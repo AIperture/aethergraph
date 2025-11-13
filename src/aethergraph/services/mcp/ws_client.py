@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio, json, time, contextlib
 from typing import Any, Dict, List, Optional
 import websockets
-from websockets import WebSocketClientProtocol
+from websockets.client import WebSocketClientProtocol
 from aethergraph.contracts.services.mcp import MCPClientProtocol, MCPTool, MCPResource
 
 class WsMCPClient(MCPClientProtocol):

@@ -49,11 +49,19 @@ class RAGFacade:
         self.chunker = chunker
         self.logger = logger
 
+        # self.logger.info(f"RAGFacade initialized with corpus root: {self.root}, index: {type(self.index).__name__}, embed model: {getattr(self.embed, 'embed_model', None)}, llm model: {getattr(self.llm, 'model', None)}")
+    
     def set_llm_client(self, client: LLMClientProtocol) -> None:
         """Set the LLM client to use for answering questions."""
         assert client.model is not None, "RAG LLM client must have a model set"
         assert client.embed_model is not None, "RAG LLM client must have an embedding model set"
         self.llm = client
+        self.logger.info(f"RAG LLM client set to model: {self.llm.model}, embed model: {self.llm.embed_model}")
+
+    def set_index_backend(self, index_backend) -> None:
+        """Set the vector index backend."""
+        self.index = index_backend
+        self.logger.info(f"RAG index backend set to: {type(self.index).__name__}")
 
     def _cdir(self, corpus_id: str) -> str:
         """Get corpus directory path based on corpus ID while ensuring the path work safely across OS.

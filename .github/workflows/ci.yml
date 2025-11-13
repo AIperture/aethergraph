@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    name: Lint • Typecheck • Test (Py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+        extras: ["", "[slack]"]  # test base and the slack extra
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml','setup.cfg','requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
+      - name: Install package + extras
+        run: |
+          python -m pip install -U pip wheel
+          pip install -e ".${{ matrix.extras }}"
+          # Dev tools (adjust if you use Poetry/uv/tox)
+          pip install pytest pytest-cov mypy ruff
+
+      - name: Ruff (lint)
+        run: ruff check src
+
+      - name: Mypy (type check)
+        run: mypy src
+
+      - name: Run tests
+        env:
+          # Avoid real network calls in CI; the code should default to stubs/mocks for tests
+          AETHERGRAPH_LLM__DEFAULT__PROVIDER: "dummy"
+          AETHERGRAPH_LLM__DEFAULT__MODEL: "dummy"
+          AETHERGRAPH_LLM__DEFAULT__API_KEY: "dummy"
+          AETHERGRAPH_ROOT: "./.ci-workspace"
+        run: |
+          mkdir -p .ci-workspace
+          pytest -q --cov=src --cov-report=term-missing

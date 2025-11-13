@@ -10,6 +10,7 @@ from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- core services ----
 from aethergraph.config.config import AppSettings
+from aethergraph.services.rag.index_factory import create_vector_index
 from aethergraph.services.state_stores.json_store import JsonGraphStateStore
 from aethergraph.services.mcp.service import MCPService
 from aethergraph.services.rag.facade import RAGFacade
@@ -48,8 +49,8 @@ from aethergraph.services.llm.factory import build_llm_clients
 from aethergraph.services.llm.service import LLMService
 
 # ---- RAG components ----
-from aethergraph.services.rag.index.faiss_index import FAISSVectorIndex
-from aethergraph.services.rag.index.sqlite_index import SQLiteVectorIndex
+from aethergraph.services.rag.index.faiss_index import FAISSVectorIndex # FAISS-based vector index
+from aethergraph.services.rag.index.sqlite_index import SQLiteVectorIndex # SQLite-based vector index
 from aethergraph.services.rag.chunker import TextSplitter
 
 from aethergraph.services.eventbus.inmem import InMemoryEventBus
@@ -145,6 +146,9 @@ class DefaultContainer:
     # extensible services
     ext_services: Dict[str, Any] = field(default_factory=dict)
 
+    # settings -- not a service, but useful to have around
+    settings: Optional[AppSettings] = None
+
 def build_default_container(
     *,
     root: str | None = None,
@@ -160,8 +164,11 @@ def build_default_container(
         cfg = load_settings()
         set_current_settings(cfg)
 
-    root = root or cfg.root
 
+    root = root or cfg.root
+    # override root in cfg to match
+    cfg.root = root
+    
     # we use user specified root if provided, else from config/env
     root_p = Path(root).resolve() if root else Path(cfg.root).resolve()
     (root_p / "kv").mkdir(parents=True, exist_ok=True)
@@ -213,12 +220,19 @@ def build_default_container(
     secrets = EnvSecrets() # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     llm_clients = build_llm_clients(cfg.llm, secrets) # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
-    rag_facade = RAGFacade(corpus_root=str(root_p / "rag" / "rag_corpora"), artifacts=artifacts,
-                           embed_client=llm_service.get("default"),
-                           llm_client=llm_service.get("default"),
-                           index_backend=FAISSVectorIndex(str(root_p / "rag" / "rag_index" / "faiss.index")),
-                           chunker=TextSplitter(),
-                           logger=logger_factory.for_run())  # simple RAG facade using local FS corpora
+    
+    rag_cfg = cfg.rag
+    vec_index = create_vector_index(backend=rag_cfg.backend, index_path=str(root_p / "rag" / "rag_index"), dim=rag_cfg.dim)
+
+    rag_facade = RAGFacade(
+        corpus_root=str(root_p / "rag" / "rag_corpora"),
+        artifacts=artifacts,
+        embed_client=llm_service.get("default"),
+        llm_client=llm_service.get("default"),
+        index_backend=vec_index,
+        chunker=TextSplitter(),
+        logger=logger_factory.for_run(),
+    )
     mcp = MCPService()  # empty MCP service; users can register clients as needed
     
     memory_factory = MemoryFactory(
@@ -265,6 +279,7 @@ def build_default_container(
         redactor=None,
         metering=None,
         tracer=None,
+        settings=cfg,
     )
 
 

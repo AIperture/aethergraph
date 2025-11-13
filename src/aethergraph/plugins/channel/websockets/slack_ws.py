@@ -1,14 +1,18 @@
-# slack_socket_mode.py
+
+from ..utils.slack_utils import handle_slack_events_common, handle_slack_interactive_common
+from aethergraph.utils.optdeps import require
+
+require(pkg="slack_sdk", extra="slack")
 
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
-from ..utils.slack_utils import handle_slack_events_common, handle_slack_interactive_common
 
 class SlackSocketModeRunner:
     def __init__(self, container, settings):
         self.container = container
         self.settings = settings
+
 
         self.bot_token = settings.slack.bot_token.get_secret_value() if settings.slack.bot_token else ""
         self.app_token = settings.slack.app_token.get_secret_value() if settings.slack.app_token else ""  # xapp-...

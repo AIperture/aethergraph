@@ -68,7 +68,7 @@ class ChannelBus:
         resolved_key = self.resolve_channel_key(channel_key)
         prefix = self._prefix(resolved_key)
         if prefix not in self.adapters:
-            raise RuntimeError(f"No adapter for prefix={prefix}")
+            raise RuntimeError(f"No adapter for prefix={prefix}; known: {list(self.adapters.keys())}; Check if you have enabled the required channel service in .env and registered the adapter.")
         return self.adapters[prefix]
 
     def _warn(self, msg: str) -> None:

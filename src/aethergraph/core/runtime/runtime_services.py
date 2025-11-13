@@ -1,4 +1,5 @@
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Any, Callable, Optional
 from contextlib import contextmanager
 
@@ -122,6 +123,31 @@ def set_rag_llm_client(client: Optional[LLMClientProtocol] = None,
 
     svc.rag.set_llm_client(client=client)
     return client
+
+def set_rag_index_backend(
+    *,
+    backend: Optional[str] = None,       # "sqlite" | "faiss"
+    index_path: Optional[str] = None,
+    dim: Optional[int] = None
+):
+    """
+    Configure the RAG index backend. If backend='faiss' but FAISS is missing,
+    we log a warning and fall back to SQLite automatically.
+    """
+    from aethergraph.services.rag.index_factory import create_vector_index
+
+    svc = current_services()
+    # resolve defaults from settings
+    s = svc.settings.rag  # AppSettings.rag bound into services
+    backend = backend or s.backend
+    index_path = index_path or s.index_path
+    dim = dim if dim is not None else s.dim
+    root = svc.settings.root
+
+    index = create_vector_index(backend=backend, index_path=index_path, dim=dim, root=str(Path(root) / "rag"))
+    svc.rag.set_index_backend(index)
+    return index
+
 
 # --------- Logger helpers --------- 
 def current_logger_factory() -> Any:

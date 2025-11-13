@@ -67,9 +67,6 @@ open_ai_client = register_llm_client(
     api_key="sk-...your-key...",
 )
 ```
-
-> Never commit real keys. Consider adding `examples/_local_secrets.py` to `.gitignore` for local testing.
-
 ---
 
 ## Quickstart (60 seconds)

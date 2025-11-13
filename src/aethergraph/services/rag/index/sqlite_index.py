@@ -47,6 +47,7 @@ class SQLiteVectorIndex(VectorIndex):
         return sqlite3.connect(self.db_path)
 
     async def add(self, corpus_id: str, chunk_ids: List[str], vectors: List[list[float]], metas: List[Dict[str,Any]]):
+
         conn = self._connect()
         try:
             cur = conn.cursor()
@@ -86,8 +87,7 @@ class SQLiteVectorIndex(VectorIndex):
         finally:
             conn.close()
 
-    async def search(self, corpus_id: str, query_vec: list[float], k: int) -> List[Dict[str,Any]]:
-        # Brute-force cosine similarity. Loads vectors for that corpus.
+    async def search(self, corpus_id: str, query_vec: list[float], k: int) -> List[Dict[str,Any]]:        # Brute-force cosine similarity. Loads vectors for that corpus.
         q = np.asarray(query_vec, dtype=np.float32)
         qn = float(np.linalg.norm(q) + 1e-9)
 

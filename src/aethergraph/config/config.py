@@ -79,6 +79,14 @@ class ChannelSettings(BaseModel):
     # room for Telegram / Console etc.
     default: str = "console:stdin"
 
+
+class RAGSettings(BaseModel):
+    root: str = "./aethergraph_data/rag"   # base dir for rag; should not use it unless customized
+    backend: str = "sqlite"                # "sqlite" | "faiss"
+    index_path: str | None = None          # defaults set at runtime if None
+    dim: int | None = None                 # only for faiss; optional
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AETHERGRAPH_",
@@ -87,7 +95,7 @@ class AppSettings(BaseSettings):
         case_sensitive=False
     )
 
-    # top-level
+    # top-level for workspace root
     root: str = "./aethergraph_data"
 
     logging: LoggingSettings = LoggingSettings()
@@ -97,6 +105,7 @@ class AppSettings(BaseSettings):
     cont: ContinuationStoreSettings = ContinuationStoreSettings()
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
+    rag: RAGSettings = RAGSettings()
 
     # Future fields:
     # authn: ...

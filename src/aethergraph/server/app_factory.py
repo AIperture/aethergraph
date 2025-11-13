@@ -14,8 +14,7 @@ from ..plugins.channel.routes.console_routes import router as console_router
 from ..plugins.channel.routes.telegram_routes import router as telegram_router
 from ..plugins.channel.routes.slack_routes import router as slack_router 
 from ..plugins.channel.routes.webui_routes import install_web_channel, webui_router
-from ..plugins.channel.websockets.slack_ws import SlackSocketModeRunner 
-from ..plugins.channel.websockets.telegram_polling import TelegramPollingRunner
+from aethergraph.utils.optdeps import require
 
 
 def create_app(
@@ -70,6 +69,8 @@ def create_app(
             and slack_cfg.bot_token
             and slack_cfg.app_token
         ):
+            require("slack_sdk", "slack")
+            from ..plugins.channel.websockets.slack_ws import SlackSocketModeRunner
             runner = SlackSocketModeRunner(container=container, settings=settings)
             app.state.slack_socket_runner = runner
             asyncio.create_task(runner.start())
@@ -83,6 +84,7 @@ def create_app(
             and tg_cfg.polling_enabled
             and tg_cfg.bot_token
         ):
+            from ..plugins.channel.websockets.telegram_polling import TelegramPollingRunner
             tg_runner = TelegramPollingRunner(container=container, settings=settings)
             app.state.telegram_polling_runner = tg_runner
             asyncio.create_task(tg_runner.start())

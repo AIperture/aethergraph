@@ -17,6 +17,7 @@ from aethergraph.core.runtime.runtime_services import (
     get_llm_service,
     register_llm_client,
     set_rag_llm_client,
+    set_rag_index_backend,
 
     # logger service helpers
     current_logger_factory,
@@ -50,6 +51,7 @@ __all__ = [
     'get_llm_service',
     'register_llm_client',
     'set_rag_llm_client',
+    'set_rag_index_backend',
     # logger service helpers
     'current_logger_factory',
     # external context service helpers

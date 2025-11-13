@@ -1,9 +1,9 @@
 import os
 from typing import Dict, Set 
 import json
-from slack_sdk.web.async_client import AsyncWebClient 
 from aethergraph.services.continuations.continuation import Correlator
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+from aethergraph.utils.optdeps import require
 
 class SlackChannelAdapter(ChannelAdapter):
     capabilities: Set[str] = {"text","buttons","image","file","edit","stream"}
@@ -13,6 +13,10 @@ class SlackChannelAdapter(ChannelAdapter):
         The bot token can be provided via the `SLACK_BOT_TOKEN` environment variable.
         The channel key format is: "slack:team/T:chan/C[:thread/TS]"
         """
+
+        require(pkg="slack_sdk", extra="slack")
+        from slack_sdk.web.async_client import AsyncWebClient 
+
         self.client = AsyncWebClient(token=bot_token or os.environ["SLACK_BOT_TOKEN"])
         self._first_ts_by_chan: Dict[str, str] = {}  # cache of first message ts by channel
 

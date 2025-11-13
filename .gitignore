@@ -24,6 +24,7 @@ __pycache__/
 # Pytest cache
 .cache/
 .pytest_cache/
+.tox 
 
 # Output files
 *.png
@@ -194,3 +195,6 @@ ehthumbs.db
 # Other caches and temp files
 tmp/
 temp/
+
+# local test and env files
+_local*
