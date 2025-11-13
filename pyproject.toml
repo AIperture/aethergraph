@@ -1,0 +1,125 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aethergraph"
+version = "0.1.0"
+description = "Agentic DAG execution framework"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Zhaocheng Liu" }]
+requires-python = ">=3.10"
+
+# Conservative lower bounds; you can tighten as you stabilize.
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "numpy>=1.24",
+  "matplotlib>=3.7",
+  "networkx>=3.1",
+  "openai>=1.0",
+  "python-multipart>=0.0.9",
+  "jsonschema>=4.18"
+]
+
+keywords = [
+  "agents", "workflow", "DAG", "LLM", "orchestration", "research", "aethergraph"
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Software Development :: Libraries",
+]
+
+[project.urls]
+Homepage = "https://github.com/AIperture/aethergraph"
+Repository = "https://github.com/AIperture/aethergraph"
+Documentation = "https://aiperture.dev/aethergraph"
+Issues = "https://github.com/AIperture/aethergraph/issues"
+
+[project.scripts]
+aethergraph = "aethergraph.cli.main:main"
+
+[project.optional-dependencies]
+# Keep extras small and purposeful; add more as modularize features.
+slack = ["slack_sdk>=3.27.0"]
+dev = [
+  "ruff>=0.5",
+  "black>=24.1.0",
+  "mypy>=1.8.0",
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23",
+  "httpx>=0.27",
+  "types-requests>=2.31.0.10"
+]
+docs = [
+  "mkdocs>=1.5",
+  "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.24"
+]
+test = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23",
+  "coverage>=7.4"
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+license-files = ["LICENSE*", "NOTICE*", "COPYING*"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+# If you want to exclude experimental dirs, uncomment and adjust:
+# exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+# Ship non-Python assets bundled with the package (adjust as needed)
+aethergraph = [
+  "**/*.json",
+  "**/*.yaml",
+  "**/*.yml",
+  "**/*.txt",
+  "v*/**/templates/**/*",
+]
+
+# -------------------------
+# Quality & tooling (optional)
+# -------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+lint.select = ["E","F","I","B","UP","SIM"]
+lint.ignore = ["E203", "E266", "E501"]  # E501 handled by formatter
+extend-exclude = ["docs", "scripts", "examples"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+strict_optional = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+asyncio_mode = "auto"

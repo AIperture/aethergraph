@@ -1,0 +1,19 @@
+from typing import Any, Dict, List, Optional, TypedDict
+
+class MCPTool(TypedDict):
+    name: str
+    description: str | None
+    input_schema: Dict[str, Any] | None
+
+class MCPResource(TypedDict):
+    uri: str
+    mime: str | None
+    description: str | None
+
+class MCPClientProtocol:
+    async def open(self): ...
+    async def close(self): ...
+    async def list_tools(self) -> List[MCPTool]: ...
+    async def call(self, tool: str, params: Dict[str, Any] | None = None) -> Dict[str, Any]: ...
+    async def list_resources(self) -> List[MCPResource]: ...
+    async def read_resource(self, uri: str) -> Dict[str, Any]: ...
