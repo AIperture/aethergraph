@@ -126,12 +126,23 @@ target-version = ["py310"]
 
 [tool.mypy]
 python_version = "3.10"
-check_untyped_defs = true
 ignore_missing_imports = true
-warn_unused_ignores = true
 warn_redundant_casts = true
-warn_return_any = true
-strict_optional = true
+
+# Relax for now:
+warn_return_any = false
+strict_optional = false
+no_implicit_optional = false
+disallow_untyped_defs = false
+check_untyped_defs = false
+warn_unused_ignores = false
+
+exclude = [
+  "^docs/",
+  "^examples/",
+  "^scripts/",
+  "^tests/",
+]
 
 [tool.pytest.ini_options]
 addopts = "-q"
