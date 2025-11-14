@@ -1,19 +1,19 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68", "wheel", "build"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "aethergraph"
 version = "0.1.0a1"
-description = "Agentic DAG execution framework"
+description = "Python-first agentic DAG execution framework"
 readme = "README.md"
 license = { file = "LICENSE" }
-authors = [{ name = "Zhaocheng Liu" }]
+authors = [{ name = "Zhaocheng Liu", email = "zhaocheng@aiperture.io" }]
 requires-python = ">=3.10"
 
 # Conservative lower bounds; you can tighten as you stabilize.
 dependencies = [
-  "fastapi>=0.110",
+  "fastapi>=0.110,<1.0",
   "uvicorn[standard]>=0.31",
   "pydantic>=2.6",
   "pydantic-settings>=2.2",
@@ -46,7 +46,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/AIperture/aethergraph"
 Repository = "https://github.com/AIperture/aethergraph"
-Documentation = "https://aiperture.dev/aethergraph"
+Documentation = "https://aiperture.github.io/aethergraph-docs/"
 Issues = "https://github.com/AIperture/aethergraph/issues"
 
 [project.scripts]
