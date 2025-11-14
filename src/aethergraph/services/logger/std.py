@@ -50,6 +50,10 @@ class LoggingConfig:
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 5
 
+    # external loggers
+    external_level: str = "WARNING"
+    quiet_loggers: tuple[str, ...] = ("httpx", "faiss", "faiss.loader")
+
     @staticmethod
     def from_env() -> LoggingConfig:
         return LoggingConfig(
@@ -63,11 +67,13 @@ class LoggingConfig:
     @staticmethod
     def from_cfg(cfg: AppSettings, log_dir: str | None = None) -> LoggingConfig:
         return LoggingConfig(
-            root_ns="aethergraph",
+            root_ns=cfg.logging.nspace or "aethergraph",
             level=cfg.logging.level,
             log_dir=log_dir or "./logs",
             use_json=cfg.logging.json_logs,
-            enable_queue=True,
+            enable_queue=cfg.logging.enable_queue,
+            external_level=cfg.logging.external_level,
+            quiet_loggers=tuple(cfg.logging.quiet_loggers),
         )
 
 
@@ -187,5 +193,11 @@ class StdLoggerService(LoggerService):
                 fh.setFormatter(SafeFormatter(cfg.file_pattern))
             fh.setLevel(getattr(logging, cfg.level.upper(), logging.INFO))
             root.addHandler(fh)
+
+        ext_level = getattr(logging, cfg.external_level.upper(), logging.WARNING)
+        for name in cfg.quiet_loggers:
+            lg = logging.getLogger(name)
+            lg.setLevel(ext_level)
+            lg.propagate = True
 
         return StdLoggerService(root, cfg=cfg)

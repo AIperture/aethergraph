@@ -76,7 +76,7 @@ class LLMService:
                 # best-effort async close
                 asyncio.create_task(old_client.aclose())
             except RuntimeError:
-                logger.warning("Failed to close old httpx client", exc_info=True)
+                logger.warning("Failed to close old httpx client")
         return c
 
     # --- Quick start helpers ---

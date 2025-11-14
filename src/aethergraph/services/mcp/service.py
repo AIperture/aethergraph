@@ -47,7 +47,7 @@ class MCPService:
         try:
             await self.get(name).close()
         except Exception:
-            logger.warning(f"Failed to close MCP client '{name}'", exc_info=True)
+            logger.warning(f"Failed to close MCP client '{name}'")
 
     async def open_all(self) -> None:
         for n in self._clients:
@@ -58,7 +58,7 @@ class MCPService:
             try:
                 await self._clients[n].close()
             except Exception:
-                logger.warning(f"Failed to close MCP client '{n}'", exc_info=True)
+                logger.warning(f"Failed to close MCP client '{n}'")
 
     # ---- call helpers (optional, keeps call sites tiny) ----
     async def call(

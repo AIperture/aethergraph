@@ -101,9 +101,9 @@ class GenericLLMClient(LLMClientProtocol):
             if self._client is not None:
                 try:
                     await self._client.aclose()
-                except Exception as e:
+                except Exception:
                     logger = logging.getLogger("aethergraph.services.llm.generic_client")
-                    logger.warning("llm_client_close_failed", provider=self.provider, error=str(e))
+                    logger.warning("llm_client_close_failed")
             self._client = httpx.AsyncClient(timeout=self._client.timeout)
             self._bound_loop = loop
 

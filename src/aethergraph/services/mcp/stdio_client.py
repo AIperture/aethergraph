@@ -35,8 +35,8 @@ class StdioMCPClient(MCPClientProtocol):
             return
         try:
             self.proc.terminate()
-        except Exception as e:
-            self.logger.warning("mcp_stdio_terminate_failed", cmd=self.cmd, error=str(e))
+        except Exception:
+            self.logger.warning("mcp_stdio_terminate_failed")
 
         self.proc = None
 

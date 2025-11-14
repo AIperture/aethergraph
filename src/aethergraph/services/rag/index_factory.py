@@ -22,7 +22,7 @@ def create_vector_index(
     """
     backend = (backend or "sqlite").lower()
     if backend not in {"sqlite", "faiss"}:
-        logger.warning("Unknown RAG backend %r; falling back to sqlite.", backend)
+        logger.warning(f"Unknown RAG backend {backend!r}; falling back to sqlite.")
         backend = "sqlite"
 
     if backend == "faiss":
@@ -38,9 +38,7 @@ def create_vector_index(
             )
             return FAISSVectorIndex(path, dim=dim)
         except Exception as e:
-            logger.warning(
-                "FAISS backend unavailable (%s); falling back to sqlite.", e, exc_info=False
-            )
+            logger.warning(f"FAISS backend unavailable ({e}); falling back to sqlite.")
             backend = "sqlite"
 
     # sqlite (default)

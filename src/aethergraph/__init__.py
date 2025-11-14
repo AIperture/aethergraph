@@ -1,5 +1,6 @@
 __version__ = "0.1.0a1"
 
+
 # Server
 # Channel buttons
 from .contracts.services.channel import Button
@@ -40,3 +41,9 @@ __all__ = [
     # Channel buttons
     "Button",
 ]
+
+
+# Setup a default null logger to avoid "No handler found" warnings
+import logging
+
+logging.getLogger("aethergraph").addHandler(logging.NullHandler())

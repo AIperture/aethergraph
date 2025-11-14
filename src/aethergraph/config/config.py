@@ -13,6 +13,12 @@ class LoggingSettings(BaseModel):
     json_logs: bool = Field(False, description="Emit JSON logs")
     enable_queue: bool = Field(default=False, description="Enable async logging via queue")
 
+    external_level: str = Field("WARNING", description="Level for third-party loggers")
+    quiet_loggers: list[str] = Field(
+        default_factory=lambda: ["httpx", "faiss", "faiss.loader", "slack_sdk"],
+        description="Additional loggers to set to external_level",
+    )
+
 
 class SlackSettings(BaseModel):
     # Turn Slack integration on/off globally

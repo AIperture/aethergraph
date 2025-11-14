@@ -44,7 +44,7 @@ class ResumeRouter:
                     await self.store.delete(run_id, node_id)
                 except Exception as e:
                     self.logger.warning(
-                        "Failed to delete continuation after cooperative resolution: %s", e
+                        f"Failed to delete continuation after cooperative resolution: {e}"
                     )
                 return
             except Exception as e:

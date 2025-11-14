@@ -19,5 +19,5 @@ async def mcp_call_logged(context: NodeContext, server: str, tool: str, params: 
             message=f"MCP {server}:{tool}",
         )
     except Exception:
-        logger.warning("Failed to log MCP tool call result", exc_info=True)
+        logger.warning("Failed to log MCP tool call result")
     return res

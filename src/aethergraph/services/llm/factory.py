@@ -68,7 +68,7 @@ def _apply_env_overrides_to_profile(
                 p.timeout = float(timeout_env)
             except ValueError:
                 logger = logging.getLogger("aethergraph.services.llm")
-                logger.warning(f"Invalid LLM_TIMEOUT value: {timeout_env}", exc_info=True)
+                logger.warning(f"Invalid LLM_TIMEOUT value: {timeout_env}")
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:

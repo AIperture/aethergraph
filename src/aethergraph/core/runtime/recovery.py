@@ -61,7 +61,7 @@ async def recover_graph_run(
 
         logger = logging.getLogger("aethergraph.core.runtime.recovery")
         logger.warning(
-            f"[recover_graph_run] Spec hash mismatch for run {run_id}: snapshot has {snap.spec_hash}, want {want}"
+            f"[recover_graph_run] Spec hash mismatch for run {run_id}: snapshot has {snap.spec_hash[:8]}..., want {want[:8]}... This typically means the graph definition changed since the snapshot was taken. It is not a problem if you created the graph differently on resume."
         )
 
     # Apply snapshot state

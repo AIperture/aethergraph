@@ -58,10 +58,7 @@ class MultiSchedulerResumeBus(ResumeBus):
                 await self.store.delete(run_id, node_id)
             except Exception as e:
                 self.logger.warning(
-                    "[multi-resume-bus] failed to delete continuation for %s/%s: %s",
-                    run_id,
-                    node_id,
-                    e,
+                    f"[multi-resume-bus] failed to delete continuation for {run_id}/{node_id}: {e}"
                 )
 
         sched.post_resume_event_threadsafe(run_id, node_id, payload)
