@@ -1,8 +1,13 @@
 from __future__ import annotations
-import os, json, time, asyncio
+
+import asyncio
 from dataclasses import asdict
-from typing import Dict
-from aethergraph.contracts.services.memory import Persistence, Event
+import json
+import os
+import time
+
+from aethergraph.contracts.services.memory import Event, Persistence
+
 
 class FSPersistence(Persistence):
     def __init__(self, *, base_dir: str):
@@ -20,14 +25,16 @@ class FSPersistence(Persistence):
 
         await asyncio.to_thread(_write)
 
-    async def save_json(self, uri: str, obj: Dict[str, any]) -> None:
+    async def save_json(self, uri: str, obj: dict[str, any]) -> None:
         assert uri.startswith("file://"), f"FSPersistence only supports file://, got {uri!r}"
-        rel = uri[len("file://"):].lstrip("/\\")
+        rel = uri[len("file://") :].lstrip("/\\")
         path = os.path.join(self.base_dir, rel)
+
         def _write():
             os.makedirs(os.path.dirname(path), exist_ok=True)
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(obj, f, ensure_ascii=False, indent=2)
             os.replace(tmp, path)
+
         await asyncio.to_thread(_write)

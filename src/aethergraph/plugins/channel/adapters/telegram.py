@@ -1,33 +1,44 @@
-import os, json, asyncio, html
-from typing import Dict, Set, Optional, Tuple
+import asyncio
+import logging
+import os
+
 import httpx
-from aethergraph.services.continuations.continuation import Correlator
+
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+from aethergraph.services.continuations.continuation import Correlator
+
 
 def _tg_render_bar(percent: float, width: int = 20) -> str:
     p = max(0.0, min(1.0, percent))
     filled = int(round(p * width))
     return "█" * filled + "░" * (width - filled)
 
+
 def _tg_fmt_eta(sec: float | None) -> str:
-    if sec is None: return ""
+    if sec is None:
+        return ""
     s = int(max(0, sec))
-    if s < 60: return f"{s}s"
+    if s < 60:
+        return f"{s}s"
     m, s = divmod(s, 60)
-    if m < 60: return f"{m}m {s}s"
+    if m < 60:
+        return f"{m}m {s}s"
     h, m = divmod(m, 60)
     return f"{h}h {m}m"
+
 
 def _prune(d: dict) -> dict:
     return {k: v for k, v in d.items() if v is not None}
 
-def _mk_params(chat_id: int, topic_id: Optional[int], **rest) -> dict:
+
+def _mk_params(chat_id: int, topic_id: int | None, **rest) -> dict:
     p = {"chat_id": chat_id, **rest}
     if topic_id is not None:
         p["message_thread_id"] = topic_id
     return p
 
-def _safe_text_md(text: str | None) -> tuple[str, Optional[str]]:
+
+def _safe_text_md(text: str | None) -> tuple[str, str | None]:
     """
     Best-effort: if text looks like Markdown-safe, return ("Markdown", text).
     Else, drop parse mode to avoid 400s on unescaped symbols.
@@ -38,6 +49,7 @@ def _safe_text_md(text: str | None) -> tuple[str, Optional[str]]:
     risky = any(c in text for c in ("*", "_", "[", "`"))
     return (text, None if risky else "Markdown")
 
+
 class TelegramChannelAdapter(ChannelAdapter):
     """
     Telegram channel adapter using the Bot API.
@@ -46,31 +58,34 @@ class TelegramChannelAdapter(ChannelAdapter):
       - Optional topic (supergroups): "tg:chat/<chat_id>:topic/<message_thread_id>"
     """
 
-    capabilities: Set[str] = {"text", "buttons", "image", "file", "edit", "stream"}
+    capabilities: set[str] = {"text", "buttons", "image", "file", "edit", "stream"}
 
-    def __init__(self, bot_token: Optional[str] = None, *, timeout_s: int = 15):
+    def __init__(self, bot_token: str | None = None, *, timeout_s: int = 15):
         self.token = bot_token or os.environ["TELEGRAM_BOT_TOKEN"]
         self.base = f"https://api.telegram.org/bot{self.token}"
 
         timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
-        limits = httpx.Limits(max_connections=20, max_keepalive_connections=10, keepalive_expiry=30.0)
+        limits = httpx.Limits(
+            max_connections=20, max_keepalive_connections=10, keepalive_expiry=30.0
+        )
 
         try:
             transport = httpx.AsyncHTTPTransport(retries=0, local_address="0.0.0.0", http2=False)
         except Exception:
             transport = httpx.AsyncHTTPTransport(retries=0, http2=False)
 
-        proxies = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or None
+        # proxies = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or None
 
         self._client = httpx.AsyncClient(timeout=timeout, limits=limits, transport=transport)
         # cache for edit/upsert: (channel_key, upsert_key) -> (chat_id, message_id)
-        self._msg_id_cache: Dict[Tuple[str, str], Tuple[int, int]] = {}
+        self._msg_id_cache: dict[tuple[str, str], tuple[int, int]] = {}
 
     async def aclose(self):
         try:
             await self._client.aclose()
-        except Exception:
-            pass
+        except Exception as e:
+            logger = logging.getLogger("aethergraph.plugins.channel.adapters.telegram")
+            logger.warning(f"Failed to close Telegram client: {e}")
 
     # ------------- helpers -------------
     @staticmethod
@@ -112,14 +127,18 @@ class TelegramChannelAdapter(ChannelAdapter):
                     raise RuntimeError(f"Telegram API error: {data.get('error_code')} {desc}")
                 return data
             except httpx.ConnectError as e:
-                last_exc = e; await asyncio.sleep(0.6 * (attempt + 1))
+                last_exc = e
+                await asyncio.sleep(0.6 * (attempt + 1))
             except httpx.ReadTimeout as e:
-                last_exc = e; await asyncio.sleep(0.6 * (attempt + 1))
+                last_exc = e
+                await asyncio.sleep(0.6 * (attempt + 1))
             except ValueError as e:
                 text = getattr(resp, "text", lambda: "")()
                 raise RuntimeError(f"Telegram non-JSON response: {text[:200]}") from e
 
-        raise httpx.ConnectError(f"Failed to call Telegram {method}; last_error={last_exc!r}") from last_exc
+        raise httpx.ConnectError(
+            f"Failed to call Telegram {method}; last_error={last_exc!r}"
+        ) from last_exc
 
     # ------------- core send -------------
     async def peek_thread(self, channel_key: str) -> str | None:
@@ -132,7 +151,16 @@ class TelegramChannelAdapter(ChannelAdapter):
         topic_id = meta["topic"]  # None if not provided
 
         # Streaming & upsert (editMessageText)
-        if event.type in ("agent.stream.start", "agent.stream.delta", "agent.stream.end", "agent.message.update") and event.upsert_key:
+        if (
+            event.type
+            in (
+                "agent.stream.start",
+                "agent.stream.delta",
+                "agent.stream.end",
+                "agent.message.update",
+            )
+            and event.upsert_key
+        ):
             key = (event.channel, event.upsert_key)
             if key not in self._msg_id_cache:
                 text, md = _safe_text_md(event.text or "…")
@@ -144,7 +172,9 @@ class TelegramChannelAdapter(ChannelAdapter):
                 ch, mid = self._msg_id_cache[key]
                 if event.text:
                     text, md = _safe_text_md(event.text)
-                    await self._api("editMessageText", chat_id=ch, message_id=mid, text=text, parse_mode=md)
+                    await self._api(
+                        "editMessageText", chat_id=ch, message_id=mid, text=text, parse_mode=md
+                    )
             return None
 
         # Buttons / approvals
@@ -153,8 +183,12 @@ class TelegramChannelAdapter(ChannelAdapter):
             if not buttons:
                 opts = (event.meta or {}).get("options", ["Approve", "Reject"])
                 buttons = [
-                    type("B", (), {"label": opts[0], "value": "approve", "style": None, "url": None}),
-                    type("B", (), {"label": opts[-1], "value": "reject",  "style": None, "url": None}),
+                    type(
+                        "B", (), {"label": opts[0], "value": "approve", "style": None, "url": None}
+                    ),
+                    type(
+                        "B", (), {"label": opts[-1], "value": "reject", "style": None, "url": None}
+                    ),
                 ]
 
             # Compact callback data: "c=<choice>|k=<resume_key>"  (<< 64 bytes)
@@ -172,7 +206,9 @@ class TelegramChannelAdapter(ChannelAdapter):
             reply_markup = {"inline_keyboard": rows}
             text, md = _safe_text_md(event.text or "Please approve:")
 
-            params = _mk_params(chat_id, topic_id, text=text, parse_mode=md, reply_markup=reply_markup)
+            params = _mk_params(
+                chat_id, topic_id, text=text, parse_mode=md, reply_markup=reply_markup
+            )
             resp = await self._api("sendMessage", **params)
             msg = resp["result"]
 
@@ -201,15 +237,18 @@ class TelegramChannelAdapter(ChannelAdapter):
                 return None
 
         # Progress with upsert/edit (single text body)
-        if event.type in ("agent.progress.start", "agent.progress.update", "agent.progress.end") and event.upsert_key:
+        if (
+            event.type in ("agent.progress.start", "agent.progress.update", "agent.progress.end")
+            and event.upsert_key
+        ):
             r = event.rich or {}
             title = r.get("title") or "Working..."
             subtitle = r.get("subtitle") or ""
             total = r.get("total")
             cur = r.get("current") or 0
-            pct = max(0.0, min(1.0, float(cur)/float(total))) if total else 0.0
+            pct = max(0.0, min(1.0, float(cur) / float(total))) if total else 0.0
             bar = _tg_render_bar(pct, 20)
-            pct_txt = f"{int(round(pct*100))}%"
+            pct_txt = f"{int(round(pct * 100))}%"
             eta_txt = _tg_fmt_eta(r.get("eta_seconds"))
             header = f"⏳ {title}"
             if event.type == "agent.progress.end":
@@ -219,9 +258,11 @@ class TelegramChannelAdapter(ChannelAdapter):
                     pct_txt = "100%"
 
             body_lines = [f"*{header}*"]
-            if total: body_lines.append(f"`{bar}`  {pct_txt}")
+            if total:
+                body_lines.append(f"`{bar}`  {pct_txt}")
             tail = " • ".join([t for t in (subtitle, f"ETA {eta_txt}" if eta_txt else "") if t])
-            if tail: body_lines.append(tail)
+            if tail:
+                body_lines.append(tail)
             text = "\n".join(body_lines)
 
             key = (event.channel, event.upsert_key)
@@ -234,7 +275,9 @@ class TelegramChannelAdapter(ChannelAdapter):
             else:
                 ch, mid = self._msg_id_cache[key]
                 t, md = _safe_text_md(text)
-                await self._api("editMessageText", chat_id=ch, message_id=mid, text=t, parse_mode=md)
+                await self._api(
+                    "editMessageText", chat_id=ch, message_id=mid, text=t, parse_mode=md
+                )
             return None
 
         # Image (sendPhoto)

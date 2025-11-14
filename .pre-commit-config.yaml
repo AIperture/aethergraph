@@ -1,0 +1,8 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9         # match your local `ruff --version`
+    hooks:
+      - id: ruff
+        args: ["--fix", "--config=pyproject.toml", "--show-fixes", "--output-format=full"]
+      - id: ruff-format
+        args: ["--config=pyproject.toml"]

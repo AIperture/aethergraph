@@ -1,30 +1,53 @@
-import os, time, hmac, hashlib, json, aiohttp
+import hashlib
+import hmac
+import json
+import time
+
+import aiohttp
 from fastapi import HTTPException, Request
-from starlette.responses import JSONResponse
+
 from aethergraph.services.continuations.continuation import Correlator
 
-# --- shared utils ---
 
+# --- shared utils ---
 async def _download_slack_file(url: str, token: str) -> bytes:
-    async with aiohttp.ClientSession() as sess:
-        async with sess.get(url, headers={"Authorization": f"Bearer {token}"}) as r:
-            r.raise_for_status()
-            return await r.read()
+    async with (
+        aiohttp.ClientSession() as sess,
+        sess.get(url, headers={"Authorization": f"Bearer {token}"}) as r,
+    ):
+        r.raise_for_status()
+        return await r.read()
+
+
+# async def _download_slack_file(url: str, token: str) -> bytes:
+#     async with aiohttp.ClientSession() as sess:
+#         async with sess.get(url, headers={"Authorization": f"Bearer {token}"}) as r:
+#             r.raise_for_status()
+#             return await r.read()
+
 
 def _verify_sig(request: Request, body: bytes):
     """Verify Slack request signature (HTTP webhooks only)."""
-    SLACK_SIGNING_SECRET = request.app.state.settings.slack.signing_secret.get_secret_value() if request.app.state.settings.slack.signing_secret else ""
+    SLACK_SIGNING_SECRET = (
+        request.app.state.settings.slack.signing_secret.get_secret_value()
+        if request.app.state.settings.slack.signing_secret
+        else ""
+    )
     if not SLACK_SIGNING_SECRET:
         raise HTTPException(401, "no slack signing secret configured")
-    
+
     ts = request.headers.get("X-Slack-Request-Timestamp")
     sig = request.headers.get("X-Slack-Signature")
     if not ts or not sig or abs(time.time() - int(ts)) > 300:
         raise HTTPException(400, "stale or missing signature")
     basestring = f"v0:{ts}:{body.decode()}"
-    my_sig = "v0=" + hmac.new(SLACK_SIGNING_SECRET.encode(), basestring.encode(), hashlib.sha256).hexdigest()
+    my_sig = (
+        "v0="
+        + hmac.new(SLACK_SIGNING_SECRET.encode(), basestring.encode(), hashlib.sha256).hexdigest()
+    )
     if not hmac.compare_digest(my_sig, sig):
         raise HTTPException(401, "bad signature")
+
 
 def _channel_key(team_id: str, channel_id: str, thread_ts: str | None) -> str:
     """Construct a Slack channel key from its components.
@@ -33,7 +56,8 @@ def _channel_key(team_id: str, channel_id: str, thread_ts: str | None) -> str:
     key = f"slack:team/{team_id}:chan/{channel_id}"
     if thread_ts:
         key += f":thread/{thread_ts}"
-    return key 
+    return key
+
 
 async def _stage_and_save(c, *, data: bytes, file_id: str, name: str, ch_key: str, cont) -> str:
     """Write bytes to tmp path, then save via FileArtifactStore.save_file(...).
@@ -45,11 +69,18 @@ async def _stage_and_save(c, *, data: bytes, file_id: str, name: str, ch_key: st
     node_id = cont.node_id if cont else "channel"
     # graph_id is unknown here; set a neutral tag
     art = await c.artifacts.save_file(
-        path=tmp, kind="upload", run_id=run_id, graph_id="channel",
-        node_id=node_id, tool_name="slack.upload", tool_version="0.0.1",
-        suggested_uri=None, pin=False,
-        labels={"source":"slack","slack_file_id":file_id,"channel":ch_key,"name":name},
-        metrics=None, preview_uri=None
+        path=tmp,
+        kind="upload",
+        run_id=run_id,
+        graph_id="channel",
+        node_id=node_id,
+        tool_name="slack.upload",
+        tool_version="0.0.1",
+        suggested_uri=None,
+        pin=False,
+        labels={"source": "slack", "slack_file_id": file_id, "channel": ch_key, "name": name},
+        metrics=None,
+        preview_uri=None,
     )
     return getattr(art, "uri", None) or getattr(art, "path", None) or f"file://{tmp}"
 
@@ -59,7 +90,9 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
     Common handler for Slack Events API payloads.
     This is transport-agnostic: can be called from HTTP route or Socket Mode.
     """
-    SLACK_BOT_TOKEN = settings.slack.bot_token.get_secret_value() if settings.slack.bot_token else ""
+    SLACK_BOT_TOKEN = (
+        settings.slack.bot_token.get_secret_value() if settings.slack.bot_token else ""
+    )
     c = container
 
     ev = payload.get("event") or {}
@@ -80,7 +113,7 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
             corr = Correlator(scheme="slack", channel=ch_key, thread=thread_ts, message="")
             cont = await c.cont_store.find_by_correlator(corr=corr)
         if not cont:
-            # Fallback to channel-root 
+            # Fallback to channel-root
             corr2 = Correlator(scheme="slack", channel=ch_key, thread="", message="")
             cont = await c.cont_store.find_by_correlator(corr=corr2)
 
@@ -100,15 +133,27 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                 if url_priv:
                     try:
                         data_bytes = await _download_slack_file(url_priv, token)
-                        uri = await _stage_and_save(c, data=data_bytes, file_id=file_id, name=name, ch_key=ch_key, cont=cont)
+                        uri = await _stage_and_save(
+                            c, data=data_bytes, file_id=file_id, name=name, ch_key=ch_key, cont=cont
+                        )
                     except Exception as e:
-                        container.logger and container.logger.warning(f"Slack download failed: {e}", exc_info=True)
+                        container.logger and container.logger.warning(
+                            f"Slack download failed: {e}", exc_info=True
+                        )
 
-                file_refs.append({
-                    "id": file_id, "name": name, "mimetype": mimetype, "size": size,
-                    "uri": uri, "url_private": url_priv,
-                    "platform":"slack", "channel_key": ch_key, "ts": ev.get("ts"),
-                })
+                file_refs.append(
+                    {
+                        "id": file_id,
+                        "name": name,
+                        "mimetype": mimetype,
+                        "size": size,
+                        "uri": uri,
+                        "url_private": url_priv,
+                        "platform": "slack",
+                        "channel_key": ch_key,
+                        "ts": ev.get("ts"),
+                    }
+                )
 
             # append to per-channel inbox (dedupe by id)
             inbox_key = f"inbox://{ch_key}"
@@ -118,7 +163,9 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
             return {}
 
         if cont.kind in ("user_files", "user_input_or_files"):
-            await c.resume_router.resume(cont.run_id, cont.node_id, cont.token, {"text": text, "files": file_refs})
+            await c.resume_router.resume(
+                cont.run_id, cont.node_id, cont.token, {"text": text, "files": file_refs}
+            )
         else:
             await c.resume_router.resume(cont.run_id, cont.node_id, cont.token, {"text": text})
         return {}
@@ -127,7 +174,11 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
     if ev_type == "file_shared":
         team = payload.get("team_id")
         file_id = (ev.get("file") or {}).get("id")
-        thread_ts = (ev.get("file") or {}).get("thread_ts") or (ev.get("channel") or {}).get("thread_ts") or (ev.get("event_ts"))
+        thread_ts = (
+            (ev.get("file") or {}).get("thread_ts")
+            or (ev.get("channel") or {}).get("thread_ts")
+            or (ev.get("event_ts"))
+        )
         chan = ev.get("channel_id") or (ev.get("channel") or {}).get("id")
         if not (file_id and chan):
             return {}
@@ -152,21 +203,33 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
         if url_priv:
             try:
                 data_bytes = await _download_slack_file(url_priv, SLACK_BOT_TOKEN)
-                uri = await _stage_and_save(c, data=data_bytes, file_id=file_id, name=name, ch_key=ch_key, cont=cont)
+                uri = await _stage_and_save(
+                    c, data=data_bytes, file_id=file_id, name=name, ch_key=ch_key, cont=cont
+                )
             except Exception as e:
-                container.logger and container.logger.for_run().warning(f"Slack download failed: {e}", exc_info=True)
-    
+                container.logger and container.logger.for_run().warning(
+                    f"Slack download failed: {e}", exc_info=True
+                )
+
         fr = {
-            "id": file_id, "name": name, "mimetype": mimetype, "size": size,
-            "uri": uri, "url_private": url_priv,
-            "platform":"slack", "channel_key": ch_key, "ts": ev.get("event_ts"),
+            "id": file_id,
+            "name": name,
+            "mimetype": mimetype,
+            "size": size,
+            "uri": uri,
+            "url_private": url_priv,
+            "platform": "slack",
+            "channel_key": ch_key,
+            "ts": ev.get("event_ts"),
         }
 
         inbox_key = f"inbox://{ch_key}"
         await c.kv_hot.list_append_unique(inbox_key, [fr], id_key="id")
 
         if cont and cont.kind in ("user_files", "user_input_or_files"):
-            await c.resume_router.resume(cont.run_id, cont.node_id, cont.token, {"text": "", "files": [fr]})
+            await c.resume_router.resume(
+                cont.run_id, cont.node_id, cont.token, {"text": "", "files": [fr]}
+            )
         return {}
 
     # other events might add later
@@ -182,9 +245,11 @@ async def handle_slack_interactive_common(container, payload: dict) -> dict:
 
     action = (payload.get("actions") or [{}])[0]
     team = (payload.get("team") or {}).get("id")
-    chan = (payload.get("channel") or {}).get("id") or (payload.get("container") or {}).get("channel_id")
-    thread_ts = (payload.get("message") or {}).get("thread_ts")
-    ch_key = _channel_key(team, chan, None)  
+    chan = (payload.get("channel") or {}).get("id") or (payload.get("container") or {}).get(
+        "channel_id"
+    )
+    # thread_ts = (payload.get("message") or {}).get("thread_ts")
+    ch_key = _channel_key(team, chan, None)
 
     meta_raw = action.get("value") or "{}"
     try:
@@ -196,16 +261,18 @@ async def handle_slack_interactive_common(container, payload: dict) -> dict:
 
     # value contains {"choice", "run_id", "node_id", "token", "sig" (optional)}
     token = meta.get("token")
-    run_id = meta.get("run_id") 
+    run_id = meta.get("run_id")
     node_id = meta.get("node_id")
     if token and run_id and node_id:
         await c.resume_router.resume(
-            run_id=run_id, node_id=node_id, token=token,
+            run_id=run_id,
+            node_id=node_id,
+            token=token,
             payload={
                 "choice": choice,
                 "slack_ts": (payload.get("message") or {}).get("ts"),
                 "channel_key": ch_key,
-            }
+            },
         )
 
     return {}

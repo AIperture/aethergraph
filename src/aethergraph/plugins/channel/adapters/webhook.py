@@ -12,13 +12,15 @@ Use cases include:
 # aethergraph/channels/webhook.py
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Any, Set, Optional
-import logging, warnings
+import logging
+from typing import Any
+import warnings
 
-from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent, Button
+from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
 from aethergraph.plugins.net.http import get_async_client
 
 logger = logging.getLogger("aethergraph.channels.webhook")
+
 
 @dataclass
 class WebhookChannelAdapter(ChannelAdapter):
@@ -31,22 +33,23 @@ class WebhookChannelAdapter(ChannelAdapter):
       webhook:https://hooks.zapier.com/hooks/catch/123/abc/
       webhook:https://discord.com/api/webhooks/.../...
     """
-    default_headers: Dict[str, str] | None = None
+
+    default_headers: dict[str, str] | None = None
     timeout_seconds: float = 10.0
 
-    capabilities: Set[str] = frozenset({"text", "file", "rich", "buttons"})
+    capabilities: set[str] = frozenset({"text", "file", "rich", "buttons"})
 
     def _url_for(self, channel_key: str) -> str:
         try:
             _, url = channel_key.split(":", 1)
-        except ValueError:
-            raise ValueError(f"Invalid webhook channel key: {channel_key!r}")
+        except ValueError as exc:
+            raise ValueError(f"Invalid webhook channel key: {channel_key!r}") from exc
         url = url.strip()
         if not (url.startswith("http://") or url.startswith("https://")):
             raise ValueError(f"Webhook channel key must contain a full URL, got: {url!r}")
         return url
 
-    def _serialize_buttons(self, buttons: Dict[str, Button] | None) -> list[Dict[str, Any]]:
+    def _serialize_buttons(self, buttons: dict[str, Button] | None) -> list[dict[str, Any]]:
         if not buttons:
             return []
         return [
@@ -54,7 +57,7 @@ class WebhookChannelAdapter(ChannelAdapter):
             for k, b in buttons.items()
         ]
 
-    def _serialize_file(self, file_info: Dict[str, Any] | None) -> Optional[Dict[str, Any]]:
+    def _serialize_file(self, file_info: dict[str, Any] | None) -> dict[str, Any] | None:
         if not file_info:
             return None
         return {
@@ -64,9 +67,9 @@ class WebhookChannelAdapter(ChannelAdapter):
             "size": file_info.get("size"),
         }
 
-    def _build_payload(self, event: OutEvent) -> Dict[str, Any]:
+    def _build_payload(self, event: OutEvent) -> dict[str, Any]:
         ts = datetime.now(timezone.utc).isoformat()
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "type": event.type,
             "channel": event.channel,
             "text": event.text,
@@ -98,4 +101,4 @@ class WebhookChannelAdapter(ChannelAdapter):
                     )
         except Exception as e:
             # Best-effort; don't bubble failures into graph control flow
-            warnings.warn(f"[WebhookChannelAdapter] Failed to POST to {url}: {e}")
+            warnings.warn(f"[WebhookChannelAdapter] Failed to POST to {url}: {e}", stacklevel=2)

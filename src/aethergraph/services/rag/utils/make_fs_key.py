@@ -1,14 +1,34 @@
-import re
 import base64
 import hashlib
+import re
 
 # Windows forbidden characters and device names
 _INVALID_CHARS_RE = re.compile(r'[<>:"/\\|?\*\x00-\x1F]')
 _RESERVED_WIN = {
-    "CON","PRN","AUX","NUL",
-    "COM1","COM2","COM3","COM4","COM5","COM6","COM7","COM8","COM9",
-    "LPT1","LPT2","LPT3","LPT4","LPT5","LPT6","LPT7","LPT8","LPT9",
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
 }
+
 
 def make_fs_key(cid: str, max_len: int = 128) -> str:
     """

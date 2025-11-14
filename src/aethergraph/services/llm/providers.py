@@ -1,3 +1,3 @@
-from typing import Literal, Optional, Dict
+from typing import Literal
 
-Provider = Literal["openai","azure","anthropic","google","openrouter","lmstudio","ollama"]
+Provider = Literal["openai", "azure", "anthropic", "google", "openrouter", "lmstudio", "ollama"]

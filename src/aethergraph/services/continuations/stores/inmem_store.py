@@ -1,22 +1,27 @@
 from __future__ import annotations
-import os, hmac, hashlib, threading
-from datetime import datetime, timezone
-from typing import Dict, Optional, List
+
 from collections import defaultdict
+from datetime import datetime, timezone
+import hashlib
+import hmac
+import os
+import threading
 
 from ..continuation import Continuation, Correlator
+
 
 class InMemoryContinuationStore:  # implements AsyncContinuationStore
     def __init__(self, secret: bytes | None = None):
         self.secret = secret or os.urandom(32)
-        self._by_token: Dict[str, Continuation] = {}
-        self._by_run_node: Dict[tuple[str,str], Continuation] = {}
-        self._corr_index: Dict[tuple[str,str,str,str], List[str]] = defaultdict(list)
+        self._by_token: dict[str, Continuation] = {}
+        self._by_run_node: dict[tuple[str, str], Continuation] = {}
+        self._corr_index: dict[tuple[str, str, str, str], list[str]] = defaultdict(list)
         self._lock = threading.RLock()
 
     def _hmac(self, *parts: str) -> str:
         h = hmac.new(self.secret, digestmod=hashlib.sha256)
-        for part in parts: h.update(part.encode("utf-8"))
+        for part in parts:
+            h.update(part.encode("utf-8"))
         return h.hexdigest()
 
     async def mint_token(self, run_id: str, node_id: str, attempts: int) -> str:
@@ -27,23 +32,25 @@ class InMemoryContinuationStore:  # implements AsyncContinuationStore
             self._by_token[cont.token] = cont
             self._by_run_node[(cont.run_id, cont.node_id)] = cont
 
-    async def get(self, run_id: str, node_id: str) -> Optional[Continuation]:
+    async def get(self, run_id: str, node_id: str) -> Continuation | None:
         with self._lock:
             return self._by_run_node.get((run_id, node_id))
 
     async def delete(self, run_id: str, node_id: str) -> None:
         with self._lock:
             c = self._by_run_node.pop((run_id, node_id), None)
-            if c: self._by_token.pop(c.token, None)
+            if c:
+                self._by_token.pop(c.token, None)
 
-    async def get_by_token(self, token: str) -> Optional[Continuation]:
+    async def get_by_token(self, token: str) -> Continuation | None:
         with self._lock:
             return self._by_token.get(token)
 
     async def mark_closed(self, token: str) -> None:
         with self._lock:
             c = self._by_token.get(token)
-            if c: c.closed = True
+            if c:
+                c.closed = True
 
     async def verify_token(self, run_id: str, node_id: str, token: str) -> bool:
         c = await self.get(run_id, node_id)
@@ -56,7 +63,7 @@ class InMemoryContinuationStore:  # implements AsyncContinuationStore
             if token not in toks:
                 toks.append(token)
 
-    async def find_by_correlator(self, *, corr: Correlator) -> Optional[Continuation]:
+    async def find_by_correlator(self, *, corr: Correlator) -> Continuation | None:
         with self._lock:
             toks = list(self._corr_index.get(corr.key()) or [])
         for t in reversed(toks):
@@ -67,7 +74,7 @@ class InMemoryContinuationStore:  # implements AsyncContinuationStore
                 return c
         return None
 
-    async def last_open(self, *, channel: str, kind: str) -> Optional[Continuation]:
+    async def last_open(self, *, channel: str, kind: str) -> Continuation | None:
         with self._lock:
             for c in reversed(list(self._by_token.values())):
                 if not c.closed and c.channel == channel and c.kind == kind:
@@ -80,7 +87,9 @@ class InMemoryContinuationStore:  # implements AsyncContinuationStore
 
     async def clear(self) -> None:
         with self._lock:
-            self._by_token.clear(); self._by_run_node.clear(); self._corr_index.clear()
+            self._by_token.clear()
+            self._by_run_node.clear()
+            self._corr_index.clear()
 
-    async def alias_for(self, token: str) -> Optional[str]:
+    async def alias_for(self, token: str) -> str | None:
         return token[:24]

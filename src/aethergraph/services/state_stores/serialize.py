@@ -1,10 +1,13 @@
 from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
-from typing import Any, Mapping, Sequence, Tuple, Optional, Dict
+from typing import Any
+
 from .externalize import externalize_to_artifact
 
-
 _JSON_SCALARS = (str, int, float, bool, type(None))
+
 
 def is_json_pure(obj: Any) -> bool:
     if isinstance(obj, _JSON_SCALARS):
@@ -19,7 +22,7 @@ def is_json_pure(obj: Any) -> bool:
             if not is_json_pure(v):
                 return False
         return True
-    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+    if isinstance(obj, Sequence) and not isinstance(obj, str | bytes | bytearray):
         return all(is_json_pure(v) for v in obj)
     return False
 
@@ -27,8 +30,8 @@ def is_json_pure(obj: Any) -> bool:
 def jsonish_or_ref(
     obj: Any,
     *,
-    mk_ref: Optional[callable[[Any], Dict[str, Any]]] = None,
-) -> Tuple[Any, Optional[Dict[str, Any]]]:
+    mk_ref: callable[[Any], dict[str, Any]] | None = None,
+) -> tuple[Any, dict[str, Any] | None]:
     """
     Returns (jsonish, ref) where:
       - if obj is JSON-pure → (obj, None)
@@ -43,14 +46,17 @@ def jsonish_or_ref(
         return {"__aether_ref__": "opaque:nonjson"}, {"__aether_ref__": "opaque:nonjson"}
 
     ref = mk_ref(obj) or {"__aether_ref__": "opaque:nonjson"}
-    return {"__aether_ref__": ref.get("__aether_ref__", "opaque:nonjson"), **{k: v for k, v in ref.items() if k != "__aether_ref__"}}, ref
+    return {
+        "__aether_ref__": ref.get("__aether_ref__", "opaque:nonjson"),
+        **{k: v for k, v in ref.items() if k != "__aether_ref__"},
+    }, ref
 
 
 def map_jsonish_or_ref(
     payload: Any,
     *,
-    mk_ref: Optional[callable[[Any], Dict[str, Any]]] = None,
-) -> Tuple[Any, bool]:
+    mk_ref: callable[[Any], dict[str, Any]] | None = None,
+) -> tuple[Any, bool]:
     """
     Walk nested structures. Returns (jsonish_payload, had_refs).
     Any non-JSON leaf becomes a {"__aether_ref__": ...} marker via mk_ref.
@@ -72,7 +78,7 @@ def map_jsonish_or_ref(
         return out, had_ref
 
     # list/tuple
-    if isinstance(payload, Sequence) and not isinstance(payload, (str, bytes, bytearray)):
+    if isinstance(payload, Sequence) and not isinstance(payload, str | bytes | bytearray):
         out = []
         had_ref = False
         for v in payload:
@@ -86,27 +92,39 @@ def map_jsonish_or_ref(
     return jsonish, True
 
 
-
-async def _externalize_leaf_to_artifact(obj: Any, *, run_id: str, graph_id: str, node_id: str, tool_name: str | None, tool_version: str | None, artifacts):
-    ref = await externalize_to_artifact(
-        obj,
-        run_id=run_id, graph_id=graph_id, node_id=node_id,
-        tool_name=tool_name, tool_version=tool_version,
-        artifacts=artifacts
-    )
-    return ref
-
-async def _jsonish_outputs_with_refs(
+async def _externalize_leaf_to_artifact(
+    obj: Any,
     *,
-    outputs: Dict[str, Any] | None,
     run_id: str,
     graph_id: str,
     node_id: str,
     tool_name: str | None,
     tool_version: str | None,
-    artifacts,                     # AsyncArtifactStore or None
-    allow_externalize: bool,       # toggle
-) -> Dict[str, Any] | None:
+    artifacts,
+):
+    ref = await externalize_to_artifact(
+        obj,
+        run_id=run_id,
+        graph_id=graph_id,
+        node_id=node_id,
+        tool_name=tool_name,
+        tool_version=tool_version,
+        artifacts=artifacts,
+    )
+    return ref
+
+
+async def _jsonish_outputs_with_refs(
+    *,
+    outputs: dict[str, Any] | None,
+    run_id: str,
+    graph_id: str,
+    node_id: str,
+    tool_name: str | None,
+    tool_version: str | None,
+    artifacts,  # AsyncArtifactStore or None
+    allow_externalize: bool,  # toggle
+) -> dict[str, Any] | None:
     if outputs is None:
         return None
 
@@ -142,24 +160,31 @@ async def _jsonish_outputs_with_refs(
     async def _externalize_in_place(orig):
         # returns jsonish w/ real refs
         from collections.abc import Mapping, Sequence
-        if isinstance(orig, (str, int, float, bool, type(None))):
+
+        if isinstance(orig, str | int | float | bool | type(None)):
             return orig
         if isinstance(orig, Mapping):
             out = {}
             for k, v in orig.items():
                 out[str(k)] = await _externalize_in_place(v)
             return out
-        if isinstance(orig, Sequence) and not isinstance(orig, (str, bytes, bytearray)):
+        if isinstance(orig, Sequence) and not isinstance(orig, str | bytes | bytearray):
             return [await _externalize_in_place(v) for v in orig]
 
         # leaf non-JSON → actual artifact ref
         ref = await _externalize_leaf_to_artifact(
             orig,
-            run_id=run_id, graph_id=graph_id, node_id=node_id,
-            tool_name=tool_name, tool_version=tool_version,
-            artifacts=artifacts
+            run_id=run_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            tool_name=tool_name,
+            tool_version=tool_version,
+            artifacts=artifacts,
         )
-        return {"__aether_ref__": ref["__aether_ref__"], **{k: v for k, v in ref.items() if k != "__aether_ref__"}}
+        return {
+            "__aether_ref__": ref["__aether_ref__"],
+            **{k: v for k, v in ref.items() if k != "__aether_ref__"},
+        }
 
     return await _externalize_in_place(outputs)
 
@@ -170,9 +195,9 @@ async def state_to_json_safe(
     run_id: str,
     graph_id: str,
     artifacts=None,
-    allow_externalize: bool = False, # Do not externalize by default until fixing artifacts writer
+    allow_externalize: bool = False,  # Do not externalize by default until fixing artifacts writer
     include_wait_spec: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Convert TaskGraphState to a JSON-safe dict.
     - JSON outputs inlined
@@ -182,8 +207,12 @@ async def state_to_json_safe(
     for nid, ns in state_obj.nodes.items():
         status = getattr(ns, "status", None)
         status_name = getattr(status, "name", status)  # Enum.name or string
-        tool_name = getattr(ns, "tool_name", None) or getattr(getattr(ns, "spec", None), "tool_name", None)
-        tool_version = getattr(ns, "tool_version", None) or getattr(getattr(ns, "spec", None), "tool_version", None)
+        tool_name = getattr(ns, "tool_name", None) or getattr(
+            getattr(ns, "spec", None), "tool_name", None
+        )
+        tool_version = getattr(ns, "tool_version", None) or getattr(
+            getattr(ns, "spec", None), "tool_version", None
+        )
 
         outputs_json = await _jsonish_outputs_with_refs(
             outputs=getattr(ns, "outputs", None),

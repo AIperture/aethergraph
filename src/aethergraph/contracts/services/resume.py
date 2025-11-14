@@ -1,6 +1,7 @@
+from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Protocol
-from abc import abstractmethod
+
 
 class ResumeBus(Protocol):
     """
@@ -18,6 +19,7 @@ class ResumeBus(Protocol):
         Should be idempotent and safe to call multiple times.
         """
         raise NotImplementedError
+
 
 @dataclass
 class ResumeEvent:

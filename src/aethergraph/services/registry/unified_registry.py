@@ -1,24 +1,25 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Mapping, Iterable, Callable, Union
-import threading
+
+from collections.abc import Callable, Iterable, Mapping
 import re
+import threading
+from typing import Any
 
 try:
     # Prefer packaging for correct PEP 440 / pre-release ordering
     from packaging.version import Version
+
     _has_packaging = True
 except Exception:
     _has_packaging = False
 
-from .registry_key import Key, NS
 from .key_parsing import parse_ref
-
+from .registry_key import NS, Key
 
 # allow storing either the object, or a factory that returns the object on first use
 RegistryObject = Any
 RegistryFactory = Callable[[], Any]
-RegistryValue = Union[RegistryObject, RegistryFactory]
+RegistryValue = RegistryObject | RegistryFactory
 
 
 class UnifiedRegistry:
@@ -28,10 +29,11 @@ class UnifiedRegistry:
 
     Thread-safe for concurrent get/register operations.
     """
+
     def __init__(self, *, allow_overwrite: bool = True):
-        self._store: Dict[Tuple[str, str], Dict[str, RegistryValue]] = {}
-        self._latest: Dict[Tuple[str, str], str] = {}
-        self._aliases: Dict[Tuple[str, str], Dict[str, str]] = {}  # (ns,name) -> alias -> version
+        self._store: dict[tuple[str, str], dict[str, RegistryValue]] = {}
+        self._latest: dict[tuple[str, str], str] = {}
+        self._aliases: dict[tuple[str, str], dict[str, str]] = {}  # (ns,name) -> alias -> version
         self._lock = threading.RLock()
         self._allow_overwrite = allow_overwrite
 
@@ -44,11 +46,15 @@ class UnifiedRegistry:
         with self._lock:
             versions = self._store.setdefault(key, {})
             if (version in versions) and not self._allow_overwrite:
-                raise ValueError(f"{nspace}:{name}@{version} already registered and overwrite disabled")
+                raise ValueError(
+                    f"{nspace}:{name}@{version} already registered and overwrite disabled"
+                )
             versions[version] = obj
             self._latest[key] = self._pick_latest(versions.keys())
 
-    def register_latest(self, *, nspace: str, name: str, obj: RegistryValue, version: str = "0.0.0") -> None:
+    def register_latest(
+        self, *, nspace: str, name: str, obj: RegistryValue, version: str = "0.0.0"
+    ) -> None:
         # Explicit version anyway; also marks latest via _pick_latest
         self.register(nspace=nspace, name=name, version=version, obj=obj)
 
@@ -73,11 +79,7 @@ class UnifiedRegistry:
 
             # resolve version: explicit → alias → latest
             ver = key.version
-            if ver:
-                # try alias first
-                ver = self._aliases.get(k, {}).get(ver, ver)
-            else:
-                ver = self._latest.get(k)
+            ver = self._aliases.get(k, {}).get(ver, ver) if ver else self._latest.get(k)
 
             if ver not in versions:
                 raise KeyError(f"Version not found: {key.nspace}:{key.name}@{ver}")
@@ -92,11 +94,11 @@ class UnifiedRegistry:
 
     # ---------- listing / admin ----------
 
-    def list(self, nspace: Optional[str] = None) -> Dict[str, str]:
+    def list(self, nspace: str | None = None) -> dict[str, str]:
         """Return { 'ns:name': '<latest_version>' } optionally filtered."""
-        out: Dict[str, str] = {}
+        out: dict[str, str] = {}
         with self._lock:
-            for (ns, name), versions in self._store.items():
+            for (ns, name), _ in self._store.items():
                 if nspace and ns != nspace:
                     continue
                 out[f"{ns}:{name}"] = self._latest.get((ns, name), "unknown")
@@ -111,7 +113,7 @@ class UnifiedRegistry:
         with self._lock:
             return dict(self._aliases.get((nspace, name), {}))
 
-    def unregister(self, *, nspace: str, name: str, version: Optional[str] = None) -> None:
+    def unregister(self, *, nspace: str, name: str, version: str | None = None) -> None:
         with self._lock:
             k = (nspace, name)
             if k not in self._store:
@@ -145,18 +147,17 @@ class UnifiedRegistry:
 
     # ---------- typed getters ----------
 
-    def get_tool(self, name: str, version: Optional[str] = None) -> Any:
+    def get_tool(self, name: str, version: str | None = None) -> Any:
         return self.get(Key(nspace="tool", name=name, version=version))
 
-    def get_graph(self, name: str, version: Optional[str] = None) -> Any:
+    def get_graph(self, name: str, version: str | None = None) -> Any:
         return self.get(Key(nspace="graph", name=name, version=version))
 
-    def get_graphfn(self, name: str, version: Optional[str] = None) -> Any:
+    def get_graphfn(self, name: str, version: str | None = None) -> Any:
         return self.get(Key(nspace="graphfn", name=name, version=version))
 
-    def get_agent(self, name: str, version: Optional[str] = None) -> Any:
+    def get_agent(self, name: str, version: str | None = None) -> Any:
         return self.get(Key(nspace="agent", name=name, version=version))
-
 
     # ---------- helpers ----------
 

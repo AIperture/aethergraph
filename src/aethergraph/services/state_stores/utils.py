@@ -1,13 +1,14 @@
 from __future__ import annotations
-import asyncio
+
 from dataclasses import asdict, is_dataclass
-from typing import Dict, Any
-
-from enum import Enum
 from datetime import datetime
+from enum import Enum
+from typing import Any
 
-from aethergraph.contracts.services.state_stores import GraphSnapshot 
+from aethergraph.contracts.services.state_stores import GraphSnapshot
+
 from .serialize import state_to_json_safe
+
 
 async def snapshot_from_graph(
     run_id: str,
@@ -16,7 +17,7 @@ async def snapshot_from_graph(
     spec_hash: str,
     state_obj,
     *,
-    artifacts=None,            # AsyncArtifactStore or None
+    artifacts=None,  # AsyncArtifactStore or None
     allow_externalize: bool = False,
     include_wait_spec: bool = True,
 ):
@@ -37,6 +38,7 @@ async def snapshot_from_graph(
         state=json_state,
     )
 
+
 def _status_to_str(s) -> str:
     if s is None:
         return "PENDING"
@@ -45,6 +47,7 @@ def _status_to_str(s) -> str:
     # already a string or something printable
     return str(s)
 
+
 def _enum_name_or_str(x):
     try:
         return x.name  # Enum
@@ -52,7 +55,7 @@ def _enum_name_or_str(x):
         return str(x)
 
 
-def _state_to_json(state_obj) -> Dict[str, Any]:
+def _state_to_json(state_obj) -> dict[str, Any]:
     return {
         "run_id": getattr(state_obj, "run_id", None),
         "rev": getattr(state_obj, "rev", None),

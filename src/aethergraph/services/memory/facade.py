@@ -1,26 +1,34 @@
 from __future__ import annotations
-import json, hashlib, time
-from dataclasses import asdict
-from typing import Any, Dict, List, Optional, Literal, Sequence
-from aethergraph.contracts.services.memory import Event, HotLog, Persistence, Indices
-from aethergraph.services.artifacts.fs_store import FileArtifactStoreSync
-from aethergraph.contracts.services.llm import LLMClientProtocol
 
-from aethergraph.services.llm.service import LLMService
+from collections.abc import Sequence
+import hashlib
+import json
+import os
+import re
+import time
+from typing import Any, Literal
+import unicodedata
+
+from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persistence
+from aethergraph.services.artifacts.fs_store import FileArtifactStoreSync
 from aethergraph.services.rag.facade import RAGFacade
 
-def now_iso()->str: return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-def stable_event_id(parts: Dict[str, Any]) -> str:
+_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def stable_event_id(parts: dict[str, Any]) -> str:
     blob = json.dumps(parts, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:24]
 
-import os, json, hashlib, re, unicodedata
-from typing import Optional, Literal
-
-_SAFE = re.compile(r'[^A-Za-z0-9._-]+')
 
 def _short_hash(s: str, n: int = 8) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:n]
+
 
 def _slug(s: str) -> str:
     s = unicodedata.normalize("NFKC", str(s)).strip()
@@ -28,12 +36,14 @@ def _slug(s: str) -> str:
     s = _SAFE.sub("-", s)
     return s.strip("-") or "default"
 
+
 def _load_sticky(path: str) -> dict:
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
+
 
 def _save_sticky(path: str, m: dict):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -96,11 +106,25 @@ class MemoryFacade:
       • Add helpers to save content-addressed artifacts (e.g., `save_summary_as_artifact`).
       • Swap backends by providing different implementations of the protocols.
     """
-    def __init__(self, *, run_id:str, graph_id:Optional[str], node_id:Optional[str],
-                 agent_id:Optional[str], hotlog: HotLog, persistence: Persistence, indices: Indices,
-                 artifact_store: FileArtifactStoreSync, hot_limit:int=1000, hot_ttl_s:int=7*24*3600,
-                 default_signal_threshold: float = 0.25, logger=None, rag: RAGFacade | None = None,
-                 llm: LLMClientProtocol | None = None):
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        graph_id: str | None,
+        node_id: str | None,
+        agent_id: str | None,
+        hotlog: HotLog,
+        persistence: Persistence,
+        indices: Indices,
+        artifact_store: FileArtifactStoreSync,
+        hot_limit: int = 1000,
+        hot_ttl_s: int = 7 * 24 * 3600,
+        default_signal_threshold: float = 0.25,
+        logger=None,
+        rag: RAGFacade | None = None,
+        llm: LLMClientProtocol | None = None,
+    ):
         self.run_id = run_id
         self.graph_id = graph_id
         self.node_id = node_id
@@ -117,8 +141,14 @@ class MemoryFacade:
         self.llm = llm  # optional LLM service for RAG answering, etc.
 
     # ---------- recording ----------
-    async def record_raw(self, *, base: Dict[str, Any], text: Optional[str]=None,
-                         metrics: Optional[Dict[str, Any]]=None, sources: Optional[List[str]]=None) -> Event:
+    async def record_raw(
+        self,
+        *,
+        base: dict[str, Any],
+        text: str | None = None,
+        metrics: dict[str, Any] | None = None,
+        sources: list[str] | None = None,
+    ) -> Event:
         """
         Append a normalized event to HotLog (fast) and Persistence (durable).
 
@@ -147,14 +177,22 @@ class MemoryFacade:
         if signal is None:
             signal = self._estimate_signal(text=text, metrics=metrics, severity=severity)
 
-        eid = stable_event_id({
-            "ts": ts, "run_id": base["run_id"],
-            "graph_id": base.get("graph_id"), "node_id": base.get("node_id"),
-            "agent_id": base.get("agent_id"), "tool": base.get("tool"),
-            "kind": base.get("kind"), "stage": base.get("stage"),
-            "severity": severity, "text": (text or "")[:6000], "metrics_present": bool(metrics),
-            "sources": sources or [],
-        })
+        eid = stable_event_id(
+            {
+                "ts": ts,
+                "run_id": base["run_id"],
+                "graph_id": base.get("graph_id"),
+                "node_id": base.get("node_id"),
+                "agent_id": base.get("agent_id"),
+                "tool": base.get("tool"),
+                "kind": base.get("kind"),
+                "stage": base.get("stage"),
+                "severity": severity,
+                "text": (text or "")[:6000],
+                "metrics_present": bool(metrics),
+                "sources": sources or [],
+            }
+        )
 
         evt = Event(event_id=eid, ts=ts, text=text, metrics=metrics, signal=signal, **base)
         await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
@@ -164,9 +202,21 @@ class MemoryFacade:
         # await kv.list_append_unique(f"mem:{self.run_id}:idx:{base.get('kind','misc')}", [{"id": eid}], id_key="id", ttl_s=self.hot_ttl_s)
 
         return evt
-    
-    async def record(self, kind, data, tags=None, entities=None, severity=2, stage=None,
-                     inputs_ref=None, outputs_ref=None, metrics=None, sources=None, signal=None) -> Event:
+
+    async def record(
+        self,
+        kind,
+        data,
+        tags=None,
+        entities=None,
+        severity=2,
+        stage=None,
+        inputs_ref=None,
+        outputs_ref=None,
+        metrics=None,
+        sources=None,
+        signal=None,
+    ) -> Event:
         """
         Convenience wrapper around record_raw() with common fields.
 
@@ -194,9 +244,9 @@ class MemoryFacade:
                 try:
                     text = json.dumps(data, ensure_ascii=False)
                 except Exception as e:
-                    text = f"<unserializable data: {str(e)}>"
+                    text = f"<unserializable data: {e!s}>"
                     if self.logger:
-                      self.logger.warning(text)
+                        self.logger.warning(text)
         base = dict(
             kind=kind,
             stage=stage,
@@ -208,10 +258,17 @@ class MemoryFacade:
         )
         return await self.record_raw(base=base, text=text, metrics=metrics, sources=sources)
 
-    async def write_result(self, *, topic: str, inputs: Optional[List[Dict[str,Any]]]=None,
-                           outputs: Optional[List[Dict[str,Any]]]=None, tags: Optional[List[str]]=None,
-                           metrics: Optional[Dict[str,float]]=None, message: Optional[str]=None,
-                           severity:int=3) -> Event:
+    async def write_result(
+        self,
+        *,
+        topic: str,
+        inputs: list[dict[str, Any]] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        metrics: dict[str, float] | None = None,
+        message: str | None = None,
+        severity: int = 3,
+    ) -> Event:
         """
         Convenience for recording a “tool/agent/flow result” with typed I/O.
 
@@ -224,17 +281,25 @@ class MemoryFacade:
         `inputs`  : List[Value]
         `outputs` : List[Value]  <-- indices derive from these
         """
-        inputs = inputs or []; outputs = outputs or []
+        inputs = inputs or []
+        outputs = outputs or []
         evt = await self.record_raw(
-            base=dict(tool=topic, kind="tool_result", severity=severity, tags=tags or [],
-                      inputs=inputs, outputs=outputs),
-            text=message, metrics=metrics,
+            base=dict(
+                tool=topic,
+                kind="tool_result",
+                severity=severity,
+                tags=tags or [],
+                inputs=inputs,
+                outputs=outputs,
+            ),
+            text=message,
+            metrics=metrics,
         )
         await self.indices.update(self.run_id, evt)
         return evt
 
     # ---------- retrieval ----------
-    async def recent(self, *, kinds: Optional[List[str]]=None, limit:int=50) -> List[Event]:
+    async def recent(self, *, kinds: list[str] | None = None, limit: int = 50) -> list[Event]:
         """Return recent events from HotLog (most recent last), optionally filtered by kind."""
         return await self.hotlog.recent(self.run_id, kinds=kinds, limit=limit)
 
@@ -255,34 +320,40 @@ class MemoryFacade:
             except Exception:
                 out.append(evt.text)
         return out
-    
-    async def last_by_name(self, name:str):
+
+    async def last_by_name(self, name: str):
         """Return the last output value by `name` from Indices (fast path)."""
         return await self.indices.last_by_name(self.run_id, name)
 
-    async def latest_refs_by_kind(self, kind:str, *, limit:int=50):
+    async def latest_refs_by_kind(self, kind: str, *, limit: int = 50):
         """Return latest ref outputs by ref.kind (fast path, KV-backed)."""
         return await self.indices.latest_refs_by_kind(self.run_id, kind, limit=limit)
 
-    async def last_outputs_by_topic(self, topic:str):
+    async def last_outputs_by_topic(self, topic: str):
         """Return the last output map for a given topic (tool/flow/agent) from Indices."""
         return await self.indices.last_outputs_by_topic(self.run_id, topic)
 
     # alias for easy readability for users
-    async def get_last_value(self, name:str):
+    async def get_last_value(self, name: str):
         """Alias for last_by_name()."""
         return await self.last_by_name(name)
 
-    async def get_latest_values_by_kind(self, kind:str, *, limit:int=50):
+    async def get_latest_values_by_kind(self, kind: str, *, limit: int = 50):
         """Alias for latest_refs_by_kind()."""
         return await self.latest_refs_by_kind(kind, limit=limit)
-    
-    async def get_last_outputs_for_topic(self, topic:str):
+
+    async def get_last_outputs_for_topic(self, topic: str):
         """Alias for last_outputs_by_topic()."""
         return await self.last_outputs_by_topic(topic)
 
     # ---------- distillation (plug strategies) ----------
-    async def distill_rolling_chat(self, *, max_turns:int=20, min_signal: Optional[float]=None, turn_kinds: Optional[List[str]]=None) -> Dict[str, Any]:
+    async def distill_rolling_chat(
+        self,
+        *,
+        max_turns: int = 20,
+        min_signal: float | None = None,
+        turn_kinds: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Build a rolling chat summary from recent user/assistant turns.
         - Reads from HotLog; may emit a JSON summary via Persistence.
@@ -292,29 +363,49 @@ class MemoryFacade:
         For turn_kinds, default to ["user_msg","assistant_msg"] if not provided.
         """
         from aethergraph.services.memory.distillers.rolling import RollingSummarizer
-        d = RollingSummarizer(max_turns=max_turns, min_signal=min_signal or self.default_signal_threshold, turn_kinds=turn_kinds)
-        return await d.distill(self.run_id, hotlog=self.hotlog, persistence=self.persistence, indices=self.indices)
 
-    async def distill_episode(self, *, tool:str, run_id:str, include_metrics:bool=True) -> Dict[str, Any]:
+        d = RollingSummarizer(
+            max_turns=max_turns,
+            min_signal=min_signal or self.default_signal_threshold,
+            turn_kinds=turn_kinds,
+        )
+        return await d.distill(
+            self.run_id, hotlog=self.hotlog, persistence=self.persistence, indices=self.indices
+        )
+
+    async def distill_episode(
+        self, *, tool: str, run_id: str, include_metrics: bool = True
+    ) -> dict[str, Any]:
         """
         Summarize a tool/agent episode (all events for a given run_id+tool).
         - Reads from HotLog/Persistence, writes back a summary JSON (and optionally CAS bundle).
         - Returns descriptor (e.g., { "uri": ..., "sources": [...], "metrics": {...} }).
         """
         from aethergraph.services.memory.distillers.episode import EpisodeSummarizer
-        d = EpisodeSummarizer(include_metrics=include_metrics, )
-        return await d.distill(self.run_id, hotlog=self.hotlog, persistence=self.persistence, indices=self.indices,
-                               tool=tool, run_id=run_id)
+
+        d = EpisodeSummarizer(
+            include_metrics=include_metrics,
+        )
+        return await d.distill(
+            self.run_id,
+            hotlog=self.hotlog,
+            persistence=self.persistence,
+            indices=self.indices,
+            tool=tool,
+            run_id=run_id,
+        )
 
     # ---------- RAG facade ----------
-    async def rag_upsert(self, *, corpus_id: str, docs: Sequence[Dict[str, Any]], topic: str | None=None) -> Dict[str, Any]:
+    async def rag_upsert(
+        self, *, corpus_id: str, docs: Sequence[dict[str, Any]], topic: str | None = None
+    ) -> dict[str, Any]:
         """Upsert documents into RAG corpus via RAG facade, if configured."""
         if not self.rag:
             raise RuntimeError("RAG facade not configured in MemoryFacade")
         stats = await self.rag.upsert_docs(corpus_id=corpus_id, docs=list(docs))
         # Optional write result -- disable for now
         # self.write_result(
-        #     topic=topic or f"rag.upsert.{corpus_id}", 
+        #     topic=topic or f"rag.upsert.{corpus_id}",
         #     outputs=[{"name": "stats", "kind": "json", "value": stats}],
         #     tags=["rag", "ingest"],
         #     message=f"Upserted {stats.get('chunks',0)}  chunks into {corpus_id}"
@@ -322,29 +413,40 @@ class MemoryFacade:
         return stats
 
     # ---------- helpers ----------
-    def _estimate_signal(self, *, text: Optional[str], metrics: Optional[Dict[str, Any]], severity:int) -> float:
+    def _estimate_signal(
+        self, *, text: str | None, metrics: dict[str, Any] | None, severity: int
+    ) -> float:
         """
         Cheap heuristic to gauge “signal” of an event (0.0–1.0).
         - Rewards presence/length of text and presence of metrics.
         - Used as a noise gate in rolling summaries; can be overridden by caller.
         """
-        score = 0.15 + 0.1*severity
-        if text:    score += min(len(text)/400.0, 0.4)
-        if metrics: score += 0.2
+        score = 0.15 + 0.1 * severity
+        if text:
+            score += min(len(text) / 400.0, 0.4)
+        if metrics:
+            score += 0.2
         return max(0.0, min(1.0, score))
 
-    def resolve(self, params: Dict[str, Any]) -> Dict[str, Any]:
+    def resolve(self, params: dict[str, Any]) -> dict[str, Any]:
         """
         Synchronous version of parameter resolution (for sync contexts).
         See `aethergraph.services.memory.resolver.resolve_params` for details.
         """
         from aethergraph.services.memory.resolver import ResolverContext, resolve_params
+
         rctx = ResolverContext(mem=self)
         return resolve_params(params, rctx)
 
     # ----------- RAG: corpus binding & status -----------
-    async def rag_bind(self, *, corpus_id: Optional[str] = None, key: Optional[str] = None,
-                    create_if_missing: bool = True, labels: dict | None = None) -> str:
+    async def rag_bind(
+        self,
+        *,
+        corpus_id: str | None = None,
+        key: str | None = None,
+        create_if_missing: bool = True,
+        labels: dict | None = None,
+    ) -> str:
         if not self.rag:
             raise RuntimeError("RAG facade not configured")
 
@@ -359,9 +461,6 @@ class MemoryFacade:
         if create_if_missing:
             await self.rag.add_corpus(cid, meta=labels or {})
         return cid
-
-
-
 
     async def rag_status(self, *, corpus_id: str) -> dict:
         """Quick stats about a corpus."""
@@ -379,7 +478,7 @@ class MemoryFacade:
         await self.write_result(
             topic=f"rag.snapshot.{corpus_id}",
             outputs=[{"name": "bundle_uri", "kind": "uri", "value": bundle.get("uri")}],
-            tags=["rag","snapshot"],
+            tags=["rag", "snapshot"],
             message=title,
             severity=2,
         )
@@ -388,7 +487,7 @@ class MemoryFacade:
     async def rag_compact(self, *, corpus_id: str, policy: dict | None = None) -> dict:
         """
         Simple compaction policy:
-        - Optionally drop docs by label or min_score 
+        - Optionally drop docs by label or min_score
         - Optional re-embed with a new model
         For now we just expose reembed() plumbing and a placeholder for pruning.
 
@@ -410,7 +509,7 @@ class MemoryFacade:
         corpus_id: str,
         events: list[Event] | None = None,
         where: dict | None = None,
-        policy: dict | None = None
+        policy: dict | None = None,
     ) -> dict:
         """
         Convert events to documents and upsert.
@@ -448,21 +547,27 @@ class MemoryFacade:
                 # Fallback to compact JSON of I/O + metrics
                 body = json.dumps(
                     {"inputs": e.inputs, "outputs": e.outputs, "metrics": e.metrics},
-                    ensure_ascii=False
+                    ensure_ascii=False,
                 )
             docs.append({"text": body, "title": title, "labels": labels})
 
         if not docs:
-            return {"added": 0, "chunks": 0, "index": getattr(self.rag.index, "__class__", type("X",(object,),{})).__name__}
+            return {
+                "added": 0,
+                "chunks": 0,
+                "index": getattr(self.rag.index, "__class__", type("X", (object,), {})).__name__,
+            }
 
         stats = await self.rag.upsert_docs(corpus_id=corpus_id, docs=docs)
         # (Optional) write a result for traceability
         await self.write_result(
             topic=f"rag.promote.{corpus_id}",
-            outputs=[{"name":"added_docs","kind":"number","value":stats.get("added",0)},
-                     {"name":"chunks","kind":"number","value":stats.get("chunks",0)}],
-            tags=["rag","ingest"],
-            message=f"Promoted {stats.get('added',0)} events into {corpus_id}",
+            outputs=[
+                {"name": "added_docs", "kind": "number", "value": stats.get("added", 0)},
+                {"name": "chunks", "kind": "number", "value": stats.get("chunks", 0)},
+            ],
+            tags=["rag", "ingest"],
+            message=f"Promoted {stats.get('added', 0)} events into {corpus_id}",
             severity=2,
         )
         return stats
@@ -475,39 +580,52 @@ class MemoryFacade:
         query: str,
         k: int = 8,
         filters: dict | None = None,
-        mode: Literal["hybrid","dense"] = "hybrid"
+        mode: Literal["hybrid", "dense"] = "hybrid",
     ) -> list[dict]:
         """Thin pass-through, but returns serializable dicts."""
         if not self.rag:
             raise RuntimeError("RAG facade not configured in MemoryFacade")
         hits = await self.rag.search(corpus_id, query, k=k, filters=filters, mode=mode)
-        return [dict(chunk_id=h.chunk_id, doc_id=h.doc_id, corpus_id=h.corpus_id, score=h.score,
-                     text=h.text, meta=h.meta) for h in hits]
+        return [
+            dict(
+                chunk_id=h.chunk_id,
+                doc_id=h.doc_id,
+                corpus_id=h.corpus_id,
+                score=h.score,
+                text=h.text,
+                meta=h.meta,
+            )
+            for h in hits
+        ]
 
     async def rag_answer(
         self,
         *,
         corpus_id: str,
         question: str,
-        style: Literal["concise","detailed"] = "concise",
+        style: Literal["concise", "detailed"] = "concise",
         with_citations: bool = True,
-        k: int = 6
+        k: int = 6,
     ) -> dict:
         """Answer with citations, then log as a tool_result."""
         if not self.rag:
             raise RuntimeError("RAG facade not configured in MemoryFacade")
         ans = await self.rag.answer(
-            corpus_id=corpus_id, question=question, llm=self.llm, style=style,
-            with_citations=with_citations, k=k
+            corpus_id=corpus_id,
+            question=question,
+            llm=self.llm,
+            style=style,
+            with_citations=with_citations,
+            k=k,
         )
         # Flatten citations into outputs for indices
-        outs = [{"name":"answer","kind":"text","value":ans.get("answer","")}]
+        outs = [{"name": "answer", "kind": "text", "value": ans.get("answer", "")}]
         for i, rc in enumerate(ans.get("resolved_citations", []), start=1):
-            outs.append({"name": f"cite_{i}", "kind":"json", "value": rc})
+            outs.append({"name": f"cite_{i}", "kind": "json", "value": rc})
         await self.write_result(
             topic=f"rag.answer.{corpus_id}",
             outputs=outs,
-            tags=["rag","qa"],
+            tags=["rag", "qa"],
             message=f"Q: {question}",
             metrics=ans.get("usage", {}),
             severity=2,

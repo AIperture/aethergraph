@@ -1,18 +1,11 @@
 from __future__ import annotations
-from venv import logger
-
-from aethergraph.services.memory.hotlog_kv import KVHotLog
-from aethergraph.services.memory.persist_fs import FSPersistence
-from aethergraph.services.memory.indices import KVIndices
-from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.kv.factory import make_kv
-from aethergraph.services.artifacts.factory import make_artifact_store
 
 from dataclasses import dataclass
-from typing import Any, Optional
-from .facade import MemoryFacade
-from aethergraph.contracts.services.memory import HotLog, Persistence, Indices
+from typing import Any
+
 from aethergraph.contracts.services.artifacts import AsyncArtifactStore  # generic protocol
+from aethergraph.contracts.services.memory import HotLog, Indices, Persistence
+from aethergraph.services.memory.facade import MemoryFacade
 
 """
     # --- Artifacts (async FS store)
@@ -42,27 +35,30 @@ from aethergraph.contracts.services.artifacts import AsyncArtifactStore  # gener
     # --- Global session handle (optional convenience)
     global_mem = factory.for_session("global", run_id="global")
 """
+
+
 @dataclass(frozen=True)
 class MemoryFactory:
-    """ Factory for creating MemoryFacade instances with shared components. """
+    """Factory for creating MemoryFacade instances with shared components."""
+
     hotlog: HotLog
     persistence: Persistence
-    indices: Indices # key-value backed indices for fast lookups, not artifact storage index
+    indices: Indices  # key-value backed indices for fast lookups, not artifact storage index
     artifacts: AsyncArtifactStore
     hot_limit: int = 1000
     hot_ttl_s: int = 7 * 24 * 3600
     default_signal_threshold: float = 0.25
-    logger: Optional[Any] = None
-    llm_service: Optional[Any] = None  # LLMService
-    rag_facade: Optional[Any] = None  # RAGFacade
+    logger: Any | None = None
+    llm_service: Any | None = None  # LLMService
+    rag_facade: Any | None = None  # RAGFacade
 
     def for_session(
         self,
         run_id: str,
         *,
-        graph_id: Optional[str] = None,
-        node_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        agent_id: str | None = None,
     ) -> MemoryFacade:
         return MemoryFacade(
             run_id=run_id,

@@ -1,16 +1,19 @@
 # src/aethergraph/plugins/channel/adapters/webui.py
 from __future__ import annotations
-from typing import Deque, Dict, Set, Optional, Any 
-from dataclasses import asdict, is_dataclass
+
 from collections import deque
+from dataclasses import asdict, is_dataclass
+import logging
+from typing import Any
 
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
 from aethergraph.services.continuations.continuation import Correlator
 
+
 class WebSessionHub:
     def __init__(self, backlog_size: int = 100):
-        self._conns: Dict[str, Set] = {}
-        self._backlog: Dict[str, Deque[dict]] = {}
+        self._conns: dict[str, set] = {}
+        self._backlog: dict[str, deque[dict]] = {}
         self._backlog_size = backlog_size
 
     async def attach(self, session_id: str, sender):
@@ -20,7 +23,8 @@ class WebSessionHub:
             try:
                 await sender(payload)
             except Exception:
-                pass  # ignore single-send failures
+                logger = logging.getLogger("aethergraph.plugins.channel.adapters.webui")
+                logger.warning(f"Failed to flush backlog payload to session {session_id}")
 
     async def detach(self, session_id: str, sender):
         s = self._conns.get(session_id)
@@ -43,15 +47,18 @@ class WebSessionHub:
         q = self._backlog.setdefault(session_id, deque(maxlen=self._backlog_size))
         q.append(payload)
 
+
 def _serialize_event(event: OutEvent) -> dict:
     """Dataclass → dict; normalize buttons; strip file bytes; drop None."""
     if is_dataclass(event):
         payload = asdict(event)
     else:
         # be lenient if a pydantic-like instance sneaks in
-        payload = getattr(event, "model_dump", None) and event.model_dump() \
-               or getattr(event, "dict", None) and event.dict() \
-               or dict(event)
+        payload = (
+            (getattr(event, "model_dump", None) and event.model_dump())
+            or (getattr(event, "dict", None) and event.dict())
+            or dict(event)
+        )
 
     # normalize buttons dict -> list
     btns = payload.get("buttons")
@@ -68,6 +75,7 @@ def _serialize_event(event: OutEvent) -> dict:
     # clean None
     return {k: v for k, v in payload.items() if v is not None}
 
+
 class WebChannelAdapter(ChannelAdapter):
     """
     Channel key: 'web:session/{session_id}'
@@ -76,12 +84,15 @@ class WebChannelAdapter(ChannelAdapter):
       - stream/progress upserts via upsert_key
       - buttons/image/file payload shapes
     """
-    capabilities: Set[str] = {"text","buttons","image","file","edit","stream"}
+
+    capabilities: set[str] = {"text", "buttons", "image", "file", "edit", "stream"}
 
     def __init__(self, hub: WebSessionHub):
         self.hub = hub
-        self._first_msg_by_key: Dict[tuple[str, str], str] = {}  # (channel, upsert_key) -> synthetic message id
-        self._seq_by_chan: Dict[str, int] = {}
+        self._first_msg_by_key: dict[
+            tuple[str, str], str
+        ] = {}  # (channel, upsert_key) -> synthetic message id
+        self._seq_by_chan: dict[str, int] = {}
 
     @staticmethod
     def _parse(channel_key: str) -> dict:
@@ -95,7 +106,7 @@ class WebChannelAdapter(ChannelAdapter):
         self._seq_by_chan[ch] = n
         return str(n)
 
-    async def peek_thread(self, channel_key: str) -> Optional[str]:
+    async def peek_thread(self, channel_key: str) -> str | None:
         # no threads in web adapter
         return None
 
@@ -109,7 +120,7 @@ class WebChannelAdapter(ChannelAdapter):
             if key not in self._first_msg_by_key:
                 self._first_msg_by_key[key] = self._next_seq(event.channel)
 
-        payload: Dict[str, Any] = _serialize_event(event)
+        payload: dict[str, Any] = _serialize_event(event)
         await self.hub.emit(session_id, payload)
 
         # return correlator so ChannelSession can bind (consistent with Slack)

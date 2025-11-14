@@ -1,8 +1,9 @@
 from __future__ import annotations
-from typing import Tuple
+
 from pypdf import PdfReader
 
-def extract_text(path: str) -> Tuple[str, dict]:
+
+def extract_text(path: str) -> tuple[str, dict]:
     reader = PdfReader(path)
     texts = []
     for page in reader.pages:
@@ -11,4 +12,3 @@ def extract_text(path: str) -> Tuple[str, dict]:
         except Exception:
             continue
     return "\n\n".join(texts), {"pages": len(reader.pages)}
-

@@ -1,17 +1,17 @@
-import re
 from dataclasses import dataclass
-from typing import Optional
+import re
 
 NS = {"tool", "graph", "graphfn", "agent"}
 
 # Simple ref regex to detect optional leading 'registry:'
 _REG_PREFIX = re.compile(r"^registry:(.+)$", re.I)
 
+
 @dataclass(frozen=True)
 class Key:
     nspace: str
     name: str
-    version: Optional[str] = None  # None or "latest" means resolve latest
+    version: str | None = None  # None or "latest" means resolve latest
 
     def canonical(self) -> str:
         ver = self.version

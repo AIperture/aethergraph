@@ -1,20 +1,22 @@
+from collections.abc import Callable
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Callable, Optional
-from contextlib import contextmanager
+from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.services.llm.generic_client import GenericLLMClient
-
 
 _current = ContextVar("aeg_services", default=None)
 # process-wide fallback (handles contextvar boundary issues)
 _services_global: Any = None
 
+
 def install_services(services: Any) -> None:
     global _services_global
     _services_global = services
     return _current.set(services)
+
 
 def ensure_services_installed(factory: Callable[[], Any]) -> Any:
     global _services_global
@@ -25,12 +27,14 @@ def ensure_services_installed(factory: Callable[[], Any]) -> Any:
     _current.set(svc)  # keep ContextVar in sync for this context
     return svc
 
+
 def current_services() -> Any:
     svc = _current.get() or _services_global
     if svc is None:
-        raise RuntimeError("No services installed. Call install_services(container) at app startup.")
+        raise RuntimeError(
+            "No services installed. Call install_services(container) at app startup."
+        )
     return svc
-
 
 
 @contextmanager
@@ -42,43 +46,48 @@ def use_services(services):
         _current.reset(tok)
 
 
-
 # --------- Channel service helpers ---------
 def get_channel_service() -> Any:
     svc = current_services()
-    return svc.channels # ChannelBus
+    return svc.channels  # ChannelBus
+
 
 def set_default_channel(key: str) -> None:
     svc = current_services()
     svc.channels.set_default_channel_key(key)
-    return 
+    return
+
 
 def get_default_channel() -> str:
     svc = current_services()
     return svc.channels.default_channel_key
 
+
 def set_channel_alias(alias: str, channel_key: str) -> None:
     svc = current_services()
     svc.channels.register_alias(alias, channel_key)
 
+
 def register_channel_adapter(name: str, adapter: Any) -> None:
     svc = current_services()
     svc.channel.register_adapter(name, adapter)
+
 
 # --------- LLM service helpers ---------
 def get_llm_service() -> Any:
     svc = current_services()
     return svc.llm
 
+
 def register_llm_client(
-            profile: str, 
-            provider: str,
-            model: str,
-            embed_model: Optional[str] = None,
-            base_url: Optional[str] = None,
-            api_key: Optional[str] = None,
-            timeout: Optional[float] = None) -> None:
-    
+    profile: str,
+    provider: str,
+    model: str,
+    embed_model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    timeout: float | None = None,
+) -> None:
     svc = current_services()
     client = svc.llm.configure_profile(
         profile=profile,
@@ -88,27 +97,33 @@ def register_llm_client(
         base_url=base_url,
         api_key=api_key,
         timeout=timeout,
-        )
+    )
     return client
+
 
 # backend compatibility
 set_llm_client = register_llm_client
 
-def set_rag_llm_client(client: Optional[LLMClientProtocol] = None,
-                       *,
-                       provider: Optional[str] = None,
-                       model: Optional[str] = None,
-                       embed_model: Optional[str] = None,
-                       base_url: Optional[str] = None,
-                       api_key: Optional[str] = None,
-                       timeout: Optional[float] = None) -> LLMClientProtocol:
+
+def set_rag_llm_client(
+    client: LLMClientProtocol | None = None,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    embed_model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    timeout: float | None = None,
+) -> LLMClientProtocol:
     """Set the LLM client to use for RAG service.
     If client is provided, use it directly.
     Otherwise, create a new client using the provided parameters."""
     svc = current_services()
     if client is None:
         if provider is None or model is None or embed_model is None:
-            raise ValueError("Must provide provider, model, and embed_model to create RAG LLM client")
+            raise ValueError(
+                "Must provide provider, model, and embed_model to create RAG LLM client"
+            )
         try:
             client = GenericLLMClient(
                 provider=provider,
@@ -124,11 +139,12 @@ def set_rag_llm_client(client: Optional[LLMClientProtocol] = None,
     svc.rag.set_llm_client(client=client)
     return client
 
+
 def set_rag_index_backend(
     *,
-    backend: Optional[str] = None,       # "sqlite" | "faiss"
-    index_path: Optional[str] = None,
-    dim: Optional[int] = None
+    backend: str | None = None,  # "sqlite" | "faiss"
+    index_path: str | None = None,
+    dim: int | None = None,
 ):
     """
     Configure the RAG index backend. If backend='faiss' but FAISS is missing,
@@ -144,40 +160,45 @@ def set_rag_index_backend(
     dim = dim if dim is not None else s.dim
     root = svc.settings.root
 
-    index = create_vector_index(backend=backend, index_path=index_path, dim=dim, root=str(Path(root) / "rag"))
+    index = create_vector_index(
+        backend=backend, index_path=index_path, dim=dim, root=str(Path(root) / "rag")
+    )
     svc.rag.set_index_backend(index)
     return index
 
 
-# --------- Logger helpers --------- 
+# --------- Logger helpers ---------
 def current_logger_factory() -> Any:
     svc = current_services()
     return svc.logger
 
 
-
 # --------- External context services ---------
 def register_context_service(name: str, service: Any) -> None:
     svc = current_services()
-    svc.ext_services[name] = service     
+    svc.ext_services[name] = service
+
 
 def get_ext_context_service(name: str) -> Any:
     svc = current_services()
     return svc.ext_services.get(name)
 
+
 def list_ext_context_services() -> list[str]:
     svc = current_services()
-    return list(svc.ext_services.keys())    
+    return list(svc.ext_services.keys())
 
 
 # --------- MCP service helpers ---------
 def set_mcp_service(mcp_service: Any) -> None:
     svc = current_services()
-    svc.mcp = mcp_service 
+    svc.mcp = mcp_service
+
 
 def get_mcp_service() -> Any:
     svc = current_services()
     return svc.mcp
+
 
 def register_mcp_client(name: str, client: Any) -> None:
     svc = current_services()
@@ -185,11 +206,13 @@ def register_mcp_client(name: str, client: Any) -> None:
         raise RuntimeError("No MCP service installed. Call set_mcp_service() first.")
     svc.mcp.register(name, client)
 
+
 def list_mcp_clients() -> list[str]:
     svc = current_services()
     if svc.mcp:
         return svc.mcp.list_clients()
     return []
+
 
 # --------- Scheduler helpers --------- - (Not used)
 def ensure_global_scheduler_started() -> None:
@@ -197,4 +220,5 @@ def ensure_global_scheduler_started() -> None:
     sched = svc.schedulers.get("global")
     if sched and not sched.is_running():
         import asyncio
+
         asyncio.create_task(sched.run_forever())

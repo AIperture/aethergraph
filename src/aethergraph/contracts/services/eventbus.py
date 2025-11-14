@@ -1,11 +1,12 @@
-from typing import Protocol, Awaitable, Callable, Dict, Any
+from collections.abc import Awaitable, Callable
+from typing import Any, Protocol
 
-Handler = Callable[[Dict[str, Any]], Awaitable[None]]
+Handler = Callable[[dict[str, Any]], Awaitable[None]]
+
 
 class EventBus(Protocol):
     """Protocol for an event bus service."""
-    async def publish(self, topic: str, event: Dict[str, Any]) -> None:
-        ...
-    
-    def subscribe(self, topic: str, handler: Handler) -> None:
-        ...
+
+    async def publish(self, topic: str, event: dict[str, Any]) -> None: ...
+
+    def subscribe(self, topic: str, handler: Handler) -> None: ...

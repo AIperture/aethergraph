@@ -1,19 +1,25 @@
-import json, hmac, aiohttp
-from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, Request, HTTPException
+import hmac
+import json
+from typing import Any
+
+import aiohttp
+from fastapi import APIRouter, HTTPException, Request
+
 from aethergraph.services.continuations.continuation import Correlator
 
 router = APIRouter()
 
 # Reuse one aiohttp session with timeouts
 _aiohttp_session: aiohttp.ClientSession | None = None
+
+
 def _http_session() -> aiohttp.ClientSession:
     global _aiohttp_session
     if _aiohttp_session is None or _aiohttp_session.closed:
         timeout = aiohttp.ClientTimeout(
-            total=40,    # > 30
+            total=40,  # > 30
             connect=5,
-            sock_read=35 # > 30
+            sock_read=35,  # > 30
         )
         connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
         _aiohttp_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
@@ -21,7 +27,9 @@ def _http_session() -> aiohttp.ClientSession:
 
 
 def _verify_secret(request: Request):
-    TELEGRAM_WEBHOOK_SECRET = request.app.state.settings.telegram.webhook_secret.get_secret_value() or ""
+    TELEGRAM_WEBHOOK_SECRET = (
+        request.app.state.settings.telegram.webhook_secret.get_secret_value() or ""
+    )
     if not TELEGRAM_WEBHOOK_SECRET:
         raise HTTPException(401, "no telegram webhook secret configured")
     if TELEGRAM_WEBHOOK_SECRET:
@@ -29,12 +37,14 @@ def _verify_secret(request: Request):
         if not hmac.compare_digest(hdr or "", TELEGRAM_WEBHOOK_SECRET):
             raise HTTPException(401, "bad telegram webhook secret")
 
-def _channel_key(chat_id: int, topic_id: Optional[int]) -> str:
+
+def _channel_key(chat_id: int, topic_id: int | None) -> str:
     base = f"tg:chat/{int(chat_id)}"
     return f"{base}:topic/{int(topic_id)}" if topic_id else base
 
+
 # ---- helpers ----
-async def _tg_get_file_path(file_id: str, token: str) -> Optional[str]:
+async def _tg_get_file_path(file_id: str, token: str) -> str | None:
     if not token:
         return None
     api = f"https://api.telegram.org/bot{token}/getFile"
@@ -46,11 +56,13 @@ async def _tg_get_file_path(file_id: str, token: str) -> Optional[str]:
             return None
         return (data.get("result") or {}).get("file_path")
 
+
 async def _tg_download_file(file_path: str, token: str) -> bytes:
     url = f"https://api.telegram.org/file/bot{token}/{file_path}"
     async with _http_session().get(url) as r:
         r.raise_for_status()
         return await r.read()
+
 
 # -------- NEW: background worker that does the heavy lifting --------
 async def _process_update(container, payload: dict, token: str):
@@ -65,7 +77,8 @@ async def _process_update(container, payload: dict, token: str):
             ch_key = _channel_key(chat_id, topic_id)
 
             data_raw = cq.get("data") or ""
-            choice = "reject"; resume_key = None
+            choice = "reject"
+            resume_key = None
 
             # Accept JSON or compact "c=...|k=..." forms
             try:
@@ -81,9 +94,11 @@ async def _process_update(container, payload: dict, token: str):
                     choice = str(data_raw)
 
             choice_l = choice.lower()
-            approved = choice_l.startswith("approve") or choice_l in {"yes","y","ok"} # resolve from choice string
+            # approved = choice_l.startswith("approve") or choice_l in {"yes","y","ok"} # resolve from choice string
 
-            token = None; run_id = None; node_id = None
+            token = None
+            run_id = None
+            node_id = None
 
             # Resolve alias → token (preferred)
             if resume_key and hasattr(container.cont_store, "token_from_alias"):
@@ -96,22 +111,26 @@ async def _process_update(container, payload: dict, token: str):
 
             # Fallback: thread-scoped correlator
             if not token:
-                corr = Correlator(scheme="tg", channel=ch_key, thread=str(topic_id or ""), message="")
+                corr = Correlator(
+                    scheme="tg", channel=ch_key, thread=str(topic_id or ""), message=""
+                )
                 cont = await container.cont_store.find_by_correlator(corr=corr)
                 if cont:
                     run_id, node_id, token = cont.run_id, cont.node_id, cont.token
 
             if token and run_id and node_id:
                 await container.resume_router.resume(
-                    run_id=run_id, node_id=node_id, token=token,
+                    run_id=run_id,
+                    node_id=node_id,
+                    token=token,
                     payload={
                         "choice": choice_l,
                         "telegram": {
                             "callback_id": cq.get("id"),
                             "message_id": msg.get("message_id"),
-                            "chat_id": chat_id
-                        }
-                    }
+                            "chat_id": chat_id,
+                        },
+                    },
                 )
 
             # Ack the button press to stop the spinner
@@ -136,7 +155,7 @@ async def _process_update(container, payload: dict, token: str):
         ch_key = _channel_key(chat_id, topic_id)
         text = (msg.get("text") or msg.get("caption") or "") or ""
 
-        files: List[Dict[str, Any]] = []
+        files: list[dict[str, Any]] = []
 
         # Photos
         photos = msg.get("photo") or []
@@ -149,10 +168,24 @@ async def _process_update(container, payload: dict, token: str):
             if file_path:
                 try:
                     data = await _tg_download_file(file_path, token)
-                    uri = await _stage_and_save(container, data=data, name=name, ch_key=ch_key, cont=None)
-                    files.append(_file_ref(file_id=file_id, name=name, mimetype="image/jpeg", size=size, uri=uri, ch_key=ch_key, ts=msg.get("date")))
+                    uri = await _stage_and_save(
+                        container, data=data, name=name, ch_key=ch_key, cont=None
+                    )
+                    files.append(
+                        _file_ref(
+                            file_id=file_id,
+                            name=name,
+                            mimetype="image/jpeg",
+                            size=size,
+                            uri=uri,
+                            ch_key=ch_key,
+                            ts=msg.get("date"),
+                        )
+                    )
                 except Exception as e:
-                    container.logger and container.logger.for_run().warning(f"Telegram photo download failed: {e}")
+                    container.logger and container.logger.for_run().warning(
+                        f"Telegram photo download failed: {e}"
+                    )
 
         # Documents
         doc = msg.get("document")
@@ -166,9 +199,21 @@ async def _process_update(container, payload: dict, token: str):
                 try:
                     data = await _tg_download_file(file_path, token)
                     uri = _stage_and_save(container, data=data, name=name, ch_key=ch_key, cont=None)
-                    files.append(_file_ref(file_id=file_id, name=name, mimetype=mime, size=size, uri=uri, ch_key=ch_key, ts=msg.get("date")))
+                    files.append(
+                        _file_ref(
+                            file_id=file_id,
+                            name=name,
+                            mimetype=mime,
+                            size=size,
+                            uri=uri,
+                            ch_key=ch_key,
+                            ts=msg.get("date"),
+                        )
+                    )
                 except Exception as e:
-                    container.logger and container.logger.for_run().warning(f"Telegram document download failed: {e}")
+                    container.logger and container.logger.for_run().warning(
+                        f"Telegram document download failed: {e}"
+                    )
 
         if files:
             await _append_inbox(container, ch_key, files)
@@ -177,39 +222,63 @@ async def _process_update(container, payload: dict, token: str):
         cont = None
         corr = Correlator(scheme="tg", channel=ch_key, thread=str(topic_id or ""), message="")
         cont = await container.cont_store.find_by_correlator(corr=corr)
-        container.logger and container.logger.for_run().debug(f"[TG] inbound: text='{text}' files={len(files)} cont={bool(cont)}")
+        container.logger and container.logger.for_run().debug(
+            f"[TG] inbound: text='{text}' files={len(files)} cont={bool(cont)}"
+        )
 
         if not cont:
             return
 
-        payload_out = {"text": text, "telegram": {"message_id": msg.get("message_id"), "chat_id": chat_id}}
+        payload_out = {
+            "text": text,
+            "telegram": {"message_id": msg.get("message_id"), "chat_id": chat_id},
+        }
         if cont.kind in ("user_files", "user_input_or_files"):
             payload_out["files"] = files
 
         await container.resume_router.resume(cont.run_id, cont.node_id, cont.token, payload_out)
 
     except Exception as e:
-        container.logger and container.logger.for_run().error(f"Telegram inbound processing error: {e}", exc_info=True)
+        container.logger and container.logger.for_run().error(
+            f"Telegram inbound processing error: {e}", exc_info=True
+        )
 
 
 # ---- file helpers ----
 def _normalize_mime_by_name(name: str | None, hint: str | None) -> str:
     extmap = {
-        "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","gif":"image/gif",
-        "webp":"image/webp","tif":"image/tiff","tiff":"image/tiff","bmp":"image/bmp",
-        "svg":"image/svg+xml","pdf":"application/pdf","csv":"text/csv","json":"application/json",
-        "yaml":"text/yaml","yml":"text/yaml","txt":"text/plain","md":"text/markdown",
-        "zip":"application/zip","gz":"application/gzip","tar":"application/x-tar","7z":"application/x-7z-compressed",
-        "xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "mph":"application/octet-stream",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "tif": "image/tiff",
+        "tiff": "image/tiff",
+        "bmp": "image/bmp",
+        "svg": "image/svg+xml",
+        "pdf": "application/pdf",
+        "csv": "text/csv",
+        "json": "application/json",
+        "yaml": "text/yaml",
+        "yml": "text/yaml",
+        "txt": "text/plain",
+        "md": "text/markdown",
+        "zip": "application/zip",
+        "gz": "application/gzip",
+        "tar": "application/x-tar",
+        "7z": "application/x-7z-compressed",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "mph": "application/octet-stream",
     }
-    if hint: return hint.lower()
+    if hint:
+        return hint.lower()
     if name and "." in name:
         ext = name.lower().rsplit(".", 1)[-1]
         return extmap.get(ext, "application/octet-stream")
     return "application/octet-stream"
+
 
 async def _stage_and_save(container, *, data: bytes, name: str, ch_key: str, cont) -> str:
     tmp = container.artifacts.tmp_path(suffix=f"_{name}")
@@ -218,13 +287,21 @@ async def _stage_and_save(container, *, data: bytes, name: str, ch_key: str, con
     run_id = cont.run_id if cont else "ad-hoc"
     node_id = cont.node_id if cont else "telegram"
     art = await container.artifacts.save_file(
-        path=tmp, kind="upload", run_id=run_id, graph_id="channel",
-        node_id=node_id, tool_name="telegram.upload", tool_version="0.0.1",
-        labels={"source":"telegram","channel":ch_key,"name":name},
+        path=tmp,
+        kind="upload",
+        run_id=run_id,
+        graph_id="channel",
+        node_id=node_id,
+        tool_name="telegram.upload",
+        tool_version="0.0.1",
+        labels={"source": "telegram", "channel": ch_key, "name": name},
     )
     return getattr(art, "uri", None) or f"file://{tmp}"
 
-def _file_ref(*, file_id: str, name: str, mimetype: str, size: int | None, uri: str, ch_key: str, ts: Any):
+
+def _file_ref(
+    *, file_id: str, name: str, mimetype: str, size: int | None, uri: str, ch_key: str, ts: Any
+):
     return {
         "id": file_id,
         "name": name,
@@ -237,7 +314,8 @@ def _file_ref(*, file_id: str, name: str, mimetype: str, size: int | None, uri: 
         "ts": ts,
     }
 
-async def _append_inbox(container, ch_key: str, file_refs: List[Dict[str,Any]]):
+
+async def _append_inbox(container, ch_key: str, file_refs: list[dict[str, Any]]):
     kv = getattr(container, "kv_hot", None)
     if kv:
         await kv.list_append_unique(f"inbox://{ch_key}", file_refs, id_key="id")

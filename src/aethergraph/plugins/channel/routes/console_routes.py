@@ -1,12 +1,13 @@
-from fastapi import APIRouter, Request, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
-from typing import Optional
+
 from aethergraph.services.continuations.continuation import Correlator
 
 router = APIRouter()
 
+
 @router.get("/api/continuations/latest")
-async def latest(request: Request, channel: str, kind: Optional[str] = Query(None)):
+async def latest(request: Request, channel: str, kind: str | None = Query(None)):
     """
     Console: resolve newest open continuation bound to this channel.
     We use a channel-wide correlator (no thread/message).
@@ -37,11 +38,16 @@ class ConsoleResume(BaseModel):
     token: str
     payload: dict
 
+
 @router.post("/api/console/resume")
 async def console_resume(request: Request, req: ConsoleResume):
     c = request.app.state.container
     payload = dict(req.payload or {})
-    cont = await c.cont_store.get_by_token(req.token) if hasattr(c.cont_store, "get_by_token") else None
+    cont = (
+        await c.cont_store.get_by_token(req.token)
+        if hasattr(c.cont_store, "get_by_token")
+        else None
+    )
 
     if cont and getattr(cont, "kind", "") == "approval":
         # If client already parsed the choice, don't override it
@@ -50,14 +56,16 @@ async def console_resume(request: Request, req: ConsoleResume):
         else:
             raw = str(payload.get("text", "")).strip()
             # Try to use mappings echoed by the client (if any)
-            options_map = (payload.get("options_map") or {})
-            label_map   = (payload.get("options_label_to_value") or {})
+            options_map = payload.get("options_map") or {}
+            label_map = payload.get("options_label_to_value") or {}
 
             # Otherwise reconstruct from the Continuation.prompt
             if not options_map and isinstance(cont.prompt, dict):
                 labels = cont.prompt.get("buttons") or cont.prompt.get("options") or []
-                options_map = {str(i+1): str(lbl).lower() for i, lbl in enumerate(labels, start=1)}
-                label_map   = {str(lbl).lower(): str(lbl).lower() for lbl in labels}
+                options_map = {
+                    str(i + 1): str(lbl).lower() for i, lbl in enumerate(labels, start=1)
+                }
+                label_map = {str(lbl).lower(): str(lbl).lower() for lbl in labels}
 
             if raw.isdigit() and raw in options_map:
                 choice = options_map[raw]

@@ -1,24 +1,28 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+import inspect
+from typing import TYPE_CHECKING, Any
 
-from aethergraph.contracts.services.resume import ResumeEvent  # we’ll extend usage to include run_id
+from aethergraph.contracts.services.resume import (
+    ResumeEvent,  # we’ll extend usage to include run_id
+)
 from aethergraph.contracts.services.wakeup import WakeupEvent
+
+from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID
 from ..graph.node_spec import NodeEvent
 from ..graph.node_state import TERMINAL_STATES, WAITING_STATES, NodeStatus
-from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID
 from ..graph.task_node import TaskNodeRuntime
-
 from .retry_policy import RetryPolicy
 
 if TYPE_CHECKING:
-    from ..runtime.runtime_env import RuntimeEnv
-    from ..graph.task_graph import TaskGraph
     from aethergraph.services.schedulers.registry import SchedulerRegistry
+
+    from ..graph.task_graph import TaskGraph
+    from ..runtime.runtime_env import RuntimeEnv
 
 
 # --------- Global control events tagged with run_id ---------
@@ -26,7 +30,8 @@ if TYPE_CHECKING:
 class GlobalResumeEvent:
     run_id: str
     node_id: str
-    payload: Dict[str, Any]
+    payload: dict[str, Any]
+
 
 @dataclass
 class GlobalWakeupEvent:
@@ -42,27 +47,29 @@ class RunSettings:
     stop_on_first_error: bool = False
     skip_dependents_on_failure: bool = True
 
+
 @dataclass
 class RunState:
     run_id: str
-    graph: "TaskGraph"
-    env: "RuntimeEnv"
+    graph: TaskGraph
+    env: RuntimeEnv
     settings: RunSettings
 
     # bookkeeping
-    running_tasks: Dict[str, asyncio.Task] = field(default_factory=dict)                    # node_id -> task
-    resume_payloads: Dict[str, Dict[str, Any]] = field(default_factory=dict)               # node_id -> payload
-    resume_pending: Set[str] = field(default_factory=set)                                   # node_ids awaiting capacity
-    ready_pending: Set[str] = field(default_factory=set)                                    # nodes explicitly enqueued
-    backoff_tasks: Dict[str, asyncio.Task] = field(default_factory=dict)                    # node_id -> sleeper task
+    running_tasks: dict[str, asyncio.Task] = field(default_factory=dict)  # node_id -> task
+    resume_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)  # node_id -> payload
+    resume_pending: set[str] = field(default_factory=set)  # node_ids awaiting capacity
+    ready_pending: set[str] = field(default_factory=set)  # nodes explicitly enqueued
+    backoff_tasks: dict[str, asyncio.Task] = field(default_factory=dict)  # node_id -> sleeper task
     terminated: bool = False
 
     def capacity(self) -> int:
         return max(0, self.settings.max_concurrency - len(self.running_tasks))
 
     def any_waiting(self) -> bool:
-        return any((n.spec.type != "plan") and (n.state.status in WAITING_STATES)
-                   for n in self.graph.nodes)
+        return any(
+            (n.spec.type != "plan") and (n.state.status in WAITING_STATES) for n in self.graph.nodes
+        )
 
     def all_terminal(self) -> bool:
         for n in self.graph.nodes:
@@ -79,6 +86,7 @@ class RunEvent:
     status: str  # "SUCCESS" | "FAILED" | "CANCELLED"
     timestamp: float
 
+
 # --------- Global Forward Scheduler ---------
 class GlobalForwardScheduler:
     """
@@ -90,13 +98,15 @@ class GlobalForwardScheduler:
     • Each run has its own capacity; also a global cap can be applied if desired
     """
 
-    def __init__(self,
-                 *,
-                 registry: "SchedulerRegistry",
-                 global_max_concurrency: Optional[int] = None,
-                 logger: Optional[Any] = None):
-        self._runs: Dict[str, RunState] = {}
-        self._listeners: List[Callable[[NodeEvent], Awaitable[None]]] = []
+    def __init__(
+        self,
+        *,
+        registry: SchedulerRegistry,
+        global_max_concurrency: int | None = None,
+        logger: Any | None = None,
+    ):
+        self._runs: dict[str, RunState] = {}
+        self._listeners: list[Callable[[NodeEvent], Awaitable[None]]] = []
         self._events: asyncio.Queue = asyncio.Queue()
         self._pause_event = asyncio.Event()
         self._pause_event.set()
@@ -123,12 +133,9 @@ class GlobalForwardScheduler:
             raise ValueError("Listener must be an async function")
         self._listeners.append(cb)
 
-    async def submit(self,
-                     *,
-                     run_id: str,
-                     graph: "TaskGraph",
-                     env: "RuntimeEnv",
-                     settings: Optional[RunSettings] = None):
+    async def submit(
+        self, *, run_id: str, graph: TaskGraph, env: RuntimeEnv, settings: RunSettings | None = None
+    ):
         """Register a new run (graph+env) with optional per-run settings."""
         if run_id in self._runs:
             raise ValueError(f"run_id already submitted: {run_id}")
@@ -164,14 +171,14 @@ class GlobalForwardScheduler:
         # wake the driver if it's blocked on events.get()
         try:
             await self._events.put(GlobalWakeupEvent(run_id="__shutdown__", node_id="__shutdown__"))
-        except RuntimeError:
+        except RuntimeError as e:
             # queue may be closing; best-effort
-            pass
+            if self._logger:
+                self._logger.warning(f"[GlobalForwardScheduler.shutdown] failed to wake up: {e}")
 
         # also ensure the pause gate isn’t closed
         if hasattr(self, "_pause_event"):
             self._pause_event.set()
-
 
     async def terminate_run(self, run_id: str):
         rs = self._runs.get(run_id)
@@ -184,14 +191,14 @@ class GlobalForwardScheduler:
             t.cancel()
 
     # external resume/wakeup API (called by ResumeBus)
-    async def on_resume_event(self, run_id: str, node_id: str, payload: Dict[str, Any]):
+    async def on_resume_event(self, run_id: str, node_id: str, payload: dict[str, Any]):
         await self._events.put(GlobalResumeEvent(run_id=run_id, node_id=node_id, payload=payload))
 
     async def on_wakeup_event(self, run_id: str, node_id: str):
         await self._events.put(GlobalWakeupEvent(run_id=run_id, node_id=node_id))
 
     # ----- main loop -----
-    async def _drive_loop(self, *, block_until: str | Tuple[str, str]):
+    async def _drive_loop(self, *, block_until: str | tuple[str, str]):
         if self.loop is None:
             self.loop = asyncio.get_running_loop()
 
@@ -214,21 +221,39 @@ class GlobalForwardScheduler:
 
             # 3) Check termination conditions
             if block_until == "all_done":
-                if all(rs.all_terminal() and not rs.running_tasks and not rs.backoff_tasks and not rs.resume_pending
-                       for rs in self._runs.values()):
+                if all(
+                    rs.all_terminal()
+                    and not rs.running_tasks
+                    and not rs.backoff_tasks
+                    and not rs.resume_pending
+                    for rs in self._runs.values()
+                ):
                     break
 
             elif isinstance(block_until, tuple) and block_until[0] == "run_done":
                 tgt = self._runs.get(block_until[1])
-                if tgt and tgt.all_terminal() and not tgt.running_tasks and not tgt.backoff_tasks and not tgt.resume_pending:
+                if (
+                    tgt
+                    and tgt.all_terminal()
+                    and not tgt.running_tasks
+                    and not tgt.backoff_tasks
+                    and not tgt.resume_pending
+                ):
                     # compute a simple status
                     status = "SUCCESS"
                     for n in tgt.graph.nodes:
-                        if n.spec.type == "plan": 
+                        if n.spec.type == "plan":
                             continue
                         if n.state.status == NodeStatus.FAILED:
-                            status = "FAILED"; break
-                    await self._emit_run(RunEvent(run_id=tgt.run_id, status=status, timestamp=datetime.utcnow().timestamp()))
+                            status = "FAILED"
+                            break
+                    await self._emit_run(
+                        RunEvent(
+                            run_id=tgt.run_id,
+                            status=status,
+                            timestamp=datetime.utcnow().timestamp(),
+                        )
+                    )
                     break
 
             # 4) If nothing is running anywhere and nothing scheduled, decide how to wait
@@ -252,7 +277,9 @@ class GlobalForwardScheduler:
             ctrl = asyncio.create_task(self._events.get())
             try:
                 if running_tasks:
-                    done, _ = await asyncio.wait(running_tasks + [ctrl], return_when=asyncio.FIRST_COMPLETED)
+                    done, _ = await asyncio.wait(
+                        running_tasks + [ctrl], return_when=asyncio.FIRST_COMPLETED
+                    )
                     if ctrl in done:
                         ev = ctrl.result()
                         await self._handle_event(ev)
@@ -294,10 +321,14 @@ class GlobalForwardScheduler:
             while rs.ready_pending and rs.capacity() > 0 and global_capacity_left() > 0:
                 nid = rs.ready_pending.pop()
                 node = rs.graph.node(nid)
-                if node and nid not in rs.running_tasks and node.state.status not in TERMINAL_STATES:
-                    if self._deps_satisfied(rs, node):
-                        await self._start_node(rs, node)
-                        scheduled += 1
+                if (
+                    node
+                    and nid not in rs.running_tasks
+                    and node.state.status not in TERMINAL_STATES
+                    and self._deps_satisfied(rs, node)
+                ):
+                    await self._start_node(rs, node)
+                    scheduled += 1
 
         # phase 3: normal ready nodes (round-robin for fairness)
         any_capacity = any(rs.capacity() > 0 for rs in self._runs.values())
@@ -314,8 +345,8 @@ class GlobalForwardScheduler:
 
         return scheduled > 0
 
-    def _compute_ready(self, rs: RunState) -> Set[str]:
-        ready: Set[str] = set()
+    def _compute_ready(self, rs: RunState) -> set[str]:
+        ready: set[str] = set()
         for node in rs.graph.nodes:
             node_id = node.node_id
             if node.spec.type == "plan":
@@ -339,15 +370,21 @@ class GlobalForwardScheduler:
         return True
 
     # ----- event handling -----
-    async def _handle_event(self, ev: GlobalResumeEvent | GlobalWakeupEvent | ResumeEvent | WakeupEvent):
+    async def _handle_event(
+        self, ev: GlobalResumeEvent | GlobalWakeupEvent | ResumeEvent | WakeupEvent
+    ):
         # Back-compat: if someone still enqueues a plain ResumeEvent without run_id, ignore (we’re global now).
         if isinstance(ev, ResumeEvent):
             if self._logger:
-                self._logger.warning("Ignored legacy ResumeEvent without run_id in GlobalForwardScheduler")
+                self._logger.warning(
+                    "Ignored legacy ResumeEvent without run_id in GlobalForwardScheduler"
+                )
             return
         if isinstance(ev, WakeupEvent):
             if self._logger:
-                self._logger.warning("Ignored legacy WakeupEvent without run_id in GlobalForwardScheduler")
+                self._logger.warning(
+                    "Ignored legacy WakeupEvent without run_id in GlobalForwardScheduler"
+                )
             return
 
         if isinstance(ev, GlobalResumeEvent):
@@ -401,39 +438,55 @@ class GlobalForwardScheduler:
             try:
                 await rs.graph.set_node_status(node_id, NodeStatus.RUNNING)
                 ctx = rs.env.make_ctx(node=node, resume_payload=resume_payload)
-                result = await step_forward(node=node, ctx=ctx, retry_policy=rs.settings.retry_policy)
+                result = await step_forward(
+                    node=node, ctx=ctx, retry_policy=rs.settings.retry_policy
+                )
 
                 if result.status == NodeStatus.DONE:
                     outs = result.outputs or {}
                     await rs.graph.set_node_outputs(node_id, outs)
                     await rs.graph.set_node_status(node_id, NodeStatus.DONE)
                     rs.env.outputs_by_node[node.node_id] = outs
-                    await self._emit(NodeEvent(run_id=rs.env.run_id,
-                                               graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
-                                               node_id=node.node_id,
-                                               status=str(NodeStatus.DONE),
-                                               outputs=outs,
-                                               timestamp=datetime.utcnow().timestamp()))
+                    await self._emit(
+                        NodeEvent(
+                            run_id=rs.env.run_id,
+                            graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
+                            node_id=node.node_id,
+                            status=str(NodeStatus.DONE),
+                            outputs=outs,
+                            timestamp=datetime.utcnow().timestamp(),
+                        )
+                    )
                 elif result.status.startswith("WAITING_"):
                     await rs.graph.set_node_status(node_id, result.status)
-                    await self._emit(NodeEvent(run_id=rs.env.run_id,
-                                               graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
-                                               node_id=node.node_id,
-                                               status=result.status,
-                                               outputs=node.outputs or {},
-                                               timestamp=datetime.utcnow().timestamp()))
+                    await self._emit(
+                        NodeEvent(
+                            run_id=rs.env.run_id,
+                            graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
+                            node_id=node.node_id,
+                            status=result.status,
+                            outputs=node.outputs or {},
+                            timestamp=datetime.utcnow().timestamp(),
+                        )
+                    )
                 elif result.status == NodeStatus.FAILED:
                     await rs.graph.set_node_status(node_id, NodeStatus.FAILED)
-                    await self._emit(NodeEvent(run_id=rs.env.run_id,
-                                               graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
-                                               node_id=node.node_id,
-                                               status=str(NodeStatus.FAILED),
-                                               outputs=node.outputs or {},
-                                               timestamp=datetime.utcnow().timestamp()))
+                    await self._emit(
+                        NodeEvent(
+                            run_id=rs.env.run_id,
+                            graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
+                            node_id=node.node_id,
+                            status=str(NodeStatus.FAILED),
+                            outputs=node.outputs or {},
+                            timestamp=datetime.utcnow().timestamp(),
+                        )
+                    )
                     attempts = getattr(node, "attempts", 0)
                     if attempts > 0 and attempts < rs.settings.retry_policy.max_attempts:
                         delay = rs.settings.retry_policy.backoff(attempts - 1).total_seconds()
-                        rs.backoff_tasks[node.node_id] = asyncio.create_task(self._sleep_and_requeue(rs, node, delay))
+                        rs.backoff_tasks[node.node_id] = asyncio.create_task(
+                            self._sleep_and_requeue(rs, node, delay)
+                        )
                     else:
                         if rs.settings.skip_dependents_on_failure:
                             await self._skip_dependents(rs, node_id)
@@ -441,17 +494,24 @@ class GlobalForwardScheduler:
                             rs.terminated = True
                 elif result.status == NodeStatus.SKIPPED:
                     await rs.graph.set_node_status(node_id, NodeStatus.SKIPPED)
-                    await self._emit(NodeEvent(run_id=rs.env.run_id,
-                                               graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
-                                               node_id=node.node_id,
-                                               status=str(NodeStatus.SKIPPED),
-                                               outputs=node.outputs or {},
-                                               timestamp=datetime.utcnow().timestamp()))
+                    await self._emit(
+                        NodeEvent(
+                            run_id=rs.env.run_id,
+                            graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
+                            node_id=node.node_id,
+                            status=str(NodeStatus.SKIPPED),
+                            outputs=node.outputs or {},
+                            timestamp=datetime.utcnow().timestamp(),
+                        )
+                    )
             except asyncio.CancelledError:
                 try:
                     await rs.graph.set_node_status(node_id, NodeStatus.FAILED)
-                except Exception:
-                    pass
+                except Exception as e:
+                    if self._logger:
+                        self._logger.warning(
+                            f"[GlobalForwardScheduler._start_node] failed to set node {node_id} as FAILED on cancellation: {e}"
+                        )
             finally:
                 pass
 
@@ -480,7 +540,10 @@ class GlobalForwardScheduler:
                         continue
                     seen.add(n.node_id)
                     node = rs.graph.node(n.node_id)
-                    if node.state.status not in TERMINAL_STATES and n.node_id not in rs.running_tasks:
+                    if (
+                        node.state.status not in TERMINAL_STATES
+                        and n.node_id not in rs.running_tasks
+                    ):
                         await rs.graph.set_node_status(n.node_id, NodeStatus.SKIPPED)
                     q.append(n.node_id)
 
@@ -493,7 +556,6 @@ class GlobalForwardScheduler:
                     self._logger.warning(f"[GlobalForwardScheduler._emit] listener error: {e}")
                 else:
                     print(f"[GlobalForwardScheduler._emit] listener error: {e}")
-
 
     def _get_run(self, run_id: str) -> RunState:
         rs = self._runs.get(run_id)
@@ -508,16 +570,23 @@ class GlobalForwardScheduler:
         # nudge the loop (a no-op wakeup is fine)
         await self._events.put(GlobalWakeupEvent(run_id=run_id, node_id=node_id))
 
-    async def wait_for_node_terminal(self, run_id: str, node_id: str) -> Dict[str, Any]:
+    async def wait_for_node_terminal(self, run_id: str, node_id: str) -> dict[str, Any]:
         """Resolve when node reaches a terminal status; return its outputs (may be {})."""
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
 
+        statuses_to_wait_for = (
+            str(NodeStatus.DONE),
+            str(NodeStatus.FAILED),
+            str(NodeStatus.SKIPPED),
+        )
+
         async def _once(ev):
-            if ev.run_id == run_id and ev.node_id == node_id:
-                if ev.status in (str(NodeStatus.DONE), str(NodeStatus.FAILED), str(NodeStatus.SKIPPED)):
-                    if not fut.done():
-                        fut.set_result(ev.outputs or {})
+            if ev.run_id == run_id and ev.node_id == node_id and ev.status in statuses_to_wait_for:
+                if not fut.done():
+                    fut.set_result(ev.outputs or {})
+                else:
+                    pass
 
         # one-shot listener
         self.add_listener(_once)
@@ -527,13 +596,12 @@ class GlobalForwardScheduler:
             # best-effort: remove listener by rebuilding list (small scale)
             self._listeners = [cb for cb in self._listeners if cb is not _once]
 
-
     def post_resume_event_threadsafe(self, run_id: str, node_id: str, payload: dict) -> None:
         if self.loop is None:
             raise RuntimeError("GlobalForwardScheduler.loop is not set yet")
         self.loop.call_soon_threadsafe(
             self._events.put_nowait,
-            GlobalResumeEvent(run_id=run_id, node_id=node_id, payload=payload)
+            GlobalResumeEvent(run_id=run_id, node_id=node_id, payload=payload),
         )
 
     def get_status(self) -> dict:
@@ -551,7 +619,6 @@ class GlobalForwardScheduler:
         total_running = sum(r["running"] for r in runs.values())
         idle = (total_running == 0) and any(r["waiting"] > 0 for r in runs.values())
         return {"idle": idle, "runs": runs}
-        
 
     def add_run_listener(self, cb):
         if not inspect.iscoroutinefunction(cb):
@@ -562,6 +629,6 @@ class GlobalForwardScheduler:
         for cb in list(self._run_listeners):
             try:
                 await cb(ev)
-            except Exception:
+            except Exception as e:
                 if self._logger:
                     self._logger.warning(f"run listener error: {e}")

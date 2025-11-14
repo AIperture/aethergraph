@@ -1,10 +1,12 @@
 # telegram_polling.py
 import asyncio
 import json
-from typing import Optional, Any, Dict, List
+from typing import Any
+
 import aiohttp
 
-from ..utils.telegram_utils import _http_session, _process_update 
+from ..utils.telegram_utils import _http_session, _process_update
+
 
 class TelegramPollingRunner:
     def __init__(self, container, settings):
@@ -16,13 +18,15 @@ class TelegramPollingRunner:
     async def stop(self):
         self._stop = True
 
-    async def _fetch_updates(self, offset: Optional[int]) -> List[Dict[str, Any]]:
+    async def _fetch_updates(self, offset: int | None) -> list[dict[str, Any]]:
         if not self.bot_token:
-            self.container.logger.for_run().warning("[TelegramPolling] no bot token, skipping fetch")
+            self.container.logger.for_run().warning(
+                "[TelegramPolling] no bot token, skipping fetch"
+            )
             return []
 
         api = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
-        params: Dict[str, Any] = {"timeout": 30}
+        params: dict[str, Any] = {"timeout": 30}
         if offset is not None:
             params["offset"] = offset
 
@@ -34,56 +38,60 @@ class TelegramPollingRunner:
                 raw = await r.text()
 
                 if status != 200:
-                    self.container.logger.for_run().warning(f"[TelegramPolling] non-200 status: {status}, returning empty list")
+                    self.container.logger.for_run().warning(
+                        f"[TelegramPolling] non-200 status: {status}, returning empty list"
+                    )
                     return []
 
                 try:
                     data = json.loads(raw)
                 except Exception as e:
-                    self.container.logger.for_run().error(f"[TelegramPolling] JSON decode error: {e}")
+                    self.container.logger.for_run().error(
+                        f"[TelegramPolling] JSON decode error: {e}"
+                    )
                     return []
 
                 if not data.get("ok"):
-                    self.container.logger.for_run().warning(f"[TelegramPolling] ok=false in response: {data}")
+                    self.container.logger.for_run().warning(
+                        f"[TelegramPolling] ok=false in response: {data}"
+                    )
                     return []
 
                 result = data.get("result") or []
                 if result:
                     first_id = result[0].get("update_id")
                     last_id = result[-1].get("update_id")
-                    self.container.logger.for_run().info(f"[TelegramPolling] got {len(result)} updates, ids {first_id}..{last_id}")
+                    self.container.logger.for_run().info(
+                        f"[TelegramPolling] got {len(result)} updates, ids {first_id}..{last_id}"
+                    )
                 else:
-                    self.container.logger.for_run().info("[TelegramPolling] got 0 updates in this poll")
+                    self.container.logger.for_run().info(
+                        "[TelegramPolling] got 0 updates in this poll"
+                    )
 
                 return result
 
         except asyncio.TimeoutError:
-            self.container.logger.for_run().warning("[TelegramPolling] asyncio.TimeoutError while fetching updates")
+            self.container.logger.for_run().warning(
+                "[TelegramPolling] asyncio.TimeoutError while fetching updates"
+            )
             return []
         except aiohttp.ClientError as e:
             self.container.logger.for_run().error(f"[TelegramPolling] aiohttp.ClientError: {e}")
             return []
         except Exception as e:
-            self.container.logger.for_run().error(f"[TelegramPolling] unexpected error in _fetch_updates: {e}")
+            self.container.logger.for_run().error(
+                f"[TelegramPolling] unexpected error in _fetch_updates: {e}"
+            )
             return []
-
-        except asyncio.TimeoutError:
-            self.container.logger.for_run().warning(f"{asyncio.TimeoutError} (client timed out waiting for response)")
-
-
         except aiohttp.ClientConnectionError as e:
             self.container.logger.for_run().warning(f"[TelegramPolling] ClientConnectionError: {e}")
 
-
-        except Exception as e:
-            self.container.logger.for_run().error(f"[TelegramPolling] unexpected error: {e}", exc_info=True)
-            return []
-        
-    async def _fetch_updates_(self, offset: Optional[int]) -> List[Dict[str, Any]]:
+    async def _fetch_updates_(self, offset: int | None) -> list[dict[str, Any]]:
         if not self.bot_token:
             return []
         api = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
-        params: Dict[str, Any] = {"timeout": 30}
+        params: dict[str, Any] = {"timeout": 30}
         if offset is not None:
             params["offset"] = offset
 
@@ -97,12 +105,14 @@ class TelegramPollingRunner:
 
     async def start(self):
         if not self.bot_token:
-            self.container.logger.for_run().warning("[TelegramPolling] not started: missing bot token")
+            self.container.logger.for_run().warning(
+                "[TelegramPolling] not started: missing bot token"
+            )
             return
 
         self.container.logger.for_run().info("[TelegramPolling] starting polling loop...")
 
-        offset: Optional[int] = None
+        offset: int | None = None
 
         # OPTIONAL: initial drain of old updates so we only react to new ones
         try:
@@ -116,9 +126,13 @@ class TelegramPollingRunner:
 
         while not self._stop:
             try:
-                self.container.logger.for_run().info(f"[TelegramPolling] fetching updates with offset={offset}...")
+                self.container.logger.for_run().info(
+                    f"[TelegramPolling] fetching updates with offset={offset}..."
+                )
                 updates = await self._fetch_updates(offset)
-                self.container.logger.for_run().info(f"[TelegramPolling] fetched {len(updates)} updates.")
+                self.container.logger.for_run().info(
+                    f"[TelegramPolling] fetched {len(updates)} updates."
+                )
                 if updates:
                     # process each, then bump offset past the last one
                     for upd in updates:

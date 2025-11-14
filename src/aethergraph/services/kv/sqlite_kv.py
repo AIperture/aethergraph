@@ -1,12 +1,19 @@
 from __future__ import annotations
-import sqlite3, json, time, os, threading
-from typing import Any, Optional, List, Dict
+
+import json
+import os
+import sqlite3
+import threading
+import time
+from typing import Any
+
 
 class SQLiteKV:
     """
     Durable KV with TTL (JSON values).
     Thread-safe via RLock; async callers can await these methods safely.
     """
+
     def __init__(self, path: str, *, prefix: str = ""):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
@@ -30,15 +37,18 @@ class SQLiteKV:
         k = self._k(key)
         with self._lock:
             row = self._db.execute("SELECT v, expire_at FROM kv WHERE k=?", (k,)).fetchone()
-            if not row: return default
+            if not row:
+                return default
             v_txt, exp = row
             if exp and exp < time.time():
                 self._db.execute("DELETE FROM kv WHERE k=?", (k,))
                 return default
-            try: return json.loads(v_txt)
-            except Exception: return default
+            try:
+                return json.loads(v_txt)
+            except Exception:
+                return default
 
-    async def set(self, key: str, value: Any, *, ttl_s: Optional[int] = None) -> None:
+    async def set(self, key: str, value: Any, *, ttl_s: int | None = None) -> None:
         k = self._k(key)
         with self._lock:
             exp = (time.time() + ttl_s) if ttl_s else None
@@ -54,14 +64,18 @@ class SQLiteKV:
         with self._lock:
             self._db.execute("DELETE FROM kv WHERE k=?", (k,))
 
-    async def list_append_unique(self, key: str, items: list, *, id_key: str = "id", ttl_s: Optional[int] = None) -> list:
+    async def list_append_unique(
+        self, key: str, items: list, *, id_key: str = "id", ttl_s: int | None = None
+    ) -> list:
         k = self._k(key)
         with self._lock:
             row = self._db.execute("SELECT v FROM kv WHERE k=?", (k,)).fetchone()
             cur = []
             if row and row[0]:
-                try: cur = list(json.loads(row[0]) or [])
-                except Exception: cur = []
+                try:
+                    cur = json.loads(row[0])
+                except Exception:
+                    cur = []
             seen = {x.get(id_key) for x in cur if isinstance(x, dict)}
             cur.extend([x for x in items if isinstance(x, dict) and x.get(id_key) not in seen])
             exp = (time.time() + ttl_s) if ttl_s else None
@@ -77,7 +91,8 @@ class SQLiteKV:
         with self._lock:
             row = self._db.execute("SELECT v FROM kv WHERE k=?", (k,)).fetchone()
             self._db.execute("DELETE FROM kv WHERE k=?", (k,))
-            if not row or not row[0]: return []
+            if not row or not row[0]:
+                return []
             try:
                 val = json.loads(row[0])
                 return list(val) if isinstance(val, list) else []
@@ -85,26 +100,29 @@ class SQLiteKV:
                 return []
 
     # Optional helpers
-    async def mget(self, keys: List[str]) -> List[Any]:
+    async def mget(self, keys: list[str]) -> list[Any]:
         out = []
-        for k in keys: out.append(await self.get(k))
+        for k in keys:
+            out.append(await self.get(k))
         return out
 
-    async def mset(self, kv: Dict[str, Any], *, ttl_s: Optional[int] = None) -> None:
+    async def mset(self, kv: dict[str, Any], *, ttl_s: int | None = None) -> None:
         for k, v in kv.items():
             await self.set(k, v, ttl_s=ttl_s)
 
     async def expire(self, key: str, ttl_s: int) -> None:
         k = self._k(key)
         with self._lock:
-            self._db.execute("UPDATE kv SET expire_at=? WHERE k=?", (time.time()+ttl_s, k))
+            self._db.execute("UPDATE kv SET expire_at=? WHERE k=?", (time.time() + ttl_s, k))
 
     async def purge_expired(self, limit: int = 1000) -> int:
         with self._lock:
             now = time.time()
             # sqlite lacks DELETE .. LIMIT in older versions; do it in two steps
-            rows = self._db.execute("SELECT k FROM kv WHERE expire_at IS NOT NULL AND expire_at < ? LIMIT ?",
-                                    (now, limit)).fetchall()
+            rows = self._db.execute(
+                "SELECT k FROM kv WHERE expire_at IS NOT NULL AND expire_at < ? LIMIT ?",
+                (now, limit),
+            ).fetchall()
             for (k,) in rows:
                 self._db.execute("DELETE FROM kv WHERE k=?", (k,))
             return len(rows)

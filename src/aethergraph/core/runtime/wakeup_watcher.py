@@ -1,9 +1,10 @@
-import asyncio, time
-from typing import Optional
+import asyncio
+import time
 
 """This is a template implementation of a WakeupWatcher that periodically checks for
 Currenlty, we have not materialize the wakeup method in Aethergraph core.
 """
+
 
 class WakeupWatcher:
     def __init__(self, cont_store, resume_bus, poll_sec: int = 10):
@@ -33,4 +34,7 @@ class WakeupWatcher:
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_sec)
             except asyncio.TimeoutError:
-                pass
+                import logging
+
+                logger = logging.getLogger("aethergraph.core.runtime.wakeup_watcher")
+                logger.info("WakeupWatcher polling for due continuations...")

@@ -1,25 +1,25 @@
 from __future__ import annotations
-from typing import Any, Callable, Dict, Iterable, List, Optional
+
+import inspect
 
 from ..runtime.runtime_registry import current_registry
 from .task_graph import TaskGraph
 
-import inspect
 
-
-def graphify(*, name="default_graph", inputs=(), outputs=None, version="0.1.0",
-             agent: str | None = None):
+def graphify(
+    *, name="default_graph", inputs=(), outputs=None, version="0.1.0", agent: str | None = None
+):
     """
     Decorator that builds a TaskGraph from a function body using the builder context.
     The function author writes sequential code with tool calls returning NodeHandles.
-    
+
     Usage:
     @graphify(name="my_graph", inputs=["input1", "input2"], outputs=["output"])
     def my_graph(input1, input2):
         # function body using graph builder API
         pass
         return {"output": some_node_handle}
-    
+
     The decorated function returns a builder function that constructs the TaskGraph.
 
     To build the graph, call the returned function:
@@ -31,18 +31,16 @@ def graphify(*, name="default_graph", inputs=(), outputs=None, version="0.1.0",
         fn_params = list(fn_sig.parameters.keys())
 
         # Normalize declared inputs into a list of names
-        if isinstance(inputs, dict):
-            required_inputs = list(inputs.keys())
-        else:
-            required_inputs = list(inputs)
+        required_inputs = list(inputs.keys()) if isinstance(inputs, dict) else list(inputs)
 
         # Optional: validate the signature matches declared inputs
         # (or keep permissive: inject only the overlap)
         overlap = [p for p in fn_params if p in required_inputs]
 
-        def _build() -> "TaskGraph":
+        def _build() -> TaskGraph:
             from .graph_builder import graph
             from .graph_refs import arg
+
             with graph(name=name) as g:
                 # declarations unchanged...
                 if isinstance(inputs, dict):
@@ -54,10 +52,17 @@ def graphify(*, name="default_graph", inputs=(), outputs=None, version="0.1.0",
                 injected_kwargs = {p: arg(p) for p in overlap}
 
                 # Run user body
-                ret = fn(**injected_kwargs)   # ← key line
+                ret = fn(**injected_kwargs)  # ← key line
 
                 # expose logic (fixed typo + single-output collapse)
-                def _is_ref(x): return isinstance(x, dict) and x.get("_type")=="ref" and "from" in x and "key" in x
+                def _is_ref(x):
+                    return (
+                        isinstance(x, dict)
+                        and x.get("_type") == "ref"
+                        and "from" in x
+                        and "key" in x
+                    )
+
                 def _expose_from_handle(prefix, handle):
                     oks = list(getattr(handle, "output_keys", []))
                     if prefix and len(oks) == 1:
@@ -68,33 +73,42 @@ def graphify(*, name="default_graph", inputs=(), outputs=None, version="0.1.0",
 
                 if isinstance(ret, dict):
                     for k, v in ret.items():
-                        if _is_ref(v): g.expose(k, v)
-                        elif hasattr(v, "node_id"): _expose_from_handle(k, v)
-                        else: g.expose(k, v)
+                        if _is_ref(v):
+                            g.expose(k, v)
+                        elif hasattr(v, "node_id"):
+                            _expose_from_handle(k, v)
+                        else:
+                            g.expose(k, v)
                 elif hasattr(ret, "node_id"):
                     _expose_from_handle("", ret)
                 else:
                     if outputs:
                         if len(outputs) != 1:
-                            raise ValueError("Returning a single literal but multiple outputs are declared.")
+                            raise ValueError(
+                                "Returning a single literal but multiple outputs are declared."
+                            )
                         g.expose(outputs[0], ret)
                     else:
-                        raise ValueError("Returning a single literal but no output name is declared.")
+                        raise ValueError(
+                            "Returning a single literal but no output name is declared."
+                        )
             return g
 
         _build.__name__ = fn.__name__
-        _build.build = _build                              # alias
+        _build.build = _build  # alias
         _build.graph_name = name
         _build.version = version
 
         def _spec():
             g = _build()
             return g.spec
+
         _build.spec = _spec
 
         def _io():
             g = _build()
             return g.io_signature()
+
         _build.io = _io
 
         # ---- Register graph + optional agent ----
@@ -107,7 +121,7 @@ def graphify(*, name="default_graph", inputs=(), outputs=None, version="0.1.0",
             if agent:
                 # we will have agent API later, now just register a graph as agent
                 agent_id = agent
-                hub.register(nspace="agent", name=agent_id, version=version, obj=_build()) 
+                hub.register(nspace="agent", name=agent_id, version=version, obj=_build())
 
         return _build
 

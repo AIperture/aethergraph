@@ -1,19 +1,17 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
 from datetime import timedelta
+from typing import Any
 
-from aethergraph.core.runtime.runtime_services import get_ext_context_service
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.services.llm.providers import Provider
-
-from .node_services import NodeServices 
-from .bound_memory import BoundMemoryAdapter
-from .base_service import _ServiceHandle
-
-from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.channel.session import ChannelSession 
+from aethergraph.core.runtime.runtime_services import get_ext_context_service
+from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.llm.providers import Provider
+from aethergraph.services.memory.facade import MemoryFacade
 
+from .base_service import _ServiceHandle
+from .bound_memory import BoundMemoryAdapter
+from .node_services import NodeServices
 
 
 @dataclass
@@ -22,13 +20,19 @@ class NodeContext:
     graph_id: str
     node_id: str
     services: NodeServices
-    resume_payload: Optional[Dict[str, Any]] = None
-    bound_memory: Optional[BoundMemoryAdapter] = None  # back-compat
+    resume_payload: dict[str, Any] | None = None
+    bound_memory: BoundMemoryAdapter | None = None  # back-compat
 
     # --- accessors (compatible names) ---
-    def runtime(self) -> NodeServices: return self.services
-    def logger(self): return self.services.logger.for_node_ctx(run_id=self.run_id, node_id=self.node_id, graph_id=self.graph_id)
-    def channel(self, channel_key: str | None = None): 
+    def runtime(self) -> NodeServices:
+        return self.services
+
+    def logger(self):
+        return self.services.logger.for_node_ctx(
+            run_id=self.run_id, node_id=self.node_id, graph_id=self.graph_id
+        )
+
+    def channel(self, channel_key: str | None = None):
         return ChannelSession(self, channel_key)
 
     # New way: prefer memory_facade directly
@@ -44,22 +48,24 @@ class NodeContext:
         return self.bound_memory
 
     # Artifacts / index
-    def artifacts(self): return self.services.artifact_store
+    def artifacts(self):
+        return self.services.artifact_store
 
-    def kv(self): 
-        if not self.services.kv: raise RuntimeError("KV not available")
+    def kv(self):
+        if not self.services.kv:
+            raise RuntimeError("KV not available")
         return self.services.kv
 
     def llm(
         self,
         profile: str = "default",
         *,
-        provider: Optional[Provider] = None,
-        model: Optional[str] = None,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        azure_deployment: Optional[str] = None,
-        timeout: Optional[float] = None,
+        provider: Provider | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        azure_deployment: str | None = None,
+        timeout: float | None = None,
     ) -> LLMClientProtocol:
         """
         Get an LLM client by profile.
@@ -94,7 +100,7 @@ class NodeContext:
         """
         svc = self.services.llm
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
-    
+
     def rag(self):
         if not self.services.rag:
             raise RuntimeError("RAGService not available")
@@ -105,20 +111,21 @@ class NodeContext:
             raise RuntimeError("MCPService not available")
         return self.services.mcp.get(name)
 
-    def continuations(self): return self.services.continuation_store
+    def continuations(self):
+        return self.services.continuation_store
 
     def prepare_wait_for_resume(self, token: str):
         # creates and registers a Future for this token without awaiting
         return self.services.wait_registry.register(token)
 
-    def clock(self):    
+    def clock(self):
         if not self.services.clock:
             raise RuntimeError("Clock service not available")
         return self.services.clock
 
     def svc(self, name: str) -> Any:
         # generic accessor for external context services
-        raw = get_ext_context_service(name) 
+        raw = get_ext_context_service(name)
         if raw is None:
             raise KeyError(f"Service '{name}' not registered")
         # bind the service to the context
@@ -126,14 +133,14 @@ class NodeContext:
         if callable(bind):
             return raw.bind(context=self)
         return raw
-    
+
     def __getattr__(self, name: str) -> Any:
         # Try to resolve as an external context service
         try:
             bound = self.svc(name)
         except KeyError:
             # Fall back to normal attribute error for anything else
-            raise AttributeError(f"NodeContext has no attribute '{name}'")
+            raise AttributeError(f"NodeContext has no attribute '{name}'") from None
         # Return a callable handle that behaves like the bound service
         return _ServiceHandle(name, bound)
 
@@ -142,15 +149,21 @@ class NodeContext:
             return self.services.clock.now()
         else:
             from datetime import datetime
+
             return datetime.utcnow()
 
-    # ---- continuation helpers ---- 
-    async def create_continuation(self, *, kind: str, payload: dict | None, 
-                        channel: str | None,
-                        deadline_s: int | None = None,
-                        poll: dict | None = None,
-                        attempts: int = 0) -> Continuation:
-        """ Create and store a continuation for this node in the continuation store. """
+    # ---- continuation helpers ----
+    async def create_continuation(
+        self,
+        *,
+        kind: str,
+        payload: dict | None,
+        channel: str | None,
+        deadline_s: int | None = None,
+        poll: dict | None = None,
+        attempts: int = 0,
+    ) -> Continuation:
+        """Create and store a continuation for this node in the continuation store."""
         token = await self.services.continuation_store.mint_token(
             self.run_id, self.node_id, attempts=attempts
         )
@@ -159,12 +172,12 @@ class NodeContext:
             deadline = self._now() + timedelta(seconds=deadline_s)
 
         continuation = Continuation(
-            run_id = self.run_id,
-            node_id = self.node_id,
-            kind = kind,
-            token = token,
-            prompt = payload.get("prompt") if payload else None,
-            resume_schema = payload.get("resume_schema") if payload else None,
+            run_id=self.run_id,
+            node_id=self.node_id,
+            kind=kind,
+            token=token,
+            prompt=payload.get("prompt") if payload else None,
+            resume_schema=payload.get("resume_schema") if payload else None,
             channel=channel,
             deadline=deadline,
             poll=poll,
@@ -177,7 +190,7 @@ class NodeContext:
         return continuation
 
     async def wait_for_resume(self, token: str) -> dict:
-        """ Wait for a continuation to be resumed, and return the payload.
+        """Wait for a continuation to be resumed, and return the payload.
         This will register the wait in the wait registry, and suspend until resumed.
         Useful for nodes that need to pause and wait for short-term external events.
         For long-term waits, use DualStage Tools instead.
@@ -187,4 +200,4 @@ class NodeContext:
             raise RuntimeError("WaitRegistry missing on context/runtime")
         fut = waits.register(token)
         payload = await fut
-        return payload 
+        return payload

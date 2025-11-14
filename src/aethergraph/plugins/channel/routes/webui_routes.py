@@ -1,14 +1,14 @@
 # src/aethergraph/server/webui.py
 from __future__ import annotations
-import os
-from typing import Optional, Callable, Awaitable, Any, List
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
+import os
+from typing import Any
+
+from fastapi import APIRouter, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-from aethergraph.plugins.channel.adapters.webui import WebSessionHub, WebChannelAdapter
-from aethergraph.services.continuations.continuation import Correlator
+from aethergraph.plugins.channel.adapters.webui import WebChannelAdapter, WebSessionHub
 
 webui_router = APIRouter()
 
@@ -16,11 +16,14 @@ webui_router = APIRouter()
 HUB_ATTR = "web_session_hub"
 UPLOAD_DIR_ATTR = "web_upload_dir"
 
+
 def _hub(app) -> WebSessionHub:
     return getattr(app.state, HUB_ATTR)
 
+
 def _uploads_dir(app) -> str:
     return getattr(app.state, UPLOAD_DIR_ATTR)
+
 
 # ------- WebSocket endpoint -------
 @webui_router.websocket("/ws/channel/{session_id}")
@@ -53,6 +56,7 @@ async def ws_channel(ws: WebSocket, session_id: str):
     finally:
         await hub.detach(session_id, send_json)
 
+
 # ------- HTTP resume fallback (for InputDock before WS ready) -------
 class ResumeBody(BaseModel):
     run_id: str
@@ -60,20 +64,24 @@ class ResumeBody(BaseModel):
     token: str
     payload: dict
 
+
 @webui_router.post("/api/web/resume")
 async def http_resume(request: Request, body: ResumeBody):
     c = request.app.state.container
     await c.resume_router.resume(body.run_id, body.node_id, body.token, body.payload)
     return {"ok": True}
 
+
 # ------- Uploads -------
 @webui_router.post("/api/web/upload")
-async def upload_files(request: Request, files: List[UploadFile] = File(...)):
+async def upload_files(request: Request, files: list[UploadFile] = None):
     """
     Save to <workspace>/web_uploads/<session_or_any>/... and return FileRef[]:
       [{url, filename, size, mime}]
     UI doesn't pass session; we just save under a common folder.
     """
+    if files is None:
+        files = File(...)
     root = _uploads_dir(request.app)
     os.makedirs(root, exist_ok=True)
 
@@ -83,8 +91,15 @@ async def upload_files(request: Request, files: List[UploadFile] = File(...)):
         with open(target, "wb") as w:
             w.write(await f.read())
         url = f"/api/web/files/{f.filename}"
-        out.append({"url": url, "filename": f.filename, "mime": f.content_type or "application/octet-stream"})
+        out.append(
+            {
+                "url": url,
+                "filename": f.filename,
+                "mime": f.content_type or "application/octet-stream",
+            }
+        )
     return out
+
 
 @webui_router.get("/api/web/files/{filename}")
 async def serve_uploaded(request: Request, filename: str):
@@ -93,6 +108,7 @@ async def serve_uploaded(request: Request, filename: str):
     if not os.path.exists(path):
         return JSONResponse({"error": "not found"}, status_code=404)
     return FileResponse(path, filename=filename)
+
 
 # ------- Integration helper -------
 def install_web_channel(app: Any):

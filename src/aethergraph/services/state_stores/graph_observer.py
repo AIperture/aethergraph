@@ -1,15 +1,25 @@
 # aethergraph/persist/observer.py
 from __future__ import annotations
-import time, hashlib
+
+import time
+
 from aethergraph.contracts.services.artifacts import AsyncArtifactStore
-from aethergraph.core.graph.task_node import NodeStatus
 from aethergraph.contracts.services.state_stores import GraphStateStore, StateEvent
+from aethergraph.core.graph.task_node import NodeStatus
 from aethergraph.services.state_stores.serialize import _jsonish_outputs_with_refs
 from aethergraph.services.state_stores.utils import snapshot_from_graph
 
+
 class PersistenceObserver:
-    def __init__(self, *, store: GraphStateStore, artifact_store: AsyncArtifactStore,
-                 spec_hash: str, snapshot_every: int = 50, min_interval_s: float = 5.0):
+    def __init__(
+        self,
+        *,
+        store: GraphStateStore,
+        artifact_store: AsyncArtifactStore,
+        spec_hash: str,
+        snapshot_every: int = 50,
+        min_interval_s: float = 5.0,
+    ):
         self.store = store
         self.artifact_store = artifact_store
         self.spec_hash = spec_hash
@@ -29,8 +39,8 @@ class PersistenceObserver:
             payload={
                 "node_id": runtime_node.node_id,
                 "status": runtime_node.state.status.name
-                    if isinstance(runtime_node.state.status, NodeStatus)
-                    else str(runtime_node.state.status),
+                if isinstance(runtime_node.state.status, NodeStatus)
+                else str(runtime_node.state.status),
             },
         )
         await self.store.append_event(ev)
@@ -45,11 +55,11 @@ class PersistenceObserver:
             graph_id=g.graph_id,
             node_id=runtime_node.node_id,
             tool_name=getattr(runtime_node.state, "tool_name", None)
-                      or getattr(getattr(runtime_node, "spec", None), "tool_name", None),
+            or getattr(getattr(runtime_node, "spec", None), "tool_name", None),
             tool_version=getattr(runtime_node.state, "tool_version", None)
-                      or getattr(getattr(runtime_node, "spec", None), "tool_version", None),
-            artifacts=None,                 # ← keep events self-contained
-            allow_externalize=False,        # ← do not write artifacts from events
+            or getattr(getattr(runtime_node, "spec", None), "tool_version", None),
+            artifacts=None,  # ← keep events self-contained
+            allow_externalize=False,  # ← do not write artifacts from events
         )
 
         ev = StateEvent(
@@ -60,7 +70,7 @@ class PersistenceObserver:
             kind="OUTPUT",
             payload={
                 "node_id": runtime_node.node_id,
-                "outputs": safe_outputs or {},   # ✅ JSON-safe
+                "outputs": safe_outputs or {},  # ✅ JSON-safe
             },
         )
         await self.store.append_event(ev)
@@ -104,7 +114,9 @@ class PersistenceObserver:
     async def _maybe_snapshot(self, graph):
         self._event_count += 1
         now = time.time()
-        if (self._event_count % self.snapshot_every == 0) and (now - self._last_snap_ts >= self.min_interval_s):
+        if (self._event_count % self.snapshot_every == 0) and (
+            now - self._last_snap_ts >= self.min_interval_s
+        ):
             snap = await snapshot_from_graph(
                 run_id=graph.state.run_id or "unknown",
                 graph_id=graph.graph_id,
@@ -112,7 +124,7 @@ class PersistenceObserver:
                 spec_hash=self.spec_hash,
                 state_obj=graph.state,
                 artifacts=self.artifact_store,
-                allow_externalize=False,   # keep snapshots JSON-only (opaque refs)
+                allow_externalize=False,  # keep snapshots JSON-only (opaque refs)
                 include_wait_spec=True,
             )
             await self.store.save_snapshot(snap)

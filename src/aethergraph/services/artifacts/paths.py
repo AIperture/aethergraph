@@ -1,10 +1,10 @@
 # at top of the file
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
-from typing import Union
 
-def _from_uri_or_path(s: Union[str, Path]) -> Path:
+
+def _from_uri_or_path(s: str | Path) -> Path:
     """Turn a file:// URI or plain path into a local Path (Windows-safe)."""
     if isinstance(s, Path):
         return s

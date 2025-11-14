@@ -1,10 +1,14 @@
 from __future__ import annotations
-import os, json, pickle
-from typing import List, Dict, Any
+
+import os
+import pickle
+from typing import Any
+
 import numpy as np
+
 try:
     import faiss
-except Exception as e:
+except Exception:
     faiss = None
 
 from .base import VectorIndex
@@ -13,8 +17,10 @@ from .base import VectorIndex
 Stores vectors as BLOBs along with metadata in a simple schema.
 """
 
+
 class FAISSVectorIndex(VectorIndex):
     """A simple FAISS index per corpus (L2 on normalized vectors ~ cosine)."""
+
     def __init__(self, index_path: str, dim: int | None = None):
         super().__init__(index_path)
         self.dim = dim  # optional default; will infer on first add
@@ -43,7 +49,13 @@ class FAISSVectorIndex(VectorIndex):
         with open(meta_path, "wb") as f:
             pickle.dump(metas, f)
 
-    async def add(self, corpus_id: str, chunk_ids: List[str], vectors: List[list[float]], metas: List[Dict[str,Any]]):
+    async def add(
+        self,
+        corpus_id: str,
+        chunk_ids: list[str],
+        vectors: list[list[float]],
+        metas: list[dict[str, Any]],
+    ):
         if faiss is None:
             raise RuntimeError("FAISS not installed")
         vecs = np.asarray(vectors, dtype=np.float32)
@@ -56,30 +68,33 @@ class FAISSVectorIndex(VectorIndex):
             index = faiss.IndexFlatIP(d)  # cosine via normalized dot
             old_metas = []
         index.add(vecs)
-        for cid, m in zip(chunk_ids, metas):
+        for cid, m in zip(chunk_ids, metas, strict=True):
             old_metas.append({"chunk_id": cid, "meta": m})
         self._save(corpus_id, index, old_metas)
 
-    async def delete(self, corpus_id: str, chunk_ids: List[str] | None = None):
+    async def delete(self, corpus_id: str, chunk_ids: list[str] | None = None):
         # Simple approach: rebuild if filtering; or delete entire corpus.
         if not chunk_ids:
             idx_path, meta_path = self._paths(corpus_id)
             for p in (idx_path, meta_path):
-                if os.path.exists(p): os.remove(p)
+                if os.path.exists(p):
+                    os.remove(p)
         else:
             index, metas = self._load(corpus_id)
             if index is None:
                 return
             # Rebuild without those ids
-            keep = [i for i,m in enumerate(metas) if m["chunk_id"] not in set(chunk_ids)]
+            keep = [i for i, m in enumerate(metas) if m["chunk_id"] not in set(chunk_ids)]
             if not keep:
                 await self.delete(corpus_id, None)
                 return
             # Need stored vectors to rebuild — this simple implementation does not persist them.
             # In production, persist vectors or recompute from text.
-            raise NotImplementedError("Selective delete requires stored vectors; not implemented here.")
+            raise NotImplementedError(
+                "Selective delete requires stored vectors; not implemented here."
+            )
 
-    async def list_chunks(self, corpus_id: str) -> List[str]:
+    async def list_chunks(self, corpus_id: str) -> list[str]:
         _, metas = self._load(corpus_id)
         return [m["chunk_id"] for m in metas] if metas else []
 
@@ -91,10 +106,16 @@ class FAISSVectorIndex(VectorIndex):
             return []
         q = np.asarray([query_vec], dtype=np.float32)
         q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-9)
-        D, I = index.search(q, k)
+        D, I = index.search(q, k)  # noqa: E741
         out = []
-        for score, idx in zip(D[0].tolist(), I[0].tolist()):
+        for score, idx in zip(D[0].tolist(), I[0].tolist(), strict=True):
             if idx < 0 or idx >= len(metas):
                 continue
-            out.append({"chunk_id": metas[idx]["chunk_id"], "score": float(score), "meta": metas[idx]["meta"]})
+            out.append(
+                {
+                    "chunk_id": metas[idx]["chunk_id"],
+                    "score": float(score),
+                    "meta": metas[idx]["meta"],
+                }
+            )
         return out

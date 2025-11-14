@@ -1,24 +1,24 @@
-from typing import Literal, Optional, Dict 
-from pydantic import SecretStr 
-from .generic_client import GenericLLMClient
-from aethergraph.config.llm import LLMProfile, LLMSettings
-from ..secrets.base import Secrets 
+import logging
+import os
 
+from pydantic import SecretStr
+
+from aethergraph.config.llm import LLMProfile, LLMSettings
+
+from ..secrets.base import Secrets
+from .generic_client import GenericLLMClient
 from .providers import Provider
 
 
-def _resolve_key(direct: Optional[SecretStr], ref: Optional[str], secrets: Secrets) -> Optional[str]:
+def _resolve_key(direct: SecretStr | None, ref: str | None, secrets: Secrets) -> str | None:
     if direct:
         return direct.get_secret_value()
     if ref:
         return secrets.get(ref)
     return None
 
-from typing import Dict, Optional
-import os
 
-
-def _provider_default_base_url(provider: Provider) -> Optional[str]:
+def _provider_default_base_url(provider: Provider) -> str | None:
     # Fallback base URLs if not given in config or env
     if provider == "openai":
         return "https://api.openai.com/v1"
@@ -53,9 +53,9 @@ def _apply_env_overrides_to_profile(
     # 1) Generic overrides for DEFAULT profile (if user wants a quick global switch)
     if is_default:
         provider_env = os.getenv("LLM_PROVIDER")
-        model_env    = os.getenv("LLM_MODEL")
-        base_env     = os.getenv("LLM_BASE_URL")
-        timeout_env  = os.getenv("LLM_TIMEOUT")
+        model_env = os.getenv("LLM_MODEL")
+        base_env = os.getenv("LLM_BASE_URL")
+        timeout_env = os.getenv("LLM_TIMEOUT")
 
         if provider_env:
             p.provider = provider_env.lower()  # type: ignore[assignment]
@@ -67,7 +67,8 @@ def _apply_env_overrides_to_profile(
             try:
                 p.timeout = float(timeout_env)
             except ValueError:
-                pass  # ignore bad values
+                logger = logging.getLogger("aethergraph.services.llm")
+                logger.warning(f"Invalid LLM_TIMEOUT value: {timeout_env}", exc_info=True)
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:
@@ -127,7 +128,7 @@ def client_from_profile(p: LLMProfile, secrets: Secrets) -> GenericLLMClient:
     )
 
 
-def build_llm_clients(cfg: LLMSettings, secrets: Secrets) -> Dict[str, GenericLLMClient]:
+def build_llm_clients(cfg: LLMSettings, secrets: Secrets) -> dict[str, GenericLLMClient]:
     """Returns dict of {profile_name: client}, always includes 'default' if enabled."""
     if not cfg.enabled:
         return {}
@@ -139,7 +140,9 @@ def build_llm_clients(cfg: LLMSettings, secrets: Secrets) -> Dict[str, GenericLL
         is_default=True,
         secrets=secrets,
     )
-    clients: Dict[str, GenericLLMClient] = {"default": client_from_profile(default_profile, secrets)}
+    clients: dict[str, GenericLLMClient] = {
+        "default": client_from_profile(default_profile, secrets)
+    }
 
     # Extra profiles
     for name, prof in (cfg.profiles or {}).items():

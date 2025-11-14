@@ -1,37 +1,42 @@
 # aethergraph/core/execution/context.py
 from __future__ import annotations
+
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Callable
 from datetime import datetime
 import importlib
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from aethergraph.core.graph.task_node import TaskNodeRuntime
+
+from aethergraph.services.clock.clock import SystemClock
+from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.resume.router import ResumeRouter
 
-from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID, RESERVED_INJECTABLES 
+from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID, RESERVED_INJECTABLES
+from .bound_memory import BoundMemoryAdapter
 from .node_context import NodeContext
 from .node_services import NodeServices
-from .bound_memory import BoundMemoryAdapter
 
-from aethergraph.services.logger.std import StdLoggerService
-from aethergraph.services.clock.clock import SystemClock
 
 @dataclass
 class ExecutionContext:
     run_id: str
-    graph_id: Optional[str]
-    graph_inputs: Dict[str, Any]
-    outputs_by_node: Dict[str, Dict[str, Any]]
+    graph_id: str | None
+    graph_inputs: dict[str, Any]
+    outputs_by_node: dict[str, dict[str, Any]]
     services: NodeServices
     logger_factory: StdLoggerService
     clock: SystemClock
-    resume_payload: Optional[Dict[str, Any]] = None
-    should_run_fn: Optional[Callable[[], bool]] = None
-    resume_router: Optional[ResumeRouter] = None  # ResumeRouter
+    resume_payload: dict[str, Any] | None = None
+    should_run_fn: Callable[[], bool] | None = None
+    resume_router: ResumeRouter | None = None  # ResumeRouter
 
     # Back-compat shim
-    bound_memory: Optional[BoundMemoryAdapter] = None
+    bound_memory: BoundMemoryAdapter | None = None
 
-    def create_node_context(self, node: "TaskNodeRuntime") -> "NodeContext":
+    def create_node_context(self, node: TaskNodeRuntime) -> NodeContext:
         return NodeContext(
             run_id=self.run_id,
             graph_id=self.graph_id or "",
@@ -41,7 +46,7 @@ class ExecutionContext:
             # back-compat for old ctx.mem()
             bound_memory=self.bound_memory,
         )
-    
+
     # def as_node_context(self, ad) -> "NodeContext":
     #     """ Create a NodeContext representing this execution context itself as a node.
     #         Useful for ad-hoc contexts that don't have real nodes.
@@ -61,15 +66,15 @@ class ExecutionContext:
         return self.clock.now()
 
     def resolve(self, logic_ref: str):
-        """ Resolve a logic reference to a callable.
-            NOTE: This is not used anymore; prefer get_logic().
+        """Resolve a logic reference to a callable.
+        NOTE: This is not used anymore; prefer get_logic().
         """
         # fallback dotted import
         mod, _, attr = logic_ref.rpartition(".")
         return getattr(importlib.import_module(mod), attr)
 
     def get_logic(self, logic_ref):
-        """ Resolve a logic reference to a callable.
+        """Resolve a logic reference to a callable.
         If a registry is available and the ref looks like a registry key, use it.
         Otherwise, if a dotted path, import it.
         Otherwise, return as-is (assumed callable).
@@ -86,8 +91,8 @@ class ExecutionContext:
             mod, _, attr = logic_ref.rpartition(".")
             return getattr(importlib.import_module(mod), attr)
         return logic_ref
-    
-    async def resolve_inputs(self, node) -> Dict[str, Any]:
+
+    async def resolve_inputs(self, node) -> dict[str, Any]:
         """
         Materialize a node's input mapping by resolving:
         - {"_type":"arg","key":K} → graph input value (or optional default)
@@ -103,7 +108,7 @@ class ExecutionContext:
            each key-value pair.
          - If the value is a list or tuple, it recursively resolves each element.
          - Otherwise, it returns the value as-is (assumed to be a constant).
-         
+
         Args:
             node: The TaskNodeRuntime whose inputs to resolve.
         Returns:
@@ -113,7 +118,7 @@ class ExecutionContext:
         """
         raw = getattr(node, "inputs", {}) or {}
         # Grab optional defaults from the graph spec if available
-        opt_defaults: Dict[str, Any] = {}
+        opt_defaults: dict[str, Any] = {}
         parent_graph = getattr(node, "_parent_graph", None)
         if parent_graph and getattr(parent_graph, "spec", None):
             # _io_inputs_optional is a dict[str, Any]
@@ -125,9 +130,11 @@ class ExecutionContext:
             fallback_outputs = getattr(parent_graph.state, "node_outputs", {}) or {}
 
         def _err_path(msg: str, path: str):
-            raise KeyError(f"{msg} (node={getattr(node,'node_id', getattr(node,'id','?'))}, path={path})")
+            raise KeyError(
+                f"{msg} (node={getattr(node, 'node_id', getattr(node, 'id', '?'))}, path={path})"
+            )
 
-        def _resolve_arg(marker: Dict[str, Any], path: str):
+        def _resolve_arg(marker: dict[str, Any], path: str):
             k = marker.get("key")
             if k is None:
                 _err_path("Bad arg marker (missing 'key')", path)
@@ -139,8 +146,9 @@ class ExecutionContext:
             known = list(self.graph_inputs.keys())
             _err_path(f"Graph input '{k}' not provided (known inputs: {known})", path)
 
-        def _resolve_ref(marker: Dict[str, Any], path: str):
-            src = marker.get("from"); out_key = marker.get("key")
+        def _resolve_ref(marker: dict[str, Any], path: str):
+            src = marker.get("from")
+            out_key = marker.get("key")
             if src is None or out_key is None:
                 _err_path("Bad ref marker (need 'from' and 'key')", path)
 
@@ -154,16 +162,22 @@ class ExecutionContext:
                 outs = self.outputs_by_node[src] or {}
                 if out_key in outs:
                     return outs[out_key]
-                _err_path(f"Upstream node '{src}' has no output key '{out_key}'. "
-                        f"Available: {list(outs.keys())}", path)
+                _err_path(
+                    f"Upstream node '{src}' has no output key '{out_key}'. "
+                    f"Available: {list(outs.keys())}",
+                    path,
+                )
 
             # Fallback: graph state (useful during tests or if scheduler filled it there)
             if src in fallback_outputs:
                 outs = fallback_outputs[src] or {}
                 if out_key in outs:
                     return outs[out_key]
-                _err_path(f"(fallback) Upstream node '{src}' has no output key '{out_key}'. "
-                        f"Available: {list(outs.keys())}", path)
+                _err_path(
+                    f"(fallback) Upstream node '{src}' has no output key '{out_key}'. "
+                    f"Available: {list(outs.keys())}",
+                    path,
+                )
 
             _err_path(f"Upstream node '{src}' outputs not available yet", path)
 
@@ -190,9 +204,8 @@ class ExecutionContext:
             return val
 
         # Make sure we don't mutate node.inputs
-        # materialized = _resolve_any(copy.deepcopy(raw), path="inputs")        
+        # materialized = _resolve_any(copy.deepcopy(raw), path="inputs")
         materialized = _resolve_any(raw, path="inputs")
-
 
         # Strip framework-reserved injectables from *user* inputs.
         # We always inject these later from the execution context.

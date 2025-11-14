@@ -1,6 +1,8 @@
 # services/eventbus/inmem.py
-import asyncio, threading
+import asyncio
 from collections import defaultdict
+import threading
+
 
 class InMemoryEventBus:
     def __init__(self):

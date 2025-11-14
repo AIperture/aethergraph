@@ -1,11 +1,17 @@
 from __future__ import annotations
-from typing import Any, Mapping, Sequence
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
 
 class ResumptionNotSupported(Exception):
     """Raised when a snapshot contains non-JSON-pure outputs and resume is disabled."""
+
     pass
 
+
 _JSON_SCALARS = (str, int, float, bool, type(None))
+
 
 def _is_json_pure(obj: Any) -> bool:
     """
@@ -27,14 +33,15 @@ def _is_json_pure(obj: Any) -> bool:
                 return False
         return True
 
-    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+    if isinstance(obj, Sequence) and not isinstance(obj, (str | bytes | bytearray)):
         return all(_is_json_pure(v) for v in obj)
 
     return False
 
 
-def assert_snapshot_json_pure(snapshot_state: dict, *, run_id: str, graph_id: str,
-                              allow_non_json: bool = False) -> None:
+def assert_snapshot_json_pure(
+    snapshot_state: dict, *, run_id: str, graph_id: str, allow_non_json: bool = False
+) -> None:
     """
     Validate the *serialized* (dict) snapshot state produced by snapshot_from_graph(...).
     If any node outputs are not strictly JSON-pure, raise ResumptionNotSupported

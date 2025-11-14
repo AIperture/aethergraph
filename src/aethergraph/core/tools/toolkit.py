@@ -1,17 +1,19 @@
+from collections.abc import Callable
 from functools import wraps
 import importlib
 import inspect
-from typing import Any, Callable, List, Optional
+from typing import Any
 import uuid
 
-from .waitable import DualStageTool, waitable_tool 
 from ..execution.step_forward import _normalize_result
-from ..graph.graph_builder import current_builder 
-from ..graph.interpreter import AwaitableResult, current_interpreter, SimpleNS
+from ..graph.graph_builder import current_builder
+from ..graph.interpreter import AwaitableResult, SimpleNS, current_interpreter
+from ..graph.node_handle import NodeHandle
 from ..runtime.runtime_registry import current_registry
-from ..graph.node_handle import NodeHandle 
+from .waitable import DualStageTool, waitable_tool
 
-def _infer_inputs_from_signature(fn: Callable) -> List[str]:
+
+def _infer_inputs_from_signature(fn: Callable) -> list[str]:
     sig = inspect.signature(fn)
     keys = []
     for p in sig.parameters.values():
@@ -20,27 +22,34 @@ def _infer_inputs_from_signature(fn: Callable) -> List[str]:
         keys.append(p.name)
     return keys
 
+
 def _normalize_result_to_dict(res: Any) -> dict:
-    """ Normalize function result into a dict of outputs.
+    """Normalize function result into a dict of outputs.
     Supports:
         - None -> {}
         - dict -> as-is
         - tuple -> {"out0": v0, "out1": v1, ...}
         - single value -> {"result": value}
     """
-    if res is None: return {}
-    if isinstance(res, dict): return res
-    if isinstance(res, tuple): return {f"out{i}": v for i, v in enumerate(res)}
+    if res is None:
+        return {}
+    if isinstance(res, dict):
+        return res
+    if isinstance(res, tuple):
+        return {f"out{i}": v for i, v in enumerate(res)}
     return {"result": res}
+
 
 def _check_contract(outputs, out, impl):
     missing = [k for k in outputs if k not in out]
     if missing:
-        raise ValueError(f"Tool {getattr(impl, '__name__', type(impl).__name__)} missing outputs: {missing}")
-    
+        raise ValueError(
+            f"Tool {getattr(impl, '__name__', type(impl).__name__)} missing outputs: {missing}"
+        )
+
 
 def resolve_dotted(path: str):
-    """ Resolve a dotted path to a callable. """
+    """Resolve a dotted path to a callable."""
     # "pkg.mod:symbol" or "pkg.mod.symbol"
     if ":" in path:
         mod, _, sym = path.partition(":")
@@ -48,19 +57,22 @@ def resolve_dotted(path: str):
     mod, _, attr = path.rpartition(".")
     return getattr(importlib.import_module(mod), attr)
 
+
 CONTROL_KW = ("_after", "_name", "_condition", "_id", "_alias", "_labels")
+
 
 def _split_control_kwargs(kwargs: dict):
     ctrl = {k: kwargs.pop(k) for k in CONTROL_KW if k in kwargs}
     return ctrl, kwargs
 
 
-def tool(outputs: List[str],
-         inputs: Optional[List[str]] = None,
-         *,
-         name: Optional[str] = None,
-         version: str = "0.1.0",
-         ):
+def tool(
+    outputs: list[str],
+    inputs: list[str] | None = None,
+    *,
+    name: str | None = None,
+    version: str = "0.1.0",
+):
     """
     Dual-mode decorator for plain functions and DualStageTool classes.
     - Graph mode: builds node (returns NodeHandle)
@@ -69,21 +81,24 @@ def tool(outputs: List[str],
       - persist=None -> register_callable (dev hot reload)
       - persist="file" -> persist code under project/tools/... and register_file
     """
+
     def _wrap(obj):
         # -- normalize impl --
         waitable = inspect.isclass(obj) and issubclass(obj, DualStageTool)
         impl = waitable_tool(obj) if waitable else obj
         sig = inspect.signature(impl)
         declared_inputs = inputs or [
-            p.name for p in sig.parameters.values()
+            p.name
+            for p in sig.parameters.values()
             if p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)
         ]
         is_async = inspect.iscoroutinefunction(impl) or (
-            hasattr(impl, "__call__") and inspect.iscoroutinefunction(impl.__call__)
+            callable(impl) and inspect.iscoroutinefunction(impl.__call__)
         )
 
         # -- proxy --
         if is_async:
+
             async def _immediate(call_kwargs):
                 res = await impl(**call_kwargs)
                 out = _normalize_result(res)
@@ -94,16 +109,19 @@ def tool(outputs: List[str],
             def proxy(*args, **kwargs):
                 ctrl, kwargs = _split_control_kwargs(dict(kwargs))  # copy+strip control
 
-                bound = sig.bind_partial(*args, **kwargs); bound.apply_defaults()
+                bound = sig.bind_partial(*args, **kwargs)
+                bound.apply_defaults()
                 call_kwargs = dict(bound.arguments)
                 if current_builder() is not None:
                     return call_tool(proxy, **call_kwargs, **ctrl)
                 return _immediate(call_kwargs)
         else:
+
             @wraps(impl)
             def proxy(*args, **kwargs):
                 ctrl, kwargs = _split_control_kwargs(dict(kwargs))  # copy+strip control
-                bound = sig.bind_partial(*args, **kwargs); bound.apply_defaults()
+                bound = sig.bind_partial(*args, **kwargs)
+                bound.apply_defaults()
                 call_kwargs = dict(bound.arguments)
                 if current_builder() is not None:
                     return call_tool(proxy, **call_kwargs, **ctrl)
@@ -112,13 +130,13 @@ def tool(outputs: List[str],
                 return out
 
         # annotate
-        proxy.__aether_inputs__  = list(declared_inputs)
+        proxy.__aether_inputs__ = list(declared_inputs)
         proxy.__aether_outputs__ = list(outputs)
-        proxy.__aether_impl__    = impl
+        proxy.__aether_impl__ = impl
 
         if waitable:
             proxy.__aether_waitable__ = True
-            proxy.__aether_tool_class__ = obj  # original class 
+            proxy.__aether_tool_class__ = obj  # original class
 
         # registry behavior
         registry = current_registry()
@@ -131,30 +149,34 @@ def tool(outputs: List[str],
             )
 
         return proxy
+
     return _wrap
 
 
 def _id_of(x):
     return getattr(x, "node_id", x)  # accepts NodeHandle or str
 
+
 def _ensure_list(x):
-    if x is None: return []
-    if isinstance(x, (list, tuple, set)): return list(x)
+    if x is None:
+        return []
+    if isinstance(x, list | tuple | set):
+        return list(x)
     return [x]
 
-def call_tool_old(fn_or_path, **kwargs):   
+
+def call_tool_old(fn_or_path, **kwargs):
     builder = current_builder()
-    interp = current_interpreter() 
+    interp = current_interpreter()
     # --- extract control-plane early
 
-    
     ctrl, kwargs = _split_control_kwargs(kwargs)
-    after_raw = ctrl.get("_after", None) 
+    after_raw = ctrl.get("_after", None)
     name_hint = ctrl.get("_name", None)
     alias = ctrl.get("_alias", None)
-    node_id_kw = ctrl.get("_id", None) # hard override for node_id
+    node_id_kw = ctrl.get("_id", None)  # hard override for node_id
     labels = _ensure_list(ctrl.get("_labels", None))
-    condition = ctrl.get("_condition", None)  # not implemented yet 
+    # condition = ctrl.get("_condition", None)  # not implemented yet
 
     after_ids = [_id_of(a) for a in _ensure_list(after_raw)]
 
@@ -165,8 +187,8 @@ def call_tool_old(fn_or_path, **kwargs):
         """
         if isinstance(fn_or_path, str):
             logic = fn_or_path
-            logic_name  = logic.rsplit(".", 1)[-1]
-            inputs_decl  = list(kwargs.keys())
+            logic_name = logic.rsplit(".", 1)[-1]
+            inputs_decl = list(kwargs.keys())
             outputs_decl = ["result"]
         else:
             impl = getattr(fn_or_path, "__aether_impl__", fn_or_path)
@@ -174,23 +196,30 @@ def call_tool_old(fn_or_path, **kwargs):
 
             # Prefer registry for portability (esp. waitables)
             if reg_key:
-                logic = f"registry:{reg_key}"            # e.g. "registry:tool:approve_report@0.1.0"
+                logic = f"registry:{reg_key}"  # e.g. "registry:tool:approve_report@0.1.0"
                 logic_name = reg_key.split(":")[1].split("@")[0]
-                logic_version = reg_key.split("@")[1] if "@" in reg_key else None   
+                logic_version = reg_key.split("@")[1] if "@" in reg_key else None
             else:
-                logic = f"{impl.__module__}.{getattr(impl,'__name__','tool')}"
-                logic_name  = getattr(impl, "__name__", "tool")
+                logic = f"{impl.__module__}.{getattr(impl, '__name__', 'tool')}"
+                logic_name = getattr(impl, "__name__", "tool")
                 logic_version = getattr(impl, "__version__", None)
 
-            inputs_decl  = getattr(fn_or_path, "__aether_inputs__",  _infer_inputs_from_signature(impl))
+            inputs_decl = getattr(
+                fn_or_path, "__aether_inputs__", _infer_inputs_from_signature(impl)
+            )
             outputs_decl = getattr(fn_or_path, "__aether_outputs__", ["result"])
-        
+
         # add node to the (fresh) graph; dependencies are enforced by the schedule order we create
-        node_id = (builder.next_id(logic_name=logic_name) if builder
-                   else f"{logic_name}_{uuid.uuid4().hex[:6]}")
-        
+        node_id = (
+            builder.next_id(logic_name=logic_name)
+            if builder
+            else f"{logic_name}_{uuid.uuid4().hex[:6]}"
+        )
+
         if builder is None:
-            raise RuntimeError("Interpreter expects a TaskGraph builder context; missing `with graph(...)`")
+            raise RuntimeError(
+                "Interpreter expects a TaskGraph builder context; missing `with graph(...)`"
+            )
 
         if node_id_kw:
             node_id = node_id_kw  # override if provided
@@ -200,7 +229,9 @@ def call_tool_old(fn_or_path, **kwargs):
             node_id = builder.next_id(logic_name=logic_name)
 
         if node_id in builder.spec.nodes:
-            raise ValueError(f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'")
+            raise ValueError(
+                f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'"
+            )
 
         builder.add_tool_node(
             node_id=node_id,
@@ -211,20 +242,22 @@ def call_tool_old(fn_or_path, **kwargs):
             # after=kwargs.pop("_after", None),
             after=after_ids,
             tool_name=logic_name,
-            tool_version=logic_version ,
+            tool_version=logic_version,
         )
         builder.graph.__post_init__()  # reify runtime nodes
-        builder.register_logic_name(logic_name, node_id) # register logic name for reverse lookup
-        builder.register_labels(labels, node_id) # register labels for reverse lookup
+        builder.register_logic_name(logic_name, node_id)  # register logic name for reverse lookup
+        builder.register_labels(labels, node_id)  # register labels for reverse lookup
         if alias:
             builder.register_alias(alias, node_id)
-            
+
         # stash alias/labels in metadata for downstream (promotion, audit)
-        builder.spec.nodes[node_id].metadata.update({
-            "alias": alias,
-            "labels": labels,
-            "display_name": name_hint or logic_name,
-        })         
+        builder.spec.nodes[node_id].metadata.update(
+            {
+                "alias": alias,
+                "labels": labels,
+                "display_name": name_hint or logic_name,
+            }
+        )
 
         async def _runner():
             outs = await interp.run_one(node=builder.graph.node(node_id))
@@ -232,6 +265,7 @@ def call_tool_old(fn_or_path, **kwargs):
             # n = builder.graph.node(node_id)
             # await builder.graph.set_node_outputs(node_id, outs)
             return SimpleNS(outs, node_id=node_id)
+
         return AwaitableResult(_runner)
 
     if builder is not None:
@@ -241,8 +275,8 @@ def call_tool_old(fn_or_path, **kwargs):
 
         if isinstance(fn_or_path, str):
             logic = fn_or_path
-            logic_name  = logic.rsplit(".", 1)[-1]
-            inputs_decl  = list(kwargs.keys())
+            logic_name = logic.rsplit(".", 1)[-1]
+            inputs_decl = list(kwargs.keys())
             outputs_decl = ["result"]
         else:
             impl = getattr(fn_or_path, "__aether_impl__", fn_or_path)
@@ -250,17 +284,18 @@ def call_tool_old(fn_or_path, **kwargs):
 
             # Prefer registry for portability (esp. waitables)
             if reg_key:
-                logic = f"registry:{reg_key}"            # e.g. "registry:tool:approve_report@0.1.0"
+                logic = f"registry:{reg_key}"  # e.g. "registry:tool:approve_report@0.1.0"
                 logic_name = reg_key.split(":")[1].split("@")[0]
                 logic_version = reg_key.split("@")[1] if "@" in reg_key else None
             else:
-                logic = f"{impl.__module__}.{getattr(impl,'__name__','tool')}"
-                logic_name  = getattr(impl, "__name__", "tool")
+                logic = f"{impl.__module__}.{getattr(impl, '__name__', 'tool')}"
+                logic_name = getattr(impl, "__name__", "tool")
                 logic_version = getattr(impl, "__version__", None)
 
-            inputs_decl  = getattr(fn_or_path, "__aether_inputs__",  _infer_inputs_from_signature(impl))
+            inputs_decl = getattr(
+                fn_or_path, "__aether_inputs__", _infer_inputs_from_signature(impl)
+            )
             outputs_decl = getattr(fn_or_path, "__aether_outputs__", ["result"])
-
 
         if node_id_kw:
             node_id = node_id_kw  # override if provided
@@ -270,8 +305,10 @@ def call_tool_old(fn_or_path, **kwargs):
             node_id = builder.next_id(logic_name=logic_name)
 
         if node_id in builder.spec.nodes:
-            raise ValueError(f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'")
-        
+            raise ValueError(
+                f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'"
+            )
+
         builder.add_tool_node(
             node_id=node_id,
             logic=logic,
@@ -280,7 +317,7 @@ def call_tool_old(fn_or_path, **kwargs):
             expected_output_keys=outputs_decl,
             after=after_ids,
             tool_name=logic_name,
-            tool_version=logic_version ,
+            tool_version=logic_version,
         )
         builder.register_logic_name(logic_name, node_id)
         builder.register_labels(labels, node_id)
@@ -288,14 +325,14 @@ def call_tool_old(fn_or_path, **kwargs):
             builder.register_alias(alias, node_id)
 
         # stash alias/labels in metadata for downstream (promotion, audit)
-        builder.spec.nodes[node_id].metadata.update({
-            "alias": alias,
-            "labels": labels,
-            "display_name": name_hint or logic_name,
-        })            
+        builder.spec.nodes[node_id].metadata.update(
+            {
+                "alias": alias,
+                "labels": labels,
+                "display_name": name_hint or logic_name,
+            }
+        )
         return NodeHandle(node_id=node_id, output_keys=outputs_decl)
-
-
 
     # immediate mode
     fn = resolve_dotted(fn_or_path) if isinstance(fn_or_path, str) else fn_or_path
@@ -313,7 +350,7 @@ def call_tool(fn_or_path, **kwargs):
     alias = ctrl.get("_alias", None)
     node_id_kw = ctrl.get("_id", None)  # hard override for node_id
     labels = _ensure_list(ctrl.get("_labels", None))
-    condition = ctrl.get("_condition", None)  # TODO
+    # condition = ctrl.get("_condition", None)  # TODO
 
     after_ids = [_id_of(a) for a in _ensure_list(after_raw)]
 
@@ -321,10 +358,10 @@ def call_tool(fn_or_path, **kwargs):
     if interp is not None:
         if isinstance(fn_or_path, str):
             logic = fn_or_path
-            logic_name  = logic.rsplit(".", 1)[-1]
-            inputs_decl  = list(kwargs.keys())
+            logic_name = logic.rsplit(".", 1)[-1]
+            inputs_decl = list(kwargs.keys())
             outputs_decl = ["result"]
-            logic_version = None                       # ✅ ensure defined
+            logic_version = None  # ✅ ensure defined
         else:
             impl = getattr(fn_or_path, "__aether_impl__", fn_or_path)
             reg_key = getattr(fn_or_path, "__aether_registry_key__", None)
@@ -333,15 +370,19 @@ def call_tool(fn_or_path, **kwargs):
                 logic_name = reg_key.split(":")[1].split("@")[0]
                 logic_version = reg_key.split("@")[1] if "@" in reg_key else None
             else:
-                logic = f"{impl.__module__}.{getattr(impl,'__name__','tool')}"
-                logic_name  = getattr(impl, "__name__", "tool")
+                logic = f"{impl.__module__}.{getattr(impl, '__name__', 'tool')}"
+                logic_name = getattr(impl, "__name__", "tool")
                 logic_version = getattr(impl, "__version__", None)
 
-            inputs_decl  = getattr(fn_or_path, "__aether_inputs__",  _infer_inputs_from_signature(impl))
+            inputs_decl = getattr(
+                fn_or_path, "__aether_inputs__", _infer_inputs_from_signature(impl)
+            )
             outputs_decl = getattr(fn_or_path, "__aether_outputs__", ["result"])
 
         if builder is None:
-            raise RuntimeError("Interpreter expects a TaskGraph builder context; missing `with graph(...)`")
+            raise RuntimeError(
+                "Interpreter expects a TaskGraph builder context; missing `with graph(...)`"
+            )
 
         # node_id selection
         if node_id_kw:
@@ -352,7 +393,9 @@ def call_tool(fn_or_path, **kwargs):
             node_id = builder.next_id(logic_name=logic_name)
 
         if node_id in builder.spec.nodes:
-            raise ValueError(f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'")
+            raise ValueError(
+                f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'"
+            )
 
         builder.add_tool_node(
             node_id=node_id,
@@ -376,15 +419,17 @@ def call_tool(fn_or_path, **kwargs):
         if alias:
             builder.register_alias(alias, node_id)
 
-        builder.spec.nodes[node_id].metadata.update({
-            "alias": alias,
-            "labels": labels,
-            "display_name": name_hint or logic_name,
-        })
+        builder.spec.nodes[node_id].metadata.update(
+            {
+                "alias": alias,
+                "labels": labels,
+                "display_name": name_hint or logic_name,
+            }
+        )
 
         async def _runner():
             outs = await interp.run_one(node=builder.graph.node(node_id))
-            return SimpleNS(outs, node_id=node_id)      # ✅ include node_id
+            return SimpleNS(outs, node_id=node_id)  # ✅ include node_id
 
         return AwaitableResult(_runner, node_id=node_id)
 
@@ -392,10 +437,10 @@ def call_tool(fn_or_path, **kwargs):
     if builder is not None:
         if isinstance(fn_or_path, str):
             logic = fn_or_path
-            logic_name  = logic.rsplit(".", 1)[-1]
-            inputs_decl  = list(kwargs.keys())
+            logic_name = logic.rsplit(".", 1)[-1]
+            inputs_decl = list(kwargs.keys())
             outputs_decl = ["result"]
-            logic_version = None                       # ✅ ensure defined
+            logic_version = None  # ✅ ensure defined
         else:
             impl = getattr(fn_or_path, "__aether_impl__", fn_or_path)
             reg_key = getattr(fn_or_path, "__aether_registry_key__", None)
@@ -404,11 +449,13 @@ def call_tool(fn_or_path, **kwargs):
                 logic_name = reg_key.split(":")[1].split("@")[0]
                 logic_version = reg_key.split("@")[1] if "@" in reg_key else None
             else:
-                logic = f"{impl.__module__}.{getattr(impl,'__name__','tool')}"
-                logic_name  = getattr(impl, "__name__", "tool")
+                logic = f"{impl.__module__}.{getattr(impl, '__name__', 'tool')}"
+                logic_name = getattr(impl, "__name__", "tool")
                 logic_version = getattr(impl, "__version__", None)
 
-            inputs_decl  = getattr(fn_or_path, "__aether_inputs__",  _infer_inputs_from_signature(impl))
+            inputs_decl = getattr(
+                fn_or_path, "__aether_inputs__", _infer_inputs_from_signature(impl)
+            )
             outputs_decl = getattr(fn_or_path, "__aether_outputs__", ["result"])
 
         if node_id_kw:
@@ -419,7 +466,9 @@ def call_tool(fn_or_path, **kwargs):
             node_id = builder.next_id(logic_name=logic_name)
 
         if node_id in builder.spec.nodes:
-            raise ValueError(f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'")
+            raise ValueError(
+                f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'"
+            )
 
         builder.add_tool_node(
             node_id=node_id,
@@ -436,20 +485,26 @@ def call_tool(fn_or_path, **kwargs):
         if alias:
             builder.register_alias(alias, node_id)
 
-        builder.spec.nodes[node_id].metadata.update({
-            "alias": alias,
-            "labels": labels,
-            "display_name": name_hint or logic_name,
-        })
+        builder.spec.nodes[node_id].metadata.update(
+            {
+                "alias": alias,
+                "labels": labels,
+                "display_name": name_hint or logic_name,
+            }
+        )
 
         # Return a build-time handle; ensure it carries node_id
-        return NodeHandle(node_id=node_id, output_keys=outputs_decl)  # or SimpleNS({}, node_id=node_id)
+        return NodeHandle(
+            node_id=node_id, output_keys=outputs_decl
+        )  # or SimpleNS({}, node_id=node_id)
 
     # ---------- Immediate mode (outside graph & interpreter) ----------
     fn = resolve_dotted(fn_or_path) if isinstance(fn_or_path, str) else fn_or_path
     if inspect.iscoroutinefunction(fn):
+
         async def _run_async():
             return _normalize_result_to_dict(await fn(**kwargs))
-        return AwaitableResult(_run_async)               # caller can await
+
+        return AwaitableResult(_run_async)  # caller can await
     else:
         return _normalize_result_to_dict(fn(**kwargs))

@@ -1,13 +1,12 @@
-import threading
-from typing import Dict, Optional
-from aethergraph.core.execution.forward_scheduler import ForwardScheduler
 from contextlib import asynccontextmanager
+import threading
 
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
+
 class SchedulerRegistry:
     def __init__(self):
-        self._by_run: Dict[str, GlobalForwardScheduler] = {}
+        self._by_run: dict[str, GlobalForwardScheduler] = {}
         self._lock = threading.RLock()
 
     def register(self, run_id: str, scheduler: GlobalForwardScheduler) -> None:
@@ -18,11 +17,11 @@ class SchedulerRegistry:
         with self._lock:
             self._by_run.pop(run_id, None)
 
-    def get(self, run_id: str) -> Optional[GlobalForwardScheduler]:
+    def get(self, run_id: str) -> GlobalForwardScheduler | None:
         with self._lock:
             return self._by_run.get(run_id)
 
-    def list_run_ids(self) -> Dict[str, GlobalForwardScheduler]:
+    def list_run_ids(self) -> dict[str, GlobalForwardScheduler]:
         with self._lock:
             return dict(self._by_run)
 

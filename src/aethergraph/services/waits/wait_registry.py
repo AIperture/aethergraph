@@ -1,6 +1,7 @@
 import asyncio
 import threading
-from typing import Dict, Any, Tuple, Optional
+from typing import Any
+
 
 class WaitRegistry:
     """
@@ -12,12 +13,13 @@ class WaitRegistry:
     Use this only for cooperative (same-process) resumes.
     All other resumes should go via ResumeBus/Scheduler.
     """
+
     def __init__(self) -> None:
         # token -> (owning_loop, future)
-        self._futs: Dict[str, Tuple[asyncio.AbstractEventLoop, asyncio.Future]] = {}
+        self._futs: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Future]] = {}
         self._lock = threading.RLock()
         # If a resume arrives before register()
-        self._pending_payloads: Dict[str, Any] = {}
+        self._pending_payloads: dict[str, Any] = {}
 
     def register(self, token: str) -> asyncio.Future:
         """Create or reuse a Future on the current loop; deliver any early payload."""
@@ -38,7 +40,7 @@ class WaitRegistry:
                     loop.call_soon(fut.set_result, payload)
             return fut
 
-    def resolve(self, token: str, payload: Optional[dict] = None) -> bool:
+    def resolve(self, token: str, payload: dict | None = None) -> bool:
         """Resolve from any thread; returns True if delivered to a registered Future."""
         payload = payload or {}
         with self._lock:
@@ -53,7 +55,7 @@ class WaitRegistry:
             loop.call_soon_threadsafe(fut.set_result, payload)
         return True
 
-    def cancel(self, token: str, exc: Optional[BaseException] = None) -> bool:
+    def cancel(self, token: str, exc: BaseException | None = None) -> bool:
         """Cancel from any thread; returns True if a Future was present."""
         with self._lock:
             entry = self._futs.pop(token, None)
@@ -63,8 +65,7 @@ class WaitRegistry:
         loop, fut = entry
         if not fut.done():
             loop.call_soon_threadsafe(
-                fut.set_exception,
-                exc or asyncio.CancelledError(f"Wait cancelled: {token}")
+                fut.set_exception, exc or asyncio.CancelledError(f"Wait cancelled: {token}")
             )
         return True
 

@@ -1,10 +1,12 @@
-from contextlib import AbstractContextManager 
+from contextlib import AbstractContextManager
+
 
 class RunRegistrationGuard(AbstractContextManager):
     """Context manager to register and unregister a scheduler for a run. Primarily for resume handling.
     On enter, registers the scheduler with the container's scheduler registry.
     On exit, unregisters the scheduler.
     """
+
     def __init__(self, *, run_id: str, scheduler, container):
         self.run_id = run_id
         self.scheduler = scheduler

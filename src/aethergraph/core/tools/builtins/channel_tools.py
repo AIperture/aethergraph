@@ -1,14 +1,17 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
-from ..waitable import DualStageTool, waitable_tool 
-from ...execution.wait_types import WaitSpec, WaitRequested
+
+from typing import Any
+
 from aethergraph.services.channel.wait_helpers import create_and_notify_continuation
+
+from ...execution.wait_types import WaitSpec
+from ..waitable import DualStageTool, waitable_tool
 
 
 def normalize_approval_result(payload: dict) -> dict:
     """
     Normalize approval result from various adapters into a consistent format.
-    
+
     It assumes the payload may contain:
     - "approved": bool (explicit approval flag)
     - "choice": str (the user's choice)
@@ -28,7 +31,7 @@ def normalize_approval_result(payload: dict) -> dict:
     else:
         choice_norm = str(choice).strip().lower()
         first_norm = str(options[0]).strip().lower()
-        approved = (choice_norm == first_norm)
+        approved = choice_norm == first_norm
 
     return {"approved": approved, "choice": choice}
 
@@ -38,40 +41,51 @@ class AskText(DualStageTool):
     outputs = ["text"]
 
     async def setup(
-            self,
-            prompt: Optional[str] = None,
-            *,
-            silent: bool = False,
-            timeout_s: int = 3600,
-            channel: Optional[str] = None,
-            context,
-    ) -> WaitSpec | Dict[str, Any]:
+        self,
+        prompt: str | None = None,
+        *,
+        silent: bool = False,
+        timeout_s: int = 3600,
+        channel: str | None = None,
+        context,
+    ) -> WaitSpec | dict[str, Any]:
         token, inline = await create_and_notify_continuation(
             context=context,
             kind="user_input",
-            payload={"prompt": prompt, "_force_push": True, "_silent": silent} if prompt else {"_force_push": True, "_silent": silent},
+            payload={"prompt": prompt, "_force_push": True, "_silent": silent}
+            if prompt
+            else {"_force_push": True, "_silent": silent},
             timeout_s=timeout_s,
             channel=channel,
         )
-        return WaitSpec(channel=channel, token=token, kind="user_input", deadline=timeout_s, notified=True, inline_payload=inline)
-    
-    async def on_resume(self, resume: Dict[str, Any], *, context: Any) -> Dict[str, Any]:
-        text = resume.get("text", "")
-        return {"text": text} 
+        return WaitSpec(
+            channel=channel,
+            token=token,
+            kind="user_input",
+            deadline=timeout_s,
+            notified=True,
+            inline_payload=inline,
+        )
 
-ask_text_ds = waitable_tool(AskText) 
+    async def on_resume(self, resume: dict[str, Any], *, context: Any) -> dict[str, Any]:
+        text = resume.get("text", "")
+        return {"text": text}
+
+
+ask_text_ds = waitable_tool(AskText)
+
 
 # ----- WaitText Tool  -----
 class WaitText(DualStageTool):
     outputs = ["text"]
 
     async def setup(
-            self,
-            *,
-            timeout_s: int = 3600,
-            channel: Optional[str] = None,
-            context,
-    ) -> WaitSpec | Dict[str, Any]:
+        self,
+        *,
+        timeout_s: int = 3600,
+        channel: str | None = None,
+        context,
+    ) -> WaitSpec | dict[str, Any]:
         token, inline = await create_and_notify_continuation(
             context=context,
             kind="user_input",
@@ -79,27 +93,36 @@ class WaitText(DualStageTool):
             timeout_s=timeout_s,
             channel=channel,
         )
-        return WaitSpec(channel=channel, token=token, kind="user_input", deadline=timeout_s, notified=True, inline_payload=inline)
-    
-    async def on_resume(self, resume: Dict[str, Any], *, context: Any) -> Dict[str, Any]:
+        return WaitSpec(
+            channel=channel,
+            token=token,
+            kind="user_input",
+            deadline=timeout_s,
+            notified=True,
+            inline_payload=inline,
+        )
+
+    async def on_resume(self, resume: dict[str, Any], *, context: Any) -> dict[str, Any]:
         text = resume.get("text", "")
-        return {"text": text} 
-    
-wait_text_ds = waitable_tool(WaitText) 
+        return {"text": text}
+
+
+wait_text_ds = waitable_tool(WaitText)
+
 
 # ----- AskApprovalTool -----
 class AskApproval(DualStageTool):
     outputs = ["approved", "choice"]
 
     async def setup(
-            self,
-            prompt: str, 
-            options: List[str] | tuple[str, ...] = ("Approve", "Reject"),
-            *,
-            timeout_s: int = 3600,
-            channel: Optional[str] = None,
-            context: Any,
-    ) -> WaitSpec | Dict[str, Any]:
+        self,
+        prompt: str,
+        options: list[str] | tuple[str, ...] = ("Approve", "Reject"),
+        *,
+        timeout_s: int = 3600,
+        channel: str | None = None,
+        context: Any,
+    ) -> WaitSpec | dict[str, Any]:
         token, inline = await create_and_notify_continuation(
             context=context,
             kind="approval",
@@ -107,13 +130,20 @@ class AskApproval(DualStageTool):
             timeout_s=timeout_s,
             channel=channel,
         )
-        return WaitSpec(channel=channel, token=token, kind="approval", deadline=timeout_s, notified=True, inline_payload=inline)
+        return WaitSpec(
+            channel=channel,
+            token=token,
+            kind="approval",
+            deadline=timeout_s,
+            notified=True,
+            inline_payload=inline,
+        )
 
-    
-    async def on_resume(self, resume: Dict[str, Any], *, context: Any) -> Dict[str, Any]:
+    async def on_resume(self, resume: dict[str, Any], *, context: Any) -> dict[str, Any]:
         return normalize_approval_result(resume)
-    
-ask_approval_ds = waitable_tool(AskApproval) 
+
+
+ask_approval_ds = waitable_tool(AskApproval)
 
 
 # ----- AskFiles Tool -----
@@ -124,22 +154,34 @@ class AskFiles(DualStageTool):
         self,
         *,
         prompt: str,
-        accept: Optional[List[str]] = None,
+        accept: list[str] | None = None,
         multiple: bool = True,
         timeout_s: int = 3600,
-        channel: Optional[str] = None,
-        context: Any
-    ) -> WaitSpec | Dict[str, Any]:
+        channel: str | None = None,
+        context: Any,
+    ) -> WaitSpec | dict[str, Any]:
         token, inline = await create_and_notify_continuation(
             context=context,
             kind="user_files",
-            payload={"prompt": prompt, "accept": accept or [], "multiple": bool(multiple), "_force_push": True},
+            payload={
+                "prompt": prompt,
+                "accept": accept or [],
+                "multiple": bool(multiple),
+                "_force_push": True,
+            },
             timeout_s=timeout_s,
             channel=channel,
         )
-        return WaitSpec(channel=channel, token=token, kind="user_files", deadline=timeout_s, notified=True, inline_payload=inline)
+        return WaitSpec(
+            channel=channel,
+            token=token,
+            kind="user_files",
+            deadline=timeout_s,
+            notified=True,
+            inline_payload=inline,
+        )
 
-    async def on_resume(self, resume: Dict[str, Any], *, context: Any) -> Dict[str, Any]:
+    async def on_resume(self, resume: dict[str, Any], *, context: Any) -> dict[str, Any]:
         files = resume.get("files", [])
         if not isinstance(files, list):
             files = []
@@ -147,5 +189,6 @@ class AskFiles(DualStageTool):
             "text": str(resume.get("text", "")),
             "files": files,
         }
+
 
 ask_files_ds = waitable_tool(AskFiles)

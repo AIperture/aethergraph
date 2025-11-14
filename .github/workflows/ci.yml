@@ -37,8 +37,15 @@ jobs:
           # Dev tools (adjust if you use Poetry/uv/tox)
           pip install pytest pytest-cov mypy ruff
 
-      - name: Ruff (lint)
-        run: ruff check src
+      - name: Ruff auto-fix (one-time)
+        if: ${{ github.ref == 'refs/heads/your-fix-branch' }}
+        run: |
+          ruff check . --fix
+          ruff format .
+          git config user.name "ci-bot"
+          git config user.email "ci@example.com"
+          git commit -am "chore: ruff auto-fix" || true
+          git push
 
       - name: Mypy (type check)
         run: mypy src

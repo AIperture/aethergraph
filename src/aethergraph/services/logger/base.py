@@ -1,15 +1,17 @@
 from __future__ import annotations
+
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol, Optional, Mapping, Any
 import logging
+from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
 class LogContext:
-    run_id: Optional[str] = None
-    node_id: Optional[str] = None
-    graph_id: Optional[str] = None
-    agent_id: Optional[str] = None
+    run_id: str | None = None
+    node_id: str | None = None
+    graph_id: str | None = None
+    agent_id: str | None = None
 
     def as_extra(self) -> Mapping[str, Any]:
         # Only include non-None fields; logging.Formatter will lookup keys by name.
@@ -28,5 +30,7 @@ class LoggerService(Protocol):
     def for_run(self) -> logging.Logger: ...
     def for_inspect(self) -> logging.Logger: ...
     def for_scheduler(self) -> logging.Logger: ...
-    def for_node_ctx(self, *, run_id: str, node_id: str, graph_id: Optional[str] = None) -> logging.Logger: ...
-    def for_run_ctx(self, *, run_id: str, graph_id: Optional[str] = None) -> logging.Logger: ...
+    def for_node_ctx(
+        self, *, run_id: str, node_id: str, graph_id: str | None = None
+    ) -> logging.Logger: ...
+    def for_run_ctx(self, *, run_id: str, graph_id: str | None = None) -> logging.Logger: ...

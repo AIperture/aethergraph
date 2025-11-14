@@ -1,9 +1,12 @@
 # aethergraph/core/persist/resume_policy.py
 from __future__ import annotations
-from typing import Any, Dict, Iterable, Tuple
+
+from typing import Any
+
 from aethergraph.contracts.errors.errors import ResumeIncompatibleSnapshot
 
 _JSON_PRIMITIVES = (str, int, float, bool, type(None))
+
 
 def _is_json_like(x: Any) -> bool:
     if isinstance(x, _JSON_PRIMITIVES):
@@ -20,7 +23,8 @@ def _is_json_like(x: Any) -> bool:
 
 def _walk_non_json(obj, path="$"):
     from collections.abc import Mapping, Sequence
-    if isinstance(obj, (str, int, float, bool)) or obj is None:
+
+    if isinstance(obj, str | int | float | bool) or obj is None:
         return
     if isinstance(obj, Mapping):
         if "__aether_ref__" in obj:
@@ -29,7 +33,7 @@ def _walk_non_json(obj, path="$"):
         for k, v in obj.items():
             yield from _walk_non_json(v, f"{path}.{k}")
         return
-    if isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray)):
+    if isinstance(obj, Sequence) and not isinstance(obj, str | bytes | bytearray):
         for i, v in enumerate(obj):
             yield from _walk_non_json(v, f"{path}[{i}]")
         return
@@ -40,7 +44,7 @@ def assert_snapshot_json_only(
     run_id: str,
     snap_json: dict,
     *,
-    mode: str = "reuse_only",           # "strict" | "reuse_only"
+    mode: str = "reuse_only",  # "strict" | "reuse_only"
     ignore_nodes: set[str] | None = None,  # node_ids to skip (e.g., graph output producers)
 ) -> None:
     """
@@ -72,12 +76,13 @@ def assert_snapshot_json_only(
         if bad_paths:
             reasons.append(
                 f"node '{nid}' outputs contain non-JSON or refs at: "
-                + ", ".join(bad_paths[:8]) + (" ..." if len(bad_paths) > 8 else "")
+                + ", ".join(bad_paths[:8])
+                + (" ..." if len(bad_paths) > 8 else "")
             )
 
     if reasons:
         raise ResumeIncompatibleSnapshot(run_id, reasons)
-    
+
 
 def output_node_ids_from_graph(graph) -> set[str]:
     """
@@ -104,7 +109,7 @@ def output_node_ids_from_graph(graph) -> set[str]:
         if isinstance(ref, dict):
             for v in ref.values():
                 _collect(v)
-        elif isinstance(ref, (list, tuple)):
+        elif isinstance(ref, list | tuple):
             for v in ref:
                 _collect(v)
 
@@ -112,4 +117,3 @@ def output_node_ids_from_graph(graph) -> set[str]:
         _collect(v)
 
     return out_nodes
-

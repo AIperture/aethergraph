@@ -1,34 +1,34 @@
-import asyncio
+from datetime import datetime, timedelta
 import functools
 import inspect
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
-
-from ..runtime.execution_context import ExecutionContext
-
-from .wait_types import WaitRequested 
-
-from .step_result import StepResult
-from .retry_policy import RetryPolicy
-
-from ..graph.graph_refs import RESERVED_INJECTABLES # {"context", "resume", "self"}
-from ..graph.task_node import NodeStatus
-from ..graph.task_node import TaskNodeRuntime
+from typing import Any
 
 from aethergraph.services.continuations.continuation import Continuation
 
+from ..graph.graph_refs import RESERVED_INJECTABLES  # {"context", "resume", "self"}
+from ..graph.task_node import NodeStatus, TaskNodeRuntime
+from ..runtime.execution_context import ExecutionContext
 from ..runtime.node_context import NodeContext
+from .retry_policy import RetryPolicy
+from .step_result import StepResult
+from .wait_types import WaitRequested
+
 
 async def maybe_await(func, *args, **kwargs):
     if inspect.iscoroutinefunction(func):
         return await func(*args, **kwargs)
     return func(*args, **kwargs)
 
+
 def _normalize_result(res):
-    if res is None: return {}
-    if isinstance(res, dict): return res
-    if isinstance(res, tuple): return {f"out{i}": v for i, v in enumerate(res)}
+    if res is None:
+        return {}
+    if isinstance(res, dict):
+        return res
+    if isinstance(res, tuple):
+        return {f"out{i}": v for i, v in enumerate(res)}
     return {"result": res}
+
 
 def _waiting_status(kind: str) -> str:
     return NodeStatus.from_kind(kind) if kind else NodeStatus.WAITING_EXTERNAL  # maps to WAITING_*
@@ -51,11 +51,12 @@ def unwrap_callable(fn):
         This function is useful for extracting the core logic function from various
         wrappers that may have been applied to it.
     Args:
-        fn: The callable to unwrap.    
+        fn: The callable to unwrap.
     """
     seen = set()
     while True:
-        if id(fn) in seen: return fn
+        if id(fn) in seen:
+            return fn
         seen.add(id(fn))
         if hasattr(fn, "__aether_impl__"):
             fn = fn.__aether_impl__
@@ -69,7 +70,7 @@ def unwrap_callable(fn):
         return fn
 
 
-def _flatten_inputs(resolved_inputs: Dict[str, Any]) -> Dict[str, Any]:
+def _flatten_inputs(resolved_inputs: dict[str, Any]) -> dict[str, Any]:
     """Copy, then expand nested 'kwargs' dict into top-level keys."""
     out = dict(resolved_inputs) if resolved_inputs else {}
     nested = out.pop("kwargs", None)
@@ -81,11 +82,13 @@ def _flatten_inputs(resolved_inputs: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_call_kwargs(
-        logic_fn, 
-        resolved_inputs: Dict[str, Any], *, 
-        node_ctx: NodeContext, 
-        runtime_ctx: "ExecutionContext"=None) -> Dict[str, Any]:
-    """ Build kwargs to call a logic function:
+    logic_fn,
+    resolved_inputs: dict[str, Any],
+    *,
+    node_ctx: NodeContext,
+    runtime_ctx: "ExecutionContext" = None,
+) -> dict[str, Any]:
+    """Build kwargs to call a logic function:
     - flatten resolved_inputs (expand nested kwargs)
     - inject framework args by name (node/context/logger/resume)
     - validate required args
@@ -98,6 +101,7 @@ def build_call_kwargs(
     Raises TypeError if required args are missing.
     """
     import inspect
+
     if runtime_ctx is None or node_ctx is None:
         raise RuntimeError("build_call_kwargs: node_ctx and runtime_ctx are required")
 
@@ -112,13 +116,14 @@ def build_call_kwargs(
 
     # Framework injectables (authoritative)
     inject_pool = {
-        "context": node_ctx,                                  # always NodeContext
+        "context": node_ctx,  # always NodeContext
         "resume": getattr(runtime_ctx, "resume_payload", None),
     }
 
     merged = dict(flat)
     for k in RESERVED_INJECTABLES:
-        if k == "self": continue
+        if k == "self":
+            continue
         if k in params or has_var_kw:
             merged[k] = inject_pool.get(k)
 
@@ -128,7 +133,8 @@ def build_call_kwargs(
     merged.pop("kwargs", None)
 
     required = [
-        name for name, p in params.items()
+        name
+        for name, p in params.items()
         if name != "self"
         and p.default is inspect._empty
         and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
@@ -136,15 +142,15 @@ def build_call_kwargs(
     missing = [k for k in required if k not in merged]
     if missing:
         raise TypeError(
-            f"{getattr(logic_fn,'__name__', type(logic_fn).__name__)} missing required arguments: {missing}. "
+            f"{getattr(logic_fn, '__name__', type(logic_fn).__name__)} missing required arguments: {missing}. "
             f"Provided keys: {sorted(merged.keys())}"
         )
     return merged
 
 
-
-
-async def step_forward(*, node: "TaskNodeRuntime", ctx: "ExecutionContext", retry_policy: "RetryPolicy") -> StepResult:
+async def step_forward(
+    *, node: "TaskNodeRuntime", ctx: "ExecutionContext", retry_policy: "RetryPolicy"
+) -> StepResult:
     """
     Execute one node forward:
       - resolve & inject kwargs (node/context/memory/logger/resume)
@@ -157,7 +163,9 @@ async def step_forward(*, node: "TaskNodeRuntime", ctx: "ExecutionContext", retr
     """
     lg = None
     if getattr(ctx, "logger_factory", None) and hasattr(ctx.logger_factory, "for_node_ctx"):
-        lg = ctx.logger_factory.for_node_ctx(run_id=ctx.run_id, node_id=node.node_id, graph_id=getattr(ctx, "graph_id", None))
+        lg = ctx.logger_factory.for_node_ctx(
+            run_id=ctx.run_id, node_id=node.node_id, graph_id=getattr(ctx, "graph_id", None)
+        )
     attempts = getattr(node, "attempts", 0)
 
     logic_fn = unwrap_callable(ctx.get_logic(node.logic))
@@ -166,19 +174,26 @@ async def step_forward(*, node: "TaskNodeRuntime", ctx: "ExecutionContext", retr
     try:
         resolved_inputs = await ctx.resolve_inputs(node)
     except Exception as e:
-        if lg: lg.exception("input resolution error")
+        if lg:
+            lg.exception("input resolution error")
         return StepResult(status=NodeStatus.FAILED, error=e)
 
     # should_run gate (unchanged) ...
     should = True
     if hasattr(ctx, "should_run") and callable(ctx.should_run):
         try:
-            should = await ctx.should_run(node, resolved_inputs) if inspect.iscoroutinefunction(ctx.should_run) \
-                     else ctx.should_run(node, resolved_inputs)
+            should = (
+                await ctx.should_run(node, resolved_inputs)
+                if inspect.iscoroutinefunction(ctx.should_run)
+                else ctx.should_run(node, resolved_inputs)
+            )
         except Exception as e:
-            if lg: lg.warning(f"should_run raised {e!r}; defaulting to run=True")
+            if lg:
+                lg.warning(f"should_run raised {e!r}; defaulting to run=True")
     if not should:
-        return StepResult(status=getattr(NodeStatus, "SKIPPED", "SKIPPED"), outputs={"skipped": True})
+        return StepResult(
+            status=getattr(NodeStatus, "SKIPPED", "SKIPPED"), outputs={"skipped": True}
+        )
 
     # create NodeContext once
     node_ctx = ctx.create_node_context(node)
@@ -187,34 +202,44 @@ async def step_forward(*, node: "TaskNodeRuntime", ctx: "ExecutionContext", retr
     kwargs = build_call_kwargs(
         logic_fn,
         resolved_inputs=resolved_inputs,
-        node_ctx=node_ctx,         # <-- pass node_ctx explicitly for convenience
-        runtime_ctx=ctx,           # <-- pass runtime explicitly to resolve resume payload
+        node_ctx=node_ctx,  # <-- pass node_ctx explicitly for convenience
+        runtime_ctx=ctx,  # <-- pass runtime explicitly to resolve resume payload
     )
     try:
-        result = await logic_fn(**kwargs) if inspect.iscoroutinefunction(logic_fn) or (
-            hasattr(logic_fn, "__call__") and inspect.iscoroutinefunction(logic_fn.__call__)
-        ) else logic_fn(**kwargs)
+        result = (
+            await logic_fn(**kwargs)
+            if inspect.iscoroutinefunction(logic_fn)
+            or (callable(logic_fn) and inspect.iscoroutinefunction(logic_fn.__call__))
+            else logic_fn(**kwargs)
+        )
 
         outputs = _normalize_result(result)
-        if lg: lg.info("done")
+        if lg:
+            lg.info("done")
         return StepResult(status=NodeStatus.DONE, outputs=outputs)
 
     except WaitRequested as w:
         # persist a Continuation and return StepResult with WAITING_*
-        if lg: lg.info("wait requested: %s", getattr(w, "kind", None))
-        return await _enter_wait(node=node, ctx=ctx, node_ctx=node_ctx, lg=lg, spec=w.to_dict(), attempts=attempts)
+        if lg:
+            lg.info("wait requested: %s", getattr(w, "kind", None))
+        return await _enter_wait(
+            node=node, ctx=ctx, node_ctx=node_ctx, lg=lg, spec=w.to_dict(), attempts=attempts
+        )
 
     except Exception as e:
-        if lg: lg.exception("tool error")
+        if lg:
+            lg.exception("tool error")
         if attempts < retry_policy.max_attempts and retry_policy.should_retry(e):
             backoff = retry_policy.backoff(attempts)
-            if lg: lg.warning(f"retry scheduled in {backoff}")
-            setattr(node, "attempts", attempts + 1)
+            if lg:
+                lg.warning(f"retry scheduled in {backoff}")
+            node.attempts = attempts + 1
         # import traceback; traceback.print_exc()
         return StepResult(status=NodeStatus.FAILED, error=e)
-    
+
+
 # ---- wait path ---------------------------------------------------------------
-def _parse_deadline(deadline: Any, now_fn) -> Optional[datetime]:
+def _parse_deadline(deadline: Any, now_fn) -> datetime | None:
     if not deadline:
         return None
     if isinstance(deadline, datetime):
@@ -229,10 +254,11 @@ def _parse_deadline(deadline: Any, now_fn) -> Optional[datetime]:
         except Exception:
             return None
 
-def normalize_wait_spec(spec: Dict[str, Any], *, node_ctx: "NodeContext") -> Dict[str, Any]:
-    """ Normalize wait spec from WaitRequested to a canonical dict that used in channel/continuation:
+
+def normalize_wait_spec(spec: dict[str, Any], *, node_ctx: "NodeContext") -> dict[str, Any]:
+    """Normalize wait spec from WaitRequested to a canonical dict that used in channel/continuation:
     In WaitSpec, we allow:
-        - kind: str e.g.  "approval" | "user_input" | "human" | "robot" | "external" | "time" | "event" | ... 
+        - kind: str e.g.  "approval" | "user_input" | "human" | "robot" | "external" | "time" | "event" | ...
         - prompt: str | dict
         - resume_schema: dict
         - channel: str | None (it may be None)
@@ -247,11 +273,12 @@ def normalize_wait_spec(spec: Dict[str, Any], *, node_ctx: "NodeContext") -> Dic
         - channel: str (default from node_ctx or "console:stdin")
         - deadline: datetime | None
         - poll: dict | None
-    
+
     NOTE: in channel, we only allow kind to be "approval" or "user_input" for external interaction. Other kinds will
     simply push a notification without expecting a user response.
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timezone
+
     out = dict(spec or {})
     out["kind"] = out.get("kind") or "external"
     out["prompt"] = out.get("prompt")
@@ -268,7 +295,10 @@ def normalize_wait_spec(spec: Dict[str, Any], *, node_ctx: "NodeContext") -> Dic
     # Deadline
     now_fn = getattr(node_ctx, "_now", None)
     if now_fn is None:
-        now_fn = (lambda: datetime.now(timezone.utc))
+
+        def now_fn():
+            return datetime.now(timezone.utc)
+
     out["deadline"] = _parse_deadline(out.get("deadline"), now_fn)
 
     # Poll
@@ -282,27 +312,28 @@ def normalize_wait_spec(spec: Dict[str, Any], *, node_ctx: "NodeContext") -> Dic
     return out
 
 
-async def _enter_wait(*, node, ctx, node_ctx, lg, spec: Dict[str, Any], attempts: int) -> StepResult:
+async def _enter_wait(
+    *, node, ctx, node_ctx, lg, spec: dict[str, Any], attempts: int
+) -> StepResult:
     spec = normalize_wait_spec(spec, node_ctx=node_ctx)
 
     # 1) Reuse token if present
     token = spec.get("token")
     store = ctx.services.continuation_store
 
-
     # Add wait spec in node state for reference -> This has not been used anywhere yet, We need save it with TaskGraph when state changes to WAITING_*
     node.state.wait_spec = {
-        "kind": spec["kind"],                 # "text" | "approval" | "files" | ...
+        "kind": spec["kind"],  # "text" | "approval" | "files" | ...
         "channel": spec.get("channel"),
         "prompt": spec.get("prompt"),
         "options": spec.get("options"),
         "meta": spec.get("meta", {}),
     }
-    
+
     cont = None
     if token:
         try:
-            cont = await store.get_by_token(token)  
+            cont = await store.get_by_token(token)
         except Exception:
             cont = None
 
@@ -336,6 +367,7 @@ async def _enter_wait(*, node, ctx, node_ctx, lg, spec: Dict[str, Any], attempts
     # schedule next wakeup
     if cont.poll and "interval_sec" in cont.poll:
         from datetime import timedelta
+
         cont.next_wakeup_at = ctx.now() + timedelta(seconds=int(cont.poll["interval_sec"]))
     elif cont.deadline:
         cont.next_wakeup_at = cont.deadline
@@ -350,7 +382,8 @@ async def _enter_wait(*, node, ctx, node_ctx, lg, spec: Dict[str, Any], attempts
     if inline is not None:
         try:
             await ctx.resume_router.resume(cont.run_id, cont.node_id, cont.token, inline)
-            if lg: lg.debug("inline resume dispatched for token=%s", cont.token)
+            if lg:
+                lg.debug("inline resume dispatched for token=%s", cont.token)
             # No need to notify again
             return StepResult(
                 status=_waiting_status(cont.kind),
@@ -358,16 +391,19 @@ async def _enter_wait(*, node, ctx, node_ctx, lg, spec: Dict[str, Any], attempts
                 next_wakeup_at=cont.next_wakeup_at,
             )
         except Exception as e:
-            if lg: lg.warning(f"inline resume failed: {e!r}; will proceed without it")
+            if lg:
+                lg.warning(f"inline resume failed: {e!r}; will proceed without it")
 
     # 3) Notify only if the tool hasn't already done it
     if not spec.get("notified", False):
         try:
             await ctx.channels.notify(cont)
-            if lg: lg.debug("notified channel=%s", cont.channel)
+            if lg:
+                lg.debug("notified channel=%s", cont.channel)
         except Exception as e:
-            if lg: lg.error(f"notify failed: {e}")
-    
+            if lg:
+                lg.error(f"notify failed: {e}")
+
     return StepResult(
         status=_waiting_status(cont.kind),
         continuation=cont,

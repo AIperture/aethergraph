@@ -1,4 +1,5 @@
-from .registry_key import Key, _REG_PREFIX, NS 
+from .registry_key import _REG_PREFIX, NS, Key
+
 
 def parse_ref(ref: str) -> Key:
     """

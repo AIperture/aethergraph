@@ -1,28 +1,35 @@
 from __future__ import annotations
-from typing import Any, Dict, Optional
-import io
+
 import hashlib
+import io
 import json
+from typing import Any
+
 
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-def _maybe_numpy_to_bytes(obj: Any) -> Optional[bytes]:
+
+def _maybe_numpy_to_bytes(obj: Any) -> bytes | None:
     try:
         import numpy as np
+
         if isinstance(obj, np.ndarray):
             buf = io.BytesIO()
             # .npy
             import numpy as _np
+
             _np.save(buf, obj, allow_pickle=False)
             return buf.getvalue()
     except Exception:
         pass
     return None
 
-def _maybe_torch_to_bytes(obj: Any) -> Optional[bytes]:
+
+def _maybe_torch_to_bytes(obj: Any) -> bytes | None:
     try:
         import torch
+
         if torch.is_tensor(obj):
             buf = io.BytesIO()
             torch.save(obj, buf)  # binary, portable within torch
@@ -31,7 +38,8 @@ def _maybe_torch_to_bytes(obj: Any) -> Optional[bytes]:
         pass
     return None
 
-def _maybe_json_bytes(obj: Any) -> Optional[bytes]:
+
+def _maybe_json_bytes(obj: Any) -> bytes | None:
     # Only if JSON-serializable (pure)
     try:
         payload = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -39,12 +47,15 @@ def _maybe_json_bytes(obj: Any) -> Optional[bytes]:
     except Exception:
         return None
 
-def _pickle_fallback(obj: Any) -> Optional[bytes]:
+
+def _pickle_fallback(obj: Any) -> bytes | None:
     try:
         import pickle
+
         return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
     except Exception:
         return None
+
 
 async def externalize_to_artifact(
     obj: Any,
@@ -55,7 +66,7 @@ async def externalize_to_artifact(
     tool_name: str | None,
     tool_version: str | None,
     artifacts,  # AsyncArtifactStore
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Try to persist obj into artifact store; return a standard __aether_ref__ dict.
     Priority: bytes | numpy | torch | json | pickle
@@ -65,7 +76,7 @@ async def externalize_to_artifact(
     planned_ext = ".bin"
 
     # Already bytes?
-    if isinstance(obj, (bytes, bytearray)):
+    if isinstance(obj, bytes | bytearray):
         binary = bytes(obj)
 
     if binary is None:
@@ -97,16 +108,22 @@ async def externalize_to_artifact(
     if binary is None:
         # Give up: write a tiny JSON marker
         a = await artifacts.save_json(
-            {"note": "unexternalizable-object", "repr": repr(obj)[:200]},
-            suggested_uri=None
+            {"note": "unexternalizable-object", "repr": repr(obj)[:200]}, suggested_uri=None
         )
-        return {"__aether_ref__": a.uri, "mime": "application/json", "sha256": a.sha256, "kind": a.kind}
+        return {
+            "__aether_ref__": a.uri,
+            "mime": "application/json",
+            "sha256": a.sha256,
+            "kind": a.kind,
+        }
 
     sha = _sha256_bytes(binary)
     # Use staged writer for atomicity FIXME: this write causes async loop errors, disable externalize for now
     async with await artifacts.open_writer(
         kind="blob",
-        run_id=run_id, graph_id=graph_id, node_id=node_id,
+        run_id=run_id,
+        graph_id=graph_id,
+        node_id=node_id,
         tool_name=tool_name or "externalize",
         tool_version=tool_version or "0.1.0",
         planned_ext=planned_ext,

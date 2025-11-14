@@ -1,12 +1,15 @@
 # aethergraph/config_loader.py
+from collections.abc import Iterable
+import logging
 import os
 from pathlib import Path
-from typing import Iterable, List
-from .config import AppSettings
-import logging
 
-def _existing(paths: Iterable[Path]) -> List[Path]:
+from .config import AppSettings
+
+
+def _existing(paths: Iterable[Path]) -> list[Path]:
     return [p for p in paths if p and p.exists()]
+
 
 def load_settings() -> AppSettings:
     log = logging.getLogger("aethergraph.config.loader")
@@ -31,16 +34,20 @@ def load_settings() -> AppSettings:
         repo_root = Path(__file__).resolve().parents[3]
     except Exception:
         repo_root = None
-    repo_env = (repo_root / ".env").resolve() if (repo_root and (repo_root / ".env").exists()) else None
+    repo_env = (
+        (repo_root / ".env").resolve() if (repo_root and (repo_root / ".env").exists()) else None
+    )
 
-    candidates = _existing([
-        explicit_path or Path(),             # explicit if set
-        cwd / ".env",
-        cwd / ".env.local",
-        workspace / ".env",
-        user_cfg_env,
-        repo_env if repo_env else Path(),    # dev fallback only if exists
-    ])
+    candidates = _existing(
+        [
+            explicit_path or Path(),  # explicit if set
+            cwd / ".env",
+            cwd / ".env.local",
+            workspace / ".env",
+            user_cfg_env,
+            repo_env if repo_env else Path(),  # dev fallback only if exists
+        ]
+    )
 
     if explicit and not explicit_path.exists():
         raise FileNotFoundError(f"AETHERGRAPH_ENV_FILE not found: {explicit_path}")

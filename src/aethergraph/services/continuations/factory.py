@@ -1,13 +1,16 @@
-import os 
-from aethergraph.contracts.services.continuations import AsyncContinuationStore
+import os
+
+from stores.fs_store import FSContinuationStore
 from stores.inmem_store import InMemoryContinuationStore
-from stores.fs_store import FSContinuationStore 
+
+from aethergraph.contracts.services.continuations import AsyncContinuationStore
+
 
 def make_continuation_store() -> AsyncContinuationStore:
-    """ Factory to create a continuation store based on environment configuration. 
+    """Factory to create a continuation store based on environment configuration.
      Returns:
         An instance of AsyncContinuationStore.
-    
+
     Currently supports:
     - InMemoryContinuationStore (CONT_STORE="inmem")
     - FSContinuationStore (CONT_STORE="fs")
@@ -24,6 +27,8 @@ def make_continuation_store() -> AsyncContinuationStore:
     if kind == "inmem":
         return InMemoryContinuationStore(secret=secret_bytes)
     elif kind == "fs":
-        return FSContinuationStore(root=os.getenv("CONT_ROOT", "./artifacts/continuations"), secret=secret_bytes)
+        return FSContinuationStore(
+            root=os.getenv("CONT_ROOT", "./artifacts/continuations"), secret=secret_bytes
+        )
     else:
         raise ValueError(f"Unknown continuation store kind: {kind}")

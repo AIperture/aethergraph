@@ -1,15 +1,15 @@
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Literal, Optional 
-from .node_spec import TaskNodeSpec
+from typing import Any, Literal
 
 NodeWaitingKind = Literal["human", "robot", "external", "time", "event"]
+
 
 class NodeStatus:
     PENDING = "PENDING"
     RUNNING = "RUNNING"
     DONE = "DONE"
     FAILED = "FAILED"
-    SKIPPED = "SKIPPED" 
+    SKIPPED = "SKIPPED"
     FAILED_TIMEOUT = "FAILED_TIMEOUT"
     WAITING_HUMAN = "WAITING_HUMAN"
     WAITING_ROBOT = "WAITING_ROBOT"
@@ -19,11 +19,11 @@ class NodeStatus:
 
     @classmethod
     def from_kind(cls, kind: NodeWaitingKind) -> str:
-        """ Map waiting kind to status. """
+        """Map waiting kind to status."""
         return {
             "human": cls.WAITING_HUMAN,
             "approval": cls.WAITING_HUMAN,
-            "user_approval": cls.WAITING_HUMAN, # alias to keep backward compatibility
+            "user_approval": cls.WAITING_HUMAN,  # alias to keep backward compatibility
             "user_input": cls.WAITING_HUMAN,
             "user_files": cls.WAITING_HUMAN,
             "robot": cls.WAITING_ROBOT,
@@ -31,30 +31,33 @@ class NodeStatus:
             "time": cls.WAITING_TIME,
             "event": cls.WAITING_EVENT,
         }[kind]
-    
+
     @classmethod
     def is_waiting(cls, status: str) -> bool:
         return status.startswith("WAITING_")
 
+
 TERMINAL_STATES = {NodeStatus.DONE, NodeStatus.FAILED, NodeStatus.SKIPPED}
-WAITING_STATES  = {
-    NodeStatus.WAITING_HUMAN, NodeStatus.WAITING_ROBOT,
-    NodeStatus.WAITING_EXTERNAL, NodeStatus.WAITING_TIME, NodeStatus.WAITING_EVENT
+WAITING_STATES = {
+    NodeStatus.WAITING_HUMAN,
+    NodeStatus.WAITING_ROBOT,
+    NodeStatus.WAITING_EXTERNAL,
+    NodeStatus.WAITING_TIME,
+    NodeStatus.WAITING_EVENT,
 }
 
-@dataclass 
+
+@dataclass
 class TaskNodeState:
     status: NodeStatus = NodeStatus.PENDING
-    outputs: Dict[str, any] = field(default_factory=dict)
-    error: Optional[str] = None
+    outputs: dict[str, any] = field(default_factory=dict)
+    error: str | None = None
     attempts: int = 0
-    next_wakeup_at: Optional[str] = None  # ISO timestamp
-    wait_token: Optional[str] = None  # for external wait/resume with Continuation
-    wait_spec: Optional[Dict[str, Any]] = None  # spec for waiting (kind, channel, meta, etc.)
+    next_wakeup_at: str | None = None  # ISO timestamp
+    wait_token: str | None = None  # for external wait/resume with Continuation
+    wait_spec: dict[str, Any] | None = None  # spec for waiting (kind, channel, meta, etc.)
 
     @property
     def output(self):
         # convenience for single-output nodes
         return self.outputs.get("result")
-    
-

@@ -1,6 +1,8 @@
 # aethergraph/net/http.py
 from contextlib import asynccontextmanager
+
 import httpx
+
 
 @asynccontextmanager
 async def get_async_client(timeout_s: float = 10.0, headers: dict | None = None):

@@ -115,6 +115,11 @@ lint.select = ["E","F","I","B","UP","SIM"]
 lint.ignore = ["E203", "E266", "E501"]  # E501 handled by formatter
 extend-exclude = ["docs", "scripts", "examples"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["aethergraph"]
+combine-as-imports = true
+force-sort-within-sections = true
+
 [tool.black]
 line-length = 100
 target-version = ["py310"]

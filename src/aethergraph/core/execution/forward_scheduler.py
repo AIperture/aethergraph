@@ -1,25 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any, Awaitable, Dict, List, Optional, Set, TYPE_CHECKING, Callable
+import inspect
+from typing import TYPE_CHECKING, Any
 
 from aethergraph.contracts.services.resume import ResumeEvent
 from aethergraph.contracts.services.wakeup import WakeupEvent
+
+from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID
 from ..graph.node_spec import NodeEvent
 from ..graph.node_state import TERMINAL_STATES, WAITING_STATES, NodeStatus
-from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID
 from ..graph.task_node import TaskNodeRuntime
-
+from .base_scheduler import BaseScheduler
 from .retry_policy import RetryPolicy
 from .step_forward import step_forward
-from .base_scheduler import BaseScheduler
 
 if TYPE_CHECKING:
-    from ..runtime.runtime_env import RuntimeEnv
     from ..graph.task_graph import TaskGraph
+    from ..runtime.runtime_env import RuntimeEnv
 
 
 def _is_plan(node) -> bool:
@@ -148,51 +148,57 @@ class ForwardScheduler(BaseScheduler):
     • Continuations are persisted before WAITING_* is reported.
     """
 
-    def __init__(self, 
-                 graph: TaskGraph, 
-                 env: "RuntimeEnv", 
-                 retry_policy: RetryPolicy=RetryPolicy(),
-                 *, 
-                 max_concurrency: int = 4,
-                 stop_on_first_error: bool = False,
-                 skip_dep_on_failure: bool = True,
-                 logger: Optional[Any] = None):
-        """ ForwardScheduler executes nodes in a forward manner, scheduling ready nodes as soon as their dependencies are met.
-         It supports waiting nodes (WAITING_HUMAN, WAITING_EXTERNAL, etc.) and can resume them upon external events.
-         
-         Args:
-          - graph: TaskGraph to execute.
-          - env: RuntimeEnv providing runtime services and context.
-          - retry_policy: RetryPolicy defining retry behavior for failed nodes.
-          - max_concurrency: Maximum number of concurrent running tasks.
-          - stop_on_first_error: If True, stops the entire graph execution on the first node failure.
-          - skip_dep_on_failure: If True, skips downstream dependents of a failed node, but continues executing other independent nodes.
-          """
-        
+    def __init__(
+        self,
+        graph: TaskGraph,
+        env: RuntimeEnv,
+        retry_policy: RetryPolicy | None = None,
+        *,
+        max_concurrency: int = 4,
+        stop_on_first_error: bool = False,
+        skip_dep_on_failure: bool = True,
+        logger: Any | None = None,
+    ):
+        """ForwardScheduler executes nodes in a forward manner, scheduling ready nodes as soon as their dependencies are met.
+        It supports waiting nodes (WAITING_HUMAN, WAITING_EXTERNAL, etc.) and can resume them upon external events.
+
+        Args:
+         - graph: TaskGraph to execute.
+         - env: RuntimeEnv providing runtime services and context.
+         - retry_policy: RetryPolicy defining retry behavior for failed nodes.
+         - max_concurrency: Maximum number of concurrent running tasks.
+         - stop_on_first_error: If True, stops the entire graph execution on the first node failure.
+         - skip_dep_on_failure: If True, skips downstream dependents of a failed node, but continues executing other independent nodes.
+        """
+
         super().__init__(graph, mode="forward")
         self.env = env
-        self.retry_policy = retry_policy
+        self.retry_policy = retry_policy or RetryPolicy()
         self.max_concurrency = max_concurrency
         self.stop_on_first_error = stop_on_first_error
         self.skip_dep_on_failure = skip_dep_on_failure
 
         # bookkeeping
-        self._resume_payloads: Dict[str, Dict] = {}  # node_id -> resume payload
-        self._backoff_tasks: Dict[str, asyncio.Task] = {}  # node_id -> backoff task
-        self._resume_pending: Set[str] = set()  # node_ids with resume pending but not yet started
-        self._ready_pending: Set[str] = set()  # node_ids that became ready but not yet started 
+        self._resume_payloads: dict[str, dict] = {}  # node_id -> resume payload
+        self._backoff_tasks: dict[str, asyncio.Task] = {}  # node_id -> backoff task
+        self._resume_pending: set[str] = set()  # node_ids with resume pending but not yet started
+        self._ready_pending: set[str] = set()  # node_ids that became ready but not yet started
 
         # event to pause/resume execution
-        self._events: asyncio.Queue = asyncio.Queue() 
-        self.loop: Optional[asyncio.AbstractEventLoop] = None   # used by MultiSchedulerResumeBus with cross-thread calls
-        self._nudge = asyncio.Event() 
-        self._resume_tokens: Set[str] = set()  # for logging/debugging 
+        self._events: asyncio.Queue = asyncio.Queue()
+        self.loop: asyncio.AbstractEventLoop | None = (
+            None  # used by MultiSchedulerResumeBus with cross-thread calls
+        )
+        self._nudge = asyncio.Event()
+        self._resume_tokens: set[str] = set()  # for logging/debugging
 
         # listeners and callbacks
-        self._listeners: List[Callable[[NodeEvent], Awaitable[None]]] = []  # Placeholder for event listeners
+        self._listeners: list[
+            Callable[[NodeEvent], Awaitable[None]]
+        ] = []  # Placeholder for event listeners
 
         # logger
-        self.logger = logger 
+        self.logger = logger
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop | None = None):
         """Bind an event loop to this scheduler (for cross-thread resume calls)."""
@@ -221,7 +227,6 @@ class ForwardScheduler(BaseScheduler):
         await self._start_node(node)
         return True
 
-
     async def _emit(self, event: NodeEvent):
         """Emit an event to all listeners. Should not kill the scheduler if a listener fails."""
         for cb in self._listeners:
@@ -244,11 +249,11 @@ class ForwardScheduler(BaseScheduler):
         # Implementation choices:
         # - if you keep a WaitRegistry in env, this might just trigger a run loop tick
         # - if you keep an asyncio.Event per run, set() it
-        self._resume_tokens.add(token)   # optional: track for logging
-        self._nudge.set()                # asyncio.Event the main loop awaits
+        self._resume_tokens.add(token)  # optional: track for logging
+        self._nudge.set()  # asyncio.Event the main loop awaits
 
     async def run(self):
-        """ Main run loop. Schedules ready nodes, handles events, and manages concurrency.
+        """Main run loop. Schedules ready nodes, handles events, and manages concurrency.
 
         The loop works as follows:
         - Drain any pending control events (e.g. resume and wakeup).
@@ -317,17 +322,21 @@ class ForwardScheduler(BaseScheduler):
                 if not ctrl.done():
                     ctrl.cancel()
 
-    async def run_from(self, node_ids: List[str]):
+    async def run_from(self, node_ids: list[str]):
         """Run starting from specific nodes (e.g. after external event)."""
         for nid in node_ids:
             node = self.graph.node(nid)
-            if node.state.status in (NodeStatus.WAITING_HUMAN, NodeStatus.WAITING_ROBOT,
-                                      NodeStatus.WAITING_EXTERNAL, NodeStatus.WAITING_TIME, NodeStatus.WAITING_EVENT):
+            if node.state.status in (
+                NodeStatus.WAITING_HUMAN,
+                NodeStatus.WAITING_ROBOT,
+                NodeStatus.WAITING_EXTERNAL,
+                NodeStatus.WAITING_TIME,
+                NodeStatus.WAITING_EVENT,
+            ):
                 # will be executed when resume_payload arrives
                 continue
             await self._start_node(node)
 
-    
     async def terminate(self):
         """Terminate execution; running tasks will complete but no new tasks will be started."""
         self._terminated = True
@@ -343,7 +352,7 @@ class ForwardScheduler(BaseScheduler):
         await self._start_node(node)
 
     # ENFORCE capacity in run_one()
-    async def run_one_old(self, node: "TaskNodeRuntime") -> Dict[str, Any]:
+    async def run_one_old(self, node: TaskNodeRuntime) -> dict[str, Any]:
         # deps must be DONE (except inputs node)
         for dep in node.dependencies or []:
             if dep == GRAPH_INPUTS_NODE_ID:
@@ -395,16 +404,18 @@ class ForwardScheduler(BaseScheduler):
                 # Either a running task finishes or a control event arrives
                 ctrl = asyncio.create_task(self._events.get())
                 try:
-                    done, _ = await asyncio.wait(running + [ctrl], return_when=asyncio.FIRST_COMPLETED)
+                    done, _ = await asyncio.wait(
+                        running + [ctrl], return_when=asyncio.FIRST_COMPLETED
+                    )
                     if ctrl in done:
                         await self._handle_events(ctrl.result())
                 finally:
                     if not ctrl.done():
                         ctrl.cancel()
 
-    async def run_one(self, node: "TaskNodeRuntime") -> Dict[str, Any]:
-        """ Run a single node by ID, return its outputs."""
-        self.loop = asyncio.get_running_loop() # ensure loop is set
+    async def run_one(self, node: TaskNodeRuntime) -> dict[str, Any]:
+        """Run a single node by ID, return its outputs."""
+        self.loop = asyncio.get_running_loop()  # ensure loop is set
         # deps DONE check (kept as-is) ...
         while self._capacity() <= 0:
             running = list(self.running_tasks.values())
@@ -434,7 +445,6 @@ class ForwardScheduler(BaseScheduler):
         # SKIPPED or others:
         return n.outputs or {}
 
-    
     async def step_next(self):
         """Run exactly one step (for step-by-step execution)."""
         r = self._compute_ready()
@@ -443,7 +453,7 @@ class ForwardScheduler(BaseScheduler):
             await self._start_node(self.graph.node(nid))
 
     # called by ResumeRouter when external/human resumes a waiting node
-    async def on_resume_event(self, run_id: str, node_id: str, payload: Dict[str, Any]):
+    async def on_resume_event(self, run_id: str, node_id: str, payload: dict[str, Any]):
         """Called by external event trigger to resume a waiting node.
         We use async queue to schedule the resume event.
         """
@@ -470,15 +480,22 @@ class ForwardScheduler(BaseScheduler):
         while available > 0 and self._ready_pending:
             nid = self._ready_pending.pop()
             node = self.graph.node(nid)
-            if node and node.node_id not in self.running_tasks and node.state.status not in TERMINAL_STATES:
+            if (
+                node
+                and node.node_id not in self.running_tasks
+                and node.state.status not in TERMINAL_STATES
+            ):
                 # still ensure deps satisfied
                 if all(
-                    (dep == GRAPH_INPUTS_NODE_ID) or (self.graph.node(dep).state.status == NodeStatus.DONE)
+                    (dep == GRAPH_INPUTS_NODE_ID)
+                    or (self.graph.node(dep).state.status == NodeStatus.DONE)
                     for dep in (node.spec.dependencies or [])
                 ):
                     await self._start_node(node)
                     scheduled += 1
                     available -= 1
+                else:
+                    pass  # deps not satisfied; skip
 
         # 3) normal ready nodes
         if available > 0:
@@ -501,11 +518,14 @@ class ForwardScheduler(BaseScheduler):
                         continue
                     seen.add(n.node_id)
                     node = self.graph.node(n.node_id)
-                    if node.state.status not in TERMINAL_STATES and n.node_id not in self.running_tasks:
+                    if (
+                        node.state.status not in TERMINAL_STATES
+                        and n.node_id not in self.running_tasks
+                    ):
                         await self.graph.set_node_status(n.node_id, NodeStatus.SKIPPED)
                     q.append(n.node_id)
 
-    def _compute_ready(self) -> Set[str]:
+    def _compute_ready(self) -> set[str]:
         """Nodes whose deps are completed/skipped and that are not running/waiting/failed.
         Returns set of node_ids.
         The function works as follows:
@@ -516,15 +536,24 @@ class ForwardScheduler(BaseScheduler):
         - If dependencies are satisfied, add the node_id to the ready set.
         """
 
-        ready: Set[str] = set()
-        for node in self.graph.nodes: # runtime nodes
+        ready: set[str] = set()
+        for node in self.graph.nodes:  # runtime nodes
             node_id = node.node_id
             node_status = node.state.status
-            node_type = node.spec.type 
+            node_type = node.spec.type
 
             if node_type == "plan":
-                continue # skip plan nodes; TODO: we may deprecate plan node later
-            if node_status in (NodeStatus.DONE, NodeStatus.FAILED, NodeStatus.SKIPPED,NodeStatus.WAITING_HUMAN, NodeStatus.WAITING_ROBOT,NodeStatus.WAITING_EXTERNAL, NodeStatus.WAITING_TIME, NodeStatus.WAITING_EVENT):
+                continue  # skip plan nodes; TODO: we may deprecate plan node later
+            if node_status in (
+                NodeStatus.DONE,
+                NodeStatus.FAILED,
+                NodeStatus.SKIPPED,
+                NodeStatus.WAITING_HUMAN,
+                NodeStatus.WAITING_ROBOT,
+                NodeStatus.WAITING_EXTERNAL,
+                NodeStatus.WAITING_TIME,
+                NodeStatus.WAITING_EVENT,
+            ):
                 # already done/waiting/failed
                 continue
 
@@ -540,11 +569,15 @@ class ForwardScheduler(BaseScheduler):
                 dep_node = self._runtime(dep)
                 if dep_node is None:
                     if self.logger:
-                        self.logger.warning(f"Node {node_id} has missing dependency {dep}; skipping")
+                        self.logger.warning(
+                            f"Node {node_id} has missing dependency {dep}; skipping"
+                        )
                     else:
-                        print(f"[ForwardScheduler] Node {node_id} has missing dependency {dep}; skipping")
+                        print(
+                            f"[ForwardScheduler] Node {node_id} has missing dependency {dep}; skipping"
+                        )
                     deps_ok = False
-                    break 
+                    break
                 if dep_node.state.status not in [NodeStatus.DONE]:
                     deps_ok = False
                     break
@@ -552,27 +585,29 @@ class ForwardScheduler(BaseScheduler):
                 ready.add(node_id)
 
         return ready
-    
+
     def _runtime(self, node_id: str) -> TaskNodeRuntime:
         # get runtime node by id
         node = self.graph.node(node_id)
-        return node 
-    
+        return node
+
     async def _start_node(self, node: TaskNodeRuntime):
-        node_id = node.node_id 
-        
+        node_id = node.node_id
+
         # attach resume payload if any (WAITING_* -> RUNNING)
         resume_payload = self._resume_payloads.pop(node_id, None)
-        
+
         if node.state.status in WAITING_STATES and resume_payload is None:
             # keep it pending; it will be scheduled once a payload arrives
             self._resume_pending.add(node_id)
             return
-        
+
         async def _runner():
             try:
                 await self.graph.set_node_status(node_id, NodeStatus.RUNNING)
-                ctx = self.env.make_ctx(node=node, resume_payload=resume_payload) # ExecutionContext
+                ctx = self.env.make_ctx(
+                    node=node, resume_payload=resume_payload
+                )  # ExecutionContext
                 result = await step_forward(node=node, ctx=ctx, retry_policy=self.retry_policy)
 
                 if result.status == NodeStatus.DONE:
@@ -586,8 +621,14 @@ class ForwardScheduler(BaseScheduler):
                     self.env.outputs_by_node[node.node_id] = outs
 
                     # emit event
-                    event = NodeEvent(run_id=self.env.run_id, graph_id=getattr(self.graph.spec, "graph_id", "inline"), node_id=node.node_id,
-                                      status=str(NodeStatus.DONE), outputs=node.outputs or {}, timestamp=datetime.utcnow().timestamp())
+                    event = NodeEvent(
+                        run_id=self.env.run_id,
+                        graph_id=getattr(self.graph.spec, "graph_id", "inline"),
+                        node_id=node.node_id,
+                        status=str(NodeStatus.DONE),
+                        outputs=node.outputs or {},
+                        timestamp=datetime.utcnow().timestamp(),
+                    )
                     await self._emit(event)
 
                 elif result.status.startswith("WAITING_"):
@@ -596,8 +637,14 @@ class ForwardScheduler(BaseScheduler):
                     await self.graph.set_node_status(node_id, result.status)
 
                     # emit event
-                    event = NodeEvent(run_id=self.env.run_id, graph_id=getattr(self.graph.spec, "graph_id", "inline"), node_id=node.node_id,
-                                      status=result.status, outputs=node.outputs or {}, timestamp=datetime.utcnow().timestamp())
+                    event = NodeEvent(
+                        run_id=self.env.run_id,
+                        graph_id=getattr(self.graph.spec, "graph_id", "inline"),
+                        node_id=node.node_id,
+                        status=result.status,
+                        outputs=node.outputs or {},
+                        timestamp=datetime.utcnow().timestamp(),
+                    )
                     await self._emit(event)
 
                 elif result.status == NodeStatus.FAILED:
@@ -606,14 +653,24 @@ class ForwardScheduler(BaseScheduler):
                     await self.graph.set_node_status(node_id, NodeStatus.FAILED)
 
                     # emit event
-                    event = NodeEvent(run_id=self.env.run_id, graph_id=getattr(self.graph.spec, "graph_id", "inline"), node_id=node.node_id,
-                                      status=str(NodeStatus.FAILED), outputs=node.outputs or {}, timestamp=datetime.utcnow().timestamp())
+                    event = NodeEvent(
+                        run_id=self.env.run_id,
+                        graph_id=getattr(self.graph.spec, "graph_id", "inline"),
+                        node_id=node.node_id,
+                        status=str(NodeStatus.FAILED),
+                        outputs=node.outputs or {},
+                        timestamp=datetime.utcnow().timestamp(),
+                    )
                     await self._emit(event)
 
                     attempts = getattr(node, "attempts", 0)
                     if attempts > 0 and attempts < self.retry_policy.max_attempts:
-                        delay = self.retry_policy.backoff(attempts - 1).total_seconds()  # attempts was incremented in step_forward
-                        self._backoff_tasks[node.node_id] = asyncio.create_task(self._sleep_and_requeue(node, delay))
+                        delay = self.retry_policy.backoff(
+                            attempts - 1
+                        ).total_seconds()  # attempts was incremented in step_forward
+                        self._backoff_tasks[node.node_id] = asyncio.create_task(
+                            self._sleep_and_requeue(node, delay)
+                        )
                     else:
                         # retries exhausted: optionally stop or skip dependents
                         if self.skip_dep_on_failure:
@@ -627,8 +684,14 @@ class ForwardScheduler(BaseScheduler):
                     await self.graph.set_node_status(node_id, NodeStatus.SKIPPED)
 
                     # emit event
-                    event = NodeEvent(run_id=self.env.run_id, graph_id=getattr(self.graph.spec, "graph_id", "inline"), node_id=node.node_id,
-                                      status=str(NodeStatus.SKIPPED), outputs=node.outputs or {}, timestamp=datetime.utcnow().timestamp())
+                    event = NodeEvent(
+                        run_id=self.env.run_id,
+                        graph_id=getattr(self.graph.spec, "graph_id", "inline"),
+                        node_id=node.node_id,
+                        status=str(NodeStatus.SKIPPED),
+                        outputs=node.outputs or {},
+                        timestamp=datetime.utcnow().timestamp(),
+                    )
                     await self._emit(event)
 
                 # record memory after step
@@ -639,11 +702,11 @@ class ForwardScheduler(BaseScheduler):
                 # subgraph logic not handled here; escalate to orchestrator
                 await node.set_status(NodeStatus.FAILED)
             except asyncio.CancelledError:
-                # task cancelled (e.g. on terminate); 
+                # task cancelled (e.g. on terminate);
                 await node.set_status(NodeStatus.FAILED)
             finally:
-                # remove from running tasks in caller 
-                pass 
+                # remove from running tasks in caller
+                pass
 
         task = asyncio.create_task(_runner())
         self.running_tasks[node_id] = task
@@ -659,7 +722,6 @@ class ForwardScheduler(BaseScheduler):
             pass
         finally:
             self._backoff_tasks.pop(node.node_id, None)
-
 
     async def _handle_events(self, ev):
         """Handle control events (e.g., resume, wakeup).
@@ -705,12 +767,11 @@ class ForwardScheduler(BaseScheduler):
 
     def _any_waiting(self) -> bool:
         return any(
-            (not _is_plan(n)) and (n.state.status in WAITING_STATES)
-            for n in self.graph.nodes
+            (not _is_plan(n)) and (n.state.status in WAITING_STATES) for n in self.graph.nodes
         )
-    
+
     def post_resume_event_threadsafe(self, run_id: str, node_id: str, payload: dict):
-            if not self.loop or not self.loop.is_running():
-                # no-op or log; bus will warn
-                return
-            asyncio.run_coroutine_threadsafe(self.on_resume_event(run_id, node_id, payload), self.loop)
+        if not self.loop or not self.loop.is_running():
+            # no-op or log; bus will warn
+            return
+        asyncio.run_coroutine_threadsafe(self.on_resume_event(run_id, node_id, payload), self.loop)

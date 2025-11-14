@@ -1,15 +1,19 @@
-from typing import Dict, Optional
+import asyncio
+import logging
+
+import httpx
+
+from ..secrets.base import Secrets
 from .generic_client import GenericLLMClient
 from .providers import Provider
-from ..secrets.base import Secrets
 
-import asyncio
-import httpx
+logger = logging.getLogger("aethergraph.services.llm")
 
 
 class LLMService:
     """Holds multiple LLM clients (default + named profiles)."""
-    def __init__(self, clients: Dict[str, GenericLLMClient], secrets: Secrets | None = None):
+
+    def __init__(self, clients: dict[str, GenericLLMClient], secrets: Secrets | None = None):
         self._clients = clients
         self._secrets = secrets
 
@@ -28,13 +32,13 @@ class LLMService:
         self,
         profile: str = "default",
         *,
-        provider: Optional[Provider] = None,
-        model: Optional[str] = None,
-        embed_model: Optional[str] = None,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        azure_deployment: Optional[str] = None,
-        timeout: Optional[float] = None,
+        provider: Provider | None = None,
+        model: str | None = None,
+        embed_model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        azure_deployment: str | None = None,
+        timeout: float | None = None,
     ) -> GenericLLMClient:
         """
         Create or update a profile in memory. Returns the client.
@@ -72,18 +76,20 @@ class LLMService:
                 # best-effort async close
                 asyncio.create_task(old_client.aclose())
             except RuntimeError:
-                pass
+                logger.warning("Failed to close old httpx client", exc_info=True)
         return c
 
     # --- Quick start helpers ---
-    def set_key(self, provider: str, model: str, api_key: str, profile: str = "default") -> GenericLLMClient:
+    def set_key(
+        self, provider: str, model: str, api_key: str, profile: str = "default"
+    ) -> GenericLLMClient:
         """
         Quickly set/override an API key for a profile at runtime (in-memory).
         Creates the profile if it doesn't exist yet.
         """
         return self.configure_profile(
             profile=profile,
-            provider=provider,   # type: ignore[arg-type]
+            provider=provider,  # type: ignore[arg-type]
             model=model,
             api_key=api_key,
         )

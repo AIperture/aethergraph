@@ -1,8 +1,9 @@
 import asyncio
-from fastapi import APIRouter, Request, HTTPException
-from starlette.responses import Response
-from ..utils.telegram_utils import _verify_secret, _process_update
 
+from fastapi import APIRouter, HTTPException, Request
+from starlette.responses import Response
+
+from ..utils.telegram_utils import _process_update, _verify_secret
 
 router = APIRouter()
 
@@ -23,4 +24,3 @@ async def telegram_webhook(request: Request):
 
     asyncio.create_task(_process_update(c, payload, BOT_TOKEN))
     return Response(status_code=200)
-

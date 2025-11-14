@@ -1,21 +1,29 @@
-
-from ..utils.slack_utils import handle_slack_events_common, handle_slack_interactive_common
 from aethergraph.utils.optdeps import require
 
-require(pkg="slack_sdk", extra="slack")
+from ..utils.slack_utils import handle_slack_events_common, handle_slack_interactive_common
 
-from slack_sdk.web.async_client import AsyncWebClient
-from slack_sdk.socket_mode.aiohttp import SocketModeClient
-from slack_sdk.socket_mode.request import SocketModeRequest
+try:
+    require(pkg="slack_sdk", extra="slack")
+    from slack_sdk.socket_mode.aiohttp import SocketModeClient
+    from slack_sdk.socket_mode.request import SocketModeRequest
+    from slack_sdk.web.async_client import AsyncWebClient
+except ImportError:
+    raise ImportError(
+        "slack_sdk is required for SlackSocketModeRunner; please install aethergraph with the [slack] extra."
+    ) from None
+
 
 class SlackSocketModeRunner:
     def __init__(self, container, settings):
         self.container = container
         self.settings = settings
 
-
-        self.bot_token = settings.slack.bot_token.get_secret_value() if settings.slack.bot_token else ""
-        self.app_token = settings.slack.app_token.get_secret_value() if settings.slack.app_token else ""  # xapp-...
+        self.bot_token = (
+            settings.slack.bot_token.get_secret_value() if settings.slack.bot_token else ""
+        )
+        self.app_token = (
+            settings.slack.app_token.get_secret_value() if settings.slack.app_token else ""
+        )  # xapp-...
 
         self.web_client = AsyncWebClient(token=self.bot_token)
         self.client: SocketModeClient | None = None
@@ -42,7 +50,9 @@ class SlackSocketModeRunner:
     async def start(self):
         lg = self.container.logger.for_run()
         if not (self.bot_token and self.app_token):
-            lg.warning("[Slack SocketMode] bot_token or app_token not configured; skipping Socket Mode startup.")
+            lg.warning(
+                "[Slack SocketMode] bot_token or app_token not configured; skipping Socket Mode startup."
+            )
             return
 
         self.client = SocketModeClient(

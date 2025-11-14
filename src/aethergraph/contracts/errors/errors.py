@@ -1,5 +1,5 @@
 # Typed exceptions (ValidationError, MigrationError, etc.)
-from typing import List, Optional
+
 
 class AetherGraphError(Exception):
     """Base class for all AetherGraph errors."""
@@ -23,7 +23,10 @@ class ExecutionError(AetherGraphError):
 
 class GraphHasPendingWaits(RuntimeError):
     """Raised when attempting to finalize a graph that has pending waits."""
-    def __init__(self, message: str, waiting_nodes: list[str], continuations: List[dict] | None = None):
+
+    def __init__(
+        self, message: str, waiting_nodes: list[str], continuations: list[dict] | None = None
+    ):
         super().__init__(message)
         self.waiting_nodes = waiting_nodes
         self.continuations = continuations or []
@@ -34,8 +37,8 @@ class ResumeIncompatibleSnapshot(RuntimeError):
     Raised when a snapshot is not allowed for resume under the current policy
     (e.g., contains non-JSON outputs or external refs like __aether_ref__).
     """
+
     def __init__(self, run_id: str, reasons: list[str]):
-        super().__init__(f"Resume blocked for run_id={run_id}. " +
-                         " / ".join(reasons))
+        super().__init__(f"Resume blocked for run_id={run_id}. " + " / ".join(reasons))
         self.run_id = run_id
         self.reasons = reasons

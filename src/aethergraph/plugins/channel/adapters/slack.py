@@ -1,12 +1,12 @@
 import os
-from typing import Dict, Set 
-import json
-from aethergraph.services.continuations.continuation import Correlator
+
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+from aethergraph.services.continuations.continuation import Correlator
 from aethergraph.utils.optdeps import require
 
+
 class SlackChannelAdapter(ChannelAdapter):
-    capabilities: Set[str] = {"text","buttons","image","file","edit","stream"}
+    capabilities: set[str] = {"text", "buttons", "image", "file", "edit", "stream"}
 
     def __init__(self, bot_token: str | None = None):
         """Slack channel adapter for handling Slack events.
@@ -15,10 +15,10 @@ class SlackChannelAdapter(ChannelAdapter):
         """
 
         require(pkg="slack_sdk", extra="slack")
-        from slack_sdk.web.async_client import AsyncWebClient 
+        from slack_sdk.web.async_client import AsyncWebClient
 
         self.client = AsyncWebClient(token=bot_token or os.environ["SLACK_BOT_TOKEN"])
-        self._first_ts_by_chan: Dict[str, str] = {}  # cache of first message ts by channel
+        self._first_ts_by_chan: dict[str, str] = {}  # cache of first message ts by channel
 
     def _render_bar(self, percent: float, width: int = 20) -> str:
         p = max(0.0, min(1.0, float(percent)))
@@ -32,12 +32,13 @@ class SlackChannelAdapter(ChannelAdapter):
             s = int(max(0, float(sec)))
         except Exception:
             return ""
-        if s < 60: return f"{s}s"
+        if s < 60:
+            return f"{s}s"
         m, s = divmod(s, 60)
-        if m < 60: return f"{m}m {s}s"
+        if m < 60:
+            return f"{m}m {s}s"
         h, m = divmod(m, 60)
         return f"{h}h {m}m"
-
 
     @staticmethod
     def _parse(channel_key: str):
@@ -50,7 +51,7 @@ class SlackChannelAdapter(ChannelAdapter):
             k, v = p.split("/", 1)
             d[k] = v
         return d
-    
+
     async def _ensure_thread(self, channel_key: str, seed_text: str | None = None):
         meta = self._parse(channel_key)
         channel = meta["chan"]
@@ -71,25 +72,36 @@ class SlackChannelAdapter(ChannelAdapter):
 
     async def peek_thread(self, channel_key: str):
         """
-        Return the  thread_ts currently associated with the channel_key if know, 
+        Return the  thread_ts currently associated with the channel_key if know,
         without creating a new thread.
         """
         meta = self._parse(channel_key)
         if meta.get("thread"):
             return meta["thread"]
-        # fallback to cache if first message ts (created ealier by _ensure_thread) 
-        return self._first_ts_by_chan.get(channel_key) 
-    
+        # fallback to cache if first message ts (created ealier by _ensure_thread)
+        return self._first_ts_by_chan.get(channel_key)
+
     async def send(self, event: OutEvent) -> dict | None:
         channel, thread_ts = await self._ensure_thread(event.channel)
 
         # streaming/upsert: we use chat.update keyed by upsert_key
-        if event.type in ("agent.stream.start","agent.stream.delta","agent.stream.end","agent.message.update") and event.upsert_key:
+        if (
+            event.type
+            in (
+                "agent.stream.start",
+                "agent.stream.delta",
+                "agent.stream.end",
+                "agent.message.update",
+            )
+            and event.upsert_key
+        ):
             # stash ts per upsert_key inside thread cache
             key = (event.channel, event.upsert_key)
             ts = self._first_ts_by_chan.get(key)
             if ts is None:
-                resp = await self.client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=event.text or "…")
+                resp = await self.client.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts, text=event.text or "…"
+                )
                 ts = resp.get("ts")
                 self._first_ts_by_chan[key] = ts
             else:
@@ -97,7 +109,7 @@ class SlackChannelAdapter(ChannelAdapter):
                     # In slack, chat.update requires non-empty text for stream updates
                     await self.client.chat_update(channel=channel, ts=ts, text=event.text)
             return
-        
+
         if event.type in ("session.need_approval", "link.buttons"):
             # Collect up to 5 buttons (Slack max per "actions" block)
             elements = []
@@ -107,13 +119,21 @@ class SlackChannelAdapter(ChannelAdapter):
                 opts = (event.meta or {}).get("options", ["Approve", "Reject"])
                 buttons = [
                     # mimic button objects;
-                    type("B", (), {"label": opts[0], "value": "approve", "style": "primary", "url": None}),
-                    type("B", (), {"label": opts[-1], "value": "reject",  "style": "danger",  "url": None}),
+                    type(
+                        "B",
+                        (),
+                        {"label": opts[0], "value": "approve", "style": "primary", "url": None},
+                    ),
+                    type(
+                        "B",
+                        (),
+                        {"label": opts[-1], "value": "reject", "style": "danger", "url": None},
+                    ),
                 ]
 
             if len(buttons) > 5:
                 self._warn("Slack supports max 5 buttons; truncating.")
-                buttons = buttons[:5] 
+                buttons = buttons[:5]
 
             for i, b in enumerate(buttons[:5]):  # Slack: max 5 elements
                 btn: dict = {
@@ -138,6 +158,7 @@ class SlackChannelAdapter(ChannelAdapter):
                             if k in event.meta:
                                 value_payload[k] = event.meta[k]
                     import json
+
                     btn["value"] = json.dumps(value_payload)
 
                 # Style: only set if valid
@@ -149,7 +170,10 @@ class SlackChannelAdapter(ChannelAdapter):
                 elements.append(btn)
 
             blocks = [
-                {"type": "section", "text": {"type": "mrkdwn", "text": event.text or "Please approve:"}},
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": event.text or "Please approve:"},
+                },
                 {"type": "actions", "elements": elements},
             ]
 
@@ -164,26 +188,35 @@ class SlackChannelAdapter(ChannelAdapter):
                     scheme="slack",
                     channel=event.channel,
                     thread=thread_ts,
-                    message=resp.get("ts"), # message ts
+                    message=resp.get("ts"),  # message ts
                 )
             }
 
         # file upload (url or bytes)
         if event.type == "file.upload" and event.file:
             if "bytes" in event.file:
-                await self.client.files_upload_v2(channel=channel, thread_ts=thread_ts,
-                                                  filename=event.file.get("filename","file.bin"),
-                                                  initial_comment=event.text,
-                                                  file=event.file["bytes"])
+                await self.client.files_upload_v2(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    filename=event.file.get("filename", "file.bin"),
+                    initial_comment=event.text,
+                    file=event.file["bytes"],
+                )
                 return
             if "url" in event.file:
                 # fall back to posting a link
-                await self.client.chat_postMessage(channel=channel, thread_ts=thread_ts,
-                                                   text=f"{event.text or 'File'}: {event.file['url']}")
+                await self.client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"{event.text or 'File'}: {event.file['url']}",
+                )
                 return
-            
+
         # progress upsert (single message updated by upsert_key)
-        if event.type in ("agent.progress.start", "agent.progress.update", "agent.progress.end") and event.upsert_key:
+        if (
+            event.type in ("agent.progress.start", "agent.progress.update", "agent.progress.end")
+            and event.upsert_key
+        ):
             r = event.rich or {}
             title = r.get("title") or "Working..."
             subtitle = r.get("subtitle") or ""
@@ -192,10 +225,7 @@ class SlackChannelAdapter(ChannelAdapter):
             eta_seconds = r.get("eta_seconds")
 
             # compute percent + bar
-            if total:
-                p = max(0.0, min(1.0, float(current) / float(total)))
-            else:
-                p = 0.0  # no total → show header/subtitle only
+            p = max(0.0, min(1.0, float(current) / float(total))) if total else 0.0
             bar = self._render_bar(p, 20) if total else ""
             pct_text = f"{int(round(p * 100))}%" if total else ""
             eta_text = self._fmt_eta(eta_seconds)
@@ -209,13 +239,17 @@ class SlackChannelAdapter(ChannelAdapter):
             # Build Slack blocks
             blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": f"*{header}*"}}]
             if total:
-                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"`{bar}`  {pct_text}"}})
+                blocks.append(
+                    {"type": "section", "text": {"type": "mrkdwn", "text": f"`{bar}`  {pct_text}"}}
+                )
             # optional subtitle + ETA
             ctx_tail = " • ".join(
                 [t for t in (subtitle, f"ETA {eta_text}" if eta_text else "") if t]
             )
             if ctx_tail:
-                blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": ctx_tail}]})
+                blocks.append(
+                    {"type": "context", "elements": [{"type": "mrkdwn", "text": ctx_tail}]}
+                )
 
             # Upsert using the same cache dict already in use (keyed by (channel, upsert_key))
             key = (event.channel, event.upsert_key)
@@ -238,12 +272,14 @@ class SlackChannelAdapter(ChannelAdapter):
             return
 
         # default: plain message, include (session.need_input) etc.
-        resp = await self.client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=event.text or "")
+        resp = await self.client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts, text=event.text or ""
+        )
         return {
             "correlator": Correlator(
                 scheme="slack",
                 channel=event.channel,
                 thread=thread_ts,
-                message=resp.get("ts"), # message ts
+                message=resp.get("ts"),  # message ts
             )
         }

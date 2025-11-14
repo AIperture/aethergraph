@@ -1,32 +1,34 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from sched import scheduler
-import threading
-import asyncio, uuid
-from typing import Any, Callable, Dict, Optional, Tuple
 
+import asyncio
+import threading
+from typing import Any
+import uuid
+
+from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.state_stores import GraphSnapshot
-from aethergraph.core.runtime.recovery import hash_spec, rearm_waits_if_needed, recover_graph_run
+from aethergraph.core.runtime.recovery import hash_spec, recover_graph_run
+from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.state_stores.graph_observer import PersistenceObserver
-from aethergraph.services.state_stores.resume_policy import assert_snapshot_json_only, output_node_ids_from_graph
+from aethergraph.services.state_stores.resume_policy import (
+    assert_snapshot_json_only,
+)
 from aethergraph.services.state_stores.utils import snapshot_from_graph
 
-from ..runtime.runtime_services import ensure_services_installed
-from ..runtime.runtime_env import RuntimeEnv
-from ..execution.retry_policy import RetryPolicy
 from ..execution.forward_scheduler import ForwardScheduler
-from ..graph.graph_refs import resolve_any as _resolve_any
+from ..execution.retry_policy import RetryPolicy
 from ..graph.graph_fn import GraphFunction
+from ..graph.graph_refs import resolve_any as _resolve_any
+from ..runtime.runtime_env import RuntimeEnv
+from ..runtime.runtime_services import ensure_services_installed
 from .run_registration import RunRegistrationGuard
-
-from aethergraph.services.container.default_container import build_default_container
-from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 
 
 # ---------- env helpers ----------
 def _get_container():
     # install once if not installed by sidecar/server
     return ensure_services_installed(build_default_container)
+
 
 async def _attach_persistence(graph, env, spec, snapshot_every=1) -> PersistenceObserver:
     """
@@ -48,7 +50,9 @@ async def _attach_persistence(graph, env, spec, snapshot_every=1) -> Persistence
     return obs
 
 
-async def _build_env(owner, inputs: Dict[str, Any], **rt_overrides) -> Tuple[RuntimeEnv, RetryPolicy, int]:
+async def _build_env(
+    owner, inputs: dict[str, Any], **rt_overrides
+) -> tuple[RuntimeEnv, RetryPolicy, int]:
     container = _get_container()
     # apply optional overrides onto the container instance
     for k, v in rt_overrides.items():
@@ -65,6 +69,7 @@ async def _build_env(owner, inputs: Dict[str, Any], **rt_overrides) -> Tuple[Run
     retry = rt_overrides.get("retry") or RetryPolicy()
     max_conc = rt_overrides.get("max_concurrency", getattr(owner, "max_concurrency", 4))
     return env, retry, max_conc
+
 
 # ---------- materialization ----------
 def _materialize_task_graph(target) -> Any:
@@ -95,33 +100,47 @@ def _materialize_task_graph(target) -> Any:
         "or a callable returning a TaskGraph."
     )
 
-def _resolve_graph_outputs(graph, inputs: Dict[str, Any], env: RuntimeEnv,):
-    bindings = (graph.io_signature().get("outputs", {}).get("bindings", {}))
-    def _res(b): return _resolve_any(b, graph_inputs=inputs, outputs_by_node=env.outputs_by_node)
+
+def _resolve_graph_outputs(
+    graph,
+    inputs: dict[str, Any],
+    env: RuntimeEnv,
+):
+    bindings = graph.io_signature().get("outputs", {}).get("bindings", {})
+
+    def _res(b):
+        return _resolve_any(b, graph_inputs=inputs, outputs_by_node=env.outputs_by_node)
+
     try:
         result = {k: _res(v) for k, v in bindings.items()}
     except KeyError as e:
-        waiting = [nid for nid, n in graph.state.nodes.items()
-                   if getattr(n, "status", "").startswith("WAITING_")]
+        waiting = [
+            nid
+            for nid, n in graph.state.nodes.items()
+            if getattr(n, "status", "").startswith("WAITING_")
+        ]
         continuations = []
         if env.continuation_store and hasattr(env.continuation_store, "get"):
             for nid in waiting:
                 cont = env.continuation_store.get(run_id=env.run_id, node_id=nid)
                 if cont:
-                    continuations.append({
-                        "node_id": nid,
-                        "kind": cont.kind,
-                        "token": cont.token,
-                        "channel": cont.channel,
-                        "deadline": getattr(cont.deadline, "isoformat", lambda: None)(),
-                    })
+                    continuations.append(
+                        {
+                            "node_id": nid,
+                            "kind": cont.kind,
+                            "token": cont.token,
+                            "channel": cont.channel,
+                            "deadline": getattr(cont.deadline, "isoformat", lambda: None)(),
+                        }
+                    )
         raise GraphHasPendingWaits(
             "Graph quiesced with pending waits; outputs are not yet resolvable.",
             waiting_nodes=waiting,
-            continuations=continuations
+            continuations=continuations,
         ) from e
 
     return next(iter(result.values())) if len(result) == 1 else result
+
 
 def _resolve_graph_outputs_or_waits(graph, inputs, env, *, raise_on_waits: bool = True):
     try:
@@ -129,7 +148,12 @@ def _resolve_graph_outputs_or_waits(graph, inputs, env, *, raise_on_waits: bool 
     except GraphHasPendingWaits as e:
         if raise_on_waits:
             raise
-        return {"status": "waiting", "waiting_nodes": e.waiting_nodes, "continuations": e.continuations}
+        return {
+            "status": "waiting",
+            "waiting_nodes": e.waiting_nodes,
+            "continuations": e.continuations,
+        }
+
 
 def _seed_outputs_from_snapshot(env, snap: GraphSnapshot):
     env.outputs_by_node = env.outputs_by_node or {}
@@ -139,17 +163,21 @@ def _seed_outputs_from_snapshot(env, snap: GraphSnapshot):
         if outs:
             env.outputs_by_node[nid] = outs
 
+
 def _is_graph_complete(snap: GraphSnapshot) -> bool:
     nodes = snap.state.get("nodes", {})
-    if not nodes: return False
+    if not nodes:
+        return False
+
     # completed if every node is DONE/SKIPPED or has outputs matching spec
     def doneish(st):
         s = (st or {}).get("status", "")
         return s in ("DONE", "SKIPPED")
+
     return all(doneish(ns) for ns in nodes.values())
 
 
-async def load_latest_snapshot_json(store, run_id: str) -> Optional[Dict[str, Any]]:
+async def load_latest_snapshot_json(store, run_id: str) -> dict[str, Any] | None:
     """
     Returns the raw JSON dict of the latest snapshot (or None).
     """
@@ -167,8 +195,9 @@ async def load_latest_snapshot_json(store, run_id: str) -> Optional[Dict[str, An
         "state": snap.state,
     }
 
+
 # ---------- public API ----------
-async def run_async(target, inputs: Optional[Dict[str, Any]]=None, **rt_overrides):
+async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides):
     """
     Generic async runner for TaskGraph or GraphFunction.
     - GraphFunction → delegates to gf.run(env=..., **inputs)
@@ -191,8 +220,9 @@ async def run_async(target, inputs: Optional[Dict[str, Any]]=None, **rt_override
 
     store = getattr(env.container, "state_store", None)
     snap = None
-    assert store is None or hasattr(store, "load_latest_snapshot"), \
-        "state_store must implement lo  ad_latest_snapshot(run_id)"
+    assert store is None or hasattr(
+        store, "load_latest_snapshot"
+    ), "state_store must implement lo  ad_latest_snapshot(run_id)"
 
     if store:
         # 1) Attempt cold-resume (build a graph with hydrated state)
@@ -201,7 +231,6 @@ async def run_async(target, inputs: Optional[Dict[str, Any]]=None, **rt_override
         # 2) Load raw JSON snapshot and ENFORCE strict policy
         snap_json = await load_latest_snapshot_json(store, env.run_id)
         if snap_json:
-        
             # keep for short-circuit + seeding
             snap = await store.load_latest_snapshot(env.run_id)
             # Short-circuit if already complete
@@ -209,7 +238,7 @@ async def run_async(target, inputs: Optional[Dict[str, Any]]=None, **rt_override
                 _seed_outputs_from_snapshot(env, snap)
                 if _is_graph_complete(snap):
                     return _resolve_graph_outputs(graph, inputs, env)
-                
+
             # strict policy: block resume if any non-JSON / __aether_ref__ is present
             assert_snapshot_json_only(env.run_id, snap_json, mode="reuse_only")
     else:
@@ -223,14 +252,19 @@ async def run_async(target, inputs: Optional[Dict[str, Any]]=None, **rt_override
 
     # get logger from env's container
     from ..runtime.runtime_services import current_logger_factory
+
     logger = current_logger_factory().for_scheduler()
-    
-    sched = ForwardScheduler(graph, env, retry_policy=retry,
-                             max_concurrency=max_conc,
-                             skip_dep_on_failure=True,
-                             stop_on_first_error=True,
-                             logger=logger)
-    
+
+    sched = ForwardScheduler(
+        graph,
+        env,
+        retry_policy=retry,
+        max_concurrency=max_conc,
+        skip_dep_on_failure=True,
+        stop_on_first_error=True,
+        logger=logger,
+    )
+
     # Register for resumes and run
     with RunRegistrationGuard(run_id=env.run_id, scheduler=sched, container=env.container):
         try:
@@ -248,7 +282,7 @@ async def run_async(target, inputs: Optional[Dict[str, Any]]=None, **rt_override
                     spec_hash=hash_spec(spec),
                     state_obj=graph.state,
                     artifacts=artifacts,
-                    allow_externalize=False,       # FIXME: artifact writer async loop error; set False to *avoid* writing artifacts during snapshot
+                    allow_externalize=False,  # FIXME: artifact writer async loop error; set False to *avoid* writing artifacts during snapshot
                     include_wait_spec=True,
                 )
                 await store.save_snapshot(snap)
@@ -257,7 +291,9 @@ async def run_async(target, inputs: Optional[Dict[str, Any]]=None, **rt_override
     return _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
 
 
-async def run_or_resume_async(target, inputs: Dict[str, Any], *, run_id: str | None = None, **rt_overrides):
+async def run_or_resume_async(
+    target, inputs: dict[str, Any], *, run_id: str | None = None, **rt_overrides
+):
     """
     If state exists for run_id → cold resume, else fresh run.
     Exactly the same signature as run_async plus optional run_id.
@@ -270,12 +306,12 @@ async def run_or_resume_async(target, inputs: Dict[str, Any], *, run_id: str | N
 # sync adapter (optional, safe in notebooks/servers)
 class _LoopThread:
     def __init__(self):
-        import threading
         self._ev = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._loop = None
         self._thread.start()
         self._ev.wait()
+
     def _worker(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -287,7 +323,7 @@ class _LoopThread:
         # this will block terminal until coro is done
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return fut.result()
-    
+
     def submit(self, coro):
         # this will allow KeyboardInterrupt to propagate -> still not perfect. Use async main if possible.
         fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -296,15 +332,18 @@ class _LoopThread:
         except KeyboardInterrupt:
             # cancel the task in the loop thread and wait for cleanup
             fut.cancel()
+
             def _cancel_all():
                 for t in asyncio.all_tasks(self._loop):
                     t.cancel()
+
             self._loop.call_soon_threadsafe(_cancel_all)
             raise
 
 
 _LOOP = _LoopThread()
 
-def run(target, inputs: Optional[Dict[str, Any]] = None, **rt_overrides):
+
+def run(target, inputs: dict[str, Any] | None = None, **rt_overrides):
     inputs = inputs or {}
     return _LOOP.submit(run_async(target, inputs, **rt_overrides))

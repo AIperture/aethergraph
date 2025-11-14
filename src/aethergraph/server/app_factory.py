@@ -1,20 +1,16 @@
 import asyncio
-import os
-import secrets
 from typing import Optional
-from aethergraph.config.config import AppSettings
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from ..services.container.default_container import DefaultContainer, build_default_container 
-from ..core.runtime.runtime_services import install_services 
-
-# channel routes 
-from ..plugins.channel.routes.console_routes import router as console_router
-from ..plugins.channel.routes.telegram_routes import router as telegram_router
-from ..plugins.channel.routes.slack_routes import router as slack_router 
-from ..plugins.channel.routes.webui_routes import install_web_channel, webui_router
+from aethergraph.config.config import AppSettings
 from aethergraph.utils.optdeps import require
+
+from ..core.runtime.runtime_services import install_services
+
+# channel routes
+from ..services.container.default_container import build_default_container
 
 
 def create_app(
@@ -48,7 +44,7 @@ def create_app(
     # app.include_router(telegram_router)
     # app.include_router(webui_router)
 
-    # override log level in config 
+    # override log level in config
     settings.logging.level = log_level
 
     # ---- Services container ----
@@ -71,20 +67,16 @@ def create_app(
         ):
             require("slack_sdk", "slack")
             from ..plugins.channel.websockets.slack_ws import SlackSocketModeRunner
+
             runner = SlackSocketModeRunner(container=container, settings=settings)
             app.state.slack_socket_runner = runner
             asyncio.create_task(runner.start())
 
-
         # Telegram polling for local / dev
         tg_cfg = settings.telegram
-        if (
-            tg_cfg
-            and tg_cfg.enabled
-            and tg_cfg.polling_enabled
-            and tg_cfg.bot_token
-        ):
+        if tg_cfg and tg_cfg.enabled and tg_cfg.polling_enabled and tg_cfg.bot_token:
             from ..plugins.channel.websockets.telegram_polling import TelegramPollingRunner
+
             tg_runner = TelegramPollingRunner(container=container, settings=settings)
             app.state.telegram_polling_runner = tg_runner
             asyncio.create_task(tg_runner.start())

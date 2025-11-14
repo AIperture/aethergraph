@@ -1,31 +1,41 @@
 # aethergraph/start.py
 from __future__ import annotations
-import asyncio, threading, socket, contextlib
-from typing import Optional
+
+import asyncio
+import contextlib
+import socket
+import threading
+
 import uvicorn
 
-from .app_factory import create_app
-from aethergraph.config.config import AppSettings
-from aethergraph.config.loader import load_settings
 from aethergraph.config.context import set_current_settings
-from ..plugins.channel.routes.webui_routes import install_web_channel, webui_router
+from aethergraph.config.loader import load_settings
+
+from ..plugins.channel.routes.webui_routes import install_web_channel
+from .app_factory import create_app
 
 _started = False
-_server_thread: Optional[threading.Thread] = None
+_server_thread: threading.Thread | None = None
 _shutdown_flag = threading.Event()
-_url: Optional[str] = None
+_url: str | None = None
+
 
 def _pick_free_port(p: int) -> int:
     if p:
         return p
-    s = socket.socket(); s.bind(("", 0))
-    port = s.getsockname()[1]; s.close()
+    s = socket.socket()
+    s.bind(("", 0))
+    port = s.getsockname()[1]
+    s.close()
     return port
+
 
 def _run_uvicorn_in_thread(app, host: str, port: int, log_level: str):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level=log_level, loop="asyncio"))
+    server = uvicorn.Server(
+        uvicorn.Config(app, host=host, port=port, log_level=log_level, loop="asyncio")
+    )
 
     async def runner():
         task = asyncio.create_task(server.serve())
@@ -41,11 +51,12 @@ def _run_uvicorn_in_thread(app, host: str, port: int, log_level: str):
         loop.stop()
         loop.close()
 
+
 def start_server(
     *,
     workspace: str = "./aethergraph_data",
     host: str = "127.0.0.1",
-    port: int = 8000,                              # 0 = auto free port
+    port: int = 8000,  # 0 = auto free port
     log_level: str = "warning",
     unvicorn_log_level: str = "warning",
     return_container: bool = False,
@@ -63,11 +74,7 @@ def start_server(
     cfg = load_settings()
     set_current_settings(cfg)
 
-    app = create_app(
-        workspace=workspace,
-        cfg=cfg,
-        log_level=log_level
-    )
+    app = create_app(workspace=workspace, cfg=cfg, log_level=log_level)
 
     picked_port = _pick_free_port(port)
     t = threading.Thread(
@@ -92,6 +99,7 @@ def start_server(
 async def start_server_async(**kw) -> str:
     # Async-friendly wrapper; still uses a thread to avoid clashing with caller loop
     return start_server(**kw)
+
 
 def stop_server():
     """Optional: stop the background server (useful in tests)."""

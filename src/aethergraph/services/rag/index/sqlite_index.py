@@ -1,7 +1,12 @@
 from __future__ import annotations
-import os, json, sqlite3, math
-from typing import List, Dict, Any
+
+import json
+import os
+import sqlite3
+from typing import Any
+
 import numpy as np
+
 from .base import VectorIndex
 
 """A simple SQLite-based vector index per corpus (brute-force cosine similarity).
@@ -25,6 +30,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 """
 
+
 def _ensure_db(path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     conn = sqlite3.connect(path)
@@ -37,6 +43,7 @@ def _ensure_db(path: str):
     finally:
         conn.close()
 
+
 class SQLiteVectorIndex(VectorIndex):
     def __init__(self, index_path: str):
         super().__init__(index_path)
@@ -46,30 +53,39 @@ class SQLiteVectorIndex(VectorIndex):
     def _connect(self):
         return sqlite3.connect(self.db_path)
 
-    async def add(self, corpus_id: str, chunk_ids: List[str], vectors: List[list[float]], metas: List[Dict[str,Any]]):
-
+    async def add(
+        self,
+        corpus_id: str,
+        chunk_ids: list[str],
+        vectors: list[list[float]],
+        metas: list[dict[str, Any]],
+    ):
         conn = self._connect()
         try:
             cur = conn.cursor()
-            for cid, vec, meta in zip(chunk_ids, vectors, metas):
+            for cid, vec, meta in zip(chunk_ids, vectors, metas, strict=True):
                 v = np.asarray(vec, dtype=np.float32)
                 norm = float(np.linalg.norm(v) + 1e-9)
-                cur.execute("REPLACE INTO chunks(corpus_id,chunk_id,meta_json) VALUES(?,?,?)",
-                            (corpus_id, cid, json.dumps(meta, ensure_ascii=False)))
-                cur.execute("REPLACE INTO embeddings(corpus_id,chunk_id,vec,norm) VALUES(?,?,?,?)",
-                            (corpus_id, cid, v.tobytes(), norm))
+                cur.execute(
+                    "REPLACE INTO chunks(corpus_id,chunk_id,meta_json) VALUES(?,?,?)",
+                    (corpus_id, cid, json.dumps(meta, ensure_ascii=False)),
+                )
+                cur.execute(
+                    "REPLACE INTO embeddings(corpus_id,chunk_id,vec,norm) VALUES(?,?,?,?)",
+                    (corpus_id, cid, v.tobytes(), norm),
+                )
             conn.commit()
         finally:
             conn.close()
 
-    async def delete(self, corpus_id: str, chunk_ids: List[str] | None = None):
+    async def delete(self, corpus_id: str, chunk_ids: list[str] | None = None):
         conn = self._connect()
         try:
             cur = conn.cursor()
             if chunk_ids:
-                q = f"DELETE FROM chunks WHERE corpus_id=? AND chunk_id IN ({','.join(['?']*len(chunk_ids))})"
+                q = f"DELETE FROM chunks WHERE corpus_id=? AND chunk_id IN ({','.join(['?'] * len(chunk_ids))})"
                 cur.execute(q, [corpus_id, *chunk_ids])
-                q2 = f"DELETE FROM embeddings WHERE corpus_id=? AND chunk_id IN ({','.join(['?']*len(chunk_ids))})"
+                q2 = f"DELETE FROM embeddings WHERE corpus_id=? AND chunk_id IN ({','.join(['?'] * len(chunk_ids))})"
                 cur.execute(q2, [corpus_id, *chunk_ids])
             else:
                 cur.execute("DELETE FROM chunks WHERE corpus_id=?", (corpus_id,))
@@ -78,7 +94,7 @@ class SQLiteVectorIndex(VectorIndex):
         finally:
             conn.close()
 
-    async def list_chunks(self, corpus_id: str) -> List[str]:
+    async def list_chunks(self, corpus_id: str) -> list[str]:
         conn = self._connect()
         try:
             cur = conn.cursor()
@@ -87,14 +103,19 @@ class SQLiteVectorIndex(VectorIndex):
         finally:
             conn.close()
 
-    async def search(self, corpus_id: str, query_vec: list[float], k: int) -> List[Dict[str,Any]]:        # Brute-force cosine similarity. Loads vectors for that corpus.
+    async def search(
+        self, corpus_id: str, query_vec: list[float], k: int
+    ) -> list[dict[str, Any]]:  # Brute-force cosine similarity. Loads vectors for that corpus.
         q = np.asarray(query_vec, dtype=np.float32)
         qn = float(np.linalg.norm(q) + 1e-9)
 
         conn = self._connect()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT e.chunk_id, e.vec, e.norm, c.meta_json FROM embeddings e JOIN chunks c USING(corpus_id,chunk_id) WHERE e.corpus_id=?", (corpus_id,))
+            cur.execute(
+                "SELECT e.chunk_id, e.vec, e.norm, c.meta_json FROM embeddings e JOIN chunks c USING(corpus_id,chunk_id) WHERE e.corpus_id=?",
+                (corpus_id,),
+            )
             rows = cur.fetchall()
         finally:
             conn.close()

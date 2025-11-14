@@ -1,35 +1,44 @@
 # aethergraph/runtime/recovery.py
 from __future__ import annotations
-from typing import Optional, Dict, Any
-from dataclasses import replace
-import warnings
-from ..graph.task_graph import TaskGraph
-from ..graph.task_node import TaskNodeRuntime
+
+import datetime
+import hashlib
+import time
+from typing import Any
+
+from aethergraph.contracts.services.state_stores import GraphStateStore
+
 from ..graph.node_state import NodeStatus
-from ..graph.task_graph import TaskGraphSpec
-import hashlib, asyncio, time, datetime
-from aethergraph.contracts.services.state_stores import GraphStateStore, GraphSnapshot
-from aethergraph.services.state_stores.validate import assert_snapshot_json_pure, ResumptionNotSupported 
+from ..graph.task_graph import TaskGraph, TaskGraphSpec
+
 
 def hash_spec(spec: TaskGraphSpec) -> str:
     import json
+
     # stable hash of the immutable parts
-    raw = json.dumps({
-        "graph_id": spec.graph_id,
-        "version": spec.version,
-        "nodes": {nid: {
-            "type": ns.type,
-            "dependencies": ns.dependencies,
-            "logic": ns.logic if isinstance(ns.logic, str) else str(ns.logic),
-            "metadata": ns.metadata,
-        } for nid, ns in spec.nodes.items()},
-        "io": {
-            "required": sorted(list(spec.io.required.keys())),
-            "optional": sorted(list(spec.io.optional.keys())),
-            "outputs":  sorted(list(spec.io.outputs.keys())),
-        }
-    }, sort_keys=True)
+    raw = json.dumps(
+        {
+            "graph_id": spec.graph_id,
+            "version": spec.version,
+            "nodes": {
+                nid: {
+                    "type": ns.type,
+                    "dependencies": ns.dependencies,
+                    "logic": ns.logic if isinstance(ns.logic, str) else str(ns.logic),
+                    "metadata": ns.metadata,
+                }
+                for nid, ns in spec.nodes.items()
+            },
+            "io": {
+                "required": sorted(list(spec.io.required.keys())),
+                "optional": sorted(list(spec.io.optional.keys())),
+                "outputs": sorted(list(spec.io.outputs.keys())),
+            },
+        },
+        sort_keys=True,
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 
 async def recover_graph_run(
     *,
@@ -48,14 +57,20 @@ async def recover_graph_run(
     want = hash_spec(spec)
     if snap.spec_hash != want:
         # Soft warning; TODO: raise if later want strictness.
-        warnings.warn(f"[recover_graph_run] Warning: spec hash changed for run {run_id}")
+        import logging
+
+        logger = logging.getLogger("aethergraph.core.runtime.recovery")
+        logger.warning(
+            f"[recover_graph_run] Spec hash mismatch for run {run_id}: snapshot has {snap.spec_hash}, want {want}"
+        )
 
     # Apply snapshot state
     _hydrate_state_from_json(g, snap.state)
 
     return g
 
-def _hydrate_state_from_json(graph, j: Dict[str, Any]) -> None:
+
+def _hydrate_state_from_json(graph, j: dict[str, Any]) -> None:
     graph.state.rev = j.get("rev", 0)
     graph.state._bound_inputs = j.get("_bound_inputs")
     for nid, ns_json in j.get("nodes", {}).items():
@@ -73,8 +88,8 @@ def _hydrate_state_from_json(graph, j: Dict[str, Any]) -> None:
 
 async def rearm_waits_if_needed(graph, env, *, ttl_s: int = 3600):
     store = env.container.cont_store
-    bus   = env.container.channels            
-    now   = time.time()
+    bus = env.container.channels
+    now = time.time()
 
     for nid, ns in graph.state.nodes.items():
         if getattr(ns, "status", None) not in (
@@ -86,10 +101,7 @@ async def rearm_waits_if_needed(graph, env, *, ttl_s: int = 3600):
         cont = await store.get(run_id=env.run_id, node_id=nid)
         # Normalize deadline to a numeric timestamp to avoid comparing datetime with float
         deadline = getattr(cont, "deadline", None)
-        if isinstance(deadline, datetime.datetime):
-            deadline_ts = deadline.timestamp()
-        else:
-            deadline_ts = deadline
+        deadline_ts = deadline.timestamp() if isinstance(deadline, datetime.datetime) else deadline
         expired = (not cont) or (deadline_ts is not None and deadline_ts < now)
 
         if not expired:
@@ -116,9 +128,11 @@ async def rearm_waits_if_needed(graph, env, *, ttl_s: int = 3600):
         )
         # Build + send OutEvent
         out = {
-            "type": "session.need_input" if ws["kind"] == "text" else
-                    "session.need_approval" if ws["kind"] == "approval" else
-                    "session.need_input",  # default
+            "type": "session.need_input"
+            if ws["kind"] == "text"
+            else "session.need_approval"
+            if ws["kind"] == "approval"
+            else "session.need_input",  # default
             "channel": ws.get("channel"),
             "text": ws.get("prompt"),
             "buttons": [{"label": o} for o in (ws.get("options") or [])],
@@ -130,9 +144,7 @@ async def rearm_waits_if_needed(graph, env, *, ttl_s: int = 3600):
         if payload and "payload" in payload:
             # inline path (same as in _enter_wait)
             await env.container.resume_bus.deliver_inline(
-                run_id=env.run_id,
-                node_id=nid,
-                payload=payload["payload"]
+                run_id=env.run_id, node_id=nid, payload=payload["payload"]
             )
         else:
             # Persist (replace/insert) the new continuation

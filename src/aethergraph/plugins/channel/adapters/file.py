@@ -1,22 +1,23 @@
 """
-Simple file-based channel adapter for logging events to local files. 
+Simple file-based channel adapter for logging events to local files.
 Channel key format:
     file:<relative_path>
 
-This is an inform-only adapter; it does not support receiving messages. 
+This is an inform-only adapter; it does not support receiving messages.
 
 Use cases include:
 - Logging events to local files for debugging or auditing.
 - Storing conversation logs in a structured manner.
 """
-import json
+
 from dataclasses import dataclass
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import Set
-import warnings
+import json
+import logging
+from pathlib import Path
 
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+
 
 @dataclass
 class FileChannelAdapter(ChannelAdapter):
@@ -34,7 +35,7 @@ class FileChannelAdapter(ChannelAdapter):
     root: Path  # base directory where logs will be stored
 
     # Capabilities: we mostly care about text; we log meta/rich as JSON if present
-    capabilities: Set[str] = frozenset({"text", "rich", "file", "buttons"})
+    capabilities: set[str] = frozenset({"text", "rich", "file", "buttons"})
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
@@ -51,13 +52,13 @@ class FileChannelAdapter(ChannelAdapter):
 
     def _format_line(self, event: OutEvent) -> str:
         ts = datetime.now(timezone.utc).isoformat()
-        base = {
-            "type": event.type,
-            "channel": event.channel,
-            "text": event.text,
-            "meta": event.meta or {},
-            "rich": event.rich or {},
-        }
+        # base = {
+        #     "type": event.type,
+        #     "channel": event.channel,
+        #     "text": event.text,
+        #     "meta": event.meta or {},
+        #     "rich": event.rich or {},
+        # }
         # We keep the outer format human-readable, but include structured JSON as needed
         line = f"[{ts}] {event.type}: {event.text or ''}"
         extras: dict = {}
@@ -97,4 +98,5 @@ class FileChannelAdapter(ChannelAdapter):
                 f.write(line)
         except Exception as e:
             # Best-effort; this is an inform-only channel
-            warnings.warn(f"[FileChannelAdapter] Failed to write to {path}: {e}")
+            logger = logging.getLogger("aethergraph.plugins.channel.adapters.file")
+            logger.warning(f"[FileChannelAdapter] Failed to write to {path}: {e}")

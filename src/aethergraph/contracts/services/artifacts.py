@@ -1,6 +1,9 @@
 from __future__ import annotations
-from typing import Protocol, Optional, Dict, Any, ContextManager
+
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from typing import Any, Protocol
+
 
 @dataclass
 class Artifact:
@@ -9,19 +12,19 @@ class Artifact:
     kind: str
     bytes: int
     sha256: str
-    mime: Optional[str]
+    mime: str | None
     run_id: str
     graph_id: str
     node_id: str
     tool_name: str
     tool_version: str
     created_at: str
-    labels: Dict[str, Any]
-    metrics: Dict[str, Any]
-    preview_uri: Optional[str] = None # for rendering previews in UI, not tied to storage
+    labels: dict[str, Any]
+    metrics: dict[str, Any]
+    preview_uri: str | None = None  # for rendering previews in UI, not tied to storage
     pinned: bool = False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "artifact_id": self.artifact_id,
             "uri": self.uri,
@@ -43,40 +46,97 @@ class Artifact:
 
 
 class AsyncArtifactStore(Protocol):
-    async def save_file(self, *, path: str, kind: str, run_id: str, graph_id: str, node_id: str,
-                        tool_name: str, tool_version: str, suggested_uri: Optional[str]=None,
-                        pin: bool=False, labels: Optional[dict]=None, metrics: Optional[dict]=None,
-                        preview_uri: Optional[str]=None) -> Artifact: ...
-    async def open_writer(self, *, kind: str, run_id: str, graph_id: str, node_id: str,
-                          tool_name: str, tool_version: str, planned_ext: Optional[str]=None,
-                          pin: bool=False) -> ContextManager[Any]: ...
+    async def save_file(
+        self,
+        *,
+        path: str,
+        kind: str,
+        run_id: str,
+        graph_id: str,
+        node_id: str,
+        tool_name: str,
+        tool_version: str,
+        suggested_uri: str | None = None,
+        pin: bool = False,
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        preview_uri: str | None = None,
+    ) -> Artifact: ...
+    async def open_writer(
+        self,
+        *,
+        kind: str,
+        run_id: str,
+        graph_id: str,
+        node_id: str,
+        tool_name: str,
+        tool_version: str,
+        planned_ext: str | None = None,
+        pin: bool = False,
+    ) -> AbstractAsyncContextManager[Any]: ...
     async def plan_staging_path(self, planned_ext: str = "") -> str: ...
-    async def ingest_staged_file(self, *, staged_path: str, kind: str, run_id: str, graph_id: str,
-                                 node_id: str, tool_name: str, tool_version: str, pin: bool=False,
-                                 labels: Optional[dict]=None, metrics: Optional[dict]=None,
-                                 preview_uri: Optional[str]=None, suggested_uri: Optional[str]=None) -> Artifact: ...
+    async def ingest_staged_file(
+        self,
+        *,
+        staged_path: str,
+        kind: str,
+        run_id: str,
+        graph_id: str,
+        node_id: str,
+        tool_name: str,
+        tool_version: str,
+        pin: bool = False,
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        preview_uri: str | None = None,
+        suggested_uri: str | None = None,
+    ) -> Artifact: ...
     async def plan_staging_dir(self, suffix: str = "") -> str: ...
-    async def ingest_directory(self, *, staged_dir: str, kind: str, run_id: str, graph_id: str,
-                               node_id: str, tool_name: str, tool_version: str,
-                               include: Optional[list[str]]=None, exclude: Optional[list[str]]=None,
-                               index_children: bool=False, pin: bool=False, labels: Optional[dict]=None,
-                               metrics: Optional[dict]=None, suggested_uri: Optional[str]=None,
-                               archive: bool=False, archive_name: str="bundle.tar.gz",
-                               cleanup: bool=True, store: Optional[str]=None) -> Artifact: ...
+    async def ingest_directory(
+        self,
+        *,
+        staged_dir: str,
+        kind: str,
+        run_id: str,
+        graph_id: str,
+        node_id: str,
+        tool_name: str,
+        tool_version: str,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+        index_children: bool = False,
+        pin: bool = False,
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        suggested_uri: str | None = None,
+        archive: bool = False,
+        archive_name: str = "bundle.tar.gz",
+        cleanup: bool = True,
+        store: str | None = None,
+    ) -> Artifact: ...
     async def load_artifact(self, uri: str) -> Any: ...
     async def load_artifact_bytes(self, uri: str) -> bytes: ...
     async def load_artifact_dir(self, uri: str) -> str: ...
     async def cleanup_tmp(self, max_age_hours: int = 24) -> None: ...
-    async def save_text(self, payload: str, suggested_uri: Optional[str]=None) -> Artifact: ...
-    async def save_json(self, payload: dict, suggested_uri: Optional[str]=None) -> Artifact: ...
+    async def save_text(self, payload: str, suggested_uri: str | None = None) -> Artifact: ...
+    async def save_json(self, payload: dict, suggested_uri: str | None = None) -> Artifact: ...
     @property
     def base_uri(self) -> str: ...
+
 
 class AsyncArtifactIndex(Protocol):
     async def upsert(self, a: Artifact) -> None: ...
     async def list_for_run(self, run_id: str) -> list[Artifact]: ...
-    async def search(self, *, kind: Optional[str]=None, labels: Optional[dict]=None,
-                     metric: Optional[str]=None, mode: Optional[str]=None) -> list[Artifact]: ...
-    async def best(self, *, kind: str, metric: str, mode: str, filters: Optional[dict]=None) -> Optional[Artifact]: ...
-    async def pin(self, artifact_id: str, pinned: bool=True) -> None: ...
-    async def record_occurrence(self, a: Artifact, extra_labels: dict|None=None) -> None: ...
+    async def search(
+        self,
+        *,
+        kind: str | None = None,
+        labels: dict | None = None,
+        metric: str | None = None,
+        mode: str | None = None,
+    ) -> list[Artifact]: ...
+    async def best(
+        self, *, kind: str, metric: str, mode: str, filters: dict | None = None
+    ) -> Artifact | None: ...
+    async def pin(self, artifact_id: str, pinned: bool = True) -> None: ...
+    async def record_occurrence(self, a: Artifact, extra_labels: dict | None = None) -> None: ...

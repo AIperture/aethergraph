@@ -1,24 +1,34 @@
-import asyncio
 from contextlib import contextmanager
 import datetime
 import json
+import logging
 import mimetypes
-from nturl2path import url2pathname
-from typing import Optional, Any, BinaryIO, Union
 import os
+from pathlib import Path
 import shutil
 import tempfile
+from typing import Any, BinaryIO
 from urllib.parse import unquote, urlparse
-from pathlib import Path
 from urllib.request import url2pathname
-from urllib.parse import urlparse, unquote
 
-from .utils import to_thread, _now_iso, _sha256_file, _content_addr_path, _content_addr_dir_path, _tree_manifest_and_hash, _write_json, _maybe_cleanup_tmp_parent 
 from aethergraph.contracts.services.artifacts import Artifact
+
+from .utils import (
+    _content_addr_dir_path,
+    _content_addr_path,
+    _maybe_cleanup_tmp_parent,
+    _now_iso,
+    _sha256_file,
+    _tree_manifest_and_hash,
+    _write_json,
+    to_thread,
+)
+
 
 def _to_file_uri(path_str: str) -> str:
     """Canonical RFC-8089 file URI (file:///C:/..., forward slashes)."""
     return Path(path_str).resolve().as_uri()
+
 
 def _from_uri_or_path(s: str) -> Path:
     """Robustly turn a file:// URI or plain path into a local Path."""
@@ -27,26 +37,27 @@ def _from_uri_or_path(s: str) -> Path:
     u = urlparse(s)
     if (u.scheme or "").lower() != "file":
         raise ValueError(f"Unsupported URI scheme: {u.scheme}")
-    if u.netloc:
-        raw = f"//{u.netloc}{u.path}"   # UNC: file://server/share/...
-    else:
-        raw = u.path                    # Local drive: file:///C:/...
+    # if u.netloc:
+    #     raw = f"//{u.netloc}{u.path}"   # UNC: file://server/share/...
+    # else:
+    #     raw = u.path                    # Local drive: file:///C:/...
+    raw = f"//{u.netloc}{u.path}" if u.netloc else u.path
     return Path(url2pathname(unquote(raw)))
 
 
 def _normalize_pretty_path(base_dir_for_pretty: str, suggested_uri: str) -> str:
-    """ Normalize a suggested_uri into a local filesystem path for pretty linking. 
+    """Normalize a suggested_uri into a local filesystem path for pretty linking.
     Args:
         base_dir_for_pretty (str): Base directory to resolve relative paths against.
         suggested_uri (str): The suggested URI, which may be a file:// URI or a relative/absolute path.
     Returns:
         str: The normalized local filesystem path.
-        
+
     Example:
         - suggested_uri = "file://./outputs/my_artifact.txt" -> "./outputs/my_artifact.txt
         - suggested_uri = "./outputs/my_artifact.txt" -> "./outputs/my_artifact.txt
         - suggested_uri = "/var/data/my_artifact.txt" -> "/var/data/my_artifact.txt
-    NOTE: 
+    NOTE:
         Only used for local filesystem paths. For other URI schemes, additional handling would be needed.
     """
     p = _from_uri_or_path(suggested_uri)
@@ -56,42 +67,50 @@ def _normalize_pretty_path(base_dir_for_pretty: str, suggested_uri: str) -> str:
 
 
 class _Writer:
-    """ Helper class for streaming writes to a temp file. """
-    def __init__(self, tmp_dir: str, planned_ext: Optional[str]):
+    """Helper class for streaming writes to a temp file."""
+
+    def __init__(self, tmp_dir: str, planned_ext: str | None):
         self.tmp_dir = tmp_dir
         suffix = planned_ext or ""
         file_dir, self.tmp_path = tempfile.mkstemp(suffix=suffix, dir=tmp_dir)
         os.close(file_dir)
-        self._f = open(self.tmp_path, "wb")
-        self._labels = {}; self._metrics = {}
+        with open(self.tmp_path, "wb") as f:
+            self._f = f
+        self._labels = {}
+        self._metrics = {}
 
-    def write(self, chunk: bytes): 
+    def write(self, chunk: bytes):
         self._f.write(chunk)
 
-    def add_labels(self, labels: dict): 
+    def add_labels(self, labels: dict):
         self._labels.update(labels or {})
-    
-    def add_metrics(self, metrics: dict): 
+
+    def add_metrics(self, metrics: dict):
         self._metrics.update(metrics or {})
 
-    def close(self): 
-        if not self._f.closed: 
+    def close(self):
+        if not self._f.closed:
             self._f.close()
 
 
 class _Reader:
-    """ Helper class for reading from a file. """
+    """Helper class for reading from a file."""
+
     def __init__(self, path: str, f: BinaryIO):
         self._path, self._f = path, f
+
     def read(self, n: int = -1) -> bytes:
         return self._f.read(n)
+
     def as_local_path(self) -> str:
         return self._path
+
 
 class FileArtifactStoreSync:
     """
     Synchronous file-based artifact store.
-    """ 
+    """
+
     def __init__(self, base_dir: str):
         # base directory for content-addressed storage
         self.base_dir = os.path.abspath(base_dir)
@@ -101,27 +120,38 @@ class FileArtifactStoreSync:
         self._tmp_root = os.path.join(self.base_dir, "_tmp")
         os.makedirs(self._tmp_root, exist_ok=True)
 
-        self.last_artifact: Optional[Artifact] = None
+        self.last_artifact: Artifact | None = None
 
     @property
     def base_uri(self) -> str:
         return _to_file_uri(self.base_dir)
-    
+
     def tmp_path(self, suffix: str = "") -> str:
-        """ Return a temporary path for external tools to write to. """
+        """Return a temporary path for external tools to write to."""
         os.makedirs(self._tmp_root, exist_ok=True)
         fd, p = tempfile.mkstemp(suffix=suffix, dir=self._tmp_root)
         os.close(fd)
         return p
 
     def save_file(
-            self, path: str, *, kind: str, run_id: str, graph_id: str, node_id: str,
-            tool_name: str, tool_version: str, suggested_uri: Optional[str] = None,
-            pin: bool = False, labels: Optional[dict] = None, metrics: Optional[dict] = None,
-            preview_uri: Optional[str] = None, cleanup: bool = True
+        self,
+        path: str,
+        *,
+        kind: str,
+        run_id: str,
+        graph_id: str,
+        node_id: str,
+        tool_name: str,
+        tool_version: str,
+        suggested_uri: str | None = None,
+        pin: bool = False,
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        preview_uri: str | None = None,
+        cleanup: bool = True,
     ) -> Artifact:
         """
-        Save a file into content-addressed storage and return an Artifact record.   
+        Save a file into content-addressed storage and return an Artifact record.
         Args:
             path (str): The file path to save.
             kind (str): The kind of artifact.
@@ -138,9 +168,9 @@ class FileArtifactStoreSync:
 
         Returns:
             Artifact: The created Artifact object.
-        
+
             It computes the SHA-256 hash of the file, moves it into a content-addressed storage
-            structure, and optionally creates a "pretty" symlink if a suggested URI is provided. 
+            structure, and optionally creates a "pretty" symlink if a suggested URI is provided.
         """
         sha, nbytes = _sha256_file(path)  # compute hash + size
         ext = os.path.splitext(path)[1]
@@ -158,7 +188,9 @@ class FileArtifactStoreSync:
                 shutil.copy2(src_path, target)
             # 🔐 Only clean up if the source file lived DIRECTLY under _tmp (mkstemp case).
             # If it was inside a staged dir like _tmp/dir_xxx, DO NOT prune that dir here.
-            if cleanup and os.path.normcase(os.path.abspath(src_parent)) == os.path.normcase(os.path.abspath(self._tmp_root)):
+            if cleanup and os.path.normcase(os.path.abspath(src_parent)) == os.path.normcase(
+                os.path.abspath(self._tmp_root)
+            ):
                 _maybe_cleanup_tmp_parent(self._tmp_root, src_path)
 
         mime, _ = mimetypes.guess_type(target)
@@ -173,7 +205,6 @@ class FileArtifactStoreSync:
                     os.symlink(target, pretty)
                 except OSError:
                     shutil.copy2(target, pretty)
-        
 
         # ✅ Remove this unconditional cleanup (it could wipe staged dirs):
         # _maybe_cleanup_tmp_parent(self._tmp_root, path)
@@ -182,47 +213,78 @@ class FileArtifactStoreSync:
         os.makedirs(self._tmp_root, exist_ok=True)
 
         a = Artifact(
-            artifact_id=sha, uri=uri, kind=kind, bytes=nbytes, sha256=sha, mime=mime,
-            run_id=run_id, graph_id=graph_id, node_id=node_id, tool_name=tool_name, tool_version=tool_version,
-            created_at=_now_iso(), labels=labels or {}, metrics=metrics or {}, preview_uri=preview_uri, pinned=pin
+            artifact_id=sha,
+            uri=uri,
+            kind=kind,
+            bytes=nbytes,
+            sha256=sha,
+            mime=mime,
+            run_id=run_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            tool_name=tool_name,
+            tool_version=tool_version,
+            created_at=_now_iso(),
+            labels=labels or {},
+            metrics=metrics or {},
+            preview_uri=preview_uri,
+            pinned=pin,
         )
         self.last_artifact = a
         return a
-    
-    def save_text(
-            self, payload: str, *, suggested_uri: Optional[str] = None
-    ):
-        """ Save a text payload as an artifact. """
+
+    def save_text(self, payload: str, *, suggested_uri: str | None = None):
+        """Save a text payload as an artifact."""
         staged_path = self.tmp_path(suffix=".txt")
         with open(staged_path, "w", encoding="utf-8") as f:
             f.write(payload)
         a = self.save_file(
-            path=staged_path, kind="text", run_id="ad-hoc", graph_id="ad-hoc", node_id="ad-hoc",
-            tool_name="fs_store.save_text", tool_version="0.1.0",
-            suggested_uri=suggested_uri, cleanup=True
+            path=staged_path,
+            kind="text",
+            run_id="ad-hoc",
+            graph_id="ad-hoc",
+            node_id="ad-hoc",
+            tool_name="fs_store.save_text",
+            tool_version="0.1.0",
+            suggested_uri=suggested_uri,
+            cleanup=True,
         )
         return a
-        
-    def save_json(self, payload: str, *, suggested_uri: Optional[str] = None):
-        """ Save a JSON payload as an artifact. """
+
+    def save_json(self, payload: str, *, suggested_uri: str | None = None):
+        """Save a JSON payload as an artifact."""
         import json
+
         staged_path = self.tmp_path(suffix=".json")
         with open(staged_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
         a = self.save_file(
-            path=staged_path, kind="json", run_id="ad-hoc", graph_id="ad-hoc", node_id="ad-hoc",
-            tool_name="fs_store.save_json", tool_version="0.1.0",
-            suggested_uri=suggested_uri, cleanup=True
+            path=staged_path,
+            kind="json",
+            run_id="ad-hoc",
+            graph_id="ad-hoc",
+            node_id="ad-hoc",
+            tool_name="fs_store.save_json",
+            tool_version="0.1.0",
+            suggested_uri=suggested_uri,
+            cleanup=True,
         )
         return a
-        
+
     @contextmanager
     def open_writer(
-        self, *, kind: str, run_id: str, graph_id: str, node_id: str,
-        tool_name: str, tool_version: str, planned_ext: Optional[str] = None,
-        pin: bool = False
+        self,
+        *,
+        kind: str,
+        run_id: str,
+        graph_id: str,
+        node_id: str,
+        tool_name: str,
+        tool_version: str,
+        planned_ext: str | None = None,
+        pin: bool = False,
     ):
-        """ Context manager that yields a streaming ArtifactWriter. """
+        """Context manager that yields a streaming ArtifactWriter."""
         w = _Writer(self._tmp_root, planned_ext)
         try:
             yield w
@@ -237,10 +299,21 @@ class FileArtifactStoreSync:
                 _maybe_cleanup_tmp_parent(self._tmp_root, w.tmp_path)
             mime, _ = mimetypes.guess_type(target)
             a = Artifact(
-                artifact_id=sha, uri=_to_file_uri(target), kind=kind,
-                bytes=nbytes, sha256=sha, mime=mime, run_id=run_id, graph_id=graph_id,
-                node_id=node_id, tool_name=tool_name, tool_version=tool_version,
-                created_at=_now_iso(), labels=w._labels, metrics=w._metrics, pinned=pin
+                artifact_id=sha,
+                uri=_to_file_uri(target),
+                kind=kind,
+                bytes=nbytes,
+                sha256=sha,
+                mime=mime,
+                run_id=run_id,
+                graph_id=graph_id,
+                node_id=node_id,
+                tool_name=tool_name,
+                tool_version=tool_version,
+                created_at=_now_iso(),
+                labels=w._labels,
+                metrics=w._metrics,
+                pinned=pin,
             )
             # stash on the writer so caller can grab it after context exits
             w._artifact = a
@@ -248,39 +321,58 @@ class FileArtifactStoreSync:
         except Exception:
             try:
                 w.close()
-                if os.path.exists(w.tmp_path): os.remove(w.tmp_path)
+                if os.path.exists(w.tmp_path):
+                    os.remove(w.tmp_path)
             finally:
                 raise
 
     @contextmanager
     def open_reader(self, uri: str):
-        """ Context manager that yields an ArtifactReader for a given URI. """
+        """Context manager that yields an ArtifactReader for a given URI."""
         path = _from_uri_or_path(uri)
-        f = open(path, "rb")
-        try:
-            yield _Reader(path, f)
-        finally:
-            f.close()
+        if os.path.isdir(path):
+            raise IsADirectoryError(f"Expected file, got directory: {path}")
+        # use a 'with' so the file is closed automatically even if yield is interrupted
+        with open(path, "rb") as f:
+            yield _Reader(str(path), f)
 
     # --------------------- advanced flow for external tools ------------------
     def plan_staging_path(self, planned_ext: str = "") -> str:
         """Return a temp path that an external tool can write to directly."""
         os.makedirs(self._tmp_root, exist_ok=True)  # ensure _tmp exists
         return self.tmp_path(suffix=planned_ext)
-    
+
     def ingest_staged_file(
-        self, staged_path: str, *, kind: str, run_id: str, graph_id: str, node_id: str,
-        tool_name: str, tool_version: str, pin: bool=False, labels: Optional[dict]=None,
-        metrics: Optional[dict]=None, preview_uri: Optional[str]=None,
-        suggested_uri: Optional[str]=None
+        self,
+        staged_path: str,
+        *,
+        kind: str,
+        run_id: str,
+        graph_id: str,
+        node_id: str,
+        tool_name: str,
+        tool_version: str,
+        pin: bool = False,
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        preview_uri: str | None = None,
+        suggested_uri: str | None = None,
     ) -> Artifact:
         """Turn a staged file into a content-addressed artifact + (optional) pretty link."""
         return self.save_file(
-            path=staged_path, kind=kind, run_id=run_id, graph_id=graph_id, node_id=node_id,
-            tool_name=tool_name, tool_version=tool_version, suggested_uri=suggested_uri,
-            pin=pin, labels=labels, metrics=metrics, preview_uri=preview_uri
+            path=staged_path,
+            kind=kind,
+            run_id=run_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            tool_name=tool_name,
+            tool_version=tool_version,
+            suggested_uri=suggested_uri,
+            pin=pin,
+            labels=labels,
+            metrics=metrics,
+            preview_uri=preview_uri,
         )
-    
 
     def plan_staging_dir(self, suffix: str = "") -> str:
         """Return an empty directory path that an external tool can write into."""
@@ -302,13 +394,14 @@ class FileArtifactStoreSync:
         exclude: list[str] | None = None,
         index_children: bool = False,
         pin: bool = False,
-        labels: Optional[dict] = None,
-        metrics: Optional[dict] = None,
-        suggested_uri: Optional[str] = None,
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        suggested_uri: str | None = None,
         archive: bool = False,
         archive_name: str = "bundle.tar.gz",
         cleanup: bool = True,
-        store: str | None = None,  # NEW: "archive" | "copy" | "manifest"; None -> derive from 'archive'
+        store: str
+        | None = None,  # NEW: "archive" | "copy" | "manifest"; None -> derive from 'archive'
     ) -> Artifact:
         if not os.path.isdir(staged_dir):
             raise ValueError(f"ingest_directory: not a directory: {staged_dir}")
@@ -320,18 +413,22 @@ class FileArtifactStoreSync:
         cas_dir = _content_addr_dir_path(self.base_dir, tree_sha)
         manifest_path = os.path.join(cas_dir, "manifest.json")
         if not os.path.exists(manifest_path):
-            _write_json(manifest_path, {
-                "files": manifest_entries,
-                "created_at": _now_iso(),
-                "tool_name": tool_name,
-                "tool_version": tool_version,
-            })
+            _write_json(
+                manifest_path,
+                {
+                    "files": manifest_entries,
+                    "created_at": _now_iso(),
+                    "tool_name": tool_name,
+                    "tool_version": tool_version,
+                },
+            )
 
         archive_uri = None
         if store == "archive":
             archive_path = os.path.join(cas_dir, archive_name)
             if not os.path.exists(archive_path):
                 import tarfile
+
                 with tarfile.open(archive_path, mode="w:gz") as tar:
                     for e in sorted(manifest_entries, key=lambda x: x["path"]):
                         abs_file = os.path.join(staged_dir, e["path"])
@@ -349,7 +446,9 @@ class FileArtifactStoreSync:
 
         elif store == "manifest":
             if cleanup:
-                raise ValueError("store='manifest' with cleanup=True would lose bytes; set cleanup=False or use store='archive'/'copy'.")
+                raise ValueError(
+                    "store='manifest' with cleanup=True would lose bytes; set cleanup=False or use store='archive'/'copy'."
+                )
         else:
             raise ValueError(f"unknown store mode: {store}")
 
@@ -367,24 +466,32 @@ class FileArtifactStoreSync:
                 os.makedirs(pretty_dir, exist_ok=True)
                 pm = os.path.join(pretty_dir, "manifest.json")
                 if not os.path.exists(pm):
-                    try: os.symlink(manifest_path, pm)
-                    except OSError: shutil.copy2(manifest_path, pm)
+                    try:
+                        os.symlink(manifest_path, pm)
+                    except OSError:
+                        shutil.copy2(manifest_path, pm)
+
                 if store == "archive" and archive_uri:
                     pa = os.path.join(pretty_dir, archive_name)
                     if not os.path.exists(pa):
-                        src = archive_uri[len("file://"):]
-                        try: os.symlink(src, pa)
-                        except OSError: shutil.copy2(src, pa)
+                        src = archive_uri[len("file://") :]
+                        try:
+                            os.symlink(src, pa)
+                        except OSError:
+                            shutil.copy2(src, pa)
+
                 elif store == "copy":
                     # copy small files (under 1MB) for convenience
                     for e in manifest_entries:
-                        if e["bytes"] <= 1024*1024:
+                        if e["bytes"] <= 1024 * 1024:
                             src = os.path.join(cas_dir, "tree", e["path"])
                             dst = os.path.join(pretty_dir, e["path"])
                             os.makedirs(os.path.dirname(dst), exist_ok=True)
                             if not os.path.exists(dst):
-                                try: os.symlink(src, dst)
-                                except OSError: shutil.copy2(src, dst)
+                                try:
+                                    os.symlink(src, dst)
+                                except OSError:
+                                    shutil.copy2(src, dst)
 
         total_bytes = sum(e["bytes"] for e in manifest_entries)
         a = Artifact(
@@ -394,20 +501,28 @@ class FileArtifactStoreSync:
             bytes=total_bytes,
             sha256=tree_sha,
             mime="application/vnd.aethergraph.bundle+dir",
-            run_id=run_id, graph_id=graph_id, node_id=node_id,
-            tool_name=tool_name, tool_version=tool_version,
+            run_id=run_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            tool_name=tool_name,
+            tool_version=tool_version,
             created_at=_now_iso(),
-            labels=labels or {}, metrics=metrics or {}, preview_uri=archive_uri, pinned=pin
+            labels=labels or {},
+            metrics=metrics or {},
+            preview_uri=archive_uri,
+            pinned=pin,
         )
 
         self.last_artifact = a
 
         if cleanup and store in ("archive", "copy"):
-            try: shutil.rmtree(staged_dir, ignore_errors=True)
-            except Exception: pass
+            try:
+                shutil.rmtree(staged_dir, ignore_errors=True)
+            except Exception:
+                logger = logging.getLogger("aethergraph.services.artifacts.fs_store")
+                logger.warning(f"ingest_directory: failed to cleanup staged dir: {staged_dir}")
 
         return a
-    
 
     def cleanup_tmp(self, max_age_hours: int = 24):
         now = datetime.now(datetime.timezone.utc).timestamp()
@@ -415,8 +530,10 @@ class FileArtifactStoreSync:
             try:
                 age_h = (now - p.stat().st_mtime) / 3600.0
                 if age_h > max_age_hours:
-                    if p.is_file(): p.unlink(missing_ok=True)
-                    else: shutil.rmtree(p, ignore_errors=True)
+                    if p.is_file():
+                        p.unlink(missing_ok=True)
+                    else:
+                        shutil.rmtree(p, ignore_errors=True)
             except Exception:
                 pass
 
@@ -446,9 +563,8 @@ class FileArtifactStoreSync:
     ) -> Any:
         text = self.load_text(uri, encoding=encoding, errors=errors)
         return json.loads(text)
-    
-        
-    def load_artifact(self, uri: str) -> Union[str, bytes]:
+
+    def load_artifact(self, uri: str) -> str | bytes:
         """Load an artifact by URI.
 
         - If it's a directory, return the directory path as a string.
@@ -470,7 +586,7 @@ class FileArtifactStoreSync:
         if os.path.isdir(path):
             raise IsADirectoryError(f"Expected file, got directory: {path}")
         with open(path, "rb") as f:
-            return   f.read()
+            return f.read()
 
     def load_artifact_dir(self, uri: str) -> str:
         """Return the path when the artifact is a directory."""
@@ -478,7 +594,8 @@ class FileArtifactStoreSync:
         if not os.path.isdir(path):
             raise NotADirectoryError(f"Expected directory, got file: {path}")
         return path
-    
+
+
 class FSArtifactStore:  # implements AsyncArtifactStore
     def __init__(self, base_dir: str):
         self._sync = FileArtifactStoreSync(base_dir)
@@ -486,19 +603,19 @@ class FSArtifactStore:  # implements AsyncArtifactStore
     @property
     def base_uri(self) -> str:
         return self._sync.base_uri
-    
+
     def tmp_path(self, suffix: str = "") -> str:
         return self._sync.tmp_path(suffix=suffix)
 
     async def save_file(self, **kw) -> Any:
         return await to_thread(self._sync.save_file, **kw)
-    
+
     async def save_text(self, **kw) -> Any:
         return await to_thread(self._sync.save_text, **kw)
 
     async def save_json(self, **kw) -> Any:
         return await to_thread(self._sync.save_json, **kw)
-    
+
     async def open_writer(self, **kw):
         # Wrap the sync contextmanager so 'with' usage in Facade stays the same.
         # Return the sync contextmanager directly; user code runs inside with-block
@@ -519,13 +636,13 @@ class FSArtifactStore:  # implements AsyncArtifactStore
 
     async def load_bytes(self, uri: str) -> bytes:
         return await to_thread(self._sync.load_bytes, uri)
-    
+
     async def load_text(self, uri: str, *, encoding: str = "utf-8", errors: str = "strict") -> str:
         return await to_thread(self._sync.load_text, uri, encoding=encoding, errors=errors)
-    
+
     async def load_json(self, uri: str, *, encoding: str = "utf-8", errors: str = "strict") -> Any:
         return await to_thread(self._sync.load_json, uri, encoding=encoding, errors=errors)
-    
+
     async def load_artifact(self, uri: str):
         return await to_thread(self._sync.load_artifact, uri)
 
