@@ -8,14 +8,18 @@
 
 Use AetherGraph to prototype interactive assistants, simulation/optimization loops, data transforms, or multi‑step automations without boilerplate. It works **with or without LLMs**—bring your own tools and services, and compose them into repeatable, observable graphs.
 
+- **[Introduction](https://aiperture.io)**
+- **[Docs](https://aiperture.github.io/aethergraph-docs/)**
+- **[Examples](https://github.com/AIperture/aethergraph-examples)**
+
 ---
 
 ## Requirements
 
 * Python **3.10+**
 * macOS, Linux, or Windows
-* *(Optional)* LLM API keys (OpenAI, Anthropic, Google, etc.)
-* *(Optional extras)* `slack` adapter
+* *(Suggested)* LLM API keys (OpenAI, Anthropic, Google, etc.)
+* *(Optional extras)* `slack` or `telegram` token. See [Channel Setup](https://aiperture.github.io/aethergraph-docs/channel-setup/introduction/)
 
 ---
 
@@ -53,9 +57,9 @@ echo "(optional)" && pip install -e ".[slack,dev]"
 
 ---
 
-## Configure (optional)
+## Configure
 
-Most examples run without an LLM, but for LLM‑backed flows set keys via environment variables or a local secrets file.
+Aethergraph can run without an LLM, but for many LLM‑backed flows in [examples](https://github.com/AIperture/aethergraph-examples), set keys via environment variables or a local secrets file.
 
 Minimal example (OpenAI):
 
@@ -87,38 +91,18 @@ See our docs for setup of **external channel** methods for real-time interaction
 
 ---
 
-## Quickstart (60 seconds)
-
-1. Verify install:
+## Verify install
 
 ```bash
 python -c "import aethergraph; print('AetherGraph OK, version:', getattr(aethergraph, '__version__', 'dev'))"
 ```
 
-2. Run a minimal graph:
-
-```bash
-python - <<'PY'
-from aethergraph import graph_fn, NodeContext
-from aethergraph.runner import run 
-
-@graph_fn(name="hello_world")
-async def hello_world(context: NodeContext):
-    print("Hello from AetherGraph!")
-    return {"ok": True}
-
-run(hello_world)
-PY
-```
 
 ---
 
 ## Examples
 
-Quick‑start scripts live under `examples/` in this repo. A growing gallery of standalone examples will be published at:
-
-* **Repo:** [https://github.com/AIperture/aethergraph-examples](https://github.com/AIperture/aethergraph-examples)
-* **Path:** `examples/`
+Quick‑start scripts live under `examples/` in this repo. 
 
 Run an example:
 
@@ -126,6 +110,10 @@ Run an example:
 cd examples
 python hello_world.py
 ```
+
+A growing gallery of standalone examples and recipes lives under:
+
+* **Repo:** [https://github.com/AIperture/aethergraph-examples](https://github.com/AIperture/aethergraph-examples)
 
 ---
 
