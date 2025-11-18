@@ -14,6 +14,49 @@ from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persis
 from aethergraph.services.artifacts.fs_store import FileArtifactStoreSync
 from aethergraph.services.rag.facade import RAGFacade
 
+"""
+MemoryFacade coordinates core memory services for a specific run/session.
+
+          ┌───────────────────────────┐
+          │      Agent / Graph        │
+          │  (tools, flows, chat)     │
+          └───────────┬───────────────┘
+                      │  emits Event
+                      ▼
+               ┌─────────────────┐
+               │   MemoryFacade  │
+               │ (per run_id)    │
+               └───────┬─────────┘
+        record_raw/record/write_result
+                      │
+       ┌──────────────┼─────────────────┐
+       ▼              ▼                 ▼
+┌────────────┐  ┌─────────────┐   ┌──────────────┐
+│   HotLog   │  │ FSPersistence│   │   Indices    │
+│  (KV ring) │  │ (JSONL, FS) │   │ (name/topic) │
+└────┬───────┘  └──────┬──────┘   └──────┬───────┘
+     │                │                 │
+     │                │ distillers read │
+     │                ▼                 │
+     │       ┌───────────────────┐      │
+     │       │  Distillers       │      │
+     │       │  (LongTerm, LLM)  │      │
+     │       └─────────┬─────────┘      │
+     │                 │                │
+     │     save_json() │                │ update()
+     │                 ▼                │
+     │        ┌─────────────────────┐   │
+     │        │ Summary JSON (FS)   │   │
+     │        └─────────────────────┘   │
+     │                 │                │
+     │                 │ (optional)     │
+     │                 ▼                │
+     │         ┌────────────────────┐   │
+     └────────▶│ Summary Event      │◀──┘
+               │ (kind=long_term_*) │
+               └────────────────────┘
+"""
+
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -113,7 +156,6 @@ class MemoryFacade:
         run_id: str,
         graph_id: str | None,
         node_id: str | None,
-        agent_id: str | None,
         hotlog: HotLog,
         persistence: Persistence,
         indices: Indices,
@@ -128,7 +170,6 @@ class MemoryFacade:
         self.run_id = run_id
         self.graph_id = graph_id
         self.node_id = node_id
-        self.agent_id = agent_id
         self.hotlog = hotlog
         self.persistence = persistence
         self.indices = indices
@@ -146,36 +187,21 @@ class MemoryFacade:
         *,
         base: dict[str, Any],
         text: str | None = None,
-        metrics: dict[str, Any] | None = None,
-        sources: list[str] | None = None,
+        metrics: dict[str, float] | None = None,
     ) -> Event:
-        """
-        Append a normalized event to HotLog (fast) and Persistence (durable).
-
-        - `base` carries identity + classification:
-            { kind, stage, severity, tool, tags, entities, inputs, outputs, ... }
-          The façade stamps missing scope with  (run_id, graph_id, node_id, agent_id).
-        - `text`  : optional human-readable note/message
-        - `metrics`: optional numeric map (latency, token counts, costs, etc.)
-        - `sources`: optional list of event_ids this event summarizes/derives from
-
-        Returns the Event (with stable event_id and computed `signal`).
-
-        Notes:
-        - We compute a lightweight “signal” score if caller didn’t set one.
-        - We DO NOT update `indices` here automatically; only `write_result(...)` does that,
-          because indices are tuned for typed outputs (Value[]). You can call `indices.update`
-          yourself if you need to index from a raw event.
-        """
         ts = now_iso()
+
         base.setdefault("run_id", self.run_id)
         base.setdefault("graph_id", self.graph_id)
         base.setdefault("node_id", self.node_id)
-        base.setdefault("agent_id", self.agent_id)
+
         severity = int(base.get("severity", 2))
         signal = base.get("signal")
         if signal is None:
             signal = self._estimate_signal(text=text, metrics=metrics, severity=severity)
+
+        # ensure kind is always present
+        kind = base.get("kind") or "misc"
 
         eid = stable_event_id(
             {
@@ -183,109 +209,141 @@ class MemoryFacade:
                 "run_id": base["run_id"],
                 "graph_id": base.get("graph_id"),
                 "node_id": base.get("node_id"),
-                "agent_id": base.get("agent_id"),
                 "tool": base.get("tool"),
-                "kind": base.get("kind"),
+                "kind": kind,
                 "stage": base.get("stage"),
                 "severity": severity,
                 "text": (text or "")[:6000],
                 "metrics_present": bool(metrics),
-                "sources": sources or [],
             }
         )
 
-        evt = Event(event_id=eid, ts=ts, text=text, metrics=metrics, signal=signal, **base)
+        evt = Event(
+            event_id=eid,
+            ts=ts,
+            run_id=base["run_id"],
+            kind=kind,
+            stage=base.get("stage"),
+            text=text,
+            tags=base.get("tags"),
+            data=base.get("data"),
+            metrics=metrics,
+            graph_id=base.get("graph_id"),
+            node_id=base.get("node_id"),
+            tool=base.get("tool"),
+            topic=base.get("topic"),
+            severity=severity,
+            signal=signal,
+            inputs=base.get("inputs"),
+            outputs=base.get("outputs"),
+            embedding=base.get("embedding"),
+            pii_flags=base.get("pii_flags"),
+            version=2,
+        )
+
         await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
         await self.persistence.append_event(self.run_id, evt)
-
-        # cheap per-kind index (kv_index_key) – optional to keep:
-        # await kv.list_append_unique(f"mem:{self.run_id}:idx:{base.get('kind','misc')}", [{"id": eid}], id_key="id", ttl_s=self.hot_ttl_s)
-
         return evt
 
     async def record(
         self,
-        kind,
-        data,
-        tags=None,
-        entities=None,
-        severity=2,
-        stage=None,
+        kind: str,
+        data: Any,
+        tags: list[str] | None = None,
+        severity: int = 2,
+        stage: str | None = None,
         inputs_ref=None,
         outputs_ref=None,
-        metrics=None,
-        sources=None,
-        signal=None,
+        metrics: dict[str, float] | None = None,
+        signal: float | None = None,
     ) -> Event:
         """
         Convenience wrapper around record_raw() with common fields.
 
-        Parameters:
-        - kind       : event kind (e.g., "user_msg", "tool_call", etc.)
-        - data       : json-serializable text content (will be stringified)
-        - tags       : optional list of string tags
-        - entities   : optional list of entity IDs
-        - severity   : integer severity (1=low ... 5=high)
-        - stage      : optional stage label (e.g., "observe", "act", etc.)
-        - inputs_ref : optional typed input references (e.g., List[Value] dicts)
-        - outputs_ref: optional typed output references (e.g., List[Value] dicts)
-        - metrics    : optional numeric map (latency, token counts, costs, etc.)
-        - sources    : optional list of event_ids this event summarizes/derives from
-        - signal     : optional float signal score (0.0–1.0); if None, computed heuristically
-
-        Returns the Event.
+        - kind     : logical kind (e.g. "user_msg", "tool_call", "chat_turn")
+        - data     : JSON-serializable content, or string
+        - tags     : optional list of labels
+        - severity : 1=low, 2=medium, 3=high
+        - stage    : optional stage (user/assistant/system/etc.)
+        - inputs_ref / outputs_ref : optional Value[] references
+        - metrics  : numeric map (latency, tokens, etc.)
+        - signal   : optional override for signal strength
         """
-        # if data is not a json-serializable string, log warning and log as json string
-        text = None
+        # 1) derive short preview text
+        text: str | None = None
         if data is not None:
             if isinstance(data, str):
                 text = data
             else:
                 try:
-                    text = json.dumps(data, ensure_ascii=False)
+                    raw = json.dumps(data, ensure_ascii=False)
+                    text = raw
                 except Exception as e:
                     text = f"<unserializable data: {e!s}>"
                     if self.logger:
                         self.logger.warning(text)
-        base = dict(
+
+        # 2) optionally truncate preview text (enforce token discipline)
+        if text and len(text) > 2000:
+            text = text[:2000] + " …[truncated]"
+
+        # 3) full structured payload in Event.data when possible
+        data_field: dict[str, Any] | None = None
+        if isinstance(data, dict):
+            data_field = data
+        elif data is not None and not isinstance(data, str):
+            # store under "value" if it's JSON-serializable
+            try:
+                json.dumps(data, ensure_ascii=False)
+                data_field = {"value": data}
+            except Exception:
+                data_field = {"repr": repr(data)}
+
+        base: dict[str, Any] = dict(
             kind=kind,
             stage=stage,
             severity=severity,
             tags=tags or [],
-            entities=entities or [],
+            data=data_field,
             inputs=inputs_ref,
             outputs=outputs_ref,
         )
-        return await self.record_raw(base=base, text=text, metrics=metrics, sources=sources)
+        if signal is not None:
+            base["signal"] = signal
+
+        return await self.record_raw(base=base, text=text, metrics=metrics)
 
     async def write_result(
         self,
         *,
-        topic: str,
+        tool: str,
         inputs: list[dict[str, Any]] | None = None,
         outputs: list[dict[str, Any]] | None = None,
         tags: list[str] | None = None,
         metrics: dict[str, float] | None = None,
         message: str | None = None,
         severity: int = 3,
+        topic: str | None = None,  # alias for tool, backwards compatibility
     ) -> Event:
         """
         Convenience for recording a “tool/agent/flow result” with typed I/O.
 
-        Why this exists:
-        - Creates a normalized `tool_result` event.
-        - Updates `indices` with latest-by-name, latest-ref-by-kind, and last outputs-by-topic.
-        - Keeps raw event appends (HotLog + Persistence) consistent.
-
-        `topic`   : tool/agent/flow identifier (used by indices.last_outputs_by_topic)
-        `inputs`  : List[Value]
-        `outputs` : List[Value]  <-- indices derive from these
+        `tool`    : tool/agent/flow identifier (also used by KVIndices.last_outputs_by_topic)
+        `inputs`  : List[Value]-like dicts
+        `outputs` : List[Value]-like dicts
+        `tags`    : labels like ["rag","qa"] for filtering/search
         """
+        if tool is None and topic is not None:
+            tool = topic
+        if tool is None:
+            raise ValueError("write_result requires a 'tool' (or legacy 'topic') name")
+
         inputs = inputs or []
         outputs = outputs or []
+
         evt = await self.record_raw(
             base=dict(
-                tool=topic,
+                tool=tool,
                 kind="tool_result",
                 severity=severity,
                 tags=tags or [],
@@ -303,50 +361,194 @@ class MemoryFacade:
         """Return recent events from HotLog (most recent last), optionally filtered by kind."""
         return await self.hotlog.recent(self.run_id, kinds=kinds, limit=limit)
 
-    async def recent_data(self, *, kinds: list[str], limit: int = 50) -> list[Any]:
-        """
-        Convenience wrapper around `recent()` that returns decoded `data`
-        instead of raw Event objects.
-
-        Works with the same JSON-in-text convention as `record()`.
-        """
+    async def recent_data(
+        self,
+        *,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[Any]:
         evts = await self.recent(kinds=kinds, limit=limit)
-        out = []
-        for evt in evts:
-            if not evt.text:
-                continue
-            try:
-                out.append(json.loads(evt.text))
-            except Exception:
-                out.append(evt.text)
+        if tags:
+            want = set(tags)
+            evts = [e for e in evts if want.issubset(set(e.tags or []))]
+
+        out: list[Any] = []
+        for e in evts:
+            if e.data is not None:
+                out.append(e.data)
+            elif e.text:
+                # last-resort: treat text as JSON if it looks like it, else raw string
+                t = e.text.strip()
+                if (t.startswith("{") and t.endswith("}")) or (
+                    t.startswith("[") and t.endswith("]")
+                ):
+                    try:
+                        out.append(json.loads(t))
+                        continue
+                    except Exception:
+                        pass
+                out.append(e.text)
         return out
 
     async def last_by_name(self, name: str):
         """Return the last output value by `name` from Indices (fast path)."""
         return await self.indices.last_by_name(self.run_id, name)
 
-    async def latest_refs_by_kind(self, kind: str, *, limit: int = 50):
-        """Return latest ref outputs by ref.kind (fast path, KV-backed)."""
-        return await self.indices.latest_refs_by_kind(self.run_id, kind, limit=limit)
-
     async def last_outputs_by_topic(self, topic: str):
         """Return the last output map for a given topic (tool/flow/agent) from Indices."""
         return await self.indices.last_outputs_by_topic(self.run_id, topic)
 
-    # alias for easy readability for users
-    async def get_last_value(self, name: str):
-        """Alias for last_by_name()."""
-        return await self.last_by_name(name)
+    # replace last_tool_result_outputs
+    async def last_tool_result_outputs(self, tool: str) -> dict[str, Any] | None:
+        """
+        Convenience wrapper around KVIndices.last_outputs_by_topic for this run.
+        Returns the last outputs map for a given tool, or None.
+        """
+        return await self.indices.last_outputs_by_topic(self.run_id, tool)
 
-    async def get_latest_values_by_kind(self, kind: str, *, limit: int = 50):
-        """Alias for latest_refs_by_kind()."""
-        return await self.latest_refs_by_kind(kind, limit=limit)
+    async def recent_tool_results(
+        self,
+        *,
+        tool: str | None = None,
+        tags: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[Event]:
+        """
+        Return recent tool_result events from HotLog, optionally filtered by tool name and tags.
+        """
+        events = await self.recent(kinds=["tool_result"], limit=limit)
+        if tool is not None:
+            events = [e for e in events if e.tool == tool]
+        if tags:
+            want = set(tags)
+            events = [e for e in events if want.issubset(set(e.tags or []))]
+        return events
 
-    async def get_last_outputs_for_topic(self, topic: str):
-        """Alias for last_outputs_by_topic()."""
-        return await self.last_outputs_by_topic(topic)
+    async def latest_refs_by_kind(self, kind: str, *, limit: int = 50):
+        """Return latest ref outputs by ref.kind (fast path, KV-backed)."""
+        raise NotImplementedError
+        return await self.indices.latest_refs_by_kind(self.run_id, kind, limit=limit)
+
+    async def search(
+        self,
+        *,
+        query: str,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int = 100,
+        use_embedding: bool = True,
+    ) -> list[Event]:
+        """
+        Search recent events by lexical matching and optional embedding similarity.
+        - kinds: optional filter by event kinds
+        - tags: optional filter by tags (AND semantics)
+        - limit: max number of results to return
+        - use_embedding: whether to use embedding-based ranking (requires LLM client)
+
+        NOTE: This is an in-memory scan of recent events. No indexing is done yet.
+        """
+        events = await self.recent(kinds=kinds, limit=limit)
+        if tags:
+            want = set(tags)
+            events = [e for e in events if want.issubset(set(e.tags or []))]
+
+        query_l = query.lower()
+
+        # 1) simple fallback: lexical
+        lexical_hits = [e for e in events if (e.text or "").lower().find(query_l) >= 0]
+
+        if not use_embedding:
+            return lexical_hits or events
+
+        raise NotImplementedError("Embedding-based search not implemented yet")
+
+        # 2) optional: embedding-based ranking (if you embed query + have e.embedding) [stub]
+        if not (self.llm and any(e.embedding for e in events)):
+            return lexical_hits or events
+
+        q_emb = await self.llm.embed(query)  # TODO: adapt to LLMClientProtocol
+
+        # compute cosine similarity in Python for now
+        def sim(e: Event) -> float:
+            if not e.embedding:
+                return -1.0
+            # naive dot product
+            return sum(a * b for a, b in zip(q_emb, e.embedding, strict=False))
+
+        scored = sorted(events, key=sim, reverse=True)
+        return scored[:limit]
 
     # ---------- distillation (plug strategies) ----------
+
+    # ---------- distillation helpers ----------
+    async def distill_long_term(
+        self,
+        *,
+        summary_tag: str = "session",
+        summary_kind: str = "long_term_summary",
+        include_kinds: list[str] | None = None,
+        include_tags: list[str] | None = None,
+        max_events: int = 200,
+        min_signal: float | None = None,
+        use_llm: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Run the generic LongTermSummarizer over this run's memory and persist a summary.
+
+        Returns a descriptor like:
+          {
+            "uri": "file://mem/<run_id>/summaries/<tag>/<ts>.json",
+            "summary_kind": "...",
+            "summary_tag": "...",
+            "time_window": {...},
+            "num_events": N,
+          }
+
+        This is suitable for:
+          - soft re-hydration (load summary into a new run),
+          - RAG promotion,
+          - or analytics.
+        """
+        if use_llm:
+            if not self.llm:
+                raise RuntimeError("LLM client not configured in MemoryFacade for LLM distillation")
+            from aethergraph.services.memory.distillers.llm_long_term import LLMLongTermSummarizer
+
+            d = LLMLongTermSummarizer(
+                llm=self.llm,
+                summary_kind=summary_kind,
+                summary_tag=summary_tag,
+                include_kinds=include_kinds,
+                include_tags=include_tags,
+                max_events=max_events,
+                min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
+            )
+            return await d.distill(
+                self.run_id,
+                hotlog=self.hotlog,
+                persistence=self.persistence,
+                indices=self.indices,
+            )
+
+        from aethergraph.services.memory.distillers.long_term import LongTermSummarizer
+
+        # non-LLM path -- structured digest
+        d = LongTermSummarizer(
+            summary_kind=summary_kind,
+            summary_tag=summary_tag,
+            include_kinds=include_kinds,
+            include_tags=include_tags,
+            max_events=max_events,
+            min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
+        )
+        return await d.distill(
+            self.run_id,
+            hotlog=self.hotlog,
+            persistence=self.persistence,
+            indices=self.indices,
+        )
+
     async def distill_rolling_chat(
         self,
         *,
@@ -354,6 +556,7 @@ class MemoryFacade:
         min_signal: float | None = None,
         turn_kinds: list[str] | None = None,
     ) -> dict[str, Any]:
+        raise NotImplementedError
         """
         Build a rolling chat summary from recent user/assistant turns.
         - Reads from HotLog; may emit a JSON summary via Persistence.
@@ -381,6 +584,7 @@ class MemoryFacade:
         - Reads from HotLog/Persistence, writes back a summary JSON (and optionally CAS bundle).
         - Returns descriptor (e.g., { "uri": ..., "sources": [...], "metrics": {...} }).
         """
+        raise NotImplementedError
         from aethergraph.services.memory.distillers.episode import EpisodeSummarizer
 
         d = EpisodeSummarizer(
@@ -631,3 +835,93 @@ class MemoryFacade:
             severity=2,
         )
         return ans
+
+    async def load_last_summary(
+        self,
+        *,
+        summary_tag: str = "session",
+    ) -> dict[str, Any] | None:
+        """
+        Soft-hydrate helper:
+
+        Load the most recent JSON summary for this run_id and tag, without replaying
+        all events. This is intended for use at the beginning of a new run/session
+        to recall prior context in a compact way.
+
+        NOTE: This currently assumes FSPersistence as the underlying implementation.
+        """
+        import asyncio
+        import glob
+
+        from aethergraph.services.memory.persist_fs import (
+            FSPersistence,  # adjust import path if needed
+        )
+
+        if not isinstance(self.persistence, FSPersistence):
+            self.logger and self.logger.warning(
+                "load_last_summary: persistence is not FSPersistence; cannot load summary"
+            )
+            return None
+
+        base_dir = self.persistence.base_dir
+        pattern = os.path.join(
+            base_dir,
+            "mem",
+            self.run_id,
+            "summaries",
+            summary_tag,
+            "*.json",
+        )
+
+        def _load_latest() -> dict[str, Any] | None:
+            paths = sorted(glob.glob(pattern))
+            if not paths:
+                return None
+            latest = paths[-1]  # filenames contain ISO-ish ts, so lexicographic works
+            with open(latest, encoding="utf-8") as f:
+                return json.load(f)
+
+        return await asyncio.to_thread(_load_latest)
+
+    async def soft_hydrate_last_summary(
+        self,
+        *,
+        summary_tag: str = "session",
+        summary_kind: str = "long_term_summary",
+    ) -> dict[str, Any] | None:
+        """
+        Load the last summary JSON for this tag (if any) and log a small hydrate Event
+        into the current run's HotLog. Returns the loaded summary dict, or None.
+        """
+        summary = await self.load_last_summary(summary_tag=summary_tag)
+        if not summary:
+            return None
+
+        text = summary.get("text") or ""
+        preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
+
+        evt = Event(
+            event_id=stable_event_id(
+                {
+                    "ts": now_iso(),
+                    "run_id": self.run_id,
+                    "kind": f"{summary_kind}_hydrate",
+                    "summary_tag": summary_tag,
+                    "preview": preview[:200],
+                }
+            ),
+            ts=now_iso(),
+            run_id=self.run_id,
+            kind=f"{summary_kind}_hydrate",
+            stage="hydrate",
+            text=preview,
+            tags=["summary", "hydrate", summary_tag],
+            data={"summary": summary},
+            metrics={"num_events": summary.get("num_events", 0)},
+            severity=1,
+            signal=0.4,
+        )
+
+        await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
+        await self.persistence.append_event(self.run_id, evt)
+        return summary

@@ -58,13 +58,11 @@ class MemoryFactory:
         *,
         graph_id: str | None = None,
         node_id: str | None = None,
-        agent_id: str | None = None,
     ) -> MemoryFacade:
         return MemoryFacade(
             run_id=run_id,
             graph_id=graph_id,
             node_id=node_id,
-            agent_id=agent_id,
             hotlog=self.hotlog,
             persistence=self.persistence,
             indices=self.indices,
