@@ -318,7 +318,7 @@ class MemoryFacade:
     async def write_result(
         self,
         *,
-        tool: str,
+        tool: str | None = None,  # back compatibility with 'topic'
         inputs: list[dict[str, Any]] | None = None,
         outputs: list[dict[str, Any]] | None = None,
         tags: list[str] | None = None,
