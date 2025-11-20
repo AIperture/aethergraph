@@ -47,7 +47,7 @@ class MemoryFactory:
     artifacts: AsyncArtifactStore
     hot_limit: int = 1000
     hot_ttl_s: int = 7 * 24 * 3600
-    default_signal_threshold: float = 0.25
+    default_signal_threshold: float = 0.0
     logger: Any | None = None
     llm_service: Any | None = None  # LLMService
     rag_facade: Any | None = None  # RAGFacade
@@ -58,13 +58,11 @@ class MemoryFactory:
         *,
         graph_id: str | None = None,
         node_id: str | None = None,
-        agent_id: str | None = None,
     ) -> MemoryFacade:
         return MemoryFacade(
             run_id=run_id,
             graph_id=graph_id,
             node_id=node_id,
-            agent_id=agent_id,
             hotlog=self.hotlog,
             persistence=self.persistence,
             indices=self.indices,

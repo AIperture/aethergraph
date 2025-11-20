@@ -17,29 +17,37 @@ EventKind = Literal[
 
 @dataclass
 class Event:
+    # --------- Core fields ---------
     event_id: str
     ts: str
     run_id: str
+
+    # --------- Core semantics ---------
+    kind: EventKind = None  # logical type: "chat_user", "tool_start", etc.
+    stage: str | None = None  # optional phase (user/assistant/system/tool, etc.)
+    text: str | None = None  # primary human-readable content (short, truncated)
+    tags: list[str] | None = None  # low-cardinality labels for filtering/searching
+    data: dict[str, Any] | None = None  # arbitrary JSON payload for event-specific data
+    metrics: dict[str, float] | None = None  # numeric metrics associated with event
+
+    # --------- Node context ---------
     graph_id: str | None = None
     node_id: str | None = None
-    agent_id: str | None = None
+
+    # --------- Optional fields ---------
     tool: str | None = None  # now used for tool topic: TODO: rename to topic in future
-    kind: EventKind = "tool_result"
-    stage: str | None = None
-    severity: int = 2
-    signal: float = 0.0
-    tags: list[str] | None = None
-    entities: list[str] | None = None
-    inputs: list[Value] | None = None
-    outputs: list[Value] | None = None
-    inputs_ref: dict[str, Any] | None = None
-    outputs_ref: dict[str, Any] | None = None
-    metrics: dict[str, float] | None = None
-    text: str | None = None
-    embedding: list[float] | None = None
+    topic: str | None = None
+    severity: int = 2  # 1=low, 2=medium, 3=high
+    signal: float = 0.0  # signal strength of the event (estimated importance or relevance)
+    inputs: list[Value] | None = None  # optional I/O values of the event
+    outputs: list[Value] | None = None  # optional I/O values of the event
+
+    # --------- Advanced fields ---------
+    embedding: list[float] | None = None  # reserved for vector embeddings
     pii_flags: dict[str, bool] | None = None
-    sources: list[str] | None = None
-    version: int = 1  # for schema evolution
+
+    # --------- Schema versioning ---------
+    version: int = 2  # for schema evolution
 
 
 class HotLog(Protocol):
@@ -52,6 +60,7 @@ class HotLog(Protocol):
 class Persistence(Protocol):
     async def append_event(self, run_id: str, evt: Event) -> None: ...
     async def save_json(self, uri: str, obj: dict[str, Any]) -> None: ...
+    async def load_json(self, uri: str) -> dict[str, Any]: ...
 
 
 class Indices(Protocol):

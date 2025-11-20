@@ -104,7 +104,6 @@ class RuntimeEnv:
             "run_id": self.run_id,
             "graph_id": self.graph_id,
             "node_id": node.node_id,
-            "agent_id": getattr(node, "tool_name", None),
             "tags": [],
             "entities": [],
         }
@@ -112,7 +111,6 @@ class RuntimeEnv:
             run_id=self.run_id,
             graph_id=self.graph_id,
             node_id=node.node_id,
-            agent_id=defaults["agent_id"],
         )
 
         from aethergraph.services.artifacts.facade import ArtifactFacade

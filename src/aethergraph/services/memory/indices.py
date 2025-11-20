@@ -12,8 +12,12 @@ def idx_by_name(run_id: str) -> str:
     return f"mem:{run_id}:idx2:name"
 
 
+# def idx_by_topic(run_id: str) -> str:
+#     return f"mem:{run_id}:idx2:topic"
+
+
 def idx_by_topic(run_id: str) -> str:
-    return f"mem:{run_id}:idx2:topic"
+    return f"mem:{run_id}:idx2:tool"
 
 
 class KVIndices(Indices):
