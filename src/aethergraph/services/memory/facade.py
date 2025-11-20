@@ -162,7 +162,8 @@ class MemoryFacade:
         artifact_store: FileArtifactStoreSync,
         hot_limit: int = 1000,
         hot_ttl_s: int = 7 * 24 * 3600,
-        default_signal_threshold: float = 0.25,
+        default_signal_threshold: float = 0.0,
+        memory_scope_id: str | None = None,  # determines scope for sticky storage
         logger=None,
         rag: RAGFacade | None = None,
         llm: LLMClientProtocol | None = None,
@@ -177,6 +178,7 @@ class MemoryFacade:
         self.hot_limit = hot_limit
         self.hot_ttl_s = hot_ttl_s
         self.default_signal_threshold = default_signal_threshold
+        self.memory_scope_id = memory_scope_id
         self.logger = logger
         self.rag = rag
         self.llm = llm  # optional LLM service for RAG answering, etc.
@@ -356,6 +358,30 @@ class MemoryFacade:
         await self.indices.update(self.run_id, evt)
         return evt
 
+    async def write_tool_result(
+        self,
+        *,
+        tool: str,
+        inputs: list[dict[str, Any]] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        metrics: dict[str, float] | None = None,
+        message: str | None = None,
+        severity: int = 3,
+    ) -> Event:
+        """
+        Convenience wrapper around write_result() for tool results.
+        """
+        return await self.write_result(
+            tool=tool,
+            inputs=inputs,
+            outputs=outputs,
+            tags=tags,
+            metrics=metrics,
+            message=message,
+            severity=severity,
+        )
+
     # ---------- retrieval ----------
     async def recent(self, *, kinds: list[str] | None = None, limit: int = 50) -> list[Event]:
         """Return recent events from HotLog (most recent last), optionally filtered by kind."""
@@ -394,6 +420,13 @@ class MemoryFacade:
     async def last_by_name(self, name: str):
         """Return the last output value by `name` from Indices (fast path)."""
         return await self.indices.last_by_name(self.run_id, name)
+
+    async def last_output_by_name(self, name: str):
+        """Return the last output value (Value.value) by `name` from Indices (fast path)."""
+        out = await self.indices.last_by_name(self.run_id, name)
+        if out is None:
+            return None
+        return out.get("value")  # type: ignore
 
     async def last_outputs_by_topic(self, topic: str):
         """Return the last output map for a given topic (tool/flow/agent) from Indices."""
@@ -484,6 +517,7 @@ class MemoryFacade:
     # ---------- distillation helpers ----------
     async def distill_long_term(
         self,
+        scope_id: str | None = None,
         *,
         summary_tag: str = "session",
         summary_kind: str = "long_term_summary",
@@ -526,6 +560,7 @@ class MemoryFacade:
             )
             return await d.distill(
                 self.run_id,
+                scope_id=scope_id or self.memory_scope_id,
                 hotlog=self.hotlog,
                 persistence=self.persistence,
                 indices=self.indices,
@@ -544,59 +579,66 @@ class MemoryFacade:
         )
         return await d.distill(
             self.run_id,
+            scope_id=scope_id or self.memory_scope_id,
             hotlog=self.hotlog,
             persistence=self.persistence,
             indices=self.indices,
         )
 
-    async def distill_rolling_chat(
+    async def distill_meta_summary(
         self,
+        scope_id: str | None = None,
         *,
-        max_turns: int = 20,
+        source_kind: str = "long_term_summary",
+        source_tag: str = "session",
+        summary_kind: str = "meta_summary",
+        summary_tag: str = "meta",
+        max_summaries: int = 20,
         min_signal: float | None = None,
-        turn_kinds: list[str] | None = None,
-    ) -> dict[str, Any]:
-        raise NotImplementedError
-        """
-        Build a rolling chat summary from recent user/assistant turns.
-        - Reads from HotLog; may emit a JSON summary via Persistence.
-        - Uses `default_signal_threshold` unless overridden.
-        - Returns a small descriptor (e.g., { "uri": ..., "sources": [...], ... }).
-
-        For turn_kinds, default to ["user_msg","assistant_msg"] if not provided.
-        """
-        from aethergraph.services.memory.distillers.rolling import RollingSummarizer
-
-        d = RollingSummarizer(
-            max_turns=max_turns,
-            min_signal=min_signal or self.default_signal_threshold,
-            turn_kinds=turn_kinds,
-        )
-        return await d.distill(
-            self.run_id, hotlog=self.hotlog, persistence=self.persistence, indices=self.indices
-        )
-
-    async def distill_episode(
-        self, *, tool: str, run_id: str, include_metrics: bool = True
+        use_llm: bool = True,
     ) -> dict[str, Any]:
         """
-        Summarize a tool/agent episode (all events for a given run_id+tool).
-        - Reads from HotLog/Persistence, writes back a summary JSON (and optionally CAS bundle).
-        - Returns descriptor (e.g., { "uri": ..., "sources": [...], "metrics": {...} }).
-        """
-        raise NotImplementedError
-        from aethergraph.services.memory.distillers.episode import EpisodeSummarizer
+        Run an LLM-based meta summarizer over existing summary events.
 
-        d = EpisodeSummarizer(
-            include_metrics=include_metrics,
+        Typical usage:
+          - source_kind="long_term_summary", source_tag="session"
+          - summary_kind="meta_summary",    summary_tag="weekly" or "meta"
+
+        Returns a descriptor like:
+          {
+            "uri": "file://mem/<scope_id>/summaries/<summary_tag>/<ts>.json",
+            "summary_kind": "...",
+            "summary_tag": "...",
+            "time_window": {...},
+            "num_source_summaries": N,
+          }
+        """
+        if not use_llm:
+            # Placeholder for a future non-LLM meta summarizer if desired.
+            raise NotImplementedError("Non-LLM meta summarization is not implemented yet")
+
+        if not self.llm:
+            raise RuntimeError("LLM client not configured in MemoryFacade for meta distillation")
+
+        from aethergraph.services.memory.distillers.llm_meta_summary import (
+            LLMMetaSummaryDistiller,
+        )
+
+        d = LLMMetaSummaryDistiller(
+            llm=self.llm,
+            source_kind=source_kind,
+            source_tag=source_tag,
+            summary_kind=summary_kind,
+            summary_tag=summary_tag,
+            max_summaries=max_summaries,
+            min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
         )
         return await d.distill(
             self.run_id,
+            scope_id=scope_id or self.memory_scope_id,
             hotlog=self.hotlog,
             persistence=self.persistence,
             indices=self.indices,
-            tool=tool,
-            run_id=run_id,
         )
 
     # ---------- RAG facade ----------
@@ -680,7 +722,7 @@ class MemoryFacade:
         bundle = await self.rag.export(corpus_id)
         # Optionally log a tool_result
         await self.write_result(
-            topic=f"rag.snapshot.{corpus_id}",
+            tool=f"rag.snapshot.{corpus_id}",
             outputs=[{"name": "bundle_uri", "kind": "uri", "value": bundle.get("uri")}],
             tags=["rag", "snapshot"],
             message=title,
@@ -743,7 +785,6 @@ class MemoryFacade:
                 "run_id": e.run_id,
                 "graph_id": e.graph_id,
                 "node_id": e.node_id,
-                "agent_id": e.agent_id,
                 "tags": list(e.tags or []),
             }
             body = e.text
@@ -765,7 +806,7 @@ class MemoryFacade:
         stats = await self.rag.upsert_docs(corpus_id=corpus_id, docs=docs)
         # (Optional) write a result for traceability
         await self.write_result(
-            topic=f"rag.promote.{corpus_id}",
+            tool=f"rag.promote.{corpus_id}",
             outputs=[
                 {"name": "added_docs", "kind": "number", "value": stats.get("added", 0)},
                 {"name": "chunks", "kind": "number", "value": stats.get("chunks", 0)},
@@ -827,7 +868,7 @@ class MemoryFacade:
         for i, rc in enumerate(ans.get("resolved_citations", []), start=1):
             outs.append({"name": f"cite_{i}", "kind": "json", "value": rc})
         await self.write_result(
-            topic=f"rag.answer.{corpus_id}",
+            tool=f"rag.answer.{corpus_id}",
             outputs=outs,
             tags=["rag", "qa"],
             message=f"Q: {question}",
@@ -838,24 +879,21 @@ class MemoryFacade:
 
     async def load_last_summary(
         self,
+        scope_id: str | None = None,
         *,
         summary_tag: str = "session",
     ) -> dict[str, Any] | None:
         """
         Soft-hydrate helper:
 
-        Load the most recent JSON summary for this run_id and tag, without replaying
-        all events. This is intended for use at the beginning of a new run/session
-        to recall prior context in a compact way.
-
-        NOTE: This currently assumes FSPersistence as the underlying implementation.
+        Load the most recent JSON summary for this memory scope and tag.
+        By default, memory_scope_id == run_id, but callers can set a stable
+        scope (e.g. user+persona) to share summaries across runs.
         """
         import asyncio
         import glob
 
-        from aethergraph.services.memory.persist_fs import (
-            FSPersistence,  # adjust import path if needed
-        )
+        from aethergraph.services.memory.persist_fs import FSPersistence
 
         if not isinstance(self.persistence, FSPersistence):
             self.logger and self.logger.warning(
@@ -864,10 +902,12 @@ class MemoryFacade:
             return None
 
         base_dir = self.persistence.base_dir
+        scope_id = scope_id or getattr(self, "memory_scope_id", None) or self.run_id
+
         pattern = os.path.join(
             base_dir,
             "mem",
-            self.run_id,
+            scope_id,
             "summaries",
             summary_tag,
             "*.json",
@@ -877,14 +917,68 @@ class MemoryFacade:
             paths = sorted(glob.glob(pattern))
             if not paths:
                 return None
-            latest = paths[-1]  # filenames contain ISO-ish ts, so lexicographic works
+            latest = paths[-1]
             with open(latest, encoding="utf-8") as f:
                 return json.load(f)
 
         return await asyncio.to_thread(_load_latest)
 
+    async def load_recent_summaries(
+        self,
+        scope_id: str | None = None,
+        *,
+        summary_tag: str = "session",
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """
+        Load the most recent JSON summaries for this memory scope and tag.
+
+        Returns a list of summary dicts, ordered oldest→newest (so the last item is
+        the most recent summary). If there are fewer than `limit`, returns what it finds.
+        """
+        import asyncio
+        import glob
+
+        from aethergraph.services.memory.persist_fs import FSPersistence
+
+        if not isinstance(self.persistence, FSPersistence):
+            self.logger and self.logger.warning(
+                "load_recent_summaries: persistence is not FSPersistence; cannot load summaries"
+            )
+            return []
+
+        base_dir = self.persistence.base_dir
+        scope_id = scope_id or getattr(self, "memory_scope_id", None) or self.run_id
+
+        pattern = os.path.join(
+            base_dir,
+            "mem",
+            scope_id,
+            "summaries",
+            summary_tag,
+            "*.json",
+        )
+
+        def _load_many() -> list[dict[str, Any]]:
+            paths = sorted(glob.glob(pattern))
+            if not paths:
+                return []
+            # Take the last `limit` files (most recent by filename)
+            chosen = paths[-limit:]
+            out: list[dict[str, Any]] = []
+            for p in chosen:
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        out.append(json.load(f))
+                except Exception:
+                    continue
+            return out
+
+        return await asyncio.to_thread(_load_many)
+
     async def soft_hydrate_last_summary(
         self,
+        scope_id: str | None = None,
         *,
         summary_tag: str = "session",
         summary_kind: str = "long_term_summary",
@@ -893,7 +987,7 @@ class MemoryFacade:
         Load the last summary JSON for this tag (if any) and log a small hydrate Event
         into the current run's HotLog. Returns the loaded summary dict, or None.
         """
-        summary = await self.load_last_summary(summary_tag=summary_tag)
+        summary = await self.load_last_summary(scope_id=scope_id, summary_tag=summary_tag)
         if not summary:
             return None
 
@@ -925,3 +1019,47 @@ class MemoryFacade:
         await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
         await self.persistence.append_event(self.run_id, evt)
         return summary
+
+    # ----- Stubs for future memory facade features -----
+    async def mark_event_important(
+        self,
+        event_id: str,
+        *,
+        reason: str | None = None,
+        topic: str | None = None,
+    ) -> None:
+        """
+        Stub / placeholder:
+
+        Mark a given event as "important" / "core_fact" for future policies.
+
+        Intended future behavior (not implemented yet):
+          - Look up the Event by event_id (via Persistence).
+          - Re-emit an updated Event with an added tag (e.g. "core_fact" or "pinned").
+          - Optionally promote to a fact artifact or RAG doc.
+
+        For now, this is a no-op / NotImplementedError to avoid surprise behavior.
+        """
+        raise NotImplementedError("mark_event_important is reserved for future memory policy")
+
+    async def save_core_fact_artifact(
+        self,
+        *,
+        scope_id: str,
+        topic: str,
+        fact_id: str,
+        content: dict[str, Any],
+    ):
+        """
+        Stub / placeholder:
+
+        Save a canonical, long-lived fact as a pinned artifact.
+        Intended future behavior:
+          - Use artifacts.save_json(...) to write the fact payload under a
+            stable path like file://mem/<scope_id>/facts/<topic>/<fact_id>.json
+          - Mark the artifact pinned in the index.
+          - Optionally write a tool_result Event referencing this artifact.
+
+        Not implemented yet; provided as an explicit extension hook.
+        """
+        raise NotImplementedError("save_core_fact_artifact is reserved for future memory policy")

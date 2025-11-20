@@ -94,6 +94,7 @@ class LLMLongTermSummarizer(Distiller):
             "`summary` (string), "
             "`key_facts` (list of strings), "
             "`open_loops` (list of strings)."
+            "Do not use markdown or include explanations or context outside the JSON."
         )
 
         return [
@@ -104,6 +105,7 @@ class LLMLongTermSummarizer(Distiller):
     async def distill(
         self,
         run_id: str,
+        scope_id: str = None,
         *,
         hotlog: HotLog,
         persistence: Persistence,
@@ -122,12 +124,10 @@ class LLMLongTermSummarizer(Distiller):
 
         # 2) Build prompt and call LLM
         messages = self._build_prompt(kept)
-        model = self.model  # could be None if llm has a default
 
         # LLMClientProtocol: assume chat(...) returns (text, usage)
         summary_json_str, usage = await self.llm.chat(
             messages,
-            model=model,
         )
 
         # 3) Parse LLM JSON response
@@ -139,13 +139,13 @@ class LLMLongTermSummarizer(Distiller):
                 "key_facts": [],
                 "open_loops": [],
             }
-
         ts = now_iso()
 
         summary_obj = {
             "type": self.summary_kind,
             "version": 1,
             "run_id": run_id,
+            "scope_id": scope_id or run_id,
             "summary_tag": self.summary_tag,
             "ts": ts,
             "time_window": {"from": first_ts, "to": last_ts},
@@ -155,12 +155,12 @@ class LLMLongTermSummarizer(Distiller):
             "key_facts": payload.get("key_facts", []),
             "open_loops": payload.get("open_loops", []),
             "llm_usage": usage,
-            "llm_model": model,
+            "llm_model": self.llm.model if hasattr(self.llm, "model") else None,
         }
 
-        uri = ar_summary_uri(run_id, self.summary_tag, ts)
-        await persistence.save_json(uri=uri, obj=summary_obj)
+        uri = ar_summary_uri(scope_id, self.summary_tag, ts)  # this is a file:// URI locally
 
+        saved_uri = await persistence.save_json(uri=uri, obj=summary_obj)
         # 4) Emit summary Event with preview + uri in data
         text = summary_obj["summary"] or ""
         preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
@@ -198,7 +198,7 @@ class LLMLongTermSummarizer(Distiller):
         await persistence.append_event(run_id, evt)
 
         return {
-            "uri": uri,
+            "uri": saved_uri,
             "summary_kind": self.summary_kind,
             "summary_tag": self.summary_tag,
             "time_window": summary_obj["time_window"],

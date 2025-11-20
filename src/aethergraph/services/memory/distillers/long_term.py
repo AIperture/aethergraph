@@ -14,13 +14,25 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def ar_summary_uri(run_id: str, tag: str, ts: str) -> str:
+def ar_summary_uri_by_run_id(run_id: str, tag: str, ts: str) -> str:
     """
+    NOTE: To deprecate this function in favor of ar_summary_uri below.
+
     Save summaries under the same base "mem/<run_id>/..." tree as append_event,
     but using a file:// URI so FSPersistence can handle it.
     """
     safe_ts = ts.replace(":", "-")
     return f"file://mem/{run_id}/summaries/{tag}/{safe_ts}.json"
+
+
+def ar_summary_uri(scope_id: str, tag: str, ts: str) -> str:
+    """
+    Scope summaries by a logical memory scope, not by run_id.
+    In simple setups, scope_id == run_id. For long-lived companions, scope_id
+    might be something like "user:zcliu:persona:companion_v1".
+    """
+    safe_ts = ts.replace(":", "-")
+    return f"file://mem/{scope_id}/summaries/{tag}/{safe_ts}.json"
 
 
 class LongTermSummarizer(Distiller):
@@ -79,6 +91,7 @@ class LongTermSummarizer(Distiller):
     async def distill(
         self,
         run_id: str,
+        scope_id: str = None,
         *,
         hotlog: HotLog,
         persistence: Persistence,
@@ -124,6 +137,7 @@ class LongTermSummarizer(Distiller):
             "type": self.summary_kind,
             "version": 1,
             "run_id": run_id,
+            "scope_id": scope_id or run_id,
             "summary_tag": self.summary_tag,
             "ts": ts,
             "time_window": {
@@ -136,8 +150,8 @@ class LongTermSummarizer(Distiller):
         }
 
         # 4) Persist JSON summary
-        uri = ar_summary_uri(run_id, self.summary_tag, ts)
-        await persistence.save_json(uri=uri, obj=summary)
+        uri = ar_summary_uri(scope_id, self.summary_tag, ts)  # this is a file:// URI locally
+        saved_uri = await persistence.save_json(uri=uri, obj=summary)
 
         # 5) Emit summary Event
         # NOTE: we only store a preview in text and full summary in data["summary_uri"]
@@ -176,7 +190,7 @@ class LongTermSummarizer(Distiller):
         await persistence.append_event(run_id, evt)
 
         return {
-            "uri": uri,
+            "uri": saved_uri,
             "summary_kind": self.summary_kind,
             "summary_tag": self.summary_tag,
             "time_window": summary["time_window"],
