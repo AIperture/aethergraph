@@ -123,6 +123,9 @@ class StdLoggerService(LoggerService):
     def for_inspect(self) -> logging.Logger:
         return self.for_namespace("inspect")
 
+    def for_channel(self) -> logging.Logger:
+        return self.for_namespace("channel")
+
     def for_scheduler(self) -> logging.Logger:
         return self.for_namespace("scheduler")
 
