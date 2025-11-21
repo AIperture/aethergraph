@@ -26,12 +26,20 @@ class ChannelClient:
         channel_id: str = "default",
         thread_id: str | None = None,
         timeout: float = 100.0,
+        http_client: httpx.AsyncClient | None = None,  # managed externally if provided
     ):
         self.base_url = base_url
         self.scheme = scheme
         self.channel_id = channel_id
         self.thread_id = thread_id
         self.timeout = timeout
+        self._external_client = http_client
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Get or create an httpx.AsyncClient."""
+        if self._external_client is not None:
+            return self._external_client
+        return httpx.AsyncClient(base_url=self.base_url, timeout=self.timeout)
 
     # --------- Inbound to AG (HTTP) ---------
     async def send_text(self, text: str, *, meta: dict[str, Any] | None = None) -> httpx.Response:
@@ -46,10 +54,15 @@ class ChannelClient:
             "text": text,
             "meta": meta or {},
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        client = await self._get_client()
+        close_after = self._external_client is None  # only close if we created it
+        try:
             resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        return resp
+            resp.raise_for_status()
+            return resp
+        finally:
+            if close_after:
+                await client.aclose()
 
     async def send_choice(
         self, choice: str, *, meta: dict[str, Any] | None = None
@@ -65,10 +78,16 @@ class ChannelClient:
             "choice": choice,
             "meta": meta or {},
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+
+        client = await self._get_client()
+        close_after = self._external_client is None  # only close if we created it
+        try:
             resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        return resp
+            resp.raise_for_status()
+            return resp
+        finally:
+            if close_after:
+                await client.aclose()
 
     async def send_text_and_files(
         self,
@@ -95,10 +114,15 @@ class ChannelClient:
             "files": list(files),
             "meta": meta or {},
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        client = await self._get_client()
+        close_after = self._external_client is None  # only close if we created it
+        try:
             resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        return resp
+            resp.raise_for_status()
+            return resp
+        finally:
+            if close_after:
+                await client.aclose()
 
     async def resume_manual(
         self, run_id: str, node_id: str, token: str, payload: dict[str, Any] | None = None
@@ -113,10 +137,15 @@ class ChannelClient:
             "token": token,
             "payload": payload or {},
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        client = await self._get_client()
+        close_after = self._external_client is None  # only close if we created it
+        try:
             resp = await client.post(url, json=body)
-        resp.raise_for_status()
-        return resp
+            resp.raise_for_status()
+            return resp
+        finally:
+            if close_after:
+                await client.aclose()
 
     # --------- Outbound from AG (WebSocket) ---------
     async def iter_events(self) -> AsyncIterator[dict[str, Any]]:

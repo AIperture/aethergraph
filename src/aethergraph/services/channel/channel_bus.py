@@ -215,7 +215,7 @@ class ChannelBus:
         # Shape event
         if kind == "user_input":
             silent = False
-            if hasattr(continuation, "payload"):
+            if hasattr(continuation, "payload") and isinstance(continuation.payload, dict):
                 silent = continuation.payload.get("_silent", False)
 
             txt = prompt if isinstance(prompt, str) else None

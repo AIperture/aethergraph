@@ -5,6 +5,11 @@ from typing import Any
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request
 
+from aethergraph.services.channel.ingress import (
+    ChannelIngress,
+    IncomingFile,
+    IncomingMessage,
+)
 from aethergraph.services.continuations.continuation import Correlator
 
 router = APIRouter()
@@ -43,6 +48,23 @@ def _channel_key(chat_id: int, topic_id: int | None) -> str:
     return f"{base}:topic/{int(topic_id)}" if topic_id else base
 
 
+def _tg_scheme_and_channel_id(chat_id: int, topic_id: int | None) -> tuple[str, str]:
+    """
+    Map Telegram chat/topic to (scheme, channel_id) pair for ChannelIngress.
+
+    _channel_key(chat_id, topic_id) builds:
+      "tg:chat/<id>" or "tg:chat/<id>:topic/<topic_id>"
+
+    So we use:
+      scheme    = "tg"
+      channel_id = "chat/<id>" or "chat/<id>:topic/<topic_id>"
+    """
+    base = f"chat/{int(chat_id)}"
+    if topic_id:
+        base = f"{base}:topic/{int(topic_id)}"
+    return "tg", base
+
+
 # ---- helpers ----
 async def _tg_get_file_path(file_id: str, token: str) -> str | None:
     if not token:
@@ -64,10 +86,11 @@ async def _tg_download_file(file_path: str, token: str) -> bytes:
         return await r.read()
 
 
-# -------- NEW: background worker that does the heavy lifting --------
 async def _process_update(container, payload: dict, token: str):
+    ingress: ChannelIngress = container.channel_ingress
+
     try:
-        # Callback queries (inline button presses)
+        # 1) Callback queries (inline buttons) -------------------------
         cq = payload.get("callback_query")
         if cq:
             msg = cq.get("message") or {}
@@ -94,35 +117,37 @@ async def _process_update(container, payload: dict, token: str):
                     choice = str(data_raw)
 
             choice_l = choice.lower()
-            # approved = choice_l.startswith("approve") or choice_l in {"yes","y","ok"} # resolve from choice string
 
-            token = None
+            tok = None
             run_id = None
             node_id = None
 
-            # Resolve alias → token (preferred)
+            # Preferred: resolve alias → token
             if resume_key and hasattr(container.cont_store, "token_from_alias"):
-                token = container.cont_store.token_from_alias(resume_key)
+                tok = container.cont_store.token_from_alias(resume_key)
 
-            if token and hasattr(container.cont_store, "get_by_token"):
-                cont = container.cont_store.get_by_token(token)
+            if tok and hasattr(container.cont_store, "get_by_token"):
+                cont = container.cont_store.get_by_token(tok)
                 if cont:
                     run_id, node_id = cont.run_id, cont.node_id
 
             # Fallback: thread-scoped correlator
-            if not token:
+            if not tok:
                 corr = Correlator(
-                    scheme="tg", channel=ch_key, thread=str(topic_id or ""), message=""
+                    scheme="tg",
+                    channel=ch_key,
+                    thread=str(topic_id or ""),
+                    message="",
                 )
                 cont = await container.cont_store.find_by_correlator(corr=corr)
                 if cont:
-                    run_id, node_id, token = cont.run_id, cont.node_id, cont.token
+                    run_id, node_id, tok = cont.run_id, cont.node_id, cont.token
 
-            if token and run_id and node_id:
+            if tok and run_id and node_id:
                 await container.resume_router.resume(
                     run_id=run_id,
                     node_id=node_id,
-                    token=token,
+                    token=tok,
                     payload={
                         "choice": choice_l,
                         "telegram": {
@@ -142,7 +167,7 @@ async def _process_update(container, payload: dict, token: str):
                 pass
             return
 
-        # Regular messages / uploads
+        # 2) Regular messages / uploads -------------------------------
         msg = payload.get("message")
         if not msg:
             return
@@ -153,9 +178,11 @@ async def _process_update(container, payload: dict, token: str):
         chat_id = chat.get("id")
         topic_id = msg.get("message_thread_id")
         ch_key = _channel_key(chat_id, topic_id)
+        scheme, channel_id = _tg_scheme_and_channel_id(chat_id, topic_id)
+
         text = (msg.get("text") or msg.get("caption") or "") or ""
 
-        files: list[dict[str, Any]] = []
+        tg_files: list[dict[str, Any]] = []
 
         # Photos
         photos = msg.get("photo") or []
@@ -171,7 +198,7 @@ async def _process_update(container, payload: dict, token: str):
                     uri = await _stage_and_save(
                         container, data=data, name=name, ch_key=ch_key, cont=None
                     )
-                    files.append(
+                    tg_files.append(
                         _file_ref(
                             file_id=file_id,
                             name=name,
@@ -198,8 +225,10 @@ async def _process_update(container, payload: dict, token: str):
             if file_path:
                 try:
                     data = await _tg_download_file(file_path, token)
-                    uri = _stage_and_save(container, data=data, name=name, ch_key=ch_key, cont=None)
-                    files.append(
+                    uri = await _stage_and_save(
+                        container, data=data, name=name, ch_key=ch_key, cont=None
+                    )
+                    tg_files.append(
                         _file_ref(
                             file_id=file_id,
                             name=name,
@@ -215,28 +244,48 @@ async def _process_update(container, payload: dict, token: str):
                         f"Telegram document download failed: {e}"
                     )
 
-        if files:
-            await _append_inbox(container, ch_key, files)
+        # Turn Telegram file_refs into IncomingFile with pre-saved URIs
+        incoming_files: list[IncomingFile] = []
+        for fr in tg_files:
+            incoming_files.append(
+                IncomingFile(
+                    id=fr["id"],
+                    name=fr["name"],
+                    mimetype=fr.get("mimetype"),
+                    size=fr.get("size"),
+                    uri=fr.get("uri"),  # already staged as artifact
+                    url=None,  # no re-download
+                    extra={
+                        "platform": "telegram",
+                        "channel_key": fr.get("channel_key"),
+                        "ts": fr.get("ts"),
+                    },
+                )
+            )
 
-        # Look up continuation by thread-scoped correlator (message-less)
-        cont = None
-        corr = Correlator(scheme="tg", channel=ch_key, thread=str(topic_id or ""), message="")
-        cont = await container.cont_store.find_by_correlator(corr=corr)
-        container.logger and container.logger.for_run().debug(
-            f"[TG] inbound: text='{text}' files={len(files)} cont={bool(cont)}"
+        meta = {
+            "raw": payload,
+            "channel_key": ch_key,
+            "telegram": {
+                "message_id": msg.get("message_id"),
+                "chat_id": chat_id,
+            },
+        }
+
+        resumed = await ingress.handle(
+            IncomingMessage(
+                scheme=scheme,
+                channel_id=channel_id,
+                thread_id=str(topic_id or ""),
+                text=text,
+                files=incoming_files or None,
+                meta=meta,
+            )
         )
 
-        if not cont:
-            return
-
-        payload_out = {
-            "text": text,
-            "telegram": {"message_id": msg.get("message_id"), "chat_id": chat_id},
-        }
-        if cont.kind in ("user_files", "user_input_or_files"):
-            payload_out["files"] = files
-
-        await container.resume_router.resume(cont.run_id, cont.node_id, cont.token, payload_out)
+        container.logger and container.logger.for_run().debug(
+            f"[TG] inbound: text={text!r} files={len(incoming_files)} resumed={resumed}"
+        )
 
     except Exception as e:
         container.logger and container.logger.for_run().error(
@@ -313,12 +362,3 @@ def _file_ref(
         "channel_key": ch_key,
         "ts": ts,
     }
-
-
-async def _append_inbox(container, ch_key: str, file_refs: list[dict[str, Any]]):
-    kv = getattr(container, "kv_hot", None)
-    if kv:
-        await kv.list_append_unique(f"inbox://{ch_key}", file_refs, id_key="id")
-    else:
-        logger = getattr(container, "logger", None)
-        logger and logger.for_run().warning("No KV present; uploads inbox not stored.")

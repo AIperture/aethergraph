@@ -58,18 +58,42 @@ class ChannelIngress:
       UI -> HTTP/WS -> ChannelIngress.handle(...) -> cont_store + resume_router
     """
 
-    def __init__(self, container, *, logger=None):
+    def __init__(self, *, container, logger=None):
         self.c = container
-        self.logger = logger or container.logger.for_channel()
+        # Validate and assign dependencies
+
+        assert container is not None, "Either provide all dependencies or a container"
+        self.artifacts = container.artifacts if hasattr(container, "artifacts") else None
+        self.kv_hot = container.kv_hot if hasattr(container, "kv_hot") else None
+        self.cont_store = container.cont_store if hasattr(container, "cont_store") else None
+        self.resume_router = (
+            container.resume_router if hasattr(container, "resume_router") else None
+        )
+
+        if logger is not None:
+            self.logger = logger
+        else:
+            container_logger = getattr(container, "logger", None)
+            self.logger = container_logger.for_channel() if container_logger else None
 
     def _channel_key(self, scheme: str, channel_id: str) -> str:
         """
-        Canonical channel key for non-Slack transports, similar to:
-          "ext:chan/<channel_id>"
+        Build a canonical channel key string from scheme + channel_id.
+
+        - For the generic "ext" channel, we use "ext:chan/<id>".
+        - For Slack/Telegram/etc. we can just use "<scheme>:<channel_id>" so we can
+          preserve their existing formats.
         """
-        return f"{scheme}:chan/{channel_id}"
+        if scheme == "ext":
+            return f"{scheme}:chan/{channel_id}"
+        # Slack: channel_id = "team/T:chan/C" => "slack:team/T:chan/C"
+        # Telegram: channel_id = "chat/<id>[:topic/<topic_id>]" => "tg:chat/..."
+        return f"{scheme}:{channel_id}"
 
     def _log(self, level: str, msg: str, **kwargs):
+        if not self.logger:
+            print(f"[{level.upper()}] {msg} | {kwargs}")
+            return
         log_fn = getattr(self.logger, level.lower(), self.logger.info)
         log_fn(msg, extra=kwargs)
 
@@ -94,15 +118,14 @@ class ChannelIngress:
         Write bytes to tmp path, then save via ArtifactStore.save_file(...).
         Returns the Artifact.uri (string).
         """
-        c = self.c
-        tmp = c.artifacts.tmp_path(suffix=f"_{file_id or name}")
+        tmp = self.artifacts.tmp_path(suffix=f"_{file_id or name}")
         with open(tmp, "wb") as f:
             f.write(data)
 
-        run_id = cont if cont else "ad-hoc"
+        run_id = cont.run_id if cont else "ad-hoc"
         node_id = cont.node_id if cont else "channel-ingress"
 
-        art = await c.artifacts.save_file(
+        art = await self.artifacts.save_file(
             path=tmp,
             kind="upload",
             run_id=run_id,
@@ -157,7 +180,8 @@ class ChannelIngress:
             uri = f.uri
             url = f.url
 
-            # Optional: auto-download if url is provided
+            # Optional: auto-download if url is provided and no uri
+            # this is not executed when we stage files with channel-specific upload handlers that already provide uri
             if (not uri) and url:
                 try:
                     data_bytes = await self._download_url(url)
@@ -188,7 +212,7 @@ class ChannelIngress:
 
         # Append to per-channel inbox, dedup by id
         inbox_key = f"inbox://{ch_key}"
-        await self.c.kv_hot.list_append_unique(
+        await self.kv_hot.list_append_unique(
             inbox_key,
             file_refs,
             id_key="id",
@@ -201,18 +225,15 @@ class ChannelIngress:
         """
         Find pending continuation for this channel/thread.
         """
-
-        c = self.c
-
         cont = None
         if thread_id:
-            corr = Correlator(scheme=scheme, channel_id=ch_key, thread_id=thread_id, message="")
-            cont = await c.cont_store.find_by_correlator(corr=corr)
+            corr = Correlator(scheme=scheme, channel=ch_key, thread=thread_id, message="")
+            cont = await self.cont_store.find_by_correlator(corr=corr)
 
         if not cont:
             # Fallback: look for any continuation for this channel
-            corr2 = Correlator(scheme=scheme, channel_id=ch_key, thread_id="", message="")
-            cont = await c.cont_store.find_by_correlator(corr=corr2)
+            corr2 = Correlator(scheme=scheme, channel=ch_key, thread="", message="")
+            cont = await self.cont_store.find_by_correlator(corr=corr2)
 
         return cont
 
@@ -280,7 +301,7 @@ class ChannelIngress:
                 "meta": meta,
             }
 
-        await self.c.resume_router.resume(
+        await self.resume_router.resume(
             run_id=cont.run_id,
             node_id=cont.node_id,
             token=cont.token,

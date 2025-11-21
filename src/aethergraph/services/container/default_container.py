@@ -23,6 +23,7 @@ from aethergraph.services.channel.channel_bus import ChannelBus
 
 # ---- channel services ----
 from aethergraph.services.channel.factory import build_bus, make_channel_adapters_from_env
+from aethergraph.services.channel.ingress import ChannelIngress
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.stores.fs_store import (
     FSContinuationStore,  # AsyncContinuationStore
@@ -148,6 +149,9 @@ class DefaultContainer:
     # settings -- not a service, but useful to have around
     settings: AppSettings | None = None
 
+    # channel ingress (set after init to avoid circular dependency)
+    channel_ingress: ChannelIngress | None = None  # set after init to avoid circular dependency
+
 
 def build_default_container(
     *,
@@ -270,7 +274,7 @@ def build_default_container(
         rag_facade=rag_facade,
     )
 
-    return DefaultContainer(
+    container = DefaultContainer(
         root=str(root_p),
         schedulers=schedulers,
         registry=registry,
@@ -302,6 +306,12 @@ def build_default_container(
         tracer=None,
         settings=cfg,
     )
+
+    # channel ingress (after container is built to avoid circular dependency)
+    container.channel_ingress = ChannelIngress(
+        container=container, logger=logger_factory.for_channel()
+    )
+    return container
 
 
 # Singleton (used unless the host sets their own)
