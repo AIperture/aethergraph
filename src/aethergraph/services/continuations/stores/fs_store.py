@@ -95,6 +95,25 @@ class FSContinuationStore:  # implements AsyncContinuationStore
 
         return await asyncio.to_thread(_read)
 
+    async def list_cont_by_run(self, run_id: str) -> list[Continuation]:
+        def _list():
+            out = []
+            run_path = self.root / "runs" / run_id / "nodes"
+            if not run_path.exists():
+                return out
+            for node_dir in run_path.iterdir():
+                cont_path = node_dir / "continuation.json"
+                if cont_path.exists():
+                    raw = json.loads(cont_path.read_text(encoding="utf-8"))
+                    for k in ("deadline", "next_wakeup_at", "created_at"):
+                        if raw.get(k):
+                            raw[k] = datetime.fromisoformat(raw[k])
+                    raw["closed"] = bool(raw.get("closed", False))
+                    out.append(Continuation(**raw))
+            return out
+
+        return await asyncio.to_thread(_list)
+
     async def delete(self, run_id: str, node_id: str) -> None:
         def _del():
             p = self._cont_path(run_id, node_id)

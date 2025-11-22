@@ -26,14 +26,45 @@ class ChannelClient:
         channel_id: str = "default",
         thread_id: str | None = None,
         timeout: float = 100.0,
+        api_key: str | None = None,  # currently unused
         http_client: httpx.AsyncClient | None = None,  # managed externally if provided
+        ws_path: str = "/ws/channel",  # currently unused
     ):
         self.base_url = base_url
         self.scheme = scheme
         self.channel_id = channel_id
         self.thread_id = thread_id
         self.timeout = timeout
+        self.api_key = api_key
+        self.ws_path = ws_path
+
         self._external_client = http_client
+        self._client: httpx.AsyncClient | None = None
+        self._owns_client = http_client is None
+
+    # ------------- internal helpers -------------
+    @property
+    def client(self) -> httpx.AsyncClient:
+        if self._external_client is not None:
+            return self._external_client
+        if self._client is None:
+            headers = {}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url,
+                headers=headers,
+                timeout=self.timeout,
+            )
+        return self._client
+
+    async def aclose(self):
+        if self._owns_client and self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    def _default_thread_id(self, thread_id: str | None) -> str | None:
+        return thread_id if thread_id is not None else self.thread_id
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create an httpx.AsyncClient."""
@@ -54,15 +85,9 @@ class ChannelClient:
             "text": text,
             "meta": meta or {},
         }
-        client = await self._get_client()
-        close_after = self._external_client is None  # only close if we created it
-        try:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            return resp
-        finally:
-            if close_after:
-                await client.aclose()
+        r = await self.client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json
 
     async def send_choice(
         self, choice: str, *, meta: dict[str, Any] | None = None
@@ -78,16 +103,9 @@ class ChannelClient:
             "choice": choice,
             "meta": meta or {},
         }
-
-        client = await self._get_client()
-        close_after = self._external_client is None  # only close if we created it
-        try:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            return resp
-        finally:
-            if close_after:
-                await client.aclose()
+        r = await self.client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()
 
     async def send_text_and_files(
         self,
@@ -114,75 +132,71 @@ class ChannelClient:
             "files": list(files),
             "meta": meta or {},
         }
-        client = await self._get_client()
-        close_after = self._external_client is None  # only close if we created it
-        try:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            return resp
-        finally:
-            if close_after:
-                await client.aclose()
+        r = await self.client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()
 
-    async def resume_manual(
-        self, run_id: str, node_id: str, token: str, payload: dict[str, Any] | None = None
+    async def resume(
+        self,
+        run_id: str,
+        node_id: str,
+        token: str,
+        resume_key: str | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> httpx.Response:
         """
-        Low-level manual resume via /channel/manual_resume.
+        Low-level manual resume via /channel/resume.
         """
-        url = f"{self.base_url}/channel/manual_resume"
+        url = f"{self.base_url}/channel/resume"
         body = {
             "run_id": run_id,
             "node_id": node_id,
             "token": token,
+            "resume_key": resume_key,
             "payload": payload or {},
         }
-        client = await self._get_client()
-        close_after = self._external_client is None  # only close if we created it
-        try:
-            resp = await client.post(url, json=body)
-            resp.raise_for_status()
-            return resp
-        finally:
-            if close_after:
-                await client.aclose()
+        r = await self.client.post(url, json=body)
+        r.raise_for_status()
+        return r.json()
 
     # --------- Outbound from AG (WebSocket) ---------
     async def iter_events(self) -> AsyncIterator[dict[str, Any]]:
         """
-        Async generator of events from /ws/channel.
+        Receive outbound channel events over a WebSocket.
 
-        Each event is the JSON dict produced by QueueChannelAdapter.send:
-          {
-            "type": "...",
-            "text": "...",
-            "meta": {...},
-            "rich": {...},
-            "buttons": [...],
-            "file": {...},
-            "upsert_key": "...",
-            "ts": ...
-          }
+        Expected server endpoint: /ws/channel
+
+        Query params:
+          - scheme
+          - channel_id
+          - thread_id (optional)
+          - api_key (optional)
         """
-        # naive "http" -> "ws" replacement; tweak if you have https/wss
+        # Build ws URL from base_url (http/https -> ws/wss)
         if self.base_url.startswith("https://"):
             ws_base = "wss://" + self.base_url[len("https://") :]
         elif self.base_url.startswith("http://"):
             ws_base = "ws://" + self.base_url[len("http://") :]
         else:
-            ws_base = self.base_url  # assume already ws/wss
+            # assume ws already
+            ws_base = self.base_url
 
-        ws_url = ws_base + "/ws/channel"
+        params = {
+            "scheme": self.scheme,
+            "channel_id": self.channel_id,
+        }
+        if self.thread_id:
+            params["thread_id"] = self.thread_id
+        if self.api_key:
+            params["api_key"] = self.api_key
 
-        async with websockets.connect(ws_url) as ws:
-            # handshake
-            await ws.send(
-                json.dumps(
-                    {
-                        "scheme": self.scheme,
-                        "channel_id": self.channel_id,
-                    }
-                )
-            )
-            async for raw in ws:
-                yield json.loads(raw)
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        url = f"{ws_base}{self.ws_path}?{query}"
+
+        async with websockets.connect(url) as ws:
+            async for msg in ws:
+                try:
+                    data = json.loads(msg)
+                except Exception:
+                    data = {"raw": msg}
+                yield data
