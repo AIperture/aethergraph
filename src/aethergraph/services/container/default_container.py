@@ -13,11 +13,11 @@ from aethergraph.contracts.services.llm import LLMClientProtocol
 
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
 from aethergraph.contracts.services.state_stores import GraphStateStore
+from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
+from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
-from aethergraph.services.artifacts.fs_store import FSArtifactStore  # AsyncArtifactStore
-from aethergraph.services.artifacts.jsonl_index import JsonlArtifactIndex  # AsyncArtifactIndex
 from aethergraph.services.auth.dev import AllowAllAuthz, DevTokenAuthn
 from aethergraph.services.channel.channel_bus import ChannelBus
 
@@ -60,6 +60,7 @@ from aethergraph.services.state_stores.json_store import JsonGraphStateStore
 from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
+from aethergraph.storage.factory import build_artifact_index, build_artifact_store
 
 SERVICE_KEYS = [
     # core
@@ -122,8 +123,8 @@ class DefaultContainer:
     # storage and artifacts
     kv_hot: EphemeralKV
     kv_durable: SQLiteKV
-    artifacts: FSArtifactStore
-    artifact_index: JsonlArtifactIndex
+    artifacts: AsyncArtifactStore
+    artifact_index: AsyncArtifactIndex
 
     # memory
     memory_factory: MemoryFactory
@@ -228,10 +229,13 @@ def build_default_container(
     # storage and artifacts
     kv_hot = EphemeralKV()
     kv_durable = SQLiteKV(str(root_p / "kv" / "kv.sqlite"))
-    artifacts = FSArtifactStore(
-        str(root_p / "artifacts")
-    )  # async wrapper over FileArtifactStoreSync
-    artifact_index = JsonlArtifactIndex(str(root_p / "index" / "artifacts.jsonl"))
+    # artifacts = FSArtifactStore(
+    #     str(root_p / "artifacts")
+    # )  # async wrapper over FileArtifactStoreSync
+    # artifact_index = JsonlArtifactIndex(str(root_p / "index" / "artifacts.jsonl"))
+
+    artifacts = build_artifact_store(cfg)
+    artifact_index = build_artifact_index(cfg)
 
     # memory
     hotlog = KVHotLog(kv=kv_hot)

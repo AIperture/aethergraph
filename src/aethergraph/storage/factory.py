@@ -5,8 +5,6 @@ from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.storage.artifacts.artifact_index_jsonl import JsonlArtifactIndex
 from aethergraph.storage.artifacts.artifact_index_sqlite import SqliteArtifactIndex
-from aethergraph.storage.artifacts.fs_cas import FSArtifactStore
-from aethergraph.storage.artifacts.s3_cas import S3ArtifactStore
 
 
 def build_artifact_store(cfg: AppSettings) -> AsyncArtifactStore:
@@ -17,10 +15,16 @@ def build_artifact_store(cfg: AppSettings) -> AsyncArtifactStore:
     root = os.path.abspath(cfg.root)
 
     if art_cfg.backend == "fs":
+        from aethergraph.storage.artifacts.fs_cas import FSArtifactStore
+
         base_dir = os.path.join(root, art_cfg.fs.base_dir)
         return FSArtifactStore(base_dir=base_dir)
 
     if art_cfg.backend == "s3":
+        from aethergraph.storage.artifacts.s3_cas import (
+            S3ArtifactStore,  # late import to avoid boto3 dependency if unused
+        )
+
         if not art_cfg.s3.bucket:
             raise ValueError("S3 backend selected, but STORAGE__ARTIFACTS__S3__BUCKET is empty")
 
