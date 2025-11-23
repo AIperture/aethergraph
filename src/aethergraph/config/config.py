@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .llm import LLMSettings
+from .storage import StorageSettings
 
 
 class LoggingSettings(BaseModel):
@@ -114,6 +115,7 @@ class AppSettings(BaseSettings):
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
     rag: RAGSettings = RAGSettings()
+    storage: StorageSettings = StorageSettings()
 
     # Future fields:
     # authn: ...
