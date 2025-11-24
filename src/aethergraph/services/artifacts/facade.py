@@ -1,25 +1,28 @@
+# services/artifacts/facade.py
 from __future__ import annotations
 
-import builtins
+import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from aethergraph.contracts.services.artifacts import (
-    Artifact,
-    AsyncArtifactIndex,
-    AsyncArtifactStore,
-)
-
-from .paths import _from_uri_or_path
+from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
+from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
+from aethergraph.services.artifacts.paths import _from_uri_or_path
 
 Scope = Literal["node", "run", "graph", "all"]
 
 
 class ArtifactFacade:
-    """Facade for artifact storage and indexing operations within a specific context.
-    Provides async methods to stage, ingest, save, and write artifacts with automatic indexing.
+    """
+    Facade for artifact storage + indexing within a specific execution context.
+
+    - All *writes* go through the underlying AsyncArtifactStore AND AsyncArtifactIndex.
+    - Adds scoping helpers for search/list/best.
+    - Provides backend-agnostic "as_local_*" helpers that work with FS and S3.
     """
 
     def __init__(
@@ -32,25 +35,38 @@ class ArtifactFacade:
         tool_version: str,
         store: AsyncArtifactStore,
         index: AsyncArtifactIndex,
-    ):
-        self.run_id, self.graph_id, self.node_id = run_id, graph_id, node_id
-        self.tool_name, self.tool_version = tool_name, tool_version
-        self.store, self.index = store, index
+    ) -> None:
+        self.run_id = run_id
+        self.graph_id = graph_id
+        self.node_id = node_id
+        self.tool_name = tool_name
+        self.tool_version = tool_version
+        self.store = store
+        self.index = index
+
+        # Keep track of the last created artifact
         self.last_artifact: Artifact | None = None
 
-    async def stage(self, ext: str = "") -> str:
-        return await self.store.plan_staging_path(ext)
+    # ---------- core staging/ingest ----------
+    async def stage_path(self, ext: str = "") -> str:
+        """Plan a staging path in the underlying store."""
+        return await self.store.plan_staging_path(planned_ext=ext)
 
-    async def ingest(
+    async def stage_dir(self, suffix: str = "") -> str:
+        """Plan a staging directory in the underlying store."""
+        return await self.store.plan_staging_dir(suffix=suffix)
+
+    async def ingest_file(
         self,
         staged_path: str,
         *,
         kind: str,
-        labels=None,
-        metrics=None,
+        labels: dict | None = None,
+        metrics: dict | None = None,
         suggested_uri: str | None = None,
         pin: bool = False,
-    ):
+    ) -> Artifact:
+        """Ingest a staged file and record it in the index."""
         a = await self.store.ingest_staged_file(
             staged_path=staged_path,
             kind=kind,
@@ -64,20 +80,43 @@ class ArtifactFacade:
             suggested_uri=suggested_uri,
             pin=pin,
         )
-        await self.index.upsert(a)
-        await self.index.record_occurrence(a)
+        await self._record(a)
         return a
 
-    async def save(
+    async def ingest_dir(
+        self,
+        staged_dir: str,
+        **kwargs: Any,
+    ) -> Artifact:
+        """
+        Turn a staged directory into a directory artifact with manifest (and optional archive),
+        then index it.
+        Additional kwargs are passed to store.ingest_directory (kind, labels, etc.).
+        """
+        a = await self.store.ingest_directory(
+            staged_dir=staged_dir,
+            run_id=self.run_id,
+            graph_id=self.graph_id,
+            node_id=self.node_id,
+            tool_name=self.tool_name,
+            tool_version=self.tool_version,
+            **kwargs,
+        )
+        await self._record(a)
+        return a
+
+    # ---------- core save APIs ----------
+    async def save_file(
         self,
         path: str,
         *,
         kind: str,
-        labels=None,
-        metrics=None,
+        labels: dict | None = None,
+        metrics: dict | None = None,
         suggested_uri: str | None = None,
         pin: bool = False,
-    ):
+    ) -> Artifact:
+        """Save an existing file and index it."""
         a = await self.store.save_file(
             path=path,
             kind=kind,
@@ -91,29 +130,104 @@ class ArtifactFacade:
             suggested_uri=suggested_uri,
             pin=pin,
         )
-        await self.index.upsert(a)
-        await self.index.record_occurrence(a)
-        self.last_artifact = a
+        await self._record(a)
         return a
 
-    async def save_text(self, payload: str, *, suggested_uri: str | None = None):
-        a = await self.store.save_text(payload=payload, suggested_uri=suggested_uri)
-        await self.index.upsert(a)
-        await self.index.record_occurrence(a)
-        self.last_artifact = a
-        return a
+    async def save_text(
+        self,
+        payload: str,
+        *,
+        suggested_uri: str | None = None,
+        kind: str = "text",
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        pin: bool = False,
+    ) -> Artifact:
+        """
+        Save a text payload as an artifact with full context metadata.
 
-    async def save_json(self, payload: dict, *, suggested_uri: str | None = None):
-        a = await self.store.save_json(payload=payload, suggested_uri=suggested_uri)
-        await self.index.upsert(a)
-        await self.index.record_occurrence(a)
-        self.last_artifact = a
-        return a
+        Implementation:
+          - stage a temp .txt file
+          - write payload
+          - call save_file(kind="text", ...)
+        """
+        staged = await self.stage_path(".txt")
 
+        def _write() -> str:
+            p = Path(staged)
+            p.write_text(payload, encoding="utf-8")
+            return str(p)
+
+        staged = await asyncio.to_thread(_write)
+
+        return await self.save_file(
+            path=staged,
+            kind=kind,
+            labels=labels,
+            metrics=metrics,
+            suggested_uri=suggested_uri,
+            pin=pin,
+        )
+
+    async def save_json(
+        self,
+        payload: dict,
+        *,
+        suggested_uri: str | None = None,
+        kind: str = "json",
+        labels: dict | None = None,
+        metrics: dict | None = None,
+        pin: bool = False,
+    ) -> Artifact:
+        """
+        Save a JSON payload as an artifact with full context metadata.
+
+        Implementation:
+          - stage a temp .json file
+          - write JSON
+          - call save_file(kind="json", ...)
+        """
+        staged = await self.stage_path(".json")
+
+        def _write() -> str:
+            p = Path(staged)
+            # Use ensure_ascii=False to preserve unicode; tweak as you like
+            import json
+
+            p.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            return str(p)
+
+        staged = await asyncio.to_thread(_write)
+
+        return await self.save_file(
+            path=staged,
+            kind=kind,
+            labels=labels,
+            metrics=metrics,
+            suggested_uri=suggested_uri,
+            pin=pin,
+        )
+
+    # ---------- streaming APIs ----------
     @asynccontextmanager
-    async def writer(self, *, kind: str, planned_ext: str | None = None, pin: bool = False):
-        # Use the store's (sync) contextmanager via async wrapper; user writes bytes
-        cm = await self.store.open_writer(
+    async def writer(
+        self,
+        *,
+        kind: str,
+        planned_ext: str | None = None,
+        pin: bool = False,
+    ) -> AsyncIterator[Any]:
+        """
+        Async contextmanager yielding a writer object with:
+            writer.write(bytes)
+            writer.add_labels(...)
+            writer.add_metrics(...)
+
+        After context exit, writer.artifact will be populated by the store,
+        and we will record it in the index here.
+        """
+        # 1) Delegate to the store's async context manager
+        async with self.store.open_writer(
             kind=kind,
             run_id=self.run_id,
             graph_id=self.graph_id,
@@ -122,97 +236,167 @@ class ArtifactFacade:
             tool_version=self.tool_version,
             planned_ext=planned_ext,
             pin=pin,
-        )
-        with cm as w:
+        ) as w:
+            # 2) Yield to user code (they write() and add_labels/add_metrics)
             yield w
-            a = getattr(w, "_artifact", None)
+
+        # 3) At this point, store.open_writer has fully exited and has set w.artifact
+        a = getattr(w, "artifact", None) or getattr(w, "_artifact", None)
+
         if a:
-            await self.index.upsert(a)
-            await self.index.record_occurrence(a)
-            self.last_artifact = a
+            await self._record(a)
         else:
             self.last_artifact = None
 
-    async def stage_dir(self, suffix: str = "") -> str:
-        return await self.store.plan_staging_dir(suffix)
-
-    async def ingest_dir(self, staged_dir: str, **kw):
-        a = await self.store.ingest_directory(
-            staged_dir=staged_dir,
-            run_id=self.run_id,
-            graph_id=self.graph_id,
-            node_id=self.node_id,
-            tool_name=self.tool_name,
-            tool_version=self.tool_version,
-            **kw,
-        )
-        await self.index.upsert(a)
-        await self.index.record_occurrence(a)
-        self.last_artifact = a
-        return a
-
-    async def tmp_path(self, suffix: str = "") -> str:
-        return await self.store.plan_staging_path(suffix)
-
+    # ---------- load APIs ----------
     async def load_bytes(self, uri: str) -> bytes:
+        """Load raw bytes for a file-like artifact URI."""
         return await self.store.load_bytes(uri)
 
-    async def load_text(self, uri: str, *, encoding: str = "utf-8", errors: str = "strict") -> str:
-        data = await self.store.load_text(uri)
-        return data
+    async def load_text(
+        self,
+        uri: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+    ) -> str:
+        return await self.store.load_text(uri, encoding=encoding, errors=errors)
 
-    async def load_json(self, uri: str, *, encoding: str = "utf-8", errors: str = "strict") -> Any:
-        data = await self.store.load_json(uri, encoding=encoding, errors=errors)
-        return data
+    async def load_json(
+        self,
+        uri: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+    ) -> Any:
+        text = await self.load_text(uri, encoding=encoding, errors=errors)
+        return json.loads(text)
 
     async def load_artifact(self, uri: str) -> Any:
+        """Compatibility helper: returns bytes or directory path depending on implementation."""
         return await self.store.load_artifact(uri)
 
     async def load_artifact_bytes(self, uri: str) -> bytes:
         return await self.store.load_artifact_bytes(uri)
 
-    # ------- indexing pass-throughs with scoping -------
-    async def list(self, *, scope: Scope = "run") -> builtins.list[Artifact]:
+    async def load_artifact_dir(self, uri: str) -> str:
+        """
+        Backend-agnostic: ensure a directory artifact is available as a local dir path.
+
+        FS backend can just return its CAS dir; S3 backend might download to a temp dir.
+        """
+        return await self.store.load_artifact_dir(uri)
+
+    # ---------- as local helpers ----------
+    async def as_local_dir(
+        self,
+        artifact_or_uri: str | Path | Artifact,
+        *,
+        must_exist: bool = True,
+    ) -> str:
+        """
+        Ensure an artifact representing a directory is available as a local path.
+
+        - For FS, usually returns the underlying CAS directory.
+        - For S3, implementation should download to staging and return that path.
+        """
+        uri = artifact_or_uri.uri if isinstance(artifact_or_uri, Artifact) else str(artifact_or_uri)
+        path = await self.store.load_artifact_dir(uri)
+        if must_exist and not Path(path).exists():
+            raise FileNotFoundError(f"Local path for artifact dir not found: {path}")
+        return str(Path(path).resolve())
+
+    async def as_local_file(
+        self,
+        artifact_or_uri: str | Path | Artifact,
+        *,
+        must_exist: bool = True,
+    ) -> str:
+        """
+        Ensure an artifact representing a single file is available as a local file path.
+
+        - If uri is file:// or local path → return directly.
+        - Otherwise (e.g., s3://) → download bytes into a staging file and return that path.
+        """
+        uri = artifact_or_uri.uri if isinstance(artifact_or_uri, Artifact) else str(artifact_or_uri)
+        u = urlparse(uri)
+
+        # local fs
+        if not u.scheme or u.scheme.lower() == "file":
+            path = _from_uri_or_path(uri).resolve()
+            if must_exist and not Path(path).exists():
+                raise FileNotFoundError(f"Local path for artifact file not found: {path}")
+            if must_exist and not Path(path).is_file():
+                raise FileNotFoundError(f"Local path for artifact file is not a file: {path}")
+            return path
+
+        # Non-FS backend: download to staging
+        data = await self.store.load_artifact_bytes(uri)
+        staged = await self.store.plan_staging_path(".bin")
+
+        def _write():
+            p = Path(staged)
+            p.write_bytes(data)
+            return str(p.resolve())
+
+        path = await asyncio.to_thread(_write)
+        return path
+
+    # ---------- indexing helpers ----------
+    async def list(self, *, scope: Scope = "run") -> list[Artifact]:
         """
         Quick listing scoped to current run/graph/node by default.
         scope:
           - "node": filter by (run_id, graph_id, node_id)
           - "graph": filter by (run_id, graph_id)
           - "run": filter by (run_id)   [default]
-          - "all": no implicit filters (dangerous; use sparingly)
+          - "all": no implicit filters
         """
         if scope == "node":
             arts = await self.index.search(
-                labels={"graph_id": self.graph_id, "node_id": self.node_id}
+                labels={"graph_id": self.graph_id, "node_id": self.node_id},
             )
             return [a for a in arts if a.run_id == self.run_id]
+
         if scope == "graph":
-            arts = await self.index.search(labels={"graph_id": self.graph_id})
+            arts = await self.index.search(
+                labels={"graph_id": self.graph_id},
+            )
             return [a for a in arts if a.run_id == self.run_id]
+
         if scope == "run":
             return await self.index.list_for_run(self.run_id)
+
         if scope == "all":
             return await self.index.search()
+
+        # should not reach here
         return await self.index.search(labels=self._scope_labels(scope))
 
     async def search(
         self,
         *,
         kind: str | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, str] | None = None,
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
         scope: Scope = "run",
-        extra_scope_labels: dict[str, Any] | None = None,
-    ) -> builtins.list[Artifact]:
-        """Pass-through search with automatic scoping."""
-        eff_labels = dict(labels or {})
-        if scope in ("node", "graph", "project"):
+        extra_scope_labels: dict[str, str] | None = None,
+        limit: int | None = None,
+    ) -> list[Artifact]:
+        """Pass-thorough search with scoping."""
+        eff_labels: dict[str, str] = dict(labels or {})
+        if scope in ("node", "graph"):
             eff_labels.update(self._scope_labels(scope))
         if extra_scope_labels:
             eff_labels.update(extra_scope_labels)
-        # Delegate heavy lifting to the index
-        return await self.index.search(kind=kind, labels=eff_labels, metric=metric, mode=mode)
+        return await self.index.search(
+            kind=kind,
+            labels=eff_labels or None,
+            metric=metric,
+            mode=mode,
+            limit=limit,
+        )
 
     async def best(
         self,
@@ -221,19 +405,31 @@ class ArtifactFacade:
         metric: str,
         mode: Literal["max", "min"],
         scope: Scope = "run",
-        filters: dict[str, Any] | None = None,
+        filters: dict[str, str] | None = None,
     ) -> Artifact | None:
-        eff_filters = dict(filters or {})
-        if scope in ("node", "graph", "project"):
+        eff_filters: dict[str, str] = dict(filters or {})
+        if scope in ("node", "graph"):
             eff_filters.update(self._scope_labels(scope))
+        if scope == "run":
+            eff_filters.setdefault("run_id", self.run_id)
         return await self.index.best(
-            kind=kind, metric=metric, mode=mode, filters=eff_filters or None
+            kind=kind,
+            metric=metric,
+            mode=mode,
+            filters=eff_filters or None,
         )
 
     async def pin(self, artifact_id: str, pinned: bool = True) -> None:
-        await self.index.pin(artifact_id, pinned)
+        """Mark/unmark an artifact as pinned."""
+        await self.index.pin(artifact_id, pinned=pinned)
 
-    # -------- internal helpers --------
+    # ---------- internal helpers ----------
+    async def _record(self, a: Artifact) -> None:
+        """Record artifact in index and occurrence log."""
+        await self.index.upsert(a)
+        await self.index.record_occurrence(a)
+        self.last_artifact = a
+
     def _scope_labels(self, scope: Scope) -> dict[str, Any]:
         if scope == "node":
             return {"run_id": self.run_id, "graph_id": self.graph_id, "node_id": self.node_id}
@@ -243,41 +439,96 @@ class ArtifactFacade:
             return {"run_id": self.run_id}
         return {}  # "all"
 
-    def _project_id(self) -> str | None:
-        # This function is no longer used, but kept for possible future use.
-        return getattr(self, "project_id", None)
+    # ---------- deprecated / compatibility ----------
+    async def stage(self, ext: str = "") -> str:
+        """DEPRECATED: use stage_path()."""
+        return await self.stage_path(ext=ext)
 
-    # ---------- convenience: URI -> local path (FS only) ----------
-    def to_local_path(self, uri_or_path: str | Path | Artifact, *, must_exist: bool = True) -> str:
-        """
-        Return an absolute native path string if input is a file:// URI or local path.
-        If given an Artifact, uses artifact.uri.
-        If the scheme is not file://, returns the string form unchanged (or raise in strict mode).
-        """
-        s = uri_or_path.uri or "" if isinstance(uri_or_path, Artifact) else str(uri_or_path)
+    async def ingest(
+        self,
+        staged_path: str,
+        *,
+        kind: str,
+        labels=None,
+        metrics=None,
+        suggested_uri: str | None = None,
+        pin: bool = False,
+    ):  # DEPRECATED: use ingest_file()
+        return await self.ingest_file(
+            staged_path,
+            kind=kind,
+            labels=labels,
+            metrics=metrics,
+            suggested_uri=suggested_uri,
+            pin=pin,
+        )
 
+    async def save(
+        self,
+        path: str,
+        *,
+        kind: str,
+        labels=None,
+        metrics=None,
+        suggested_uri: str | None = None,
+        pin: bool = False,
+    ):  # DEPRECATED: use save_file()
+        return await self.save_file(
+            path,
+            kind=kind,
+            labels=labels,
+            metrics=metrics,
+            suggested_uri=suggested_uri,
+            pin=pin,
+        )
+
+    async def tmp_path(self, suffix: str = "") -> str:  # DEPRECATED: use stage_path()
+        return await self.stage_path(suffix)
+
+    # FS-only, legacy helpers — prefer as_local_dir/as_local_file for new code
+    def to_local_path(
+        self,
+        uri_or_path: str | Path | Artifact,
+        *,
+        must_exist: bool = True,
+    ) -> str:
+        """
+        DEPRECATED (FS-only):
+
+        This assumes file:// or plain local paths; will not work correctly with s3://.
+        Use `await as_local_dir(...)` or `await as_local_file(...)` instead.
+        """
+        s = uri_or_path.uri if isinstance(uri_or_path, Artifact) else str(uri_or_path)
         p = _from_uri_or_path(s).resolve()
 
-        # If not a file:// (e.g., s3://, http://), _from_uri_or_path returns Path(s);
-        # detect that and either pass through or raise for clarity.
         u = urlparse(s)
         if "://" in s and (u.scheme or "").lower() != "file":
-            # Not a filesystem artifact; caller likely needs a downloader
-            return s  # or: raise ValueError("Not a local filesystem URI")
+            # Non-FS backend – just return the URI string
+            return s
 
         if must_exist and not p.exists():
             raise FileNotFoundError(f"Local path not found: {p}")
         return str(p)
 
-    def to_local_file(self, uri_or_path: str | Path | Artifact, *, must_exist: bool = True) -> str:
-        """Same as to_local_path but asserts it's a file (not a dir)."""
+    def to_local_file(
+        self,
+        uri_or_path: str | Path | Artifact,
+        *,
+        must_exist: bool = True,
+    ) -> str:
+        """DEPRECATED: FS-only; use `await as_local_file(...)` instead."""
         p = Path(self.to_local_path(uri_or_path, must_exist=must_exist))
         if must_exist and not p.is_file():
             raise IsADirectoryError(f"Expected file, got directory: {p}")
         return str(p)
 
-    def to_local_dir(self, uri_or_path: str | Path | Artifact, *, must_exist: bool = True) -> str:
-        """Same as to_local_path but asserts it's a directory."""
+    def to_local_dir(
+        self,
+        uri_or_path: str | Path | Artifact,
+        *,
+        must_exist: bool = True,
+    ) -> str:
+        """DEPRECATED: FS-only; use `await as_local_dir(...)` instead."""
         p = Path(self.to_local_path(uri_or_path, must_exist=must_exist))
         if must_exist and not p.is_dir():
             raise NotADirectoryError(f"Expected directory, got file: {p}")

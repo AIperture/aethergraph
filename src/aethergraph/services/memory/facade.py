@@ -11,7 +11,7 @@ import unicodedata
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persistence
-from aethergraph.services.artifacts.fs_store import FileArtifactStoreSync
+from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.services.rag.facade import RAGFacade
 
 """
@@ -159,7 +159,7 @@ class MemoryFacade:
         hotlog: HotLog,
         persistence: Persistence,
         indices: Indices,
-        artifact_store: FileArtifactStoreSync,
+        artifact_store: AsyncArtifactStore,
         hot_limit: int = 1000,
         hot_ttl_s: int = 7 * 24 * 3600,
         default_signal_threshold: float = 0.0,

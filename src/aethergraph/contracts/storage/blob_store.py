@@ -13,13 +13,37 @@ For example:
 
 
 class BlobStore(Protocol):
-    async def put_bytes(
-        self, data: bytes, *, ext: str | None = None, mime: str | None = None
-    ) -> str: ...
+    @property
+    def base_uri(self) -> str:  # e.g. file:///..., s3://bucket/prefix
+        ...
 
-    async def put_file(self, path: str, *, mime: str | None = None) -> str: ...
+    async def put_bytes(
+        self,
+        data: bytes,
+        *,
+        key: str | None = None,
+        ext: str | None = None,
+        mime: str | None = None,
+    ) -> str:
+        """Store bytes under an optional key; return full blob URI."""
+        ...
+
+    async def put_file(
+        self,
+        path: str,
+        *,
+        key: str | None = None,
+        mime: str | None = None,
+    ) -> str:
+        """Store a local file; return full blob URI."""
+        ...
 
     async def load_bytes(self, uri: str) -> bytes: ...
+
     async def load_text(
-        self, uri: str, *, encoding: str = "utf-8", errors: str = "strict"
+        self,
+        uri: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
     ) -> str: ...

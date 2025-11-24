@@ -2,9 +2,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
+
 # ---- artifact services ----
-from aethergraph.services.artifacts.fs_store import FSArtifactStore  # AsyncArtifactStore
-from aethergraph.services.artifacts.jsonl_index import JsonlArtifactIndex  # AsyncArtifactIndex
+from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 
 # ---- channel services ----
 from aethergraph.services.channel.channel_bus import ChannelBus
@@ -70,11 +71,11 @@ class RuntimeEnv:
         return self.container.wait_registry
 
     @property
-    def artifacts(self) -> FSArtifactStore:
+    def artifacts(self) -> AsyncArtifactStore:
         return self.container.artifacts
 
     @property
-    def artifact_index(self) -> JsonlArtifactIndex:
+    def artifact_index(self) -> AsyncArtifactIndex:
         return self.container.artifact_index
 
     @property

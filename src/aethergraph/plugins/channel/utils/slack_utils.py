@@ -6,7 +6,11 @@ import time
 import aiohttp
 from fastapi import HTTPException, Request
 
-from aethergraph.services.continuations.continuation import Correlator
+from aethergraph.services.channel.ingress import (
+    ChannelIngress,
+    IncomingFile,
+    IncomingMessage,
+)
 
 
 # --- shared utils ---
@@ -19,11 +23,20 @@ async def _download_slack_file(url: str, token: str) -> bytes:
         return await r.read()
 
 
-# async def _download_slack_file(url: str, token: str) -> bytes:
-#     async with aiohttp.ClientSession() as sess:
-#         async with sess.get(url, headers={"Authorization": f"Bearer {token}"}) as r:
-#             r.raise_for_status()
-#             return await r.read()
+def _slack_scheme_and_channel_id(team_id: str | None, channel_id: str | None) -> tuple[str, str]:
+    """
+    Map Slack team/channel to the (scheme, channel_id) pair used by ChannelIngress.
+
+    We keep the existing Slack channel key shape:
+      ch_key = "slack:team/T:chan/C"
+    and split it as:
+      scheme = "slack"
+      channel_id = "team/T:chan/C"
+    """
+    team = team_id or "unknown"
+    chan = channel_id or "unknown"
+    # This matches your existing _channel_key base form.
+    return "slack", f"team/{team}:chan/{chan}"
 
 
 def _verify_sig(request: Request, body: bytes):
@@ -62,7 +75,7 @@ def _channel_key(team_id: str, channel_id: str, thread_ts: str | None) -> str:
 async def _stage_and_save(c, *, data: bytes, file_id: str, name: str, ch_key: str, cont) -> str:
     """Write bytes to tmp path, then save via FileArtifactStore.save_file(...).
     Returns the Artifact.uri (string)."""
-    tmp = c.artifacts.tmp_path(suffix=f"_{file_id}")
+    tmp = await c.artifacts.plan_staging_path(planned_ext=f"_{file_id}")
     with open(tmp, "wb") as f:
         f.write(data)
     run_id = cont.run_id if cont else "ad-hoc"
@@ -88,12 +101,13 @@ async def _stage_and_save(c, *, data: bytes, file_id: str, name: str, ch_key: st
 async def handle_slack_events_common(container, settings, payload: dict) -> dict:
     """
     Common handler for Slack Events API payloads.
-    This is transport-agnostic: can be called from HTTP route or Socket Mode.
+    Now delegates continuation lookup & resume to ChannelIngress.
     """
     SLACK_BOT_TOKEN = (
         settings.slack.bot_token.get_secret_value() if settings.slack.bot_token else ""
     )
     c = container
+    ingress: ChannelIngress = c.channel_ingress  # must exist in your container
 
     ev = payload.get("event") or {}
     ev_type = ev.get("type")
@@ -105,19 +119,13 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
         chan = ev.get("channel")
         text = ev.get("text", "") or ""
         files = ev.get("files") or []
-        ch_key = _channel_key(team, chan, None)
 
-        cont = None
-        if thread_ts:
-            # Try precise thread-level match
-            corr = Correlator(scheme="slack", channel=ch_key, thread=thread_ts, message="")
-            cont = await c.cont_store.find_by_correlator(corr=corr)
-        if not cont:
-            # Fallback to channel-root
-            corr2 = Correlator(scheme="slack", channel=ch_key, thread="", message="")
-            cont = await c.cont_store.find_by_correlator(corr=corr2)
+        # Full Slack key for labels/metadata
+        ch_key = _channel_key(team, chan, None)  # "slack:team/T:chan/C"
+        scheme, channel_id = _slack_scheme_and_channel_id(team, chan)  # ("slack", "team/T:chan/C")
 
-        file_refs = []
+        # --- Slack-specific file download + artifact save ---
+        file_refs: list[dict] = []
         if files:
             token = SLACK_BOT_TOKEN
             for f in files:
@@ -130,11 +138,17 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                 url_priv = f.get("url_private") or f.get("url_private_download")
 
                 uri = None
-                if url_priv:
+                if url_priv and token:
                     try:
                         data_bytes = await _download_slack_file(url_priv, token)
+                        # use Slack-specific labels via _stage_and_save
                         uri = await _stage_and_save(
-                            c, data=data_bytes, file_id=file_id, name=name, ch_key=ch_key, cont=cont
+                            c,
+                            data=data_bytes,
+                            file_id=file_id,
+                            name=name,
+                            ch_key=ch_key,
+                            cont=None,  # we don't know cont yet; ChannelIngress will find it
                         )
                     except Exception as e:
                         container.logger and container.logger.warning(
@@ -155,19 +169,48 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                     }
                 )
 
-            # append to per-channel inbox (dedupe by id)
-            inbox_key = f"inbox://{ch_key}"
-            await c.kv_hot.list_append_unique(inbox_key, file_refs, id_key="id")
-
-        if not cont:
-            return {}
-
-        if cont.kind in ("user_files", "user_input_or_files"):
-            await c.resume_router.resume(
-                cont.run_id, cont.node_id, cont.token, {"text": text, "files": file_refs}
+        # Turn Slack file_refs into IncomingFile so Ingress can do inbox + payload
+        incoming_files: list[IncomingFile] = []
+        for fr in file_refs:
+            incoming_files.append(
+                IncomingFile(
+                    id=fr["id"],
+                    name=fr["name"],
+                    mimetype=fr.get("mimetype"),
+                    size=fr.get("size"),
+                    uri=fr.get("uri"),  # already artifact-backed
+                    url=None,  # no re-download
+                    extra={
+                        "platform": "slack",
+                        "channel_key": fr.get("channel_key"),
+                        "ts": fr.get("ts"),
+                    },
+                )
             )
-        else:
-            await c.resume_router.resume(cont.run_id, cont.node_id, cont.token, {"text": text})
+
+        meta = {
+            "raw": payload,
+            "channel_key": ch_key,
+        }
+
+        # Let ChannelIngress find the continuation, update inbox, and resume
+        resumed = await ingress.handle(
+            IncomingMessage(
+                scheme=scheme,
+                channel_id=channel_id,
+                thread_id=str(thread_ts or ""),
+                text=text,
+                files=incoming_files or None,
+                meta=meta,
+            )
+        )
+
+        if container.logger:
+            container.logger.for_run().debug(
+                f"[Slack] inbound message: text={text!r}, files={len(incoming_files)}, resumed={resumed}"
+            )
+
+        # Nothing special to return to Slack (Events API only cares that we 200)
         return {}
 
     # --- file_shared (out-of-band file) ---
@@ -182,15 +225,9 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
         chan = ev.get("channel_id") or (ev.get("channel") or {}).get("id")
         if not (file_id and chan):
             return {}
-        ch_key = _channel_key(team, chan, None)
 
-        cont = None
-        if thread_ts:
-            corr = Correlator(scheme="slack", channel=ch_key, thread=thread_ts, message="")
-            cont = await c.cont_store.find_by_correlator(corr=corr)
-        if not cont:
-            corr2 = Correlator(scheme="slack", channel=ch_key, thread="", message="")
-            cont = await c.cont_store.find_by_correlator(corr=corr2)
+        ch_key = _channel_key(team, chan, None)
+        scheme, channel_id = _slack_scheme_and_channel_id(team, chan)
 
         info = await c.slack.client.files_info(file=file_id)
         f = info.get("file") or {}
@@ -200,39 +237,58 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
         url_priv = f.get("url_private") or f.get("url_private_download")
 
         uri = None
-        if url_priv:
+        if url_priv and SLACK_BOT_TOKEN:
             try:
                 data_bytes = await _download_slack_file(url_priv, SLACK_BOT_TOKEN)
                 uri = await _stage_and_save(
-                    c, data=data_bytes, file_id=file_id, name=name, ch_key=ch_key, cont=cont
+                    c,
+                    data=data_bytes,
+                    file_id=file_id,
+                    name=name,
+                    ch_key=ch_key,
+                    cont=None,
                 )
             except Exception as e:
                 container.logger and container.logger.for_run().warning(
                     f"Slack download failed: {e}", exc_info=True
                 )
 
-        fr = {
-            "id": file_id,
-            "name": name,
-            "mimetype": mimetype,
-            "size": size,
-            "uri": uri,
-            "url_private": url_priv,
-            "platform": "slack",
-            "channel_key": ch_key,
-            "ts": ev.get("event_ts"),
-        }
+        # Build IncomingFile with pre-saved uri
+        incoming_file = IncomingFile(
+            id=file_id,
+            name=name,
+            mimetype=mimetype,
+            size=size,
+            uri=uri,  # already artifact-backed, no re-download when uri used in ingress
+            url=None,
+            extra={
+                "platform": "slack",
+                "channel_key": ch_key,
+                "ts": ev.get("event_ts"),
+            },
+        )
 
-        inbox_key = f"inbox://{ch_key}"
-        await c.kv_hot.list_append_unique(inbox_key, [fr], id_key="id")
+        meta = {"raw": payload, "channel_key": ch_key}
 
-        if cont and cont.kind in ("user_files", "user_input_or_files"):
-            await c.resume_router.resume(
-                cont.run_id, cont.node_id, cont.token, {"text": "", "files": [fr]}
+        resumed = await ingress.handle(
+            IncomingMessage(
+                scheme=scheme,
+                channel_id=channel_id,
+                thread_id=str(thread_ts or ""),
+                text="",  # no text; just a file drop
+                files=[incoming_file],
+                meta=meta,
             )
+        )
+
+        if container.logger:
+            container.logger.for_run().debug(
+                f"[Slack] file_shared: file_id={file_id}, resumed={resumed}"
+            )
+
         return {}
 
-    # other events might add later
+    # other events might be added later
     return {}
 
 

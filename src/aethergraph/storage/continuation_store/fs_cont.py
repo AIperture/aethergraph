@@ -13,7 +13,7 @@ import re
 import threading
 from typing import Any
 
-from ..continuation import Continuation, Correlator
+from aethergraph.services.continuations.continuation import Continuation, Correlator
 
 
 class FSContinuationStore:  # implements AsyncContinuationStore

@@ -28,3 +28,7 @@ class AsyncKV(Protocol):
     ) -> None: ...  # multiple set
     async def expire(self, key: str, ttl_s: int) -> None: ...
     async def purge_expired(self, limit: int = 1000) -> int: ...  # return number purged
+
+    # Optional: if implemented, allows scanning for cleanup and debugging
+    # Should return all keys starting with "prefix"
+    async def scan_keys(self, prefix: str) -> list[str]: ...
