@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import json
 from pathlib import Path
@@ -215,15 +216,18 @@ class ArtifactFacade:
         kind: str,
         planned_ext: str | None = None,
         pin: bool = False,
-    ):
+    ) -> AsyncIterator[Any]:
         """
         Async contextmanager yielding a writer object with:
             writer.write(bytes)
             writer.add_labels(...)
             writer.add_metrics(...)
-        After context exit, writer.artifact will be populated with the Artifact.
+
+        After context exit, writer.artifact will be populated by the store,
+        and we will record it in the index here.
         """
-        cm = await self.store.open_writer(
+        # 1) Delegate to the store's async context manager
+        async with self.store.open_writer(
             kind=kind,
             run_id=self.run_id,
             graph_id=self.graph_id,
@@ -232,10 +236,13 @@ class ArtifactFacade:
             tool_version=self.tool_version,
             planned_ext=planned_ext,
             pin=pin,
-        )
-        with cm as w:
+        ) as w:
+            # 2) Yield to user code (they write() and add_labels/add_metrics)
             yield w
-            a = getattr(w, "artifact", None) or getattr(w, "_artifact", None)
+
+        # 3) At this point, store.open_writer has fully exited and has set w.artifact
+        a = getattr(w, "artifact", None) or getattr(w, "_artifact", None)
+
         if a:
             await self._record(a)
         else:

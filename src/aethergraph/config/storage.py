@@ -1,10 +1,11 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # --- Per-backend settings ---
 
 
+# --- Artifact storage backends ---
 class FSArtifactStoreSettings(BaseModel):
     # Interpreted relative to AppSettings.root in the factory
     base_dir: str = "artifacts"  # => <root>/artifacts by default
@@ -41,6 +42,39 @@ class ArtifactIndexSettings(BaseModel):
     sqlite: SqliteArtifactIndexSettings = SqliteArtifactIndexSettings()
 
 
+# --- Graph State Storage ---
+class GraphStateStorageSettings(BaseModel):
+    backend: Literal["fs", "sqlite"] = "fs"
+
+    # FS backend
+    fs_root: str = "graph_state"  # under AppSettings.root
+    # SQLite backend
+    sqlite_path: str = "graph_state.db"  # relative to AppSettings.root
+
+
+# --- Continuation Store ---
+class ContinuationStoreSettings(BaseModel):
+    # Which backend to use:
+    #   - "fs": keep existing FSContinuationStore
+    #   - "kvdoc": KVDocContinuationStore (DocStore + AsyncKV + EventLog)
+    #   - "memory": in-memory (for tests/dev)
+    backend: Literal["fs", "kvdoc", "memory"] = "kvdoc"
+
+    # Root directory for FS backend (and default sqlite paths if you derive them)
+    root: str = "./aethergraph_data/cont"
+
+    # Namespacing for KV/Doc keys / ids
+    namespace: str = "cont"
+
+    # Secret for HMAC token generation; override via env.
+    secret_key: str = Field(
+        default="change-me",
+        description="Secret key for continuation HMAC tokens; set via AETHERGRAPH_CONT__SECRET_KEY.",
+    )
+
+
 class StorageSettings(BaseModel):
     artifacts: ArtifactStorageSettings = ArtifactStorageSettings()
     artifact_index: ArtifactIndexSettings = ArtifactIndexSettings()
+    graph_state: GraphStateStorageSettings = GraphStateStorageSettings()
+    continuation: ContinuationStoreSettings = ContinuationStoreSettings()
