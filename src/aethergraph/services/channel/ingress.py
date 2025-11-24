@@ -118,7 +118,8 @@ class ChannelIngress:
         Write bytes to tmp path, then save via ArtifactStore.save_file(...).
         Returns the Artifact.uri (string).
         """
-        tmp = self.artifacts.tmp_path(suffix=f"_{file_id or name}")
+        tmp = await self.artifacts.plan_staging_path(planned_ext=f"_{file_id or name}")
+
         with open(tmp, "wb") as f:
             f.write(data)
 

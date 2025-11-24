@@ -1,10 +1,9 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 import threading
 from typing import Any
-
-from anyio import Path
 
 from aethergraph.contracts.storage.doc_store import DocStore
 

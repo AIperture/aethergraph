@@ -330,7 +330,8 @@ def _normalize_mime_by_name(name: str | None, hint: str | None) -> str:
 
 
 async def _stage_and_save(container, *, data: bytes, name: str, ch_key: str, cont) -> str:
-    tmp = container.artifacts.tmp_path(suffix=f"_{name}")
+    tmp = await container.artifacts.plan_staging_path(planned_ext=f"_{name}")
+
     with open(tmp, "wb") as f:
         f.write(data)
     run_id = cont.run_id if cont else "ad-hoc"

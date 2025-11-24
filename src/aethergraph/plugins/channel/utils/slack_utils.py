@@ -75,7 +75,7 @@ def _channel_key(team_id: str, channel_id: str, thread_ts: str | None) -> str:
 async def _stage_and_save(c, *, data: bytes, file_id: str, name: str, ch_key: str, cont) -> str:
     """Write bytes to tmp path, then save via FileArtifactStore.save_file(...).
     Returns the Artifact.uri (string)."""
-    tmp = c.artifacts.tmp_path(suffix=f"_{file_id}")
+    tmp = await c.artifacts.plan_staging_path(planned_ext=f"_{file_id}")
     with open(tmp, "wb") as f:
         f.write(data)
     run_id = cont.run_id if cont else "ad-hoc"

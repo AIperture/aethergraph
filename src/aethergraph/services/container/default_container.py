@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
 from typing import Any
 
@@ -56,11 +55,15 @@ from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedule
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.secrets.env import EnvSecrets
-from aethergraph.services.state_stores.json_store import JsonGraphStateStore
 from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
-from aethergraph.storage.factory import build_artifact_index, build_artifact_store
+from aethergraph.storage.factory import (
+    build_artifact_index,
+    build_artifact_store,
+    build_continuation_store,
+    build_graph_state_store,
+)
 
 SERVICE_KEYS = [
     # core
@@ -177,10 +180,8 @@ def build_default_container(
     # we use user specified root if provided, else from config/env
     root_p = Path(root).resolve() if root else Path(cfg.root).resolve()
     (root_p / "kv").mkdir(parents=True, exist_ok=True)
-    (root_p / "continuations").mkdir(parents=True, exist_ok=True)
     (root_p / "index").mkdir(parents=True, exist_ok=True)
     (root_p / "memory").mkdir(parents=True, exist_ok=True)
-    (root_p / "graph_states").mkdir(parents=True, exist_ok=True)
 
     # core services
     logger_factory = StdLoggerService.build(
@@ -190,7 +191,8 @@ def build_default_container(
     registry = UnifiedRegistry()
 
     # continuations and resume
-    cont_store = FSContinuationStore(root=str(root_p / "continuations"), secret=os.urandom(32))
+    cont_store = build_continuation_store(cfg)
+
     sched_registry = SchedulerRegistry()
     wait_registry = WaitRegistry()
     resume_bus = MultiSchedulerResumeBus(
@@ -203,7 +205,8 @@ def build_default_container(
         wait_registry=wait_registry,
     )
     wakeup_queue = ThreadSafeWakeupQueue()  # TODO: this is a placeholder, not fully implemented
-    state_store = JsonGraphStateStore(root=str(root_p / "graph_states"))
+    # state_store = JsonGraphStateStore(root=str(root_p / "graph_states"))
+    state_store = build_graph_state_store(cfg)
 
     # global scheduler
     global_sched = GlobalForwardScheduler(
@@ -229,10 +232,6 @@ def build_default_container(
     # storage and artifacts
     kv_hot = EphemeralKV()
     kv_durable = SQLiteKV(str(root_p / "kv" / "kv.sqlite"))
-    # artifacts = FSArtifactStore(
-    #     str(root_p / "artifacts")
-    # )  # async wrapper over FileArtifactStoreSync
-    # artifact_index = JsonlArtifactIndex(str(root_p / "index" / "artifacts.jsonl"))
 
     artifacts = build_artifact_store(cfg)
     artifact_index = build_artifact_index(cfg)

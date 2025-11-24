@@ -1,10 +1,9 @@
 import asyncio
 from datetime import datetime
 import json
+from pathlib import Path
 import threading
 import time
-
-from anyio import Path
 
 from aethergraph.contracts.storage.event_log import EventLog
 

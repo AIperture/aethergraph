@@ -83,7 +83,7 @@ class KVDocContinuationStore(AsyncContinuationStore):
             evt = {
                 "scope_id": cont.run_id,
                 "kind": "continuation.save",
-                "ts": datetime.now(timezone.utc),
+                "ts": datetime.now(timezone.utc).isoformat(),
                 "tags": [cont.channel or "", cont.kind or ""],
                 "payload": payload,
             }
