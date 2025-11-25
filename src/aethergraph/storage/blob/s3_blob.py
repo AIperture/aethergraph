@@ -46,6 +46,7 @@ class S3BlobStore(BlobStore):
         key: str | None = None,
         ext: str | None = None,
         mime: str | None = None,
+        keep_source: bool = False,  # added for interface consistency; not used here
     ) -> str:
         key = self._resolve_key(key, ext)
 

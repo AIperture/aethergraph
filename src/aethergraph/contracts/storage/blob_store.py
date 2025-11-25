@@ -34,6 +34,7 @@ class BlobStore(Protocol):
         *,
         key: str | None = None,
         mime: str | None = None,
+        keep_source: bool = False,  # whether to keep the source file after storing, only relevant for FSBlobStore
     ) -> str:
         """Store a local file; return full blob URI."""
         ...

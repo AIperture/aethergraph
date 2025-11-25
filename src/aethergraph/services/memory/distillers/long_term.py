@@ -7,7 +7,9 @@ from typing import Any
 from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indices, Persistence
 
 # re-use stable_event_id from the MemoryFacade module
+from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.services.memory.facade import stable_event_id
+from aethergraph.services.memory.utils import _summary_doc_id
 
 
 def _now_iso() -> str:
@@ -96,6 +98,7 @@ class LongTermSummarizer(Distiller):
         hotlog: HotLog,
         persistence: Persistence,
         indices: Indices,
+        docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
         """
@@ -149,9 +152,10 @@ class LongTermSummarizer(Distiller):
             "text": digest_text,
         }
 
-        # 4) Persist JSON summary
-        uri = ar_summary_uri(scope_id, self.summary_tag, ts)  # this is a file:// URI locally
-        saved_uri = await persistence.save_json(uri=uri, obj=summary)
+        # 4) Persist JSON summary via DocStore
+        scope = scope_id or run_id
+        doc_id = _summary_doc_id(scope, self.summary_tag, ts)
+        await docs.put(doc_id, summary)
 
         # 5) Emit summary Event
         # NOTE: we only store a preview in text and full summary in data["summary_uri"]
@@ -166,7 +170,7 @@ class LongTermSummarizer(Distiller):
             text=preview,
             tags=["summary", self.summary_tag],
             data={
-                "summary_uri": uri,
+                "summary_doc_id": doc_id,
                 "summary_tag": self.summary_tag,
                 "time_window": summary["time_window"],
                 "num_events": len(kept),
@@ -190,7 +194,7 @@ class LongTermSummarizer(Distiller):
         await persistence.append_event(run_id, evt)
 
         return {
-            "uri": saved_uri,
+            "summary_doc_id": doc_id,
             "summary_kind": self.summary_kind,
             "summary_tag": self.summary_tag,
             "time_window": summary["time_window"],

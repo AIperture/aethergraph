@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
@@ -156,7 +157,7 @@ class RAGFacade:
                     tool_name="rag.upsert",
                     tool_version="0.1.0",
                     labels=labels,
-                    cleanup=False,
+                    cleanup=False,  # keep source file as this is the original
                 )
                 path = d["path"].lower()
                 if path.endswith(".pdf"):
@@ -175,8 +176,29 @@ class RAGFacade:
             else:
                 # inline text doc — persist as artifact first
                 payload = d.get("text", "")
-                uri = await self.artifacts.save_text(payload=payload)  # store as temp artifact
-                doc_uri = uri.uri if hasattr(uri, "uri") else uri
+
+                # stage and save:
+                staged = await self.artifacts.plan_staging_path(".txt")
+                payload = d.get("text", "")
+
+                def _write_staged(path: str, content: str) -> None:
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(content)
+
+                await asyncio.to_thread(_write_staged, staged, payload)
+
+                a = await self.artifacts.save_file(
+                    path=staged,
+                    kind="doc",
+                    run_id="rag",
+                    graph_id="rag",
+                    node_id="rag",
+                    tool_name="rag.upsert",
+                    tool_version="0.1.0",
+                    labels=labels,
+                )
+
+                doc_uri = a.uri if hasattr(a, "uri") else a
                 text = payload
 
             text = (text or "").strip()

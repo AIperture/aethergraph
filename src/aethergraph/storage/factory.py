@@ -4,11 +4,98 @@ from pathlib import Path
 from aethergraph.config.config import AppSettings, ContinuationStoreSettings
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.kv import AsyncKV
+from aethergraph.contracts.services.memory import HotLog, Indices, Persistence
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.contracts.storage.event_log import EventLog
+
+
+def build_doc_store(cfg: AppSettings) -> DocStore:
+    """
+    Global DocStore factory, used by:
+      - Memory persistence (EventLogPersistence)
+      - RAG
+      - Continuations (if you choose to share it)
+      - Anything else that wants "document-ish" JSON blobs.
+    """
+    root = Path(cfg.root).resolve()
+    dc = cfg.storage.docs
+
+    if dc.backend == "sqlite":
+        from aethergraph.storage.docstore.sqlite_doc import SqliteDocStore
+
+        path = root / dc.sqlite_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return SqliteDocStore(path=str(path))
+
+    if dc.backend == "fs":
+        from aethergraph.storage.docstore.fs_doc import FSDocStore
+
+        doc_root = root / dc.fs_dir
+        doc_root.mkdir(parents=True, exist_ok=True)
+        return FSDocStore(root=str(doc_root))
+
+    raise ValueError(f"Unknown DocStore backend: {dc.backend!r}")
+
+
+def build_event_log(cfg: AppSettings) -> EventLog | None:
+    """
+    Global EventLog factory.
+    Used by:
+      - GraphStateStore (if you want)
+      - Memory (EventLogPersistence)
+      - Continuations audit (optional)
+    """
+    root = Path(cfg.root).resolve()
+    ec = cfg.storage.eventlog
+
+    if ec.backend == "none":
+        return None
+
+    if ec.backend == "sqlite":
+        from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
+
+        path = root / ec.sqlite_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return SqliteEventLog(path=str(path))
+
+    if ec.backend == "fs":
+        from aethergraph.storage.eventlog.fs_event import FSEventLog
+
+        ev_root = root / ec.fs_dir
+        ev_root.mkdir(parents=True, exist_ok=True)
+        return FSEventLog(root=str(ev_root))
+
+    raise ValueError(f"Unknown EventLog backend: {ec.backend!r}")
+
+
+def build_kv_store(cfg: AppSettings, *, extra_prefix: str = "") -> AsyncKV:
+    """
+    Global KV factory.
+
+    extra_prefix lets subsystems (memory, continuations, etc.) add their own
+    namespace on top of the global storage.kv.prefix.
+    """
+    root = Path(cfg.root).resolve()
+    kc = cfg.storage.kv
+
+    full_prefix = f"{kc.prefix}{extra_prefix}"
+
+    if kc.backend == "sqlite":
+        from aethergraph.storage.kv.sqlite_kv import SqliteKV
+
+        path = root / kc.sqlite_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return SqliteKV(path=str(path), prefix=full_prefix)
+
+    if kc.backend == "inmem":
+        from aethergraph.storage.kv.inmem_kv import InMemoryKV
+
+        return InMemoryKV(prefix=full_prefix)
+
+    raise ValueError(f"Unknown KV backend: {kc.backend!r}")
 
 
 def build_artifact_store(cfg: AppSettings) -> AsyncArtifactStore:
@@ -191,3 +278,84 @@ def build_continuation_store(cfg: AppSettings) -> AsyncContinuationStore:
         return _build_kvdoc_cont_store(root, cont_cfg, secret)
 
     raise ValueError(f"Unknown continuation backend: {cont_cfg.backend}")
+
+
+def build_vector_index(cfg: AppSettings):
+    """
+    Build a VectorIndex based on cfg.storage.vector_index.
+    """
+    vcfg = cfg.storage.vector_index
+    root = os.path.abspath(cfg.root)
+
+    if vcfg.backend == "sqlite":
+        from aethergraph.storage.vector_index.sqlite_index import SQLiteVectorIndex
+
+        index_root = os.path.join(root, vcfg.sqlite.dir)
+        return SQLiteVectorIndex(root=index_root)
+
+    if vcfg.backend == "faiss":
+        from aethergraph.storage.vector_index.faiss_index import FAISSVectorIndex
+
+        index_root = os.path.join(root, vcfg.faiss.dir)
+        return FAISSVectorIndex(root=index_root, dim=vcfg.faiss.dim)
+
+    if vcfg.backend == "chroma":
+        try:
+            import chromadb
+        except ImportError as e:
+            chromadb = None  # type: ignore
+            raise RuntimeError("Chroma backend requires `chromadb` to be installed.") from e
+        from aethergraph.storage.vector_index.chroma_index import ChromaVectorIndex
+
+        if chromadb is None:
+            raise RuntimeError(
+                "Chroma backend selected, but `chromadb` is not installed. "
+                "Install it with `pip install chromadb`."
+            )
+        persist_dir = os.path.join(root, vcfg.chroma.persist_dir)
+        client = chromadb.PersistentClient(path=persist_dir)
+        return ChromaVectorIndex(
+            client=client,
+            collection_prefix=vcfg.chroma.collection_prefix,
+        )
+
+    raise ValueError(f"Unknown vector index backend: {vcfg.backend!r}")
+
+
+def build_memory_persistence(cfg: AppSettings) -> Persistence:
+    mp = cfg.storage.memory.persistence
+    root = cfg.root
+
+    if mp.backend == "fs":
+        from aethergraph.storage.memory.fs_persist import FSPersistence
+
+        return FSPersistence(base_dir=root)
+
+    if mp.backend == "eventlog":
+        from aethergraph.storage.memory.event_persist import EventLogPersistence
+
+        docs = build_doc_store(cfg)
+        log = build_event_log(cfg)
+        if log is None:
+            raise ValueError("memory.persistence.backend=eventlog requires a non-none EventLog")
+        return EventLogPersistence(
+            log=log,
+            docs=docs,
+            uri_prefix=mp.uri_prefix,
+        )
+
+    raise ValueError(f"Unknown memory persistence backend: {mp.backend!r}")
+
+
+def build_memory_hotlog(cfg: AppSettings) -> HotLog:
+    from aethergraph.storage.memory.hotlog import KVHotLog
+
+    kv = build_kv_store(cfg, extra_prefix="mem:hot:")
+    return KVHotLog(kv=kv)
+
+
+def build_memory_indices(cfg: AppSettings) -> Indices:
+    from aethergraph.storage.memory.indices import KVIndices
+
+    kv = build_kv_store(cfg, extra_prefix="mem:idx:")
+    return KVIndices(kv=kv, hot_ttl_s=cfg.storage.memory.indices.ttl_s)

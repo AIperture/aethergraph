@@ -115,6 +115,7 @@ class ArtifactFacade:
         metrics: dict | None = None,
         suggested_uri: str | None = None,
         pin: bool = False,
+        cleanup: bool = True,
     ) -> Artifact:
         """Save an existing file and index it."""
         a = await self.store.save_file(
@@ -129,6 +130,7 @@ class ArtifactFacade:
             metrics=metrics,
             suggested_uri=suggested_uri,
             pin=pin,
+            cleanup=cleanup,
         )
         await self._record(a)
         return a

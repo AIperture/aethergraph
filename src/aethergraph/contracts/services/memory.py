@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypedDict
 
+from aethergraph.contracts.storage.doc_store import DocStore
+
 EventKind = Literal[
     "user_msg",
     "assistant_msg",
@@ -74,7 +76,14 @@ class Indices(Protocol):
 
 class Distiller(Protocol):
     async def distill(
-        self, run_id: str, *, hotlog: HotLog, persistence: Persistence, indices: Indices, **kw
+        self,
+        run_id: str,
+        *,
+        hotlog: HotLog,
+        persistence: Persistence,
+        indices: Indices,
+        docs: DocStore,
+        **kw,
     ) -> dict[str, Any]: ...
 
 

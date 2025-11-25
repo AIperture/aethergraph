@@ -5,6 +5,26 @@ from pydantic import BaseModel, Field
 # --- Per-backend settings ---
 
 
+class DocStoreSettings(BaseModel):
+    backend: Literal["sqlite", "fs"] = "sqlite"
+    # All paths are *relative* to AppSettings.root
+    sqlite_path: str = "docs/doc_store.db"
+    fs_dir: str = "docs/doc_store"
+
+
+class EventLogSettings(BaseModel):
+    backend: Literal["sqlite", "fs", "none"] = "fs"
+    sqlite_path: str = "events/events.db"
+    fs_dir: str = "events"
+
+
+class KVStoreSettings(BaseModel):
+    backend: Literal["sqlite", "inmem"] = "sqlite"
+    sqlite_path: str = "kv/kv_store.db"
+    # Optional global prefix, you can still add extra per-subsystem prefixes
+    prefix: str = ""
+
+
 # --- Artifact storage backends ---
 class FSArtifactStoreSettings(BaseModel):
     # Interpreted relative to AppSettings.root in the factory
@@ -101,8 +121,67 @@ class ContinuationStoreSettings(BaseModel):
     memory: MemoryContinuationStoreSettings = MemoryContinuationStoreSettings()
 
 
+# --- Vector Index Storage ---
+class SQLiteVectorIndexSettings(BaseModel):
+    # Relative to AppSettings.root
+    dir: str = "vector_index/sqlite"
+    filename: str = "index.sqlite"  # currently not used directly, but kept for flexibility
+
+
+class FAISSVectorIndexSettings(BaseModel):
+    # Relative to AppSettings.root
+    dir: str = "vector_index/faiss"
+    dim: int | None = None  # optional default; can be inferred
+
+
+class ChromaVectorIndexSettings(BaseModel):
+    # Relative to AppSettings.root
+    persist_dir: str = "vector_index/chroma"
+    collection_prefix: str = "vec_"
+
+
+class VectorIndexStorageSettings(BaseModel):
+    backend: Literal["sqlite", "faiss", "chroma"] = "faiss"
+
+    sqlite: SQLiteVectorIndexSettings = SQLiteVectorIndexSettings()
+    faiss: FAISSVectorIndexSettings = FAISSVectorIndexSettings()
+    chroma: ChromaVectorIndexSettings = ChromaVectorIndexSettings()
+
+
+# --- Memory Storage Settings (overall) ---
+class MemoryPersistenceSettings(BaseModel):
+    # "fs" uses FSPersistence, "eventlog" uses EventLogPersistence
+    backend: Literal["fs", "eventlog"] = "eventlog"
+    # FS backend
+    fs_base_dir: str = "mem"
+    # EventLog backend
+    uri_prefix: str = "memdoc://"
+
+
+class MemoryHotLogSettings(BaseModel):
+    # TTL + buffer size for KVHotLog
+    ttl_s: int = 24 * 3600
+    limit: int = 400
+
+
+class MemoryIndicesSettings(BaseModel):
+    ttl_s: int = 24 * 3600
+
+
+class MemorySettings(BaseModel):
+    persistence: MemoryPersistenceSettings = MemoryPersistenceSettings()
+    hotlog: MemoryHotLogSettings = MemoryHotLogSettings()
+    indices: MemoryIndicesSettings = MemoryIndicesSettings()
+
+
 class StorageSettings(BaseModel):
+    docs: DocStoreSettings = DocStoreSettings()
+    eventlog: EventLogSettings = EventLogSettings()
+    kv: KVStoreSettings = KVStoreSettings()
+
     artifacts: ArtifactStorageSettings = ArtifactStorageSettings()
     artifact_index: ArtifactIndexSettings = ArtifactIndexSettings()
     graph_state: GraphStateStorageSettings = GraphStateStorageSettings()
     continuation: ContinuationStoreSettings = ContinuationStoreSettings()
+    vector_index: VectorIndexStorageSettings = VectorIndexStorageSettings()
+    memory: MemorySettings = MemorySettings()

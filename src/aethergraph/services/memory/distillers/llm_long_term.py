@@ -6,8 +6,9 @@ from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indices, Persistence
-from aethergraph.services.memory.distillers.long_term import ar_summary_uri
+from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.services.memory.facade import now_iso, stable_event_id
+from aethergraph.services.memory.utils import _summary_doc_id
 
 
 class LLMLongTermSummarizer(Distiller):
@@ -110,6 +111,7 @@ class LLMLongTermSummarizer(Distiller):
         hotlog: HotLog,
         persistence: Persistence,
         indices: Indices,
+        docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
         # 1) fetch more events than needed, then filter
@@ -158,9 +160,10 @@ class LLMLongTermSummarizer(Distiller):
             "llm_model": self.llm.model if hasattr(self.llm, "model") else None,
         }
 
-        uri = ar_summary_uri(scope_id, self.summary_tag, ts)  # this is a file:// URI locally
+        scope = scope_id or run_id
+        doc_id = _summary_doc_id(scope, self.summary_tag, ts)
+        await docs.put(doc_id, summary_obj)
 
-        saved_uri = await persistence.save_json(uri=uri, obj=summary_obj)
         # 4) Emit summary Event with preview + uri in data
         text = summary_obj["summary"] or ""
         preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
@@ -174,7 +177,7 @@ class LLMLongTermSummarizer(Distiller):
             text=preview,
             tags=["summary", "llm", self.summary_tag],
             data={
-                "summary_uri": uri,
+                "summary_doc_id": doc_id,
                 "summary_tag": self.summary_tag,
                 "time_window": summary_obj["time_window"],
                 "num_events": len(kept),
@@ -198,7 +201,7 @@ class LLMLongTermSummarizer(Distiller):
         await persistence.append_event(run_id, evt)
 
         return {
-            "uri": saved_uri,
+            "summary_doc_id": doc_id,
             "summary_kind": self.summary_kind,
             "summary_tag": self.summary_tag,
             "time_window": summary_obj["time_window"],

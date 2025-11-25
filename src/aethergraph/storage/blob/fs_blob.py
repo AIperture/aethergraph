@@ -50,6 +50,7 @@ class FSBlobStore(BlobStore):
         *,
         key: str | None = None,
         mime: str | None = None,
+        keep_source: bool = False,
     ) -> str:
         ext = os.path.splitext(path)[1]
         key = self._resolve_key(key, ext)
@@ -57,7 +58,10 @@ class FSBlobStore(BlobStore):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
 
         def _move():
-            shutil.move(os.path.abspath(path), dst)
+            if keep_source:
+                shutil.copy2(os.path.abspath(path), dst)
+            else:
+                shutil.move(os.path.abspath(path), dst)
             return _to_file_uri(dst)
 
         return await to_thread(_move)
