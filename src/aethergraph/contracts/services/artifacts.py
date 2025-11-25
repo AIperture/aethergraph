@@ -61,6 +61,7 @@ class AsyncArtifactStore(Protocol):
         labels: dict | None = None,
         metrics: dict | None = None,
         preview_uri: str | None = None,
+        cleanup: bool = True,
     ) -> Artifact: ...
     async def open_writer(
         self,

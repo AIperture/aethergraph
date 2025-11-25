@@ -12,7 +12,10 @@ import unicodedata
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persistence
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.services.rag.facade import RAGFacade
+
+from .utils import _summary_prefix
 
 """
 MemoryFacade coordinates core memory services for a specific run/session.
@@ -159,6 +162,7 @@ class MemoryFacade:
         hotlog: HotLog,
         persistence: Persistence,
         indices: Indices,
+        docs: DocStore,
         artifact_store: AsyncArtifactStore,
         hot_limit: int = 1000,
         hot_ttl_s: int = 7 * 24 * 3600,
@@ -174,6 +178,7 @@ class MemoryFacade:
         self.hotlog = hotlog
         self.persistence = persistence
         self.indices = indices
+        self.docs = docs
         self.artifacts = artifact_store
         self.hot_limit = hot_limit
         self.hot_ttl_s = hot_ttl_s
@@ -460,7 +465,6 @@ class MemoryFacade:
 
     async def latest_refs_by_kind(self, kind: str, *, limit: int = 50):
         """Return latest ref outputs by ref.kind (fast path, KV-backed)."""
-        raise NotImplementedError
         return await self.indices.latest_refs_by_kind(self.run_id, kind, limit=limit)
 
     async def search(
@@ -564,6 +568,7 @@ class MemoryFacade:
                 hotlog=self.hotlog,
                 persistence=self.persistence,
                 indices=self.indices,
+                docs=self.docs,
             )
 
         from aethergraph.services.memory.distillers.long_term import LongTermSummarizer
@@ -583,6 +588,7 @@ class MemoryFacade:
             hotlog=self.hotlog,
             persistence=self.persistence,
             indices=self.indices,
+            docs=self.docs,
         )
 
     async def distill_meta_summary(
@@ -639,6 +645,7 @@ class MemoryFacade:
             hotlog=self.hotlog,
             persistence=self.persistence,
             indices=self.indices,
+            docs=self.docs,
         )
 
     # ---------- RAG facade ----------
@@ -884,44 +891,34 @@ class MemoryFacade:
         summary_tag: str = "session",
     ) -> dict[str, Any] | None:
         """
-        Soft-hydrate helper:
-
         Load the most recent JSON summary for this memory scope and tag.
-        By default, memory_scope_id == run_id, but callers can set a stable
-        scope (e.g. user+persona) to share summaries across runs.
+
+        Uses DocStore IDs:
+        mem/{scope_id}/summaries/{summary_tag}/{ts}
+        so it works regardless of persistence backend.
         """
-        import asyncio
-        import glob
+        scope_id = scope_id or self.memory_scope_id or self.run_id
+        prefix = _summary_prefix(scope_id, summary_tag)
 
-        from aethergraph.services.memory.persist_fs import FSPersistence
-
-        if not isinstance(self.persistence, FSPersistence):
-            self.logger and self.logger.warning(
-                "load_last_summary: persistence is not FSPersistence; cannot load summary"
-            )
+        try:
+            ids = await self.docs.list()
+        except Exception as e:
+            self.logger and self.logger.warning("load_last_summary: doc_store.list() failed: %s", e)
             return None
 
-        base_dir = self.persistence.base_dir
-        scope_id = scope_id or getattr(self, "memory_scope_id", None) or self.run_id
+        # Filter and take the latest
+        candidates = [d for d in ids if d.startswith(prefix)]
+        if not candidates:
+            return None
 
-        pattern = os.path.join(
-            base_dir,
-            "mem",
-            scope_id,
-            "summaries",
-            summary_tag,
-            "*.json",
-        )
-
-        def _load_latest() -> dict[str, Any] | None:
-            paths = sorted(glob.glob(pattern))
-            if not paths:
-                return None
-            latest = paths[-1]
-            with open(latest, encoding="utf-8") as f:
-                return json.load(f)
-
-        return await asyncio.to_thread(_load_latest)
+        latest_id = sorted(candidates)[-1]
+        try:
+            return await self.docs.get(latest_id)  # type: ignore[return-value]
+        except Exception as e:
+            self.logger and self.logger.warning(
+                "load_last_summary: failed to load %s: %s", latest_id, e
+            )
+            return None
 
     async def load_recent_summaries(
         self,
@@ -931,50 +928,35 @@ class MemoryFacade:
         limit: int = 3,
     ) -> list[dict[str, Any]]:
         """
-        Load the most recent JSON summaries for this memory scope and tag.
+        Load up to `limit` most recent JSON summaries for this scope+tag.
 
-        Returns a list of summary dicts, ordered oldest→newest (so the last item is
-        the most recent summary). If there are fewer than `limit`, returns what it finds.
+        Ordered oldest→newest (so the last item is the most recent).
         """
-        import asyncio
-        import glob
+        scope_id = scope_id or self.memory_scope_id or self.run_id
+        prefix = _summary_prefix(scope_id, summary_tag)
 
-        from aethergraph.services.memory.persist_fs import FSPersistence
-
-        if not isinstance(self.persistence, FSPersistence):
+        try:
+            ids = await self.docs.list()
+        except Exception as e:
             self.logger and self.logger.warning(
-                "load_recent_summaries: persistence is not FSPersistence; cannot load summaries"
+                "load_recent_summaries: doc_store.list() failed: %s", e
             )
             return []
 
-        base_dir = self.persistence.base_dir
-        scope_id = scope_id or getattr(self, "memory_scope_id", None) or self.run_id
+        candidates = sorted(d for d in ids if d.startswith(prefix))
+        if not candidates:
+            return []
 
-        pattern = os.path.join(
-            base_dir,
-            "mem",
-            scope_id,
-            "summaries",
-            summary_tag,
-            "*.json",
-        )
-
-        def _load_many() -> list[dict[str, Any]]:
-            paths = sorted(glob.glob(pattern))
-            if not paths:
-                return []
-            # Take the last `limit` files (most recent by filename)
-            chosen = paths[-limit:]
-            out: list[dict[str, Any]] = []
-            for p in chosen:
-                try:
-                    with open(p, encoding="utf-8") as f:
-                        out.append(json.load(f))
-                except Exception:
-                    continue
-            return out
-
-        return await asyncio.to_thread(_load_many)
+        chosen = candidates[-limit:]
+        out: list[dict[str, Any]] = []
+        for doc_id in chosen:
+            try:
+                doc = await self.docs.get(doc_id)
+                if doc is not None:
+                    out.append(doc)  # type: ignore[arg-type]
+            except Exception:
+                continue
+        return out
 
     async def soft_hydrate_last_summary(
         self,

@@ -1,6 +1,8 @@
 from aethergraph.contracts.services.kv import AsyncKV
 from aethergraph.contracts.services.memory import Event, HotLog
 
+# No specific backend is required; we use AsyncKV for storage.
+
 
 def kv_hot_key(run_id: str) -> str:
     return f"mem:{run_id}:hot"
@@ -13,13 +15,17 @@ class KVHotLog(HotLog):
     async def append(self, run_id: str, evt: Event, *, ttl_s: int, limit: int) -> None:
         key = kv_hot_key(run_id)
         buf = list((await self.kv.get(key, default=[])) or [])
-        buf.append(evt.__dict__)  # store as dict for JSON serializability
+        buf.append(evt.__dict__)  # store as dict for JSON-ability
         if len(buf) > limit:
             buf = buf[-limit:]
         await self.kv.set(key, buf, ttl_s=ttl_s)
 
     async def recent(
-        self, run_id: str, *, kinds: list[str] | None = None, limit: int = 50
+        self,
+        run_id: str,
+        *,
+        kinds: list[str] | None = None,
+        limit: int = 50,
     ) -> list[Event]:
         buf = (await self.kv.get(kv_hot_key(run_id), default=[])) or []
         if kinds:

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Iterable
-import glob
 import json
-import os
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indices, Persistence
+from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.services.memory.distillers.long_term import ar_summary_uri
 from aethergraph.services.memory.facade import now_iso, stable_event_id
+from aethergraph.services.memory.utils import _summary_doc_id, _summary_prefix
 
 """
 Meta-summary pipeline (multi-scale memory):
@@ -212,6 +211,7 @@ class LLMMetaSummaryDistiller(Distiller):
         hotlog: HotLog,
         persistence: Persistence,
         indices: Indices,
+        docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
         """
@@ -223,50 +223,29 @@ class LLMMetaSummaryDistiller(Distiller):
               mem/<scope_id>/summaries/<source_tag>/*.json
           - If a different Persistence is used, we currently bail out.
         """
-        from aethergraph.services.memory.persist_fs import (
-            FSPersistence,  # local import to avoid cycles
-        )
-
         scope = scope_id or run_id
+        prefix = _summary_prefix(scope, self.source_tag)
 
-        if not isinstance(persistence, FSPersistence):
-            # For now we only support FS-based summaries. You can later add
-            # DB-backed listing methods to the Persistence protocol.
-            raise RuntimeError(
-                "LLMMetaSummaryDistiller currently requires FSPersistence to load saved summaries"
-            )
+        # 1) Load existing long-term summary JSONs from DocStore
+        try:
+            all_ids = await docs.list()
+        except Exception:
+            all_ids = []
 
-        base_dir = persistence.base_dir
-        pattern = os.path.join(
-            base_dir,
-            "mem",
-            scope,
-            "summaries",
-            self.source_tag,
-            "*.json",
-        )
+        candidates = sorted(d for d in all_ids if d.startswith(prefix))
+        if not candidates:
+            return {}
 
-        async def _load_saved_summaries() -> list[dict[str, Any]]:
-            def _load() -> list[dict[str, Any]]:
-                paths = sorted(glob.glob(pattern))
-                if not paths:
-                    return []
-                # Keep only the last N summaries by filename (ts is in the name)
-                chosen = paths[-self.max_summaries :]
-                out: list[dict[str, Any]] = []
-                for p in chosen:
-                    try:
-                        with open(p, encoding="utf-8") as f:
-                            out.append(json.load(f))
-                    except Exception:
-                        # best-effort; skip corrupt files
-                        continue
-                return out
+        chosen_ids = candidates[-self.max_summaries :]
+        summaries: list[dict[str, Any]] = []
+        for doc_id in chosen_ids:
+            try:
+                doc = await docs.get(doc_id)
+                if doc is not None:
+                    summaries.append(doc)  # type: ignore[arg-type]
+            except Exception:
+                continue
 
-            return await asyncio.to_thread(_load)
-
-        # 1) Load existing long-term summary JSONs (e.g. "session" summaries)
-        summaries = await _load_saved_summaries()
         if not summaries:
             return {}
 
@@ -346,8 +325,8 @@ class LLMMetaSummaryDistiller(Distiller):
             "llm_model": getattr(self.llm, "model", None),
         }
 
-        uri = ar_summary_uri(scope, self.summary_tag, ts)
-        saved_uri = await persistence.save_json(uri=uri, obj=summary_obj)
+        doc_id = _summary_doc_id(scope, self.summary_tag, ts)
+        await docs.put(doc_id, summary_obj)
 
         # 5) Emit meta_summary Event
         text = summary_obj["summary"] or ""
@@ -362,7 +341,7 @@ class LLMMetaSummaryDistiller(Distiller):
             text=preview,
             tags=["summary", "llm", self.summary_tag],
             data={
-                "summary_uri": uri,
+                "summary_doc_id": doc_id,
                 "summary_tag": self.summary_tag,
                 "time_window": summary_obj["time_window"],
                 "num_source_summaries": len(kept),
@@ -388,7 +367,7 @@ class LLMMetaSummaryDistiller(Distiller):
         await persistence.append_event(run_id, evt)
 
         return {
-            "uri": saved_uri,
+            "summary_doc_id": doc_id,
             "summary_kind": self.summary_kind,
             "summary_tag": self.summary_tag,
             "time_window": summary_obj["time_window"],

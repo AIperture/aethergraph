@@ -30,8 +30,6 @@ from aethergraph.services.continuations.stores.fs_store import (
 from aethergraph.services.eventbus.inmem import InMemoryEventBus
 
 # ---- kv services ----
-from aethergraph.services.kv.ephemeral import EphemeralKV
-from aethergraph.services.kv.sqlite_kv import SQLiteKV
 from aethergraph.services.llm.factory import build_llm_clients
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
@@ -39,16 +37,12 @@ from aethergraph.services.mcp.service import MCPService
 
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
-from aethergraph.services.memory.hotlog_kv import KVHotLog
-from aethergraph.services.memory.indices import KVIndices
-from aethergraph.services.memory.persist_fs import FSPersistence
 from aethergraph.services.metering.noop import NoopMetering
 from aethergraph.services.prompts.file_store import FilePromptStore
 from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
 
 # ---- RAG components ----
-from aethergraph.services.rag.index_factory import create_vector_index
 from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
@@ -62,8 +56,14 @@ from aethergraph.storage.factory import (
     build_artifact_index,
     build_artifact_store,
     build_continuation_store,
+    build_doc_store,
     build_graph_state_store,
+    build_memory_hotlog,
+    build_memory_indices,
+    build_memory_persistence,
+    build_vector_index,
 )
+from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 
 SERVICE_KEYS = [
     # core
@@ -80,7 +80,6 @@ SERVICE_KEYS = [
     "wakeup_queue",
     # storage and artifacts
     "kv_hot",
-    "kv_durable",
     "artifacts",
     "artifact_index",
     # memory
@@ -125,7 +124,6 @@ class DefaultContainer:
 
     # storage and artifacts
     kv_hot: EphemeralKV
-    kv_durable: SQLiteKV
     artifacts: AsyncArtifactStore
     artifact_index: AsyncArtifactIndex
 
@@ -231,15 +229,9 @@ def build_default_container(
 
     # storage and artifacts
     kv_hot = EphemeralKV()
-    kv_durable = SQLiteKV(str(root_p / "kv" / "kv.sqlite"))
 
     artifacts = build_artifact_store(cfg)
     artifact_index = build_artifact_index(cfg)
-
-    # memory
-    hotlog = KVHotLog(kv=kv_hot)
-    persistence = FSPersistence(base_dir=str(root_p / "memory"))
-    indices = KVIndices(kv=kv_durable, hot_ttl_s=7 * 24 * 3600)
 
     # optional services
     secrets = (
@@ -248,11 +240,8 @@ def build_default_container(
     llm_clients = build_llm_clients(cfg.llm, secrets)  # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
 
-    rag_cfg = cfg.rag
-    vec_index = create_vector_index(
-        backend=rag_cfg.backend, index_path=str(root_p / "rag" / "rag_index"), dim=rag_cfg.dim
-    )
-
+    # RAG facade
+    vec_index = build_vector_index(cfg)
     rag_facade = RAGFacade(
         corpus_root=str(root_p / "rag" / "rag_corpora"),
         artifacts=artifacts,
@@ -264,11 +253,17 @@ def build_default_container(
     )
     mcp = MCPService()  # empty MCP service; users can register clients as needed
 
+    # memory factory
+    persistence = build_memory_persistence(cfg)
+    hotlog = build_memory_hotlog(cfg)
+    indices = build_memory_indices(cfg)
+    docs = build_doc_store(cfg)
     memory_factory = MemoryFactory(
         hotlog=hotlog,
         persistence=persistence,
         indices=indices,
         artifacts=artifacts,
+        docs=docs,
         hot_limit=int(cfg.memory.hot_limit),
         hot_ttl_s=int(cfg.memory.hot_ttl_s),
         default_signal_threshold=float(cfg.memory.signal_threshold),
@@ -291,7 +286,6 @@ def build_default_container(
         resume_router=resume_router,
         wakeup_queue=wakeup_queue,
         kv_hot=kv_hot,
-        kv_durable=kv_durable,
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,

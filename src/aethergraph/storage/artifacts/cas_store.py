@@ -75,12 +75,13 @@ class CASArtifactStore(AsyncArtifactStore):
         labels: dict | None = None,
         metrics: dict | None = None,
         preview_uri: str | None = None,  # NOTE: only metadata / pretty; impl may ignore
+        cleanup: bool = True,
     ) -> Artifact:
         sha, nbytes = await to_thread(_sha256_file, path)
         ext = os.path.splitext(path)[1]
         key = os.path.join("cas", "blobs", f"{sha}{ext}")
 
-        blob_uri = await self._blob.put_file(path, key=key, mime=None)
+        blob_uri = await self._blob.put_file(path, key=key, mime=None, keep_source=not cleanup)
 
         a = Artifact(
             artifact_id=sha,
