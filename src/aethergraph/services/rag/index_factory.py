@@ -42,7 +42,7 @@ def create_vector_index(
             backend = "sqlite"
 
     # sqlite (default)
-    from .index.sqlite_index import SQLiteVectorIndex
+    from aethergraph.storage.vector_index.sqlite_index import SQLiteVectorIndex
 
     path = (
         str(Path(index_path) / "sqlite")
