@@ -30,8 +30,6 @@ from aethergraph.services.continuations.stores.fs_store import (
 from aethergraph.services.eventbus.inmem import InMemoryEventBus
 
 # ---- kv services ----
-from aethergraph.services.kv.ephemeral import EphemeralKV
-from aethergraph.services.kv.sqlite_kv import SQLiteKV
 from aethergraph.services.llm.factory import build_llm_clients
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
@@ -65,6 +63,7 @@ from aethergraph.storage.factory import (
     build_memory_persistence,
     build_vector_index,
 )
+from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 
 SERVICE_KEYS = [
     # core
@@ -81,7 +80,6 @@ SERVICE_KEYS = [
     "wakeup_queue",
     # storage and artifacts
     "kv_hot",
-    "kv_durable",
     "artifacts",
     "artifact_index",
     # memory
@@ -126,7 +124,6 @@ class DefaultContainer:
 
     # storage and artifacts
     kv_hot: EphemeralKV
-    kv_durable: SQLiteKV
     artifacts: AsyncArtifactStore
     artifact_index: AsyncArtifactIndex
 
@@ -232,7 +229,6 @@ def build_default_container(
 
     # storage and artifacts
     kv_hot = EphemeralKV()
-    kv_durable = SQLiteKV(str(root_p / "kv" / "kv.sqlite"))
 
     artifacts = build_artifact_store(cfg)
     artifact_index = build_artifact_index(cfg)
@@ -244,12 +240,8 @@ def build_default_container(
     llm_clients = build_llm_clients(cfg.llm, secrets)  # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
 
-    # rag_cfg = cfg.rag
-    # vec_index = create_vector_index(
-    #     backend=rag_cfg.backend, index_path=str(root_p / "rag" / "rag_index"), dim=rag_cfg.dim
-    # )
+    # RAG facade
     vec_index = build_vector_index(cfg)
-
     rag_facade = RAGFacade(
         corpus_root=str(root_p / "rag" / "rag_corpora"),
         artifacts=artifacts,
@@ -261,6 +253,7 @@ def build_default_container(
     )
     mcp = MCPService()  # empty MCP service; users can register clients as needed
 
+    # memory factory
     persistence = build_memory_persistence(cfg)
     hotlog = build_memory_hotlog(cfg)
     indices = build_memory_indices(cfg)
@@ -293,7 +286,6 @@ def build_default_container(
         resume_router=resume_router,
         wakeup_queue=wakeup_queue,
         kv_hot=kv_hot,
-        kv_durable=kv_durable,
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,
