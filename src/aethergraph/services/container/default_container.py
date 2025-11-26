@@ -11,12 +11,15 @@ from aethergraph.config.config import AppSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
+from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
+from aethergraph.core.runtime.run_manager import RunManager
+from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
 from aethergraph.services.auth.dev import AllowAllAuthz, DevTokenAuthn
 from aethergraph.services.channel.channel_bus import ChannelBus
 
@@ -64,6 +67,7 @@ from aethergraph.storage.factory import (
     build_vector_index,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
+from aethergraph.storage.runs.inmen_store import InMemoryRunStore
 
 SERVICE_KEYS = [
     # core
@@ -135,6 +139,10 @@ class DefaultContainer:
     rag: RAGFacade | None = None
     mcp: MCPService | None = None
 
+    # run controls -- for http endpoints and run manager
+    run_store: RunStore | None = None
+    run_manager: RunManager | None = None  # RunManager
+
     # optional services (not used by default)
     event_bus: InMemoryEventBus | None = None
     prompts: FilePromptStore | None = None
@@ -186,7 +194,9 @@ def build_default_container(
         LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs"))
     )
     clock = SystemClock()
-    registry = UnifiedRegistry()
+    # registry = UnifiedRegistry()
+    registry: UnifiedRegistry = current_registry()
+    set_current_registry(registry)  # set global registry, ensure singleton (optional)
 
     # continuations and resume
     cont_store = build_continuation_store(cfg)
@@ -272,6 +282,10 @@ def build_default_container(
         rag_facade=rag_facade,
     )
 
+    # TODO: name run store configurable -- for now, just in-memory
+    run_store = InMemoryRunStore()
+    run_manager = RunManager(run_store=run_store, registry=registry)
+
     container = DefaultContainer(
         root=str(root_p),
         schedulers=schedulers,
@@ -293,6 +307,8 @@ def build_default_container(
         llm=llm_service,
         rag=rag_facade,
         mcp=mcp,
+        run_store=run_store,
+        run_manager=run_manager,
         secrets=secrets,
         event_bus=None,
         prompts=None,

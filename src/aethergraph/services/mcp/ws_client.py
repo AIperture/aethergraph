@@ -3,10 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
-from websockets.client import WebSocketClientProtocol
+
+if TYPE_CHECKING:
+    # only imported for static type checkers; no runtime import, no warning
+    from websockets.client import WebSocketClientProtocol
 
 from aethergraph.contracts.services.mcp import MCPClientProtocol, MCPResource, MCPTool
 

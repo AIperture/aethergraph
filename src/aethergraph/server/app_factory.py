@@ -4,13 +4,18 @@ from typing import Optional
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from aethergraph.config.config import AppSettings
-from aethergraph.utils.optdeps import require
+from aethergraph.api.v1.graphs import router as graphs_router
 
-from ..core.runtime.runtime_services import install_services
+# routers
+from aethergraph.api.v1.runs import router as runs_router
+
+# include apis
+from aethergraph.config.config import AppSettings
+from aethergraph.core.runtime.runtime_services import install_services
 
 # channel routes
-from ..services.container.default_container import build_default_container
+from aethergraph.services.container.default_container import build_default_container
+from aethergraph.utils.optdeps import require
 
 
 def create_app(
@@ -36,6 +41,10 @@ def create_app(
     # Resolve settings early, so we can conditionally include routers
     settings = cfg or AppSettings()
     app.state.settings = settings
+
+    # --- API Routers ---
+    app.include_router(router=runs_router, prefix="/api/v1")
+    app.include_router(router=graphs_router, prefix="/api/v1")
 
     # --- Routers (HTTP transports) ---
     # For now, we can just always include; or gate it with a flag like settings.slack.use_webhook.

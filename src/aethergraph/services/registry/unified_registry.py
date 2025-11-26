@@ -85,11 +85,13 @@ class UnifiedRegistry:
                 raise KeyError(f"Version not found: {key.nspace}:{key.name}@{ver}")
 
             val = versions[ver]
-            # Materialize factories lazily (and cache)
-            if callable(val):
-                obj = val()
-                versions[ver] = obj
-                return obj
+
+            ## Materialize if factory -> we handle it when executing the graphs. Here it can cause
+            # the graph_fn returns a coroutine inside the GraphFunction object, not the expected function.
+            # if callable(val):
+            #     obj = val()
+            #     versions[ver] = obj
+            #     return obj
             return val
 
     # ---------- listing / admin ----------
@@ -158,6 +160,16 @@ class UnifiedRegistry:
 
     def get_agent(self, name: str, version: str | None = None) -> Any:
         return self.get(Key(nspace="agent", name=name, version=version))
+
+    # ---------- list typed ----------
+    def list_tools(self) -> dict[str, str]:
+        return self.list(nspace="tool")
+
+    def list_graphs(self) -> dict[str, str]:
+        return self.list(nspace="graph")
+
+    def list_graphfns(self) -> dict[str, str]:
+        return self.list(nspace="graphfn")
 
     # ---------- helpers ----------
 

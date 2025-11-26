@@ -29,7 +29,7 @@ def create_vector_index(
         # try FAISS, fallback to sqlite with a warning
         try:
             require("faiss", "faiss")  # faiss-cpu exposes module 'faiss'
-            from .index.faiss_index import FAISSVectorIndex
+            from aethergraph.storage.vector_index.faiss_index import FAISSVectorIndex
 
             path = (
                 str(Path(index_path) / "faiss")

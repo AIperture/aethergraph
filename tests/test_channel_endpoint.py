@@ -1,5 +1,3 @@
-import asyncio
-
 from fastapi import FastAPI
 import httpx
 import pytest
@@ -137,7 +135,3 @@ async def test_channel_http_roundtrip():
     assert payload["meta"]["foo"] == "bar"
 
     # print("Test passed: channel HTTP roundtrip works as expected.")
-
-
-if __name__ == "__main__":
-    asyncio.run(test_channel_http_roundtrip())

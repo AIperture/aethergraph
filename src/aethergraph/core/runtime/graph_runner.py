@@ -8,7 +8,7 @@ import uuid
 from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.recovery import hash_spec, recover_graph_run
-from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.container.default_container import build_default_container  # adjust path
 from aethergraph.services.state_stores.graph_observer import PersistenceObserver
 from aethergraph.services.state_stores.resume_policy import (
     assert_snapshot_json_only,
