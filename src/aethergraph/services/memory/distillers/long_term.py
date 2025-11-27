@@ -8,6 +8,7 @@ from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indi
 
 # re-use stable_event_id from the MemoryFacade module
 from aethergraph.contracts.storage.doc_store import DocStore
+from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.services.memory.facade import stable_event_id
 from aethergraph.services.memory.utils import _summary_doc_id
 
@@ -193,6 +194,26 @@ class LongTermSummarizer(Distiller):
 
         await hotlog.append(run_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
         await persistence.append_event(run_id, evt)
+
+        # Metering: record summary event
+        try:
+            meter = current_metering()
+            ctx = current_meter_context.get()
+            user_id = ctx.get("user_id")
+            org_id = ctx.get("org_id")
+
+            await meter.record_event(
+                user_id=user_id,
+                org_id=org_id,
+                run_id=run_id,
+                scope_id=scope,
+                kind=f"memory.{self.summary_kind}",  # e.g. "memory.long_term_summary"
+            )
+        except Exception:
+            import logging
+
+            logger = logging.getLogger("aethergraph.services.memory.distillers.long_term")
+            logger.error("Failed to record metering event for long_term_summary")
 
         return {
             "summary_doc_id": doc_id,

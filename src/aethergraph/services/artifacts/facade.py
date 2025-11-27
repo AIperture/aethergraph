@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
+from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.services.artifacts.paths import _from_uri_or_path
 
 Scope = Literal["node", "run", "graph", "all"]
@@ -46,6 +47,43 @@ class ArtifactFacade:
 
         # Keep track of the last created artifact
         self.last_artifact: Artifact | None = None
+
+    # Metering-enhanced record
+    async def _record(self, a: Artifact) -> None:
+        """Record artifact in index and occurrence log."""
+        await self.index.upsert(a)
+        await self.index.record_occurrence(a)
+        self.last_artifact = a
+
+        # metering hook for artifact writes
+        try:
+            meter = current_metering()
+            ctx = current_meter_context.get() or {}
+
+            # Try a few common size fields, fallback to 0
+            size = (
+                getattr(a, "bytes", None)
+                or getattr(a, "size_bytes", None)
+                or getattr(a, "size", None)
+                or 0
+            )
+
+            # record artifact metering event -- using getattr to avoid tight coupling
+            # TODO: consider standardizing artifact attributes via a protocol/base class
+            print("🍏 Recording metering event for artifact:", a.graph_id)
+            await meter.record_artifact(
+                user_id=ctx.get("user_id"),
+                org_id=ctx.get("org_id"),
+                run_id=getattr(a, "run_id", self.run_id),
+                graph_id=getattr(a, "graph_id", self.graph_id),
+                kind=getattr(a, "kind", "unknown"),
+                bytes=int(size),
+                pinned=bool(getattr(a, "pinned", False)),
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger("aethergraph.metering").exception("record_artifact_failed")
 
     # ---------- core staging/ingest ----------
     async def stage_path(self, ext: str = "") -> str:
@@ -426,7 +464,7 @@ class ArtifactFacade:
         await self.index.pin(artifact_id, pinned=pinned)
 
     # ---------- internal helpers ----------
-    async def _record(self, a: Artifact) -> None:
+    async def _record_simple(self, a: Artifact) -> None:
         """Record artifact in index and occurrence log."""
         await self.index.upsert(a)
         await self.index.record_occurrence(a)

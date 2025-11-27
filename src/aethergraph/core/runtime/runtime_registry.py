@@ -2,10 +2,6 @@ from contextvars import ContextVar
 
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
-__singleton_registry: UnifiedRegistry = UnifiedRegistry()
-_current_registry: ContextVar[UnifiedRegistry | None] = ContextVar("ag_registry", default=None)
-
-
 # Single process-wide registry instance
 __singleton_registry: UnifiedRegistry = UnifiedRegistry()
 

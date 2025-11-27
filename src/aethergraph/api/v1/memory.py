@@ -241,7 +241,7 @@ async def list_memory_summaries(
 @router.post("/memory/search", response_model=MemorySearchResponse)
 async def search_memory(
     req: MemorySearchRequest,
-    identity: RequestIdentity = Annotated[Depends(get_identity)],  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> MemorySearchResponse:
     """
     Semantic/keyword memory search.

@@ -11,6 +11,7 @@ from aethergraph.config.config import AppSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
+from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
@@ -40,7 +41,7 @@ from aethergraph.services.mcp.service import MCPService
 
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
-from aethergraph.services.metering.noop import NoopMetering
+from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
 from aethergraph.services.prompts.file_store import FilePromptStore
 from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
@@ -55,6 +56,7 @@ from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
+from aethergraph.storage.eventlog.fs_event import FSEventLog
 from aethergraph.storage.factory import (
     build_artifact_index,
     build_artifact_store,
@@ -67,6 +69,7 @@ from aethergraph.storage.factory import (
     build_vector_index,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
+from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 from aethergraph.storage.runs.inmen_store import InMemoryRunStore
 
 SERVICE_KEYS = [
@@ -149,7 +152,8 @@ class DefaultContainer:
     authn: DevTokenAuthn | None = None
     authz: AllowAllAuthz | None = None
     redactor: RegexRedactor | None = None
-    metering: NoopMetering | None = None
+
+    metering: MeteringService | None = None
     tracer: NoopTracer | None = None
     secrets: EnvSecrets | None = None
 
@@ -286,6 +290,12 @@ def build_default_container(
     run_store = InMemoryRunStore()
     run_manager = RunManager(run_store=run_store, registry=registry)
 
+    # Metering service
+    # TODO: make metering service configurable
+    eventlog = FSEventLog(root=str(root_p / "metering" / "events"))
+    metering_store = EventLogMeteringStore(event_log=eventlog)
+    metering = EventLogMeteringService(store=metering_store)
+
     container = DefaultContainer(
         root=str(root_p),
         schedulers=schedulers,
@@ -315,7 +325,7 @@ def build_default_container(
         authn=None,
         authz=None,
         redactor=None,
-        metering=None,
+        metering=metering,
         tracer=None,
         settings=cfg,
     )

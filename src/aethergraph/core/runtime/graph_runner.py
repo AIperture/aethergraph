@@ -7,6 +7,7 @@ import uuid
 
 from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.state_stores import GraphSnapshot
+from aethergraph.core.graph.task_graph import TaskGraph
 from aethergraph.core.runtime.recovery import hash_spec, recover_graph_run
 from aethergraph.services.container.default_container import build_default_container  # adjust path
 from aethergraph.services.state_stores.graph_observer import PersistenceObserver
@@ -20,6 +21,7 @@ from ..execution.retry_policy import RetryPolicy
 from ..graph.graph_fn import GraphFunction
 from ..graph.graph_refs import resolve_any as _resolve_any
 from ..runtime.runtime_env import RuntimeEnv
+from ..runtime.runtime_metering import current_meter_context
 from ..runtime.runtime_services import ensure_services_installed
 from .run_registration import RunRegistrationGuard
 
@@ -60,8 +62,10 @@ async def _build_env(
             setattr(container, k, v)
 
     run_id = rt_overrides.get("run_id") or f"run-{uuid.uuid4().hex[:8]}"
+    graph_id = getattr(owner, "graph_id", None) or getattr(owner, "name", None)
     env = RuntimeEnv(
         run_id=run_id,
+        graph_id=graph_id,
         graph_inputs=inputs,
         outputs_by_node={},
         container=container,
@@ -196,6 +200,33 @@ async def load_latest_snapshot_json(store, run_id: str) -> dict[str, Any] | None
     }
 
 
+def _register_metering_context(
+    env: RuntimeEnv, target: GraphFunction | TaskGraph | Any
+) -> dict[str, Any]:
+    """
+    Build a metering context dict from the RuntimeEnv.
+    """
+    run_id = env.run_id
+    # derive graph_id from target if possible - GraphFunction.name or TaskGraph.spec.graph_id
+    graph_id = getattr(target, "name", None) or getattr(
+        getattr(target, "spec", None), "graph_id", None
+    )
+
+    # user id etc through auth context if available
+    user_id = getattr(getattr(env, "auth", None), "user_id", None)
+    org_id = getattr(getattr(env, "auth", None), "org_id", None)
+
+    token = current_meter_context.set(
+        {
+            "run_id": run_id,
+            "graph_id": graph_id,
+            "user_id": user_id,
+            "org_id": org_id,
+        }
+    )
+    return token
+
+
 # ---------- public API ----------
 async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides):
     """
@@ -207,7 +238,12 @@ async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides
     # GraphFunction path
     if isinstance(target, GraphFunction):
         env, retry, max_conc = await _build_env(target, inputs, **rt_overrides)
-        return await target.run(env=env, max_concurrency=max_conc, **inputs)
+        token = _register_metering_context(env, target)  # set metering context
+        try:
+            return await target.run(env=env, max_concurrency=max_conc, **inputs)
+        finally:
+            # reset metering context
+            current_meter_context.reset(token)
 
     # TaskGraph path
     graph = _materialize_task_graph(target)
@@ -266,29 +302,34 @@ async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides
     )
 
     # Register for resumes and run
-    with RunRegistrationGuard(run_id=env.run_id, scheduler=sched, container=env.container):
-        try:
-            await sched.run()
-        except asyncio.CancelledError:
-            raise
-        finally:
-            # FINAL SNAPSHOT on normal or cancelled exit (if store exists)
-            if store and obs:
-                artifacts = getattr(env.container, "artifacts", None)
-                snap = await snapshot_from_graph(
-                    run_id=graph.state.run_id or env.run_id,
-                    graph_id=graph.graph_id,
-                    rev=graph.state.rev,
-                    spec_hash=hash_spec(spec),
-                    state_obj=graph.state,
-                    artifacts=artifacts,
-                    allow_externalize=False,  # FIXME: artifact writer async loop error; set False to *avoid* writing artifacts during snapshot
-                    include_wait_spec=True,
-                )
-                await store.save_snapshot(snap)
+    token = _register_metering_context(env, target)  # set metering context
+    try:
+        with RunRegistrationGuard(run_id=env.run_id, scheduler=sched, container=env.container):
+            try:
+                await sched.run()
+            except asyncio.CancelledError:
+                raise
+            finally:
+                # FINAL SNAPSHOT on normal or cancelled exit (if store exists)
+                if store and obs:
+                    artifacts = getattr(env.container, "artifacts", None)
+                    snap = await snapshot_from_graph(
+                        run_id=graph.state.run_id or env.run_id,
+                        graph_id=graph.graph_id,
+                        rev=graph.state.rev,
+                        spec_hash=hash_spec(spec),
+                        state_obj=graph.state,
+                        artifacts=artifacts,
+                        allow_externalize=False,  # FIXME: artifact writer async loop error; set False to *avoid* writing artifacts during snapshot
+                        include_wait_spec=True,
+                    )
+                    await store.save_snapshot(snap)
 
-    # Resolve graph-level outputs (will raise GraphHasPendingWaits if waits)
-    return _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
+        # Resolve graph-level outputs (will raise GraphHasPendingWaits if waits)
+        return _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
+    finally:
+        # reset metering context
+        current_meter_context.reset(token)
 
 
 async def run_or_resume_async(

@@ -13,6 +13,7 @@ from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persistence
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
+from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.services.rag.facade import RAGFacade
 
 from .utils import _summary_prefix
@@ -98,61 +99,6 @@ def _save_sticky(path: str, m: dict):
 
 
 class MemoryFacade:
-    """
-    MemoryFacade = “session memory” front-door bound to a specific runtime scope.
-
-    What it is:
-    -----------
-    A small, async façade that coordinates three *core* memory components:
-      • HotLog        — fast, transient ring-buffer of recent events (in KV/Redis/etc.)
-      • Persistence   — durable append/replay of events & JSON blobs (e.g., FS JSONL, S3, DB)
-      • Indices       — small KV-based derived views for fast lookups (latest by name/ref kind/topic)
-
-    Optionally:
-      • artifact_store — for content-addressed, immutable artifacts (large files/dirs, bundles).
-                         Not required for core memory; used by distillers/tools when you want CAS URIs.
-
-    Why this split:
-    ---------------
-      • HotLog:   low latency read/write for “what just happened?”, used by routers/LLM context builders.
-      • Persistence: durable, append-only event log + JSON blobs (summaries, episodes) for replay/analytics.
-      • Indices:  derived KV tables to avoid scanning logs for common “last X” queries.
-      • Artifacts: big assets (images, datasets, reports) that benefit from CAS, pinning, and reuse.
-
-    Binding / Scope:
-    ----------------
-    A MemoryFacade instance is bound to a scope via:
-      run_id, graph_id, node_id, agent_id
-    Typically constructed by a MemoryFactory at run/node creation, so tools/agents can just call:
-      await ctx.services.memory.record_raw(...)
-      await ctx.services.memory.write_result(...)
-
-    Concurrency:
-    ------------
-    All public methods are async; implementations of HotLog/Persistence/Indices SHOULD be non-blocking
-    (use asyncio primitives or run blocking IO via asyncio.to_thread).
-
-    Configuration knobs:
-    --------------------
-      • hot_limit:   max events kept in HotLog per session (ring buffer).
-      • hot_ttl_s:   TTL for HotLog entries (e.g., 7 days).
-      • default_signal_threshold: heuristic floor for “signal” scoring in rolling summaries, etc.
-
-    Typical flow:
-    -------------
-      1) `record_raw(...)` appends an Event to HotLog (fast) and to Persistence JSONL (durable).
-      2) `write_result(...)` is a typed helper for tool/agent outputs; also updates Indices.
-      3) `recent(...)`, `last_by_name(...)`, `latest_refs_by_kind(...)` read from HotLog/Indices.
-      4) Distillers (rolling / episode) pull from HotLog & Persistence to synthesize summaries,
-         then write back via Persistence (JSON) and/or ArtifactStore (CAS) if configured.
-
-    Extensibility:
-    --------------
-      • Add more distillers (RAG digests, long-term memory compaction).
-      • Add helpers to save content-addressed artifacts (e.g., `save_summary_as_artifact`).
-      • Swap backends by providing different implementations of the protocols.
-    """
-
     def __init__(
         self,
         *,
@@ -252,6 +198,21 @@ class MemoryFacade:
 
         await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
         await self.persistence.append_event(self.run_id, evt)
+
+        # Metering hook
+        try:
+            meter = current_metering()
+            ctx = current_meter_context.get() or {}
+            await meter.record_event(
+                user_id=ctx.get("user_id"),
+                org_id=ctx.get("org_id"),
+                run_id=self.run_id,
+                scope_id=base["scope_id"],
+                kind=f"memory.{kind}",
+            )
+        except Exception:
+            if self.logger:
+                self.logger.exception("Error recording metering event in MemoryFacade.record_raw")
         return evt
 
     async def record(

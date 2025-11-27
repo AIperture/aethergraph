@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, RootModel
 
 
 # --------- Graphs ---------
@@ -230,3 +230,79 @@ class ConfigResponse(BaseModel):
     storage_backends: dict[str, str] = {}
     llm_providers: list[ConfigLLMProvider] = []
     features: dict[str, bool] = {}
+
+
+# --------- Stats ---------
+# ---------- Overview ----------
+
+
+class StatsOverview(BaseModel):
+    llm_calls: int = Field(0, description="Total LLM calls in the window")
+    llm_prompt_tokens: int = Field(0, description="Total prompt tokens in the window")
+    llm_completion_tokens: int = Field(0, description="Total completion tokens in the window")
+
+    runs: int = Field(0, description="Total runs started in the window")
+    runs_succeeded: int = Field(0, description="Runs that completed successfully")
+    runs_failed: int = Field(0, description="Runs that failed")
+
+    artifacts: int = Field(0, description="Total artifacts recorded in the window")
+    artifact_bytes: int = Field(0, description="Total artifact payload size in bytes")
+
+    events: int = Field(0, description="Total metered memory events in the window")
+
+
+# ---------- Graph stats ----------
+
+
+class GraphStatsEntry(BaseModel):
+    runs: int = Field(0)
+    succeeded: int = Field(0)
+    failed: int = Field(0)
+    total_duration_s: float = Field(0.0)
+
+
+class GraphStats(RootModel[dict[str, GraphStatsEntry]]):
+    """Map graph_id -> GraphStatsEntry"""
+
+    # no extra fields needed; RootModel handles serialization
+
+
+# ---------- Memory stats ----------
+
+
+class MemoryStats(RootModel[dict[str, dict[str, int]]]):
+    """Map memory_kind -> { 'count': int }"""
+
+
+# ---------- Artifact stats ----------
+
+
+class ArtifactStatsEntry(BaseModel):
+    count: int = 0
+    bytes: int = 0
+    pinned_count: int = 0
+    pinned_bytes: int = 0
+
+
+class ArtifactStats(RootModel[dict[str, ArtifactStatsEntry]]):
+    """Map artifact_kind -> ArtifactStatsEntry"""
+
+
+# ---------- LLM stats ----------
+
+
+class LLMStatsEntry(BaseModel):
+    calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+class LLMStats(RootModel[dict[str, LLMStatsEntry]]):
+    """
+    Map of LLM model name → stats.
+
+    Example:
+      {
+        "gpt-4o-mini": {"calls": 5, "prompt_tokens": 1234, "completion_tokens": 567}
+      }
+    """

@@ -47,20 +47,6 @@ class ExecutionContext:
             bound_memory=self.bound_memory,
         )
 
-    # def as_node_context(self, ad) -> "NodeContext":
-    #     """ Create a NodeContext representing this execution context itself as a node.
-    #         Useful for ad-hoc contexts that don't have real nodes.
-    #     """
-    #     return NodeContext(
-    #         run_id=self.run_id,
-    #         graph_id=self.graph_id or "",
-    #         node_id="ad_",
-    #         services=self.services,
-    #         resume_payload=self.resume_payload,
-    #         # back-compat for old ctx.mem()
-    #         bound_memory=self.bound_memory,
-    #     )
-
     # ----- helpers used by step forward() -----
     def now(self) -> datetime:
         return self.clock.now()

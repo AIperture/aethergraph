@@ -7,6 +7,7 @@ from uuid import uuid4
 from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
+from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
@@ -137,6 +138,34 @@ class RunManager:
                 record.status,
                 finished_at=record.finished_at,
                 error=error_msg,
+            )
+
+        meter = current_metering()
+        # Duration: if finished_at is None, use now()
+        finished_at = record.finished_at or _utcnow()
+        duration_s = (finished_at - started_at).total_seconds()
+        # Map Runstatus + waits to status string for metering
+        if has_waits:
+            meter_status = "waiting"
+        else:
+            status_str = getattr(record.status, "value", str(record.status))
+            meter_status = status_str
+
+        try:
+            await meter.record_run(
+                user_id=user_id,
+                org_id=org_id,
+                run_id=rid,
+                graph_id=graph_id,
+                status=meter_status,
+                duration_s=duration_s,
+            )
+        except Exception:
+            # Never fail the run due to metering issues
+            import logging
+
+            logging.getLogger("aethergraph.runtime.run_manager").exception(
+                "Error recording run metering for run_id=%s", rid
             )
 
         return record, outputs, has_waits, continuations
