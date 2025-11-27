@@ -70,7 +70,6 @@ class ArtifactFacade:
 
             # record artifact metering event -- using getattr to avoid tight coupling
             # TODO: consider standardizing artifact attributes via a protocol/base class
-            print("🍏 Recording metering event for artifact:", a.graph_id)
             await meter.record_artifact(
                 user_id=ctx.get("user_id"),
                 org_id=ctx.get("org_id"),

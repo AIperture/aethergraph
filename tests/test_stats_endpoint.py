@@ -239,7 +239,7 @@ def test_stats_overview(client: TestClient):
 
 
 def test_graphs_stats_all(client: TestClient):
-    resp = client.get("/graphs/stats?window=24h")
+    resp = client.get("/stats/graphs?window=24h")
     assert resp.status_code == 200
 
     data = resp.json()
@@ -256,7 +256,7 @@ def test_graphs_stats_all(client: TestClient):
 
 
 def test_graphs_stats_filtered(client: TestClient):
-    resp = client.get("/graphs/stats?graph_id=graph.etl&window=24h")
+    resp = client.get("/stats/graphs?graph_id=graph.etl&window=24h")
     assert resp.status_code == 200
 
     data = resp.json()
@@ -269,7 +269,7 @@ def test_graphs_stats_filtered(client: TestClient):
 
 
 def test_memory_stats(client: TestClient):
-    resp = client.get("/memory/stats?window=24h")
+    resp = client.get("/stats/memory?window=24h")
     assert resp.status_code == 200
 
     data = resp.json()
@@ -282,7 +282,7 @@ def test_memory_stats(client: TestClient):
 
 
 def test_artifacts_stats(client: TestClient):
-    resp = client.get("/artifacts/stats?window=24h")
+    resp = client.get("/stats/artifacts?window=24h")
     assert resp.status_code == 200
 
     data = resp.json()

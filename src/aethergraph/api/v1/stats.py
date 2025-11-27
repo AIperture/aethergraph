@@ -40,7 +40,7 @@ async def get_stats_overview(
     return StatsOverview(**raw)
 
 
-@router.get("/graphs/stats", response_model=GraphStats)
+@router.get("/stats/graphs", response_model=GraphStats)
 async def get_graphs_stats(
     window: Annotated[str, Query(description="Time window for stats, e.g., '24h', '7d'")] = "24h",
     graph_id: Annotated[str | None, Query(description="Optional graph_id filter")] = None,
@@ -90,7 +90,7 @@ async def get_graphs_stats(
     return GraphStats(root=normalized)
 
 
-@router.get("/memory/stats", response_model=MemoryStats)
+@router.get("/stats/memory", response_model=MemoryStats)
 async def get_memory_stats(
     scope_id: Annotated[str | None, Query(description="Logical memory scope (optional)")] = None,
     window: Annotated[str, Query(description="Time window, e.g., '24h', '7d'")] = "24h",
@@ -118,7 +118,7 @@ async def get_memory_stats(
     return MemoryStats(root=raw)
 
 
-@router.get("/artifacts/stats", response_model=ArtifactStats)
+@router.get("/stats/artifacts", response_model=ArtifactStats)
 async def get_artifacts_stats(
     window: Annotated[str, Query(description="Time window, e.g., '24h', '7d'")] = "24h",
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008

@@ -9,6 +9,7 @@ from aethergraph.api.v1.artifacts import router as artifacts_router
 from aethergraph.api.v1.graphs import router as graphs_router
 from aethergraph.api.v1.memory import router as memory_router
 from aethergraph.api.v1.runs import router as runs_router
+from aethergraph.api.v1.stats import router as stats_router
 
 # include apis
 from aethergraph.config.config import AppSettings
@@ -103,6 +104,7 @@ def create_app(
     app.include_router(router=graphs_router, prefix="/api/v1")
     app.include_router(router=artifacts_router, prefix="/api/v1")
     app.include_router(router=memory_router, prefix="/api/v1")
+    app.include_router(router=stats_router, prefix="/api/v1")
 
     # Install services globally so run()/tools see the same container
     install_services(container)

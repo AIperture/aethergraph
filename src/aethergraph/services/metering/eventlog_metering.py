@@ -54,15 +54,20 @@ class EventLogMeteringService(MeteringService):
             kinds=kinds,
             limit=None,
         )
-
         # In-store filter by user/org if present
         out: list[dict[str, Any]] = []
+
         for e in rows:
+            if user_id == "local" or org_id == "local":
+                # Special case: include all local events
+                out.append(e)
+                continue
             if user_id is not None and e.get("user_id") != user_id:
                 continue
             if org_id is not None and e.get("org_id") != org_id:
                 continue
             out.append(e)
+
         return out
 
     async def _append(self, event: dict[str, Any]) -> None:
@@ -95,6 +100,7 @@ class EventLogMeteringService(MeteringService):
                 "prompt_tokens": int(prompt_tokens),
                 "completion_tokens": int(completion_tokens),
                 "latency_ms": int(latency_ms) if latency_ms is not None else None,
+                "tags": ["meter.llm"],
             }
         )
 
@@ -117,6 +123,7 @@ class EventLogMeteringService(MeteringService):
                 "graph_id": graph_id,
                 "status": status,
                 "duration_s": float(duration_s) if duration_s is not None else None,
+                "tags": ["meter.run"],
             }
         )
 
@@ -141,6 +148,7 @@ class EventLogMeteringService(MeteringService):
                 "artifact_kind": kind,
                 "bytes": int(bytes),
                 "pinned": bool(pinned),
+                "tags": ["meter.artifact"],
             }
         )
 
@@ -161,6 +169,7 @@ class EventLogMeteringService(MeteringService):
                 "run_id": run_id,
                 "event_kind": kind,
                 "scope_id": scope_id,
+                "tags": ["meter.event"],
             }
         )
 
@@ -179,24 +188,29 @@ class EventLogMeteringService(MeteringService):
             user_id=user_id,
             org_id=org_id,
         )
-        runs = await self._query(
-            window=window,
-            kinds=["meter.run"],
-            user_id=user_id,
-            org_id=org_id,
-        )
-        artifacts = await self._query(
-            window=window,
-            kinds=["meter.artifact"],
-            user_id=user_id,
-            org_id=org_id,
-        )
-        events = await self._query(
-            window=window,
-            kinds=["meter.event"],
-            user_id=user_id,
-            org_id=org_id,
-        )
+
+        # runs = await self._query(
+        #     window=window,
+        #     kinds=["meter.run"],
+        #     user_id=user_id,
+        #     org_id=org_id,
+        # )
+        # artifacts = await self._query(
+        #     window=window,
+        #     kinds=["meter.artifact"],
+        #     user_id=user_id,
+        #     org_id=org_id,
+        # )
+        # events = await self._query(
+        #     window=window,
+        #     kinds=["meter.event"],
+        #     user_id=user_id,
+        #     org_id=org_id,
+        # )
+
+        runs = []
+        artifacts = []
+        events = []
 
         return {
             "llm_calls": len(llm),
