@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # --------- Graphs ---------
@@ -92,9 +92,9 @@ class MemoryEvent(BaseModel):
     event_id: str
     scope_id: str
     kind: str
-    tages: list[str] = []
+    tags: list[str] = Field(default_factory=list)
     created_at: datetime
-    data: dict[str, Any]
+    data: dict[str, Any] | None = None
 
 
 class MemoryEventListResponse(BaseModel):
@@ -102,15 +102,18 @@ class MemoryEventListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+# ---------- Summaries ----------
+
+
 class MemorySummaryEntry(BaseModel):
     summary_id: str
     scope_id: str
     summary_tag: str
     created_at: datetime
-    time_from: datetime | None = None
-    time_to: datetime | None = None
+    time_from: datetime
+    time_to: datetime
     text: str
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class MemorySummaryListResponse(BaseModel):
@@ -118,11 +121,13 @@ class MemorySummaryListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+# ---------- Search ----------
+
+
 class MemorySearchRequest(BaseModel):
     query: str
     scope_id: str | None = None
-    top_k: int = 5
-    filters: dict[str, Any] = {}
+    top_k: int = 10
 
 
 class MemorySearchHit(BaseModel):
@@ -148,17 +153,31 @@ class ArtifactMeta(BaseModel):
 
 
 class ArtifactListResponse(BaseModel):
-    query: str
-    scope_id: str | None = None
-    top_k: int = 5
-    filters: dict[str, Any] = {}
+    artifacts: list[ArtifactMeta]
+    next_cursor: str | None = None
 
 
 class ArtifactSearchRequest(BaseModel):
-    query: str
+    # Optional semantic / text query (for future embedding search)
+    query: str | None = None
+
+    # Common filters
     scope_id: str | None = None
-    top_k: int = 10
-    filters: dict[str, Any] = {}
+    kind: str | None = None
+    tags: list[str] | None = None
+
+    # Extra label filters that map directly to Artifact.labels
+    labels: dict[str, Any] = Field(default_factory=dict)
+
+    # Metric-based ranking
+    metric: str | None = None
+    mode: Literal["max", "min"] | None = None
+
+    # Pagination / result size
+    limit: int = 10
+
+    # If True, use index.best(...) and only return a single hit
+    best_only: bool = False
 
 
 class ArtifactSearchHit(BaseModel):

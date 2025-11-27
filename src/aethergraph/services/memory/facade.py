@@ -201,6 +201,7 @@ class MemoryFacade:
         base.setdefault("run_id", self.run_id)
         base.setdefault("graph_id", self.graph_id)
         base.setdefault("node_id", self.node_id)
+        base.setdefault("scope_id", self.memory_scope_id or self.run_id)
 
         severity = int(base.get("severity", 2))
         signal = base.get("signal")
@@ -229,6 +230,7 @@ class MemoryFacade:
             event_id=eid,
             ts=ts,
             run_id=base["run_id"],
+            scope_id=base["scope_id"],
             kind=kind,
             stage=base.get("stage"),
             text=text,
@@ -792,6 +794,7 @@ class MemoryFacade:
                 "run_id": e.run_id,
                 "graph_id": e.graph_id,
                 "node_id": e.node_id,
+                "scope_id": e.scope_id,
                 "tags": list(e.tags or []),
             }
             body = e.text

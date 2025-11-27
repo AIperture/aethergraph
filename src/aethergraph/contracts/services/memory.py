@@ -23,6 +23,7 @@ class Event:
     event_id: str
     ts: str
     run_id: str
+    scope_id: str
 
     # --------- Core semantics ---------
     kind: EventKind = None  # logical type: "chat_user", "tool_start", etc.

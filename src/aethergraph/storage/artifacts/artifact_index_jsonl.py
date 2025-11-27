@@ -112,6 +112,11 @@ class JsonlArtifactIndexSync:
         with open(self.occ_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
 
+    def get(self, artifact_id: str) -> Artifact | None:
+        if artifact_id in self._by_id:
+            return Artifact(**self._by_id[artifact_id])
+        return None
+
 
 class JsonlArtifactIndex(AsyncArtifactIndex):
     """Async wrapper for JsonlArtifactIndexSync using asyncio.to_thread."""
@@ -136,3 +141,6 @@ class JsonlArtifactIndex(AsyncArtifactIndex):
 
     async def record_occurrence(self, a: Artifact, extra_labels: dict | None = None) -> None:
         await asyncio.to_thread(self._sync.record_occurrence, a, extra_labels)
+
+    async def get(self, artifact_id: str) -> Artifact | None:
+        return await asyncio.to_thread(self._sync.get, artifact_id)

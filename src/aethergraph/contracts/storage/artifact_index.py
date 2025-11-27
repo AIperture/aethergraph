@@ -68,3 +68,19 @@ class AsyncArtifactIndex(Protocol):
         Append-only lineage log: "this artifact was used/created here".
         """
         ...
+
+    async def get(self, artifact_id: str) -> Artifact | None:
+        """Get artifact by ID."""
+        ...
+
+    # TODO: add cursor-based pagination for listing/searching large sets
+    # e.g.
+    # async def search_paginated(
+    #     self,
+    #     kind: str | None = None,
+    #     labels: dict[str, Any] | None = None,
+    #     metric: str | None = None,
+    #     mode: Literal["max", "min"] | None = None,
+    #     limit: int | None = None,
+    #     cursor: str | None = None,
+    # ) -> list[Artifact]:

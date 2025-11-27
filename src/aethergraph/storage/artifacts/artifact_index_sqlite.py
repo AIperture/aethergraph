@@ -248,6 +248,16 @@ class SqliteArtifactIndexSync:
             uri="",  # set if you decide to index it here
         )
 
+    def get(self, artifact_id: str) -> Artifact | None:
+        cur = self._conn.execute(
+            "SELECT * FROM artifacts WHERE artifact_id = ?",
+            (artifact_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            return self._row_to_artifact(row)
+        return None
+
 
 class SqliteArtifactIndex(AsyncArtifactIndex):
     def __init__(self, path: str):
@@ -270,3 +280,6 @@ class SqliteArtifactIndex(AsyncArtifactIndex):
 
     async def record_occurrence(self, a: Artifact, extra_labels: dict | None = None) -> None:
         await asyncio.to_thread(self._sync.record_occurrence, a, extra_labels)
+
+    async def get(self, artifact_id: str) -> Artifact | None:
+        return await asyncio.to_thread(self._sync.get, artifact_id)

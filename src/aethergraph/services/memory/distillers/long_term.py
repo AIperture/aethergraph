@@ -165,6 +165,7 @@ class LongTermSummarizer(Distiller):
             event_id="",  # fill below
             ts=ts,
             run_id=run_id,
+            scope_id=scope,
             kind=self.summary_kind,
             stage="summary",
             text=preview,

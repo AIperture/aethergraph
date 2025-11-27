@@ -336,6 +336,7 @@ class LLMMetaSummaryDistiller(Distiller):
             event_id="",
             ts=ts,
             run_id=run_id,
+            scope_id=scope,
             kind=self.summary_kind,
             stage="summary_llm_meta",
             text=preview,

@@ -1,8 +1,11 @@
 # /artifacts
 
-from datetime import datetime, timedelta
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
+
+from aethergraph.contracts.storage.artifact_index import Artifact
+from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, get_identity
 from .schemas import (
@@ -16,33 +19,99 @@ from .schemas import (
 router = APIRouter(tags=["artifacts"])
 
 
+# -------- Helpers  -------- #
+def _extract_tags(labels: dict[str, Any]) -> list[str]:
+    """
+    Conventions:
+    - labels["tags"] may be a list[str] or comma-separated str
+    """
+    tags = labels.get("tags")
+    if isinstance(tags, list):
+        return [str(t) for t in tags]
+    if isinstance(tags, str):
+        return [t.strip() for t in tags.split(",") if t.strip()]
+    return []
+
+
+def _extract_scope_id(a: Artifact) -> str | None:
+    """
+    Conventions:
+    - labels["scope_id"] is preferred
+    - labels["scope"] is legacy
+    - fallback to run_id if no scope label found
+    """
+    labels = a.labels or {}
+    scope = labels.get("scope_id") or labels.get("scope")  # legacy
+    if scope is not None:
+        return str(scope)
+    return a.run_id  # fallback to run_id if no scope label found
+
+
+def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
+    """
+    Convert Artifact to ArtifactMeta schema.
+    """
+    out = ArtifactMeta(
+        artifact_id=a.artifact_id,
+        kind=a.kind,
+        mime_type=a.mime or "application/octet-stream",
+        size=a.bytes,
+        scope_id=_extract_scope_id(a) or "unknown_scope",
+        tags=_extract_tags(a.labels or {}),
+        created_at=a.created_at,
+        uri=a.uri,
+    )
+    return out
+
+
+# -------- API Endpoints -------- #
 @router.get("/artifacts", response_model=ArtifactListResponse)
 async def list_artifacts(
-    scope_id: str = Query(None),  # noqa: B008
-    kind: str | None = Query(None),  # noqa: B008
-    tags: str | None = Query(None, description="Comma-separated list of tags to filter"),  # noqa: B008
-    cursor: str | None = Query(None),  # noqa: B008
-    limit: int = Query(50, ge=1, le=200),  # noqa: B008
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+    scope_id: Annotated[str | None, Query()] = None,
+    kind: Annotated[str | None, Query()] = None,
+    tags: Annotated[str | None, Query(description="Comma-separated list of tags to filter")] = None,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    identity: Annotated[RequestIdentity, Depends(get_identity)] = None,
 ) -> ArtifactListResponse:
     """
     List artifacts (metadata only).
 
-    TODO:
-      - Integrate with ArtifactStore + index.
+    Currently backed by the artifact index's `search` API:
+      - `kind` -> search(kind=...)
+      - `scope_id` -> labels["scope_id"]
+      - `tags` -> labels["tags"] (list of tags)
+    Pagination cursor is not yet implemented.
     """
-    now = datetime.utcnow()
-    dummy = ArtifactMeta(
-        artifact_id="art-1",
-        kind="file",
-        mime_type="text/plain",
-        size=123,
-        scope_id=scope_id or "stub_scope",
-        tags=["stub"],
-        created_at=now - timedelta(minutes=10),
-        uri="fs://stub/path.txt",
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    if index is None:
+        # safeguard: no index configured
+        return ArtifactListResponse(artifacts=[], next_cursor=None)
+
+    # Build label filters
+    label_filters: dict[str, Any] = {}
+    if scope_id is not None:
+        label_filters["scope_id"] = scope_id
+
+    tag_list = []
+    if tags:
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        if tag_list:
+            label_filters["tags"] = tag_list
+
+    artifacts = await index.search(
+        kind=kind,
+        labels=label_filters or None,
+        metric=None,
+        mode=None,
+        limit=limit,
     )
-    return ArtifactListResponse(artifacts=[dummy], next_cursor=None)
+
+    metas = [_artifact_to_meta(a) for a in artifacts]
+
+    # TODO: implement proper pagination with cursor in ArtifactIndex
+    return ArtifactListResponse(artifacts=metas, next_cursor=None)
 
 
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactMeta)
@@ -52,60 +121,180 @@ async def get_artifact(
 ) -> ArtifactMeta:
     """
     Get single artifact metadata.
-
-    TODO:
-      - Load metadata from ArtifactStore.
     """
-    now = datetime.utcnow()
-    return ArtifactMeta(
-        artifact_id=artifact_id,
-        kind="file",
-        mime_type="text/plain",
-        size=123,
-        scope_id="stub_scope",
-        tags=["stub"],
-        created_at=now,
-        uri="fs://stub/path.txt",
-    )
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    if index is None:
+        raise HTTPException(status_code=503, detail="Artifact index not configured")
+
+    artifact = await index.get(artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+
+    meta = _artifact_to_meta(artifact)
+    return meta
 
 
 @router.get("/artifacts/{artifact_id}/content")
 async def get_artifact_content(
     artifact_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> Response:
     """
     Stream artifact content.
 
-    TODO:
-      - Stream from ArtifactStore (FS/S3/etc.).
-      - Set proper Content-Type and headers.
+    Currently loads the entire content into memory and returns it as a Response.
+    For large files, consider switching to StreamingResponse in the future.
     """
-    content = f"Stub content for artifact {artifact_id}\n"
-    return Response(content=content, media_type="text/plain")
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    store = getattr(container, "artifacts", None)
+    if index is None or store is None:
+        raise HTTPException(status_code=503, detail="Artifact services not configured")
+
+    artifact = await index.get(artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+
+    # For now, we assume non-directory artifacts; if mime indicates directory,
+    # TODO: maybe to expose archive/preview_uri instead?
+    data = await store.load_artifact_bytes(artifact.uri)
+
+    out = Response(
+        content=data,
+        media_type=artifact.mime or "application/octet-stream",
+        headers={
+            "Content-Length": str(len(data)),
+            "X-AetherGraph-Artifact-Id": artifact.artifact_id,
+        },
+    )
+    return out
 
 
 @router.post("/artifacts/search", response_model=ArtifactSearchResponse)
 async def search_artifacts(
     req: ArtifactSearchRequest,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> ArtifactSearchResponse:
     """
-    Semantic/keyword search over artifacts.
+    Structured search over artifacts via the artifact index.
 
-    TODO:
-      - Plug into your artifact index (e.g. embeddings).
+    We interpret fields on ArtifactSearchRequest in a flexible way:
+      - kind: optional artifact kind filter
+      - scope_id: maps to labels["scope_id"]
+      - tags: optional list[str] or comma-separated string -> labels["tags"]
+      - labels: optional extra label filters
+      - metric + mode: if provided, used for ranking (and required for best-only)
+      - limit: max results
+      - best_only: if True, use index.best(...) and return a single hit
     """
-    now = datetime.utcnow()
-    dummy_meta = ArtifactMeta(
-        artifact_id="art-hit",
-        kind="file",
-        mime_type="text/plain",
-        size=456,
-        scope_id=req.scope_id or "stub_scope",
-        tags=["search_stub"],
-        created_at=now,
-        uri="fs://stub/path_hit.txt",
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    if index is None:
+        # safeguard: no index configured
+        return ArtifactSearchResponse(results=[])
+
+    # Use getattr to be toleant to schema changes
+    kind = getattr(req, "kind", None)
+    scope_id = getattr(req, "scope_id", None)
+    tags = getattr(req, "tags", None)
+    extra_labels = getattr(req, "labels", None)
+    metric = getattr(req, "metric", None)
+    mode = getattr(req, "mode", None)
+    limit = getattr(req, "limit", 50)
+    best_only = getattr(req, "best_only", False)
+
+    label_filter: dict[str, Any] = {}
+    if scope_id:
+        label_filter["scope_id"] = scope_id
+
+    # Handle tags, may be list or comma-separated str
+    if tags:
+        if isinstance(tags, str):
+            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        elif isinstance(tags, list):
+            tag_list = [str(t) for t in tags]
+        label_filter["tags"] = tag_list
+
+    if extra_labels:
+        label_filter.update(extra_labels)
+
+    hits: list[ArtifactSearchHit] = []
+
+    if best_only and metric and mode:
+        # Single best artifact according to metric
+        best = await index.best(
+            kind=kind or "",
+            metric=metric,
+            mode=mode,
+            filters=label_filter or None,
+        )
+        if best is not None:
+            score = float(best.metrics.get(metric, 0.0)) if best.metrics else 0.0
+            hits.append(
+                ArtifactSearchHit(
+                    artifact=_artifact_to_meta(best),
+                    score=score,
+                )
+            )
+        return ArtifactSearchResponse(hits=hits)
+
+    # General search
+    artifacts = await index.search(
+        kind=kind,
+        labels=label_filter or None,
+        metric=metric,
+        mode=mode,
+        limit=limit,
     )
-    hit = ArtifactSearchHit(score=0.97, artifact=dummy_meta)
-    return ArtifactSearchResponse(hits=[hit])
+
+    for a in artifacts:
+        score = 1.0
+        if metric and a.metrics:
+            score = float(a.metrics.get(metric, 0.0))
+        hits.append(
+            ArtifactSearchHit(
+                artifact=_artifact_to_meta(a),
+                score=score,
+            )
+        )
+
+    return ArtifactSearchResponse(hits=hits)
+
+
+@router.post("/artifacts/{artifact_id}/pin")
+async def pin_artifact(
+    artifact_id: str,
+    pinned: Annotated[bool, Body()] = True,
+    identity: Annotated[RequestIdentity, Depends(get_identity)] = None,
+) -> dict:
+    """
+    Mark/unmark an artifact as pinned in the index.
+
+    Pinned artifacts can be treated as "keep" in GC policies or highlighted in UIs.
+    """
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    if index is None:
+        raise HTTPException(status_code=503, detail="Artifact index not configured")
+
+    await index.pin(artifact_id, pinned=pinned)
+    return {"artifact_id": artifact_id, "pinned": pinned}
+
+
+@router.get("/runs/{run_id}/artifacts", response_model=ArtifactListResponse)
+async def list_run_artifacts(
+    run_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> ArtifactListResponse:
+    """
+    List artifacts produced by a specific run.
+    """
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    if index is None:
+        raise HTTPException(status_code=503, detail="Artifact index not configured")
+
+    artifacts = await index.list_for_run(run_id)
+    metas = [_artifact_to_meta(a) for a in artifacts]
+    return ArtifactListResponse(artifacts=metas, next_cursor=None)
