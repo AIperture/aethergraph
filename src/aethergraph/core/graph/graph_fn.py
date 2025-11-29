@@ -192,7 +192,12 @@ def graph_fn(
     inputs: list[str] | None = None,
     outputs: list[str] | None = None,
     version: str = "0.1.0",
-    agent: str | None = None,  # if agent is set, register this graph fn as an agent with given name
+    agent: str
+    | None = None,  # if agent is set, register this graph fn as an agent with given name,
+    *,
+    entrypoint: bool = False,
+    flow_id: str | None = None,
+    tags: list[str] | None = None,
 ) -> Callable[[Callable], GraphFunction]:
     """Decorator to define a graph function."""
 
@@ -202,18 +207,31 @@ def graph_fn(
         registry = current_registry()
 
         if registry is not None:
+            meta = {
+                "kind": "graphfn",
+                "entrypoint": entrypoint,
+                "flow_id": flow_id or name,  # if no flow_id is given, use name as default
+                "tags": tags or [],
+            }
             registry.register(
                 nspace="graphfn",
                 name=name,
                 version=version,
                 obj=gf,  # we register GraphFunction directly without spec -- graph function is already a runtime object
+                meta=meta,
             )
 
         if agent:
+            agent_meta = {
+                "kind": "agent",
+                "flow_id": meta["flow_id"],
+                "tags": meta["tags"],
+                "backing": {"type": "graphfn", "name": name, "version": version},
+            }
             assert (
                 registry is not None
             ), "No registry available to register agent, make sure to have a current_registry() set up."
-            registry.register(nspace="agent", name=agent, version=version, obj=gf)
+            registry.register(nspace="agent", name=agent, version=version, obj=gf, meta=agent_meta)
         return gf
 
     return decorator

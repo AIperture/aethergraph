@@ -16,6 +16,8 @@ async def snapshot_from_graph(
     rev: int,
     spec_hash: str,
     state_obj,
+    started_at: datetime | None = None,
+    finished_at: datetime | None = None,
     *,
     artifacts=None,  # AsyncArtifactStore or None
     allow_externalize: bool = False,
@@ -36,6 +38,8 @@ async def snapshot_from_graph(
         created_at=datetime.utcnow().timestamp(),
         spec_hash=spec_hash,
         state=json_state,
+        started_at=started_at,
+        finished_at=finished_at,
     )
 
 
