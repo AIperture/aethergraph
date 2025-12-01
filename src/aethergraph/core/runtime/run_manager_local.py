@@ -112,9 +112,7 @@ class RunManager:
         error_msg: str | None = None
 
         try:
-            print("🍏 RunManager: calling run_or_resume_async for run_id:", rid)
             result = await run_or_resume_async(target, inputs or {}, run_id=rid)
-            print("🍏 RunManager: run_or_resume_async result:", result)
             # If we get here without GraphHasPendingWaits, run is completed
             outputs = result if isinstance(result, dict) else {"result": result}
             record.status = RunStatus.succeeded

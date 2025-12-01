@@ -88,6 +88,8 @@ async def get_run(
         flow_id = meta.get("flow_id")
         entrypoint = bool(meta.get("entrypoint", False))
 
+    print(f"🍏 get_run runs status: {rec.status}")
+
     return RunSummary(
         run_id=rec.run_id,
         graph_id=rec.graph_id,
@@ -436,34 +438,84 @@ async def get_run_channel_events(
         container = request.app.state.container
         event_log = container.eventlog  # eventlog for channels or equivalent
 
-        since_dt = None
+        since_dt: datetime | None = None
         if since_ts is not None:
+            # assuming ts stored as seconds since epoch (float)
             since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
 
-        # EventLog.query signature may differ; adapt as needed.
-        # We assume it filters by scope_id and time range.
-        rows = await event_log.query(
-            scope_id=f"run-ui:{run_id}",
+        events = await event_log.query(
+            scope_id=run_id,
             since=since_dt,
-            until=None,
+            kinds=["run_channel"],
+            limit=200,  # some reasonable cap
         )
 
-        # Each row is the dict we appended in the adapter; ensure fields exist
-        events: list[RunChannelEvent] = []
-        for row in rows:
-            events.append(
-                RunChannelEvent(
-                    id=row.get("id"),
-                    run_id=row.get("run_id", run_id),
-                    type=row.get("type"),
-                    text=row.get("text"),
-                    buttons=row.get("buttons") or [],
-                    file=row.get("file"),
-                    meta=row.get("meta") or {},
-                    ts=row.get("ts"),
-                )
+        # map to frontend shape
+        out = []
+        for e in events:
+            payload = e.get("payload", {})
+            event = RunChannelEvent(
+                id=e.get("id"),
+                run_id=e.get("scope_id") or run_id,
+                type=payload.get("type") or "agent.message",
+                text=payload.get("text"),
+                buttons=payload.get("buttons") or [],
+                file=payload.get("file"),
+                meta=payload.get("meta") or {},
+                ts=e.get("ts"),
             )
+            out.append(event)
 
-        return events
+        # sort ascending by ts so UI is stable
+        out.sort(key=lambda ev: ev.ts)
+        return out
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# @router.get("/runs/{run_id}/channel/events", response_model=list[RunChannelEvent])
+# async def get_run_channel_events(
+#     run_id: str,
+#     request: Request,
+#     since_ts: float | None = None,
+# ):
+#     """
+#     Fetch normalized UI channel events for a run.
+
+#     Frontend can poll with since_ts for incremental updates.
+#     """
+#     try:
+#         container = request.app.state.container
+#         event_log = container.eventlog  # eventlog for channels or equivalent
+
+#         since_dt = None
+#         if since_ts is not None:
+#             since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+
+#         # EventLog.query signature may differ; adapt as needed.
+#         # We assume it filters by scope_id and time range.
+#         rows = await event_log.query(
+#             scope_id=f"run-ui:{run_id}",
+#             since=since_dt,
+#             until=None,
+#         )
+
+#         # Each row is the dict we appended in the adapter; ensure fields exist
+#         events: list[RunChannelEvent] = []
+#         for row in rows:
+#             events.append(
+#                 RunChannelEvent(
+#                     id=row.get("id"),
+#                     run_id=row.get("run_id", run_id),
+#                     type=row.get("type"),
+#                     text=row.get("text"),
+#                     buttons=row.get("buttons") or [],
+#                     file=row.get("file"),
+#                     meta=row.get("meta") or {},
+#                     ts=row.get("ts"),
+#                 )
+#             )
+
+#         return events
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e)) from e

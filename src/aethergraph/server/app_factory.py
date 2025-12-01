@@ -105,6 +105,10 @@ def create_app(
     app.include_router(router=artifacts_router, prefix="/api/v1")
     app.include_router(router=memory_router, prefix="/api/v1")
     app.include_router(router=stats_router, prefix="/api/v1")
+    # Webui router
+    from aethergraph.plugins.channel.routes.webui_routes import router as webui_router
+
+    app.include_router(router=webui_router, prefix="/api/v1")
 
     # Install services globally so run()/tools see the same container
     install_services(container)

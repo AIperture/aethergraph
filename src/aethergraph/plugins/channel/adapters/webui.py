@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import time
+from datetime import datetime, timezone
 from typing import Any
 import uuid
 
@@ -65,40 +65,37 @@ class WebUIChannelAdapter(ChannelAdapter):
             "url": getattr(b, "url", None),
         }
 
-    async def send(self, event: OutEvent) -> None:
+    async def send(self, event: OutEvent) -> dict | None:
         """
         Normalize OutEvent -> UIChannelEvent dict and append to EventLog.
-
-        Returns a dict that MAY contain a correlator (for consistency with other adapters),
-        but UI typically doesn't need it directly.
         """
         run_id = self._extract_run_id(event.channel)
 
-        # normalize buttons if present
         raw_buttons = getattr(event, "buttons", None) or []
         buttons = [self._button_to_dict(b) for b in raw_buttons]
 
-        # normalize file if present
         file_info = getattr(event, "file", None) or None
 
-        ui_event = {
+        scope_id = event.meta.get("run_id") if event.meta else None
+        if not scope_id and run_id:
+            scope_id = run_id
+
+        row = {
             "id": str(uuid.uuid4()),
-            "scope_id": f"run-ui:{run_id}",  # for EventLog querying
-            "run_id": run_id,
-            "channel_key": event.channel,
-            "type": event.type,
-            "text": event.text,
-            "buttons": buttons,
-            "file": file_info,
-            "meta": dict(event.meta or {}),
-            # EventLog.append() will set "ts" if missing, but we can set it explicitly:
-            "ts": time.time(),
+            "ts": datetime.now(timezone.utc).timestamp(),
+            "scope_id": scope_id,
+            "kind": "run_channel",
+            "payload": {
+                "type": event.type,
+                "text": event.text,
+                "buttons": buttons,
+                "file": file_info,
+                "meta": event.meta or {},
+            },
         }
+        await self.event_log.append(row)
 
-        await self.event_log.append(ui_event)
-
-        # We don't create Correlator here. ChannelBus.notify() already handels correlator binding
-        # via send_result["correlator"] = correlator if needed.
+        # Optional correlator for consistency with other adapters
         return {
             "run_id": run_id,
             "correlator": Correlator(
