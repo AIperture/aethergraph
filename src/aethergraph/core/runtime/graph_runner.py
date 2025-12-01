@@ -62,10 +62,12 @@ async def _build_env(
             setattr(container, k, v)
 
     run_id = rt_overrides.get("run_id") or f"run-{uuid.uuid4().hex[:8]}"
+    session_id = rt_overrides.get("session_id")
     graph_id = getattr(owner, "graph_id", None) or getattr(owner, "name", None)
     env = RuntimeEnv(
         run_id=run_id,
         graph_id=graph_id,
+        session_id=session_id,
         graph_inputs=inputs,
         outputs_by_node={},
         container=container,
@@ -333,7 +335,12 @@ async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides
 
 
 async def run_or_resume_async(
-    target, inputs: dict[str, Any], *, run_id: str | None = None, **rt_overrides
+    target,
+    inputs: dict[str, Any],
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    **rt_overrides,
 ):
     """
     If state exists for run_id → cold resume, else fresh run.
@@ -341,6 +348,8 @@ async def run_or_resume_async(
     """
     if run_id is not None:
         rt_overrides = dict(rt_overrides or {}, run_id=run_id)
+    if session_id is not None:
+        rt_overrides = dict(rt_overrides or {}, session_id=session_id)
     return await run_async(target, inputs, **rt_overrides)
 
 

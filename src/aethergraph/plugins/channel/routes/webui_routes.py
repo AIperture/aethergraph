@@ -1,136 +1,81 @@
-# src/aethergraph/server/webui.py
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from fastapi import APIRouter, File, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from starlette.responses import JSONResponse
 
-from aethergraph.plugins.channel.adapters.webui import WebChannelAdapter, WebSessionHub
+from aethergraph.services.channel.ingress import ChannelIngress, IncomingFile, IncomingMessage
 
-webui_router = APIRouter()
-
-# ------- runtime singletons (attached in create_app) -------
-HUB_ATTR = "web_session_hub"
-UPLOAD_DIR_ATTR = "web_upload_dir"
+router = APIRouter()
 
 
-def _hub(app) -> WebSessionHub:
-    return getattr(app.state, HUB_ATTR)
+class RunChannelIncomingBody(BaseModel):
+    """
+    Inbound message from AG web UI to a run's channel.
+
+    This is a thin wrapper over ChannelIncomingBody, but we **infer**:
+      - scheme = "ui"
+      - channel_id = f"run/{run_id}"
+    """
+
+    text: str | None = None
+    # future: allow UI to attach artifacts or URLs we can convert
+    files: list[dict[str, Any]] | None = None
+    choice: str | None = None
+    meta: dict[str, Any] | None = None
 
 
-def _uploads_dir(app) -> str:
-    return getattr(app.state, UPLOAD_DIR_ATTR)
+@router.post("/runs/{run_id}/channel/incoming")
+async def run_channel_incoming(
+    run_id: str,
+    body: RunChannelIncomingBody,
+    request: Request,
+) -> JSONResponse:
+    """
+    Specialized ingress for AG Web UI.
 
-
-# ------- WebSocket endpoint -------
-@webui_router.websocket("/ws/channel/{session_id}")
-async def ws_channel(ws: WebSocket, session_id: str):
-    await ws.accept()
-
-    async def send_json(payload: dict):
-        await ws.send_json(payload)
-
-    hub = _hub(ws.app)
-    await hub.attach(session_id, send_json)
-
+    UI calls:
+      POST /runs/<run_id>/channel/incoming
+      {
+        "text": "hello",
+        "meta": {...}
+      }
+    Backend maps this to ChannelIngress with:
+      scheme="ui", channel_id=f"run/{run_id}"
+    """
     try:
-        while True:
-            msg = await ws.receive_json()
-            # Expect inbound: {"type": "resume", "run_id": ..., "node_id": ..., "token": ..., "payload": {...}}
-            t = (msg or {}).get("type")
-            if t == "resume":
-                c = ws.app.state.container
-                # basic token verification happens in ResumeRouter
-                await c.resume_router.resume(
-                    run_id=msg["run_id"],
-                    node_id=msg["node_id"],
-                    token=msg["token"],
-                    payload=msg.get("payload") or {},
+        container = request.app.state.container  # type: ignore
+        ingress: ChannelIngress = container.channel_ingress
+
+        # normalize files, if any (for now we expect only URL/uri-style descriptors)
+        files = []
+        if body.files:
+            for f in body.files:
+                files.append(
+                    IncomingFile(
+                        id=f.get("id"),
+                        name=f.get("name"),
+                        mimetype=f.get("mimetype"),
+                        size=f.get("size"),
+                        url=f.get("url"),
+                        uri=f.get("uri"),
+                        extra=f.get("extra") or {},
+                    )
                 )
-            # optionally handle ping or upload notifications (not required)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        await hub.detach(session_id, send_json)
 
-
-# ------- HTTP resume fallback (for InputDock before WS ready) -------
-class ResumeBody(BaseModel):
-    run_id: str
-    node_id: str
-    token: str
-    payload: dict
-
-
-@webui_router.post("/api/web/resume")
-async def http_resume(request: Request, body: ResumeBody):
-    c = request.app.state.container
-    await c.resume_router.resume(body.run_id, body.node_id, body.token, body.payload)
-    return {"ok": True}
-
-
-# ------- Uploads -------
-@webui_router.post("/api/web/upload")
-async def upload_files(request: Request, files: list[UploadFile] = None):
-    """
-    Save to <workspace>/web_uploads/<session_or_any>/... and return FileRef[]:
-      [{url, filename, size, mime}]
-    UI doesn't pass session; we just save under a common folder.
-    """
-    if files is None:
-        files = File(...)
-    root = _uploads_dir(request.app)
-    os.makedirs(root, exist_ok=True)
-
-    out = []
-    for f in files:
-        target = os.path.join(root, f.filename)
-        with open(target, "wb") as w:
-            w.write(await f.read())
-        url = f"/api/web/files/{f.filename}"
-        out.append(
-            {
-                "url": url,
-                "filename": f.filename,
-                "mime": f.content_type or "application/octet-stream",
-            }
+        ok = await ingress.handle(
+            IncomingMessage(
+                scheme="ui",
+                channel_id=f"run/{run_id}",  # d0 convention
+                thread_id=None,  # can be extended later
+                text=body.text,
+                files=files,
+                choice=body.choice,
+                meta=body.meta or {},
+            )
         )
-    return out
-
-
-@webui_router.get("/api/web/files/{filename}")
-async def serve_uploaded(request: Request, filename: str):
-    root = _uploads_dir(request.app)
-    path = os.path.join(root, filename)
-    if not os.path.exists(path):
-        return JSONResponse({"error": "not found"}, status_code=404)
-    return FileResponse(path, filename=filename)
-
-
-# ------- Integration helper -------
-def install_web_channel(app: Any):
-    """
-    1) Creates a WebSessionHub
-    2) Registers WebChannelAdapter under prefix 'web' in ChannelBus
-    3) Sets default channel to 'web:session/<uuid>'
-    4) Ensures upload dir exists
-    """
-    # 1) Hub
-    hub = WebSessionHub()
-    setattr(app.state, HUB_ATTR, hub)
-
-    # 2) Adapter registration
-    container = app.state.container
-    web_adapter = WebChannelAdapter(hub)
-    container.channels.adapters["web"] = web_adapter
-
-    # 3) Keep default as console unless you want to swap globally:
-    # container.channels.set_default_channel_key("web:session/dev-local")
-
-    # 4) Upload dir
-    updir = os.path.join(container.root, "web_uploads")
-    os.makedirs(updir, exist_ok=True)
-    setattr(app.state, UPLOAD_DIR_ATTR, updir)
+        return JSONResponse({"ok": True, "resumed": ok})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e

@@ -103,6 +103,7 @@ class MemoryFacade:
         self,
         *,
         run_id: str,
+        session_id: str | None,
         graph_id: str | None,
         node_id: str | None,
         hotlog: HotLog,
@@ -119,6 +120,7 @@ class MemoryFacade:
         llm: LLMClientProtocol | None = None,
     ):
         self.run_id = run_id
+        self.session_id = session_id
         self.graph_id = graph_id
         self.node_id = node_id
         self.hotlog = hotlog
@@ -129,7 +131,9 @@ class MemoryFacade:
         self.hot_limit = hot_limit
         self.hot_ttl_s = hot_ttl_s
         self.default_signal_threshold = default_signal_threshold
-        self.memory_scope_id = memory_scope_id
+        self.memory_scope_id = (
+            memory_scope_id or self.session_id or self.run_id
+        )  # order of precedence
         self.logger = logger
         self.rag = rag
         self.llm = llm  # optional LLM service for RAG answering, etc.

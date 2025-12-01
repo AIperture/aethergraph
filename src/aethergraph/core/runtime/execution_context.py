@@ -24,6 +24,7 @@ from .node_services import NodeServices
 class ExecutionContext:
     run_id: str
     graph_id: str | None
+    session_id: str | None
     graph_inputs: dict[str, Any]
     outputs_by_node: dict[str, dict[str, Any]]
     services: NodeServices
@@ -40,6 +41,7 @@ class ExecutionContext:
         return NodeContext(
             run_id=self.run_id,
             graph_id=self.graph_id or "",
+            session_id=self.session_id,
             node_id=node.node_id,
             services=self.services,
             resume_payload=self.resume_payload,

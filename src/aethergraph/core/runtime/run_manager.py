@@ -97,7 +97,9 @@ class RunManager:
 
         try:
             print("🍏 RunManager: calling run_or_resume_async for run_id:", record.run_id)
-            result = await run_or_resume_async(target, inputs or {}, run_id=record.run_id)
+            result = await run_or_resume_async(
+                target, inputs or {}, run_id=record.run_id, session_id=record.meta.get("session_id")
+            )
             print("🍏 RunManager: run_or_resume_async result:", result)
 
             # If we get here without GraphHasPendingWaits, run is completed
@@ -169,6 +171,7 @@ class RunManager:
         *,
         inputs: dict[str, Any],
         run_id: str | None = None,
+        session_id: str | None = None,
         tags: list[str] | None = None,
         user_id: str | None = None,
         org_id: str | None = None,
@@ -193,6 +196,22 @@ class RunManager:
         else:
             kind = "other"
 
+        # pull flow_id and entrypoint from registry if possible
+        flow_id: str | None = None
+        reg = self.registry()
+        if reg is not None:
+            if kind == "taskgraph":
+                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+            elif kind == "graphfn":
+                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+            else:
+                meta = {}
+            flow_id = meta.get("flow_id") or graph_id
+
+        # use run_id as session_id if not provided
+        if session_id is None:
+            session_id = run_id
+
         record = RunRecord(
             run_id=rid,
             graph_id=graph_id,
@@ -202,7 +221,17 @@ class RunManager:
             tags=list(tags),
             user_id=user_id,
             org_id=org_id,
+            meta={},
         )
+
+        if flow_id:
+            record.meta["flow_id"] = flow_id
+            if f"flow:{flow_id}" not in record.tags:
+                record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
+        if session_id:
+            record.meta["session_id"] = session_id
+            if f"session:{session_id}" not in record.tags:
+                record.tags.append(f"session:{session_id}")  # add session tag if missing
 
         if self._store is not None:
             await self._store.create(record)
@@ -237,6 +266,7 @@ class RunManager:
         *,
         inputs: dict[str, Any],
         run_id: str | None = None,
+        session_id: str | None = None,
         tags: list[str] | None = None,
         user_id: str | None = None,
         org_id: str | None = None,
@@ -264,6 +294,22 @@ class RunManager:
         else:
             kind = "other"
 
+        # pull flow_id and entrypoint from registry if possible
+        flow_id: str | None = None
+        reg = self.registry()
+        if reg is not None:
+            if kind == "taskgraph":
+                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+            elif kind == "graphfn":
+                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+            else:
+                meta = {}
+            flow_id = meta.get("flow_id") or graph_id
+
+        # use run_id as session_id if not provided
+        if session_id is None:
+            session_id = run_id
+
         record = RunRecord(
             run_id=rid,
             graph_id=graph_id,
@@ -273,7 +319,17 @@ class RunManager:
             tags=list(tags),
             user_id=user_id,
             org_id=org_id,
+            meta={},
         )
+
+        if flow_id:
+            record.meta["flow_id"] = flow_id
+            if f"flow:{flow_id}" not in record.tags:
+                record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
+        if session_id:
+            record.meta["session_id"] = session_id
+            if f"session:{session_id}" not in record.tags:
+                record.tags.append(f"session:{session_id}")  # add session tag if missing
 
         if self._store is not None:
             await self._store.create(record)
@@ -297,11 +353,19 @@ class RunManager:
         *,
         graph_id: str | None = None,
         status: RunStatus | None = None,
+        flow_id: str | None = None,  # NEW
         limit: int = 100,
     ) -> list[RunRecord]:
         if self._store is None:
             return []
-        return await self._store.list(graph_id=graph_id, status=status, limit=limit)
+
+        # First filter by graph_id/status in the store (TODO: implement self._store.list with flow_id for efficiency)
+        records = await self._store.list(graph_id=graph_id, status=status, limit=limit)
+
+        if flow_id is not None:
+            records = [r for r in records if r.meta.get("flow_id") == flow_id]
+
+        return records
 
     # Placeholder for future cancellation
     async def cancel_run(self, run_id: str) -> RunRecord | None:

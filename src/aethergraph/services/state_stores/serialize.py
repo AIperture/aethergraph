@@ -207,6 +207,8 @@ async def state_to_json_safe(
     for nid, ns in state_obj.nodes.items():
         status = getattr(ns, "status", None)
         status_name = getattr(status, "name", status)  # Enum.name or string
+        started_at = getattr(ns, "started_at", None)
+        finished_at = getattr(ns, "finished_at", None)
         tool_name = getattr(ns, "tool_name", None) or getattr(
             getattr(ns, "spec", None), "tool_name", None
         )
@@ -232,6 +234,8 @@ async def state_to_json_safe(
             "attempts": getattr(ns, "attempts", 0),
             "next_wakeup_at": getattr(ns, "next_wakeup_at", None),
             "wait_token": getattr(ns, "wait_token", None),
+            "started_at": started_at,
+            "finished_at": finished_at,
         }
         if include_wait_spec:
             ws = getattr(ns, "wait_spec", None)

@@ -56,6 +56,8 @@ class TaskNodeState:
     next_wakeup_at: str | None = None  # ISO timestamp
     wait_token: str | None = None  # for external wait/resume with Continuation
     wait_spec: dict[str, Any] | None = None  # spec for waiting (kind, channel, meta, etc.)
+    started_at: str | None = None  # ISO timestamp
+    finished_at: str | None = None  # ISO timestamp
 
     @property
     def output(self):

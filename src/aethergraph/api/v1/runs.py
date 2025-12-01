@@ -1,15 +1,17 @@
 # /runs
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, get_identity
 from .schemas import (
     NodeSnapshot,
+    RunChannelEvent,
     RunCreateRequest,
     RunCreateResponse,
     RunListResponse,
@@ -70,6 +72,22 @@ async def get_run(
     if rec is None:
         raise HTTPException(status_code=404, detail="Run not found")
 
+    # --- Graph metadata from registry ---
+    reg = getattr(container, "registry", None) or current_registry()
+    flow_id: str | None = None
+    entrypoint = False
+
+    if reg is not None:
+        if rec.kind == "taskgraph":
+            meta = reg.get_meta(nspace="graph", name=rec.graph_id, version=None) or {}
+        elif rec.kind == "graphfn":
+            meta = reg.get_meta(nspace="graphfn", name=rec.graph_id, version=None) or {}
+        else:
+            meta = {}
+
+        flow_id = meta.get("flow_id")
+        entrypoint = bool(meta.get("entrypoint", False))
+
     return RunSummary(
         run_id=rec.run_id,
         graph_id=rec.graph_id,
@@ -79,6 +97,9 @@ async def get_run(
         tags=rec.tags,
         user_id=rec.user_id,
         org_id=rec.org_id,
+        graph_kind=rec.kind,  # "taskgraph" | "graphfn" | "other"
+        flow_id=flow_id,
+        entrypoint=entrypoint,
     )
 
 
@@ -89,167 +110,63 @@ async def get_run(
 async def list_runs(
     graph_id: str | None = Query(None),  # noqa: B008
     status: RunStatus | None = Query(None),  # noqa: B008
-    cursor: str | None = Query(None),  # noqa: B008
+    flow_id: str | None = Query(None),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008 (unused for now)
     limit: int = Query(20, ge=1, le=100),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> RunListResponse:
     """
-    List recent runs, filterable by graph_id/status.
-    Should go through container.run_manager.list_records(...) → which uses run_store under the hood.
-    TODO:
-      - Integrate with your run store.
-      - Use `cursor`/`limit` for real pagination.
-      - Filter by identity.user_id/org_id as needed.
+    List recent runs, optionally filterable by graph_id, status, or flow_id.
     """
-    now = datetime.utcnow()
-    dummy_run = RunSummary(
-        run_id="run-123",
-        graph_id=graph_id or "example_graph",
-        status=RunStatus("succeeded"),
-        created_at=now - timedelta(minutes=5),
-        started_at=now - timedelta(minutes=4),
-        finished_at=now - timedelta(minutes=1),
-        tags=["stub"],
-        user_id=identity.user_id,
-        org_id=identity.org_id,
+    container = current_services()
+    rm = getattr(container, "run_manager", None)
+    if rm is None:
+        raise HTTPException(status_code=503, detail="Run manager not configured")
+
+    records = await rm.list_records(
+        graph_id=graph_id,
+        status=status,
+        flow_id=flow_id,
+        limit=limit,
     )
-    return RunListResponse(runs=[dummy_run], next_cursor=None)
 
+    reg = getattr(container, "registry", None) or current_registry()
+    summaries: list[RunSummary] = []
 
-# @router.get("/runs/{run_id}/snapshot", response_model=RunSnapshot)
-# async def get_run_snapshot(
-#     run_id: str,
-#     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-# ) -> RunSnapshot:
-#     """
-#     Get DAG snapshot: nodes + edges with statuses.
-#     Should use container.state_store
-#     TODO:
-#       - Wire to runtime's per-node state.
-#     """
-#     now = datetime.utcnow()
-#     node = NodeSnapshot(
-#         node_id="n1",
-#         tool_name="stub_tool",
-#         status=RunStatus.running,
-#         started_at=now,
-#         finished_at=None,
-#         outputs=None,
-#         error=None,
-#     )
-#     return RunSnapshot(
-#         run_id=run_id,
-#         graph_id="example_graph",
-#         nodes=[node],
-#         edges=[],
-#     )
+    for rec in records:
+        # Same graph metadata logic as in get_run
+        flow_meta_id: str | None = None
+        entrypoint = False
+        if reg is not None:
+            if rec.kind == "taskgraph":
+                meta = reg.get_meta(nspace="graph", name=rec.graph_id, version=None) or {}
+            elif rec.kind == "graphfn":
+                meta = reg.get_meta(nspace="graphfn", name=rec.graph_id, version=None) or {}
+            else:
+                meta = {}
+            flow_meta_id = meta.get("flow_id")
+            entrypoint = bool(meta.get("entrypoint", False))
 
+        # Prefer the run meta flow_id if present
+        effective_flow_id = rec.meta.get("flow_id") or flow_meta_id
 
-# @router.get("/runs/{run_id}/snapshot", response_model=RunSnapshot)
-# async def get_run_snapshot(
-#     run_id: str,
-#     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-# ) -> RunSnapshot:
-#     """
-#     Synthetic DAG snapshot for a run.
+        summaries.append(
+            RunSummary(
+                run_id=rec.run_id,
+                graph_id=rec.graph_id,
+                status=rec.status,
+                started_at=rec.started_at,
+                finished_at=rec.finished_at,
+                tags=rec.tags,
+                user_id=rec.user_id,
+                org_id=rec.org_id,
+                graph_kind=rec.kind,
+                flow_id=effective_flow_id,
+                entrypoint=entrypoint,
+            )
+        )
 
-#     For now:
-#       - Look up the Run record to get graph_id + status.
-#       - Look up the TaskGraph spec (if it's a graphify graph).
-#       - Build NodeSnapshot for each node in the DAG.
-#       - Use the run status to fake per-node statuses.
-#     """
-
-#     container = current_services()
-#     rm = getattr(container, "run_manager", None)
-#     if rm is None:
-#         raise HTTPException(status_code=503, detail="Run manager not configured")
-
-#     rec = await rm.get_record(run_id)
-#     if rec is None:
-#         raise HTTPException(status_code=404, detail="Run not found")
-
-#     graph_id = rec.graph_id
-
-#     # Try to load a static TaskGraph; if not available, just return a minimal snapshot.
-#     reg = container.registry  # or current_registry() if you use that
-#     try:
-#         graph_obj = reg.get_graph(name=graph_id, version=None)
-#         spec = getattr(graph_obj, "spec", None)
-#     except KeyError:
-#         spec = None
-
-#     # If we have no spec, just mirror the run status as a single pseudo-node
-#     if spec is None:
-#         node = NodeSnapshot(
-#             node_id="run",
-#             tool_name=None,
-#             status=rec.status,
-#             started_at=rec.started_at,
-#             finished_at=rec.finished_at,
-#             outputs=None,
-#             error=None,
-#         )
-#         return RunSnapshot(
-#             run_id=rec.run_id,
-#             graph_id=graph_id,
-#             nodes=[node],
-#             edges=[],
-#         )
-
-#     # --- Build nodes + edges from TaskGraphSpec ---
-
-#     # Simple heuristic: timing offsets so the timeline looks nice
-#     base_start = rec.started_at or datetime.utcnow()
-#     total_nodes = len(spec.nodes) or 1
-#     dt = timedelta(seconds=3)
-
-#     nodes: list[NodeSnapshot] = []
-#     edges: list[dict[str, str]] = []
-
-#     # Build edges from dependencies
-#     edge_set: set[tuple[str, str]] = set()
-#     for node_id, node_spec in spec.nodes.items():
-#         for dep_id in node_spec.dependencies:
-#             edge_set.add((dep_id, node_id))
-#     edges = [{"from": src, "to": dst} for (src, dst) in sorted(edge_set)]
-
-#     # Synthetic per-node status based on overall run status
-#     for idx, (node_id, node_spec) in enumerate(spec.nodes.items()):
-#         # naive phase-based status
-#         if rec.status in (RunStatus.succeeded, RunStatus.failed, RunStatus.canceled):
-#             node_status = rec.status
-#         elif rec.status in (RunStatus.running, RunStatus.cancellation_requested):
-#             if idx == 0:
-#                 node_status = RunStatus.running
-#             else:
-#                 node_status = RunStatus.pending
-#         else:
-#             node_status = RunStatus.pending
-
-#         started_at = base_start + dt * idx if rec.started_at else None
-#         finished_at = (
-#             started_at + dt if node_status in (RunStatus.succeeded, RunStatus.failed) else None
-#         )
-
-#         nodes.append(
-#             NodeSnapshot(
-#                 node_id=node_id,
-#                 tool_name=node_spec.tool_name,
-#                 status=node_status,
-#                 started_at=started_at,
-#                 finished_at=finished_at,
-#                 outputs=None,
-#                 error=None,
-#             )
-#         )
-
-#     return RunSnapshot(
-#         run_id=rec.run_id,
-#         graph_id=graph_id,
-#         nodes=nodes,
-#         edges=edges,
-#     )
+    return RunListResponse(runs=summaries, next_cursor=None)
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -336,14 +253,12 @@ async def get_run_snapshot(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> RunSnapshot:
     """
-    Synthetic DAG snapshot for a run.
+    Run snapshot for a single graph within this run.
 
-    For now:
-      - Look up the Run record to get graph_id + status.
-      - Look up the TaskGraph spec (if it's a graphify graph).
-      - Load latest GraphSnapshot from state_store, if available.
-      - Build NodeSnapshot for each node using real per-node state where possible.
-      - Fallback to heuristic behavior when we don't have detailed state.
+    - Uses RunRecord for run-level status.
+    - Uses registry metadata for graph_kind, flow_id, entrypoint.
+    - Uses state_store (if present) for node-level state.
+    - Falls back to TaskGraphSpec or a single pseudo-node.
     """
     container = current_services()
 
@@ -358,35 +273,44 @@ async def get_run_snapshot(
         raise HTTPException(status_code=404, detail="Run not found")
 
     graph_id = rec.graph_id
+    graph_kind = rec.kind
+
+    # --- Graph metadata from registry ---
+    reg = getattr(container, "registry", None) or current_registry()
+
+    flow_id: str | None = None
+    entrypoint = False
+    meta = {}
+
+    if reg is not None:
+        if graph_kind == "taskgraph":
+            meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+        elif graph_kind == "graphfn":
+            meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+
+        flow_id = meta.get("flow_id")
+        entrypoint = bool(meta.get("entrypoint", False))
 
     # --- Load static TaskGraph spec if it exists ---
-    reg = getattr(container, "registry", None)
-    if reg is None:
-        from aethergraph.core.runtime.runtime_registry import current_registry
-
-        reg = current_registry()
-
     spec = None
-    try:
-        graph_obj = reg.get_graph(name=graph_id, version=None)
-        spec = getattr(graph_obj, "spec", None)
-    except KeyError:
-        spec = None
+    if reg is not None:
+        try:
+            graph_obj = reg.get_graph(name=graph_id, version=None)
+            spec = getattr(graph_obj, "spec", None)
+        except KeyError:
+            spec = None
 
     # --- Load latest GraphSnapshot (if we have a state store) ---
-
     snap = None
     if state_store is not None:
         snap = await state_store.load_latest_snapshot(run_id)
 
-    # Extract node-level state + edges from snapshot if present.
     nodes_state: dict[str, dict[str, Any]] = {}
     snapshot_edges: list[dict[str, str]] = []
 
     if snap is not None and isinstance(snap.state, dict):
         raw_nodes = snap.state.get("nodes") or snap.state.get("node_state") or {}
         if isinstance(raw_nodes, dict):
-            # node_id -> dict
             nodes_state = {str(k): (v or {}) for k, v in raw_nodes.items()}
 
         raw_edges = snap.state.get("edges") or []
@@ -398,14 +322,11 @@ async def get_run_snapshot(
             ]
 
     # --- Build edges ---
-
     edges: list[dict[str, str]] = []
 
     if snapshot_edges:
-        # Prefer edges from snapshot for dynamic / graphfn graphs
         edges = snapshot_edges
     elif spec is not None and getattr(spec, "nodes", None):
-        # Static topology from TaskGraphSpec
         edge_set: set[tuple[str, str]] = set()
         for node_id, node_spec in spec.nodes.items():
             for dep_id in getattr(node_spec, "dependencies", []):
@@ -413,15 +334,14 @@ async def get_run_snapshot(
         edges = [{"source": src, "target": dst} for (src, dst) in sorted(edge_set)]
 
     nodes: list[NodeSnapshot] = []
-    # --- Case 1: we have a TaskGraph spec (static graph) ---
 
+    # --- Case 1: TaskGraph with spec (static graph) ---
     if spec is not None and getattr(spec, "nodes", None):
         for node_id, node_spec in spec.nodes.items():
             node_id_str = str(node_id)
             st = nodes_state.get(node_id_str, {})
 
             node_status = _coerce_node_status(st.get("status"), fallback=rec.status)
-
             started_at = _coerce_ts_to_dt(st.get("started_at"))
             finished_at = _coerce_ts_to_dt(st.get("finished_at"))
             outputs = st.get("outputs")
@@ -444,10 +364,12 @@ async def get_run_snapshot(
             graph_id=graph_id,
             nodes=nodes,
             edges=edges,
+            graph_kind=graph_kind,
+            flow_id=flow_id,
+            entrypoint=entrypoint,
         )
 
-    # --- Case 2: spec is missing, but snapshot has node info (e.g. graphfn/dynamic) ---
-
+    # --- Case 2: no spec, but snapshot has nodes (graphfn / dynamic) ---
     if nodes_state:
         for node_id, st in nodes_state.items():
             node_status = _coerce_node_status(st.get("status"), fallback=rec.status)
@@ -459,7 +381,7 @@ async def get_run_snapshot(
             nodes.append(
                 NodeSnapshot(
                     node_id=str(node_id),
-                    tool_name=st.get("tool_name"),  # let snapshot override if present
+                    tool_name=st.get("tool_name"),
                     status=node_status,
                     started_at=started_at,
                     finished_at=finished_at,
@@ -472,13 +394,15 @@ async def get_run_snapshot(
             run_id=rec.run_id,
             graph_id=graph_id,
             nodes=nodes,
-            edges=edges,  # may be empty or from snapshot
+            edges=edges,
+            graph_kind=graph_kind,
+            flow_id=flow_id,
+            entrypoint=entrypoint,
         )
 
-    # --- Case 3: no spec and no snapshot → fallback to pseudo-node (old behavior) ---
-
+    # --- Case 3: no spec, no snapshot → single pseudo-node, each node is the graph itself---
     node = NodeSnapshot(
-        node_id="run",
+        node_id=graph_id,
         tool_name=None,
         status=rec.status,
         started_at=rec.started_at,
@@ -491,4 +415,55 @@ async def get_run_snapshot(
         graph_id=graph_id,
         nodes=[node],
         edges=[],
+        graph_kind=graph_kind,
+        flow_id=flow_id,
+        entrypoint=entrypoint,
     )
+
+
+@router.get("/runs/{run_id}/channel/events", response_model=list[RunChannelEvent])
+async def get_run_channel_events(
+    run_id: str,
+    request: Request,
+    since_ts: float | None = None,
+):
+    """
+    Fetch normalized UI channel events for a run.
+
+    Frontend can poll with since_ts for incremental updates.
+    """
+    try:
+        container = request.app.state.container
+        event_log = container.eventlog  # eventlog for channels or equivalent
+
+        since_dt = None
+        if since_ts is not None:
+            since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+
+        # EventLog.query signature may differ; adapt as needed.
+        # We assume it filters by scope_id and time range.
+        rows = await event_log.query(
+            scope_id=f"run-ui:{run_id}",
+            since=since_dt,
+            until=None,
+        )
+
+        # Each row is the dict we appended in the adapter; ensure fields exist
+        events: list[RunChannelEvent] = []
+        for row in rows:
+            events.append(
+                RunChannelEvent(
+                    id=row.get("id"),
+                    run_id=row.get("run_id", run_id),
+                    type=row.get("type"),
+                    text=row.get("text"),
+                    buttons=row.get("buttons") or [],
+                    file=row.get("file"),
+                    meta=row.get("meta") or {},
+                    ts=row.get("ts"),
+                )
+            )
+
+        return events
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e

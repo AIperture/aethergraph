@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import threading
 import time
 from typing import Any
 
 from aethergraph.contracts.storage.async_kv import AsyncKV
+
+
+@dataclass
+class KVEntry:
+    value: Any
+    expire_at: float | None = None
 
 
 class InMemoryKV(AsyncKV):
@@ -16,10 +23,11 @@ class InMemoryKV(AsyncKV):
     - TTL managed best-effort on access / purge.
     """
 
-    def __init__(self):
+    def __init__(self, *, prefix: str = ""):
         self._data: dict[str, Any] = {}
         self._expires_at: dict[str, float | None] = {}
         self._lock = threading.RLock()
+        self._prefix = prefix
 
     async def get(self, key: str, default: Any = None) -> Any:
         now = time.time()
@@ -70,3 +78,26 @@ class InMemoryKV(AsyncKV):
                     self._expires_at.pop(k, None)
                     removed += 1
         return removed
+
+    # Helper to prefix keys
+    def _k(self, k: str) -> str:
+        return f"{self._prefix}{k}" if self._prefix else k
+
+    async def list_append_unique(
+        self, key: str, items: list[dict], *, id_key: str = "id", ttl_s: int | None = None
+    ) -> list[dict]:
+        """Append items to a list at `key`, ensuring uniqueness based on `id_key`."""
+        k = self._k(key)
+        with self._lock:
+            cur = list(self._data.get(k, KVEntry([])).value or [])
+            seen = {x.get(id_key) for x in cur if isinstance(x, dict)}
+            cur.extend([x for x in items if isinstance(x, dict) and x.get(id_key) not in seen])
+            self._data[k] = KVEntry(value=cur, expire_at=(time.time() + ttl_s) if ttl_s else None)
+            return cur
+
+    async def list_pop_all(self, key: str) -> list:
+        """Pop and return all items from the list at `key`."""
+        k = self._k(key)
+        with self._lock:
+            e = self._data.pop(k, None)
+            return list(e.value) if e and isinstance(e.value, list) else []

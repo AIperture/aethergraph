@@ -17,11 +17,39 @@ class GraphListItem(BaseModel):
     inputs: list[str] = []
     outputs: list[str] = []
     tags: list[str] = []
+    kind: str | None = None  # "graph" | "graphfn"
+    flow_id: str | None = None
+    entrypoint: bool | None = None
 
 
-class GraphDetail(GraphListItem):
-    nodes: list[dict[str, Any]]  # Simplified representation of nodes
-    edges: list[dict[str, Any]]  # Simplified representation of edges
+class GraphNodeInfo(BaseModel):
+    id: str
+    type: str | None = None
+    tool_name: str | None = None
+    tool_version: str | None = None
+    expected_inputs: list[str] = []
+    expected_outputs: list[str] = []
+    output_keys: list[str] = []
+
+
+class GraphEdgeInfo(BaseModel):
+    source: str
+    target: str
+
+
+class GraphDetail(BaseModel):
+    graph_id: str
+    name: str
+    description: str | None = None
+    inputs: list[str]
+    outputs: list[str]
+    tags: list[str] = []
+
+    kind: str | None = None  # "graph" | "graphfn"
+    flow_id: str | None = None
+    entrypoint: bool | None = None
+    nodes: list[GraphNodeInfo] = []
+    edges: list[GraphEdgeInfo] = []
 
 
 # --------- Runs ---------
@@ -42,9 +70,13 @@ class RunSummary(BaseModel):
     status: RunStatus
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    session_id: str | None = None
     tags: list[str] = []
     user_id: str | None = None
     org_id: str | None = None
+    graph_kind: str | None = None  # "taskgraph" | "graphfn" | "other"
+    flow_id: str | None = None
+    entrypoint: bool | None = None
 
 
 class RunCreateRequest(BaseModel):
@@ -52,6 +84,7 @@ class RunCreateRequest(BaseModel):
     inputs: dict[str, Any]
     run_config: dict[str, Any] = {}
     tags: list[str] = []
+    session_id: str | None = None
 
 
 class RunCreateResponse(BaseModel):
@@ -65,6 +98,18 @@ class RunCreateResponse(BaseModel):
     finished_at: datetime | None = None
 
 
+# for channel events emitted during a run
+class RunChannelEvent(BaseModel):
+    id: str
+    run_id: str
+    type: str  # original OutEvent.type
+    text: str | None
+    buttons: list[dict[str, Any]]
+    file: dict[str, Any] | None
+    meta: dict[str, Any]
+    ts: float  # unix timestamp
+
+
 class NodeSnapshot(BaseModel):
     node_id: str
     tool_name: str | None = None
@@ -75,11 +120,19 @@ class NodeSnapshot(BaseModel):
     error: str | None = None
 
 
+class EdgeSnapshot(BaseModel):
+    source: str
+    target: str
+
+
 class RunSnapshot(BaseModel):
     run_id: str
     graph_id: str
     nodes: list[NodeSnapshot]
-    edges: list[dict[str, Any]]  # Simplified representation of edges
+    edges: list[EdgeSnapshot]
+    graph_kind: str | None = None
+    flow_id: str | None = None
+    entrypoint: bool | None = None
 
 
 class RunListResponse(BaseModel):

@@ -40,7 +40,7 @@ def build_doc_store(cfg: AppSettings) -> DocStore:
     raise ValueError(f"Unknown DocStore backend: {dc.backend!r}")
 
 
-def build_event_log(cfg: AppSettings) -> EventLog | None:
+def build_event_log(cfg: AppSettings, service_name: str | None = None) -> EventLog | None:
     """
     Global EventLog factory.
     Used by:
@@ -57,14 +57,17 @@ def build_event_log(cfg: AppSettings) -> EventLog | None:
     if ec.backend == "sqlite":
         from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 
-        path = root / ec.sqlite_path
+        # If you use a different DB file per service, you get isolation between services,
+        # but lose global querying and may have more files to manage.
+        # If you use a single DB file, all services share the same event log table(s).
+        path = root / ec.sqlite_path  # You could do: root / f"{service_name}_{ec.sqlite_path}"
         path.parent.mkdir(parents=True, exist_ok=True)
         return SqliteEventLog(path=str(path))
 
     if ec.backend == "fs":
         from aethergraph.storage.eventlog.fs_event import FSEventLog
 
-        ev_root = root / ec.fs_dir
+        ev_root = root / ec.fs_dir if not service_name else root / ec.fs_dir / service_name
         ev_root.mkdir(parents=True, exist_ok=True)
         return FSEventLog(root=str(ev_root))
 

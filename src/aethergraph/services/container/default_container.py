@@ -16,6 +16,7 @@ from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
@@ -56,12 +57,12 @@ from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
-from aethergraph.storage.eventlog.fs_event import FSEventLog
 from aethergraph.storage.factory import (
     build_artifact_index,
     build_artifact_store,
     build_continuation_store,
     build_doc_store,
+    build_event_log,
     build_graph_state_store,
     build_memory_hotlog,
     build_memory_indices,
@@ -133,6 +134,7 @@ class DefaultContainer:
     kv_hot: EphemeralKV
     artifacts: AsyncArtifactStore
     artifact_index: AsyncArtifactIndex
+    eventlog: EventLog
 
     # memory
     memory_factory: MemoryFactory
@@ -193,6 +195,10 @@ def build_default_container(
     (root_p / "index").mkdir(parents=True, exist_ok=True)
     (root_p / "memory").mkdir(parents=True, exist_ok=True)
 
+    # event log for metering and channel events --
+    # TODO: make configurable from cfg
+    eventlog = build_event_log(cfg)
+
     # core services
     logger_factory = StdLoggerService.build(
         LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs"))
@@ -232,7 +238,7 @@ def build_default_container(
     }
 
     # channels
-    channel_adapters = make_channel_adapters_from_env(cfg)
+    channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog)
     channels = build_bus(
         channel_adapters,
         default="console:stdin",
@@ -241,7 +247,7 @@ def build_default_container(
         cont_store=cont_store,
     )
 
-    # storage and artifacts
+    # storage and artifacts -- kv_hot has special methods for hot data, do not use other persistent kv here
     kv_hot = EphemeralKV()
 
     artifacts = build_artifact_store(cfg)
@@ -292,7 +298,6 @@ def build_default_container(
 
     # Metering service
     # TODO: make metering service configurable
-    eventlog = FSEventLog(root=str(root_p / "metering" / "events"))
     metering_store = EventLogMeteringStore(event_log=eventlog)
     metering = EventLogMeteringService(store=metering_store)
 
@@ -313,6 +318,7 @@ def build_default_container(
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,
+        eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
         rag=rag_facade,

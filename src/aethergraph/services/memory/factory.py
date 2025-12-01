@@ -60,10 +60,12 @@ class MemoryFactory:
         *,
         graph_id: str | None = None,
         node_id: str | None = None,
+        session_id: str | None = None,
     ) -> MemoryFacade:
         return MemoryFacade(
             run_id=run_id,
             graph_id=graph_id,
+            session_id=session_id,
             node_id=node_id,
             hotlog=self.hotlog,
             persistence=self.persistence,

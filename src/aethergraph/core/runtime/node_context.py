@@ -17,6 +17,7 @@ from .node_services import NodeServices
 @dataclass
 class NodeContext:
     run_id: str
+    session_id: str
     graph_id: str
     node_id: str
     services: NodeServices

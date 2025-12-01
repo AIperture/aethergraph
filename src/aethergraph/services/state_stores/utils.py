@@ -16,8 +16,6 @@ async def snapshot_from_graph(
     rev: int,
     spec_hash: str,
     state_obj,
-    started_at: datetime | None = None,
-    finished_at: datetime | None = None,
     *,
     artifacts=None,  # AsyncArtifactStore or None
     allow_externalize: bool = False,
@@ -31,16 +29,16 @@ async def snapshot_from_graph(
         allow_externalize=allow_externalize,
         include_wait_spec=include_wait_spec,
     )
-    return GraphSnapshot(
+
+    snap = GraphSnapshot(
         run_id=run_id,
         graph_id=graph_id,
         rev=rev,
         created_at=datetime.utcnow().timestamp(),
         spec_hash=spec_hash,
         state=json_state,
-        started_at=started_at,
-        finished_at=finished_at,
     )
+    return snap
 
 
 def _status_to_str(s) -> str:
