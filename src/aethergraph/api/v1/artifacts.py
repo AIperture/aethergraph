@@ -1,8 +1,11 @@
 # /artifacts
 
+import mimetypes
+import os
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
+from fastapi.responses import RedirectResponse
 
 from aethergraph.contracts.storage.artifact_index import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
@@ -47,6 +50,34 @@ def _extract_scope_id(a: Artifact) -> str | None:
     return a.run_id  # fallback to run_id if no scope label found
 
 
+def _guess_mime(a: Artifact) -> str:
+    # 1) explicit mime wins
+    if a.mime:
+        return a.mime
+
+    # 2) infer from URI / filename
+    mime = None
+    if a.uri:
+        guessed, _ = mimetypes.guess_type(a.uri)
+        if guessed:
+            mime = guessed
+
+    # 3) heuristics from kind (optional but nice)
+    if not mime and a.kind:
+        k = a.kind.lower()
+        if any(x in k for x in ["log", "text", "stdout", "stderr"]):
+            mime = "text/plain"
+        elif "json" in k:
+            mime = "application/json"
+        elif "csv" in k:
+            mime = "text/csv"
+        elif "markdown" in k or "md" in k:
+            mime = "text/markdown"
+
+    # 4) fallback
+    return mime or "application/octet-stream"
+
+
 def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
     """
     Convert Artifact to ArtifactMeta schema.
@@ -54,12 +85,17 @@ def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
     out = ArtifactMeta(
         artifact_id=a.artifact_id,
         kind=a.kind,
-        mime_type=a.mime or "application/octet-stream",
+        mime_type=_guess_mime(a),
         size=a.bytes,
         scope_id=_extract_scope_id(a) or "unknown_scope",
         tags=_extract_tags(a.labels or {}),
         created_at=a.created_at,
         uri=a.uri,
+        pinned=a.pinned,  # keep pin state
+        preview_uri=a.preview_uri,  # optional but useful for later
+        run_id=a.run_id,
+        graph_id=a.graph_id,
+        node_id=a.node_id if getattr(a, "node_id", None) else None,
     )
     return out
 
@@ -135,17 +171,47 @@ async def get_artifact(
     return meta
 
 
+# @router.get("/artifacts/{artifact_id}/content")
+# async def get_artifact_content(
+#     artifact_id: str,
+#     identity: Annotated[RequestIdentity, Depends(get_identity)],
+# ) -> Response:
+#     """
+#     Stream artifact content.
+
+#     Currently loads the entire content into memory and returns it as a Response.
+#     For large files, consider switching to StreamingResponse in the future.
+#     """
+#     container = current_services()
+#     index = getattr(container, "artifact_index", None)
+#     store = getattr(container, "artifacts", None)
+#     if index is None or store is None:
+#         raise HTTPException(status_code=503, detail="Artifact services not configured")
+
+#     artifact = await index.get(artifact_id)
+#     if artifact is None:
+#         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+
+#     # For now, we assume non-directory artifacts; if mime indicates directory,
+#     # TODO: maybe to expose archive/preview_uri instead?
+#     data = await store.load_artifact_bytes(artifact.uri)
+
+#     out = Response(
+#         content=data,
+#         media_type=artifact.mime or "application/octet-stream",
+#         headers={
+#             "Content-Length": str(len(data)),
+#             "X-AetherGraph-Artifact-Id": artifact.artifact_id,
+#         },
+#     )
+#     return out
+
+
 @router.get("/artifacts/{artifact_id}/content")
 async def get_artifact_content(
     artifact_id: str,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> Response:
-    """
-    Stream artifact content.
-
-    Currently loads the entire content into memory and returns it as a Response.
-    For large files, consider switching to StreamingResponse in the future.
-    """
     container = current_services()
     index = getattr(container, "artifact_index", None)
     store = getattr(container, "artifacts", None)
@@ -156,19 +222,27 @@ async def get_artifact_content(
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
 
-    # For now, we assume non-directory artifacts; if mime indicates directory,
-    # TODO: maybe to expose archive/preview_uri instead?
+    # If user provided a fully qualified preview URI (e.g. S3 signed URL), you
+    # can just redirect there instead of proxying bytes:
+    if artifact.preview_uri and str(artifact.preview_uri).startswith(("http://", "https://")):
+        return RedirectResponse(artifact.preview_uri)
+
+    # Otherwise, stream raw bytes from the artifact store.
     data = await store.load_artifact_bytes(artifact.uri)
 
-    out = Response(
+    # Derive a filename that's at least somewhat meaningful
+    filename = os.path.basename(artifact.uri) if artifact.uri else artifact.artifact_id
+    media_type = artifact.mime or "application/octet-stream"
+
+    return Response(
         content=data,
-        media_type=artifact.mime or "application/octet-stream",
+        media_type=media_type,
         headers={
             "Content-Length": str(len(data)),
+            "Content-Disposition": f'attachment; filename="{filename}"',
             "X-AetherGraph-Artifact-Id": artifact.artifact_id,
         },
     )
-    return out
 
 
 @router.post("/artifacts/search", response_model=ArtifactSearchResponse)

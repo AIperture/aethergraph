@@ -17,8 +17,6 @@ class RunRegistrationGuard(AbstractContextManager):
         reg = self.container.sched_registry
         existing = reg.get(self.run_id)
         if existing is not None and existing is not self.scheduler:
-            # Be explicit to avoid silent clobbering
-            # raise RuntimeError(f"Scheduler already registered for run_id={self.run_id}")
             # Do nothing if already registered
             return self
         reg.register(self.run_id, self.scheduler)

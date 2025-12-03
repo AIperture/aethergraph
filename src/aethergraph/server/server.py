@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
+from fastapi import FastAPI
 import uvicorn
 
 from aethergraph.config.context import set_current_settings
@@ -55,7 +56,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def app_factory() -> FastAPI:
+    """
+    Factory for uvicorn's --factory mode.
+
+    Reads settings, installs them globally, builds the container and app.
+    """
+    cfg = load_settings()
+    set_current_settings(cfg)
+
+    app = create_app(
+        workspace=cfg.workspace.root if hasattr(cfg, "workspace") else "./aethergraph_data",
+        cfg=cfg,
+        log_level=cfg.logging.level if hasattr(cfg, "logging") else "info",
+    )
+    return app
+
+
+def main(argv=None) -> None:
+    import argparse
+
+    import uvicorn
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--reload", action="store_true")
+    parser.add_argument("--uvicorn-log-level", default="info")
+    args = parser.parse_args(argv)
+
+    uvicorn.run(
+        "aethergraph.server.server:app_factory",  # <- note :app_factory
+        host=args.host,
+        port=args.port,
+        log_level=args.uvicorn_log_level,
+        reload=args.reload,
+        factory=True,
+    )
+
+
+def main_old(argv: Sequence[str] | None = None) -> None:
     """
     Entry point for running AetherGraph as a long-lived server.
 

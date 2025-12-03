@@ -65,7 +65,16 @@ async def recover_graph_run(
         )
 
     # Apply snapshot state
-    _hydrate_state_from_json(g, snap.state)
+    try:
+        _hydrate_state_from_json(g, snap.state)
+        print(f"🍎 [recover_graph_run] Hydrated state from snapshot for run {run_id}")
+    except Exception as e:
+        import logging
+
+        logger = logging.getLogger("aethergraph.core.runtime.recovery")
+        logger.error(
+            f"[recover_graph_run] Failed to hydrate state from snapshot for run {run_id}: {e}"
+        )
 
     return g
 

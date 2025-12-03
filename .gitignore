@@ -21,6 +21,8 @@ __pycache__/
 .env.*
 *.env
 /test
+demos/
+
 # Pytest cache
 .cache/
 .pytest_cache/

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import inspect
 from typing import Any
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_registry import current_registry
+from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
 
@@ -43,9 +45,11 @@ class RunManager:
         *,
         run_store: RunStore | None = None,
         registry: UnifiedRegistry | None = None,
+        sched_registry: Any | None = None,  # placeholder for future use
     ):
         self._store = run_store
         self._registry = registry
+        self._sched_registry = sched_registry
 
     # -------- registry helpers --------
 
@@ -96,20 +100,29 @@ class RunManager:
         error_msg: str | None = None
 
         try:
-            print("🍏 RunManager: calling run_or_resume_async for run_id:", record.run_id)
             result = await run_or_resume_async(
                 target, inputs or {}, run_id=record.run_id, session_id=record.meta.get("session_id")
             )
-            print("🍏 RunManager: run_or_resume_async result:", result)
 
             # If we get here without GraphHasPendingWaits, run is completed
             outputs = result if isinstance(result, dict) else {"result": result}
             record.status = RunStatus.succeeded
             record.finished_at = _utcnow()
 
+        except asyncio.CancelledError:
+            # Cancellation path: scheduler.terminate() or external cancel.
+            import logging
+
+            record.status = RunStatus.canceled
+            record.finished_at = _utcnow()
+            error_msg = "Run cancelled by user"
+            logging.getLogger("aethergraph.runtime.run_manager").info(
+                "Run %s was cancelled", record.run_id
+            )
+
         except GraphHasPendingWaits as e:
             # Graph quiesced with pending waits
-            record.status = RunStatus.running
+            record.status = RunStatus.failed  # consider 'waiting' status later
             has_waits = True
             continuations = getattr(e, "continuations", [])
             # outputs remain None
@@ -346,7 +359,8 @@ class RunManager:
     async def get_record(self, run_id: str) -> RunRecord | None:
         if self._store is None:
             return None
-        return await self._store.get(run_id)
+        out = await self._store.get(run_id)
+        return out
 
     async def list_records(
         self,
@@ -367,15 +381,87 @@ class RunManager:
 
         return records
 
-    # Placeholder for future cancellation
+    def _get_sched_registry(self):
+        if self._sched_registry is not None:
+            return self._sched_registry
+        try:
+            container = current_services()
+        except Exception:
+            return None
+        return getattr(container, "sched_registry", None)
+
     async def cancel_run(self, run_id: str) -> RunRecord | None:
         """
-        Later: use container.sched_registry to find scheduler and request cancellation.
+        Best-effort cancellation for a run.
 
-        For now, it's a stub that just reads the current record.
+        Behaviour:
+        - If the run is found and not yet terminal:
+            - Mark status = cancellation_requested and persist.
+            - Look up scheduler in sched_registry and call terminate().
+        - If the run is already terminal, return it unchanged.
+        - If no record is found, we still try scheduler-level termination
+          (in case the run hasn't been persisted yet), then return None.
+
+        The actual transition to RunStatus.canceled happens inside
+        _run_and_finalize() when the scheduler raises asyncio.CancelledError.
         """
-        # Future:
-        #  - container = current_services()
-        #  - sched = container.sched_registry.get(run_id)
-        #  - if sched: sched.request_cancel() or sched.terminate()
-        return await self.get_record(run_id)
+        record: RunRecord | None = None
+        print("🍎 Debug: RunManager.cancel_run called for run_id =", run_id)
+        if self._store is not None:
+            record = await self._store.get(run_id)
+
+        # Helper: scheduler-level termination
+        async def _terminate_scheduler() -> None:
+            reg = self._get_sched_registry()
+            if reg is None:
+                return
+            sched = reg.get(run_id)
+            if sched is None:
+                return
+
+            try:
+                terminate = getattr(sched, "terminate", None) or getattr(
+                    sched, "request_cancel", None
+                )
+                if terminate is None:
+                    return
+
+                if inspect.iscoroutinefunction(terminate):
+                    await terminate()
+                else:
+                    # allow sync terminate() implementations
+                    terminate()
+            except Exception:  # noqa: BLE001
+                import logging
+
+                logging.getLogger("aethergraph.runtime.run_manager").exception(
+                    "Error terminating scheduler for run_id=%s", run_id
+                )
+
+        # No record in store – still try to terminate scheduler, then bail
+        if record is None:
+            await _terminate_scheduler()
+            return None
+
+        # If already terminal, don't change status
+        if record.status in {
+            RunStatus.succeeded,
+            RunStatus.failed,
+            RunStatus.canceled,
+        }:
+            return record
+
+        # Mark cancellation requested so UI can react immediately
+        record.status = RunStatus.cancellation_requested
+        if self._store is not None:
+            await self._store.update_status(
+                run_id,
+                RunStatus.cancellation_requested,
+                finished_at=None,
+                error=None,
+            )
+
+        # Ask the scheduler to stop
+        await _terminate_scheduler()
+
+        return record

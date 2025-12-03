@@ -294,7 +294,7 @@ def build_default_container(
 
     # TODO: name run store configurable -- for now, just in-memory
     run_store = InMemoryRunStore()
-    run_manager = RunManager(run_store=run_store, registry=registry)
+    run_manager = RunManager(run_store=run_store, registry=registry, sched_registry=sched_registry)
 
     # Metering service
     # TODO: make metering service configurable

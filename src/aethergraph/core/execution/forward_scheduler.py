@@ -700,10 +700,10 @@ class ForwardScheduler(BaseScheduler):
 
             except NotImplementedError:
                 # subgraph logic not handled here; escalate to orchestrator
-                await node.set_status(NodeStatus.FAILED)
+                await self.graph.set_node_status(node_id, NodeStatus.FAILED)
             except asyncio.CancelledError:
                 # task cancelled (e.g. on terminate);
-                await node.set_status(NodeStatus.FAILED)
+                await self.graph.set_node_status(node_id, NodeStatus.CANCELLED)
             finally:
                 # remove from running tasks in caller
                 pass

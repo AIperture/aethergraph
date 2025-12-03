@@ -60,6 +60,7 @@ class RunStatus(str, Enum):
     running = "running"
     succeeded = "succeeded"
     failed = "failed"
+    waiting = "waiting"
     canceled = "canceled"
     cancellation_requested = "cancellation_requested"
 
@@ -74,9 +75,18 @@ class RunSummary(BaseModel):
     tags: list[str] = []
     user_id: str | None = None
     org_id: str | None = None
-    graph_kind: str | None = None  # "taskgraph" | "graphfn" | "other"
+    graph_kind: str | None = None
     flow_id: str | None = None
     entrypoint: bool | None = None
+
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+    # 🔹 Python attribute names are snake_case, JSON keys are camelCase
+    app_id: str | None = Field(default=None, alias="appId")
+    app_name: str | None = Field(default=None, alias="appName")
+
+    class Config:
+        populate_by_name = True  # allows setting via app_id/app_name in Python
 
 
 class RunCreateRequest(BaseModel):
@@ -85,6 +95,12 @@ class RunCreateRequest(BaseModel):
     run_config: dict[str, Any] = {}
     tags: list[str] = []
     session_id: str | None = None
+
+    app_id: str | None = Field(default=None, alias="appId")
+    app_name: str | None = Field(default=None, alias="appName")
+
+    class Config:
+        populate_by_name = True  # allows setting via app_id/app_name in Python
 
 
 class RunCreateResponse(BaseModel):
@@ -203,6 +219,13 @@ class ArtifactMeta(BaseModel):
     tags: list[str] = []
     created_at: datetime
     uri: str | None = None
+    pinned: bool = False
+    preview_uri: str | None = None
+
+    # Associated run / graph / node
+    run_id: str | None = None
+    graph_id: str | None = None
+    node_id: str | None = None
 
 
 class ArtifactListResponse(BaseModel):
