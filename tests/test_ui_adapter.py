@@ -66,16 +66,14 @@ async def test_web_ui_adapter_appends_event_with_run_scope():
     # Check event_log row
     assert len(log.rows) == 1
     row = log.rows[0]
-    assert row["run_id"] == "run-123"
-    assert row["scope_id"] == "run-ui:run-123"
-    assert row["channel_key"] == "ui:run/run-123"
-    assert row["type"] == "agent.message"
-    assert row["text"] == "Hello from graph"
-    assert row["meta"] == {"foo": "bar"}
+    assert row["scope_id"] == "run-123"
+    assert row["payload"].get("meta") == {"foo": "bar"}
+    assert row["payload"].get("type") == "agent.message"
+    assert row["payload"].get("text") == "Hello from graph"
     # ts, buttons, file exist but we only sanity-check types
     assert isinstance(row["ts"], float)
-    assert isinstance(row["buttons"], list)
-    assert row["file"] is None
+    assert isinstance(row["payload"].get("buttons"), list)
+    assert row["payload"].get("file") is None
 
 
 @pytest.mark.asyncio

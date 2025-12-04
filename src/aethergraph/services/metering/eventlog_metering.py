@@ -189,28 +189,24 @@ class EventLogMeteringService(MeteringService):
             org_id=org_id,
         )
 
-        # runs = await self._query(
-        #     window=window,
-        #     kinds=["meter.run"],
-        #     user_id=user_id,
-        #     org_id=org_id,
-        # )
-        # artifacts = await self._query(
-        #     window=window,
-        #     kinds=["meter.artifact"],
-        #     user_id=user_id,
-        #     org_id=org_id,
-        # )
-        # events = await self._query(
-        #     window=window,
-        #     kinds=["meter.event"],
-        #     user_id=user_id,
-        #     org_id=org_id,
-        # )
-
-        runs = []
-        artifacts = []
-        events = []
+        runs = await self._query(
+            window=window,
+            kinds=["meter.run"],
+            user_id=user_id,
+            org_id=org_id,
+        )
+        artifacts = await self._query(
+            window=window,
+            kinds=["meter.artifact"],
+            user_id=user_id,
+            org_id=org_id,
+        )
+        events = await self._query(
+            window=window,
+            kinds=["meter.event"],
+            user_id=user_id,
+            org_id=org_id,
+        )
 
         return {
             "llm_calls": len(llm),

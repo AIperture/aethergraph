@@ -62,6 +62,7 @@ class RunState:
     ready_pending: set[str] = field(default_factory=set)  # nodes explicitly enqueued
     backoff_tasks: dict[str, asyncio.Task] = field(default_factory=dict)  # node_id -> sleeper task
     terminated: bool = False
+    cancelled: bool = False
 
     def capacity(self) -> int:
         return max(0, self.settings.max_concurrency - len(self.running_tasks))
@@ -163,6 +164,7 @@ class GlobalForwardScheduler:
         # mark runs as terminated & cancel sleepers/runners
         for rs in self._runs.values():
             rs.terminated = True
+            rs.cancelled = True
             for t in list(rs.backoff_tasks.values()):
                 t.cancel()
             for t in list(rs.running_tasks.values()):
@@ -185,6 +187,8 @@ class GlobalForwardScheduler:
         if not rs:
             return
         rs.terminated = True
+        rs.cancelled = True
+
         for t in list(rs.backoff_tasks.values()):
             t.cancel()
         for t in list(rs.running_tasks.values()):
@@ -240,20 +244,22 @@ class GlobalForwardScheduler:
                     and not tgt.resume_pending
                 ):
                     # compute a simple status
-                    status = "SUCCESS"
-                    for n in tgt.graph.nodes:
-                        if n.spec.type == "plan":
-                            continue
-                        if n.state.status == NodeStatus.FAILED:
-                            status = "FAILED"
-                            break
-                    await self._emit_run(
-                        RunEvent(
-                            run_id=tgt.run_id,
-                            status=status,
-                            timestamp=datetime.utcnow().timestamp(),
-                        )
+                    if tgt.cancelled:
+                        status = "CANCELLED"
+                    else:
+                        status = "SUCCESS"
+                        for n in tgt.graph.nodes:
+                            if n.spec.type == "plan":
+                                continue
+                            if n.state.status == NodeStatus.FAILED:
+                                status = "FAILED"
+                                break
+                    evt = RunEvent(
+                        run_id=tgt.run_id,
+                        status=status,
+                        timestamp=datetime.utcnow().timestamp(),
                     )
+                    await self._emit_run(evt)
                     break
 
             # 4) If nothing is running anywhere and nothing scheduled, decide how to wait
@@ -506,11 +512,11 @@ class GlobalForwardScheduler:
                     )
             except asyncio.CancelledError:
                 try:
-                    await rs.graph.set_node_status(node_id, NodeStatus.FAILED)
+                    await rs.graph.set_node_status(node_id, NodeStatus.CANCELLED)
                 except Exception as e:
                     if self._logger:
                         self._logger.warning(
-                            f"[GlobalForwardScheduler._start_node] failed to set node {node_id} as FAILED on cancellation: {e}"
+                            f"[GlobalForwardScheduler._start_node] failed to set node {node_id} as CANCELLED on cancellation: {e}"
                         )
             finally:
                 pass

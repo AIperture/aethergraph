@@ -19,7 +19,7 @@ class FakeRunManager:
     def __init__(self):
         self.last_call = None
 
-    async def start_run(
+    async def submit_run(
         self,
         graph_id: str,
         *,

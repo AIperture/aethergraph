@@ -101,6 +101,7 @@ async def test_overview_and_basic_aggregation():
     )
 
     overview = await svc.get_overview(user_id="u1", org_id="o1", window="9999d")
+    print(overview)
 
     assert overview["llm_calls"] == 1
     assert overview["llm_prompt_tokens"] == 10

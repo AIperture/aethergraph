@@ -74,6 +74,14 @@ class FakeLogger:
         return self
 
 
+class FakeEventLog:
+    def __init__(self):
+        self.rows: list[dict[str, Any]] = []
+
+    async def append(self, evt: dict) -> None:
+        self.rows.append(evt)
+
+
 class FakeContainer:
     def __init__(self, cont: Continuation):
         self.artifacts = FakeArtifacts()
@@ -81,6 +89,7 @@ class FakeContainer:
         self.cont_store = FakeContinuationStore(cont=cont)
         self.resume_router = FakeResumeRouter()
         self.logger = FakeLogger()
+        self.eventlog = FakeEventLog()
         # channel_ingress will be set after ChannelIngress is constructed
 
 

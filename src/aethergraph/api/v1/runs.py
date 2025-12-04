@@ -205,7 +205,6 @@ async def get_run(
     # 🔹 derive app info
     app_id = rec.meta.get("app_id") or _extract_app_id_from_tags(rec.tags)
     app_name = rec.meta.get("app_name")
-
     return RunSummary(
         run_id=rec.run_id,
         graph_id=rec.graph_id,

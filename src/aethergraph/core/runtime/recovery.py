@@ -67,7 +67,6 @@ async def recover_graph_run(
     # Apply snapshot state
     try:
         _hydrate_state_from_json(g, snap.state)
-        print(f"🍎 [recover_graph_run] Hydrated state from snapshot for run {run_id}")
     except Exception as e:
         import logging
 
@@ -93,6 +92,10 @@ def _hydrate_state_from_json(graph, j: dict[str, Any]) -> None:
         outs = ns_json.get("outputs") or {}
         # Keep as-is; resume_policy already blocked non-JSON/ref earlier
         ns.outputs = outs
+
+        # time fields
+        ns.started_at = ns_json.get("started_at")
+        ns.finished_at = ns_json.get("finished_at")
 
 
 async def rearm_waits_if_needed(graph, env, *, ttl_s: int = 3600):

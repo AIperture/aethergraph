@@ -64,7 +64,7 @@ class ArtifactIndexSettings(BaseModel):
 
 # --- Graph State Storage ---
 class GraphStateStorageSettings(BaseModel):
-    backend: Literal["fs", "sqlite"] = "sqlite"
+    backend: Literal["fs", "sqlite"] = "fs"
 
     # FS backend
     fs_root: str = "graph_state"  # under AppSettings.root

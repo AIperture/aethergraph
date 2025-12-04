@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-import inspect
 from typing import Any
 from uuid import uuid4
 
 from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunStore
+from aethergraph.core.execution.forward_scheduler import ForwardScheduler
+from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_registry import current_registry
@@ -406,7 +407,6 @@ class RunManager:
         _run_and_finalize() when the scheduler raises asyncio.CancelledError.
         """
         record: RunRecord | None = None
-        print("🍎 Debug: RunManager.cancel_run called for run_id =", run_id)
         if self._store is not None:
             record = await self._store.get(run_id)
 
@@ -420,17 +420,14 @@ class RunManager:
                 return
 
             try:
-                terminate = getattr(sched, "terminate", None) or getattr(
-                    sched, "request_cancel", None
-                )
-                if terminate is None:
+                # if local scheduler -> terminate
+                # if global scheduler -> terminate_run(run_id)
+                if isinstance(sched, GlobalForwardScheduler):
+                    await sched.terminate_run(run_id)
                     return
-
-                if inspect.iscoroutinefunction(terminate):
-                    await terminate()
-                else:
-                    # allow sync terminate() implementations
-                    terminate()
+                elif isinstance(sched, ForwardScheduler):
+                    await sched.terminate()
+                    return
             except Exception:  # noqa: BLE001
                 import logging
 

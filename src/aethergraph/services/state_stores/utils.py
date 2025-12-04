@@ -29,7 +29,6 @@ async def snapshot_from_graph(
         allow_externalize=allow_externalize,
         include_wait_spec=include_wait_spec,
     )
-
     snap = GraphSnapshot(
         run_id=run_id,
         graph_id=graph_id,

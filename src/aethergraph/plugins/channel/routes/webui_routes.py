@@ -8,7 +8,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
-from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.services.channel.ingress import ChannelIngress, IncomingFile, IncomingMessage
 
 router = APIRouter()
@@ -45,7 +44,7 @@ async def run_channel_incoming(
     try:
         container = request.app.state.container  # type: ignore
         ingress: ChannelIngress = container.channel_ingress
-        event_log: EventLog = container.eventlog
+        event_log = container.eventlog
 
         # 1) Normalize files into IncomingFile list (future use)
         files = []

@@ -237,6 +237,7 @@ async def state_to_json_safe(
             "started_at": started_at,
             "finished_at": finished_at,
         }
+
         if include_wait_spec:
             ws = getattr(ns, "wait_spec", None)
             if ws:

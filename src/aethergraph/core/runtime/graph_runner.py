@@ -193,6 +193,7 @@ async def load_latest_snapshot_json(store, run_id: str) -> dict[str, Any] | None
     # JsonGraphStateStore serializes GraphSnapshot via snap.__dict__
     # load_latest_snapshot already returns a GraphSnapshot(**jsondict).
     # Convert back to plain JSON-ish dict:
+
     return {
         "run_id": snap.run_id,
         "graph_id": snap.graph_id,
@@ -327,7 +328,7 @@ async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides
                     )
                     await store.save_snapshot(snap)
 
-        # Resolve graph-level outputs (will raise GraphHasPendingWaits if waits)
+        # Resolve graph-level outputs (will raise  if waits)
         return _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
     finally:
         # reset metering context

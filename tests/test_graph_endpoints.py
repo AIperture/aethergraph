@@ -167,7 +167,7 @@ def test_get_task_graph_detail_includes_nodes_and_edges(client: TestClient):
 
     # Edges: n1 -> n2 from dependencies
     edges = data["edges"]
-    assert {"from": "n1", "to": "n2"} in edges
+    assert {"source": "n1", "target": "n2"} in edges
 
 
 def test_get_graphfn_detail_has_empty_nodes_and_edges(client: TestClient):
