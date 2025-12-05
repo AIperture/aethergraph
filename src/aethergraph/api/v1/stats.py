@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,43 @@ from .schemas import (
 router = APIRouter(tags=["stats"])
 
 
+# This is demo-only; real multi-tenant setups should rely on user_id/org_id instead.
+def _has_client_tag(tags: Iterable[str] | None, client_id: str | None) -> bool:
+    if not client_id:
+        return True
+    if not tags:
+        return False
+    needle = f"client:{client_id}"
+    return any(t == needle for t in tags)
+
+
+async def _get_run_ids_for_client(
+    client_id: str | None,
+    limit: int = 500,
+) -> set[str]:
+    """
+    TEMP: demo-only helper.
+    Look up recent runs and filter by client:<id> tag.
+    """
+    if not client_id:
+        return set()
+
+    container = current_services()
+    rm = getattr(container, "run_manager", None)
+    if rm is None:
+        return set()
+
+    # list_records wrapper; adapt to your actual RunManager API
+    records = await rm.list_records(
+        graph_id=None,
+        status=None,
+        flow_id=None,
+        limit=limit,
+    )
+
+    return {r.run_id for r in records if _has_client_tag(r.tags, client_id)}
+
+
 @router.get("/stats/overview", response_model=StatsOverview)
 async def get_stats_overview(
     window: Annotated[str, Query(description="Time window for stats, e.g., '24h', '7d'")] = "24h",
@@ -32,10 +70,15 @@ async def get_stats_overview(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
+    run_ids_for_client: set[str] | None = None
+    if identity.mode == "demo" and identity.client_id:
+        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
+
     raw: dict[str, int] = await meter.get_overview(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
+        run_ids=run_ids_for_client,
     )
     return StatsOverview(**raw)
 
@@ -57,10 +100,15 @@ async def get_graphs_stats(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
+    run_ids_for_client: set[str] | None = None
+    if identity.mode == "demo" and identity.client_id:
+        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
+
     raw_all: dict[str, dict[str, Any]] = await meter.get_graph_stats(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
+        run_ids=run_ids_for_client,
     )
     # raw_all: { "<graph_id>": {"runs":..., "succeeded":..., "failed":..., "total_duration_s":...}, ... }
 
@@ -108,11 +156,16 @@ async def get_memory_stats(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
+    run_ids_for_client: set[str] | None = None
+    if identity.mode == "demo" and identity.client_id:
+        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
+
     raw: dict[str, dict[str, int]] = await meter.get_memory_stats(
         scope_id=scope_id,
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
+        run_ids=run_ids_for_client,
     )
     # raw: { "memory.user_msg": {"count": N}, ... }
     return MemoryStats(root=raw)
@@ -132,10 +185,15 @@ async def get_artifacts_stats(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
+    run_ids_for_client: set[str] | None = None
+    if identity.mode == "demo" and identity.client_id:
+        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
+
     raw: dict[str, dict[str, int]] = await meter.get_artifact_stats(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
+        run_ids=run_ids_for_client,
     )
     # raw: { "json": {"count":..., "bytes":..., "pinned_count":..., "pinned_bytes":...}, ... }
     return ArtifactStats(root=raw)
@@ -155,10 +213,15 @@ async def get_stats_llm(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
+    run_ids_for_client: set[str] | None = None
+    if identity.mode == "demo" and identity.client_id:
+        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
+
     raw: dict[str, dict[str, int]] = await meter.get_llm_stats(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
+        run_ids=run_ids_for_client,
     )
     # raw: { "gpt-4o-mini": {"calls":..., "prompt_tokens":..., "completion_tokens":...}, ... }
     return LLMStats(root=raw)

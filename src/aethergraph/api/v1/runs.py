@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
@@ -90,7 +91,6 @@ async def list_runs(
     flow_id: str | None = Query(None),  # noqa: B008
     cursor: str | None = Query(None),  # noqa: B008 (unused for now)
     limit: int = Query(20, ge=1, le=100),  # noqa: B008
-    client_id: str | None = Query(None),  # soft demo scoping
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> RunListResponse:
     """
@@ -115,8 +115,8 @@ async def list_runs(
     # --- TEMP: client_id-based soft filtering for the demo ---
     # In real multi-tenant setup, prefer identity.user_id/org_id instead.
     # And use a proper database-backed RunStore with query filtering.
-    if client_id:
-        records = [rec for rec in records if _has_client_tag(rec.tags, client_id)]
+    if identity.mode == "demo" and identity.client_id:
+        records = [rec for rec in records if _has_client_tag(rec.tags, identity.client_id)]
 
     reg = getattr(container, "registry", None) or current_registry()
     summaries: list[RunSummary] = []
@@ -166,7 +166,6 @@ async def list_runs(
 @router.get("/runs/{run_id}", response_model=RunSummary)
 async def get_run(
     run_id: str,
-    client_id: str | None = Query(None),  # <-- optional soft guard
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> RunSummary:
     """
@@ -184,7 +183,7 @@ async def get_run(
     if rec is None:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    if client_id and not _has_client_tag(rec.tags, client_id):
+    if identity.mode == "demo" and not _has_client_tag(rec.tags, identity.client_id):
         raise HTTPException(status_code=404, detail="Run not found")
 
     reg = getattr(container, "registry", None) or current_registry()
@@ -487,12 +486,29 @@ def _has_client_tag(tags: list[str] | None, client_id: str) -> bool:
     return any(t == needle for t in tags)
 
 
+async def _assert_run_belongs_to_client(
+    run_id: str,
+    client_id: str | None,
+    rm: "RunManager",
+) -> None:
+    """
+    For demo: raise 404 if client_id is provided and the run is not tagged
+    with client:<client_id>. If client_id is None, do nothing.
+    """
+    if not client_id:
+        return
+
+    rec = await rm.get_record(run_id)
+    if rec is None or not _has_client_tag(rec.tags, client_id):
+        # Don't leak existence
+        raise HTTPException(status_code=404, detail="Run not found")
+
+
 @router.get("/runs/{run_id}/channel/events", response_model=list[RunChannelEvent])
 async def get_run_channel_events(
     run_id: str,
     request: Request,
     since_ts: float | None = None,
-    client_id: str | None = Query(None),  # demo-only soft scoping, optional
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ):
     """
@@ -509,13 +525,13 @@ async def get_run_channel_events(
         raise HTTPException(status_code=503, detail="Event log or run manager not configured")
 
     # --- Demo-only client_id guard (using the RUN tags, not event tags) ---
-    if client_id:
+    if identity.mode == "demo" and identity.client_id:
         rec = await rm.get_record(run_id)
         if rec is None:
             # don't leak existence details
             raise HTTPException(status_code=404, detail="Run not found")
 
-        if not _has_client_tag(rec.tags, client_id):
+        if not _has_client_tag(rec.tags, identity.client_id):
             # pretend it doesn't exist for this client
             raise HTTPException(status_code=404, detail="Run not found")
 

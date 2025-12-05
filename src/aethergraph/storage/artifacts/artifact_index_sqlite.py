@@ -43,6 +43,7 @@ class SqliteArtifactIndexSync:
                 labels_json TEXT,
                 metrics_json TEXT,
                 pinned INTEGER DEFAULT 0
+                -- NOTE: older DBs created without uri/preview_uri columns
             )
             """
         )
@@ -61,6 +62,16 @@ class SqliteArtifactIndexSync:
             )
             """
         )
+
+        # Migration: add uri / preview_uri columns if missing
+        cur.execute("PRAGMA table_info(artifacts)")
+        cols = {row["name"] for row in cur.fetchall()}
+
+        if "uri" not in cols:
+            cur.execute("ALTER TABLE artifacts ADD COLUMN uri TEXT")
+        if "preview_uri" not in cols:
+            cur.execute("ALTER TABLE artifacts ADD COLUMN preview_uri TEXT")
+
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_sha ON artifacts(sha256)")
@@ -79,26 +90,30 @@ class SqliteArtifactIndexSync:
             INSERT INTO artifacts (
                 artifact_id, run_id, graph_id, node_id,
                 tool_name, tool_version, kind, sha256,
-                bytes, mime, created_at, labels_json, metrics_json, pinned
+                bytes, mime, created_at, labels_json, metrics_json,
+                pinned, uri, preview_uri
             ) VALUES (
                 :artifact_id, :run_id, :graph_id, :node_id,
                 :tool_name, :tool_version, :kind, :sha256,
-                :bytes, :mime, :created_at, :labels_json, :metrics_json, :pinned
+                :bytes, :mime, :created_at, :labels_json, :metrics_json,
+                :pinned, :uri, :preview_uri
             )
             ON CONFLICT(artifact_id) DO UPDATE SET
-                run_id=excluded.run_id,
-                graph_id=excluded.graph_id,
-                node_id=excluded.node_id,
-                tool_name=excluded.tool_name,
-                tool_version=excluded.tool_version,
-                kind=excluded.kind,
-                sha256=excluded.sha256,
-                bytes=excluded.bytes,
-                mime=excluded.mime,
-                created_at=excluded.created_at,
-                labels_json=excluded.labels_json,
-                metrics_json=excluded.metrics_json,
-                pinned=excluded.pinned
+                run_id        = excluded.run_id,
+                graph_id      = excluded.graph_id,
+                node_id       = excluded.node_id,
+                tool_name     = excluded.tool_name,
+                tool_version  = excluded.tool_version,
+                kind          = excluded.kind,
+                sha256        = excluded.sha256,
+                bytes         = excluded.bytes,
+                mime          = excluded.mime,
+                created_at    = excluded.created_at,
+                labels_json   = excluded.labels_json,
+                metrics_json  = excluded.metrics_json,
+                pinned        = excluded.pinned,
+                uri           = excluded.uri,
+                preview_uri   = excluded.preview_uri
             """,
             {
                 "artifact_id": rec["artifact_id"],
@@ -115,6 +130,8 @@ class SqliteArtifactIndexSync:
                 "labels_json": labels_json,
                 "metrics_json": metrics_json,
                 "pinned": int(rec.get("pinned") or 0),
+                "uri": rec.get("uri"),
+                "preview_uri": rec.get("preview_uri"),
             },
         )
         self._conn.commit()
@@ -244,8 +261,8 @@ class SqliteArtifactIndexSync:
             labels=labels,
             metrics=metrics,
             pinned=bool(row["pinned"]),
-            preview_uri=None,  # set if you store it
-            uri="",  # set if you decide to index it here
+            uri=row["uri"],  #  real URI
+            preview_uri=row["preview_uri"],  # real preview URI (may be None)
         )
 
     def get(self, artifact_id: str) -> Artifact | None:

@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
 
+from aethergraph.api.v1.runs import _assert_run_belongs_to_client, _has_client_tag
 from aethergraph.contracts.storage.artifact_index import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
 
@@ -121,9 +122,13 @@ async def list_artifacts(
     """
     container = current_services()
     index = getattr(container, "artifact_index", None)
-    if index is None:
+    rm = getattr(container, "run_manager", None)
+    if index is None or rm is None:
         # safeguard: no index configured
         return ArtifactListResponse(artifacts=[], next_cursor=None)
+    if identity.mode == "demo" and rm is None:
+        # Can't enforce client scoping without RunManager
+        raise HTTPException(status_code=503, detail="Run manager not configured")
 
     # Build label filters
     label_filters: dict[str, Any] = {}
@@ -144,8 +149,18 @@ async def list_artifacts(
         limit=limit,
     )
 
-    metas = [_artifact_to_meta(a) for a in artifacts]
+    # TEMP: demo-only client filter via run tags
+    if identity.mode == "demo" and identity.client_id:
+        filtered: list[Artifact] = []
+        for a in artifacts:
+            if not a.run_id:
+                continue
+            rec = await rm.get_record(a.run_id)
+            if rec and _has_client_tag(rec.tags, identity.client_id):
+                filtered.append(a)
+        artifacts = filtered
 
+    metas = [_artifact_to_meta(a) for a in artifacts]
     # TODO: implement proper pagination with cursor in ArtifactIndex
     return ArtifactListResponse(artifacts=metas, next_cursor=None)
 
@@ -160,67 +175,41 @@ async def get_artifact(
     """
     container = current_services()
     index = getattr(container, "artifact_index", None)
-    if index is None:
+    rm = getattr(container, "run_manager", None)
+    if index is None or (identity.mode == "demo" and rm is None):
         raise HTTPException(status_code=503, detail="Artifact index not configured")
 
     artifact = await index.get(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
 
+    # TEMP: demo-only run-based guard
+    if identity.client_id and artifact.run_id:
+        await _assert_run_belongs_to_client(artifact.run_id, identity.client_id, rm)
+
     meta = _artifact_to_meta(artifact)
     return meta
-
-
-# @router.get("/artifacts/{artifact_id}/content")
-# async def get_artifact_content(
-#     artifact_id: str,
-#     identity: Annotated[RequestIdentity, Depends(get_identity)],
-# ) -> Response:
-#     """
-#     Stream artifact content.
-
-#     Currently loads the entire content into memory and returns it as a Response.
-#     For large files, consider switching to StreamingResponse in the future.
-#     """
-#     container = current_services()
-#     index = getattr(container, "artifact_index", None)
-#     store = getattr(container, "artifacts", None)
-#     if index is None or store is None:
-#         raise HTTPException(status_code=503, detail="Artifact services not configured")
-
-#     artifact = await index.get(artifact_id)
-#     if artifact is None:
-#         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
-
-#     # For now, we assume non-directory artifacts; if mime indicates directory,
-#     # TODO: maybe to expose archive/preview_uri instead?
-#     data = await store.load_artifact_bytes(artifact.uri)
-
-#     out = Response(
-#         content=data,
-#         media_type=artifact.mime or "application/octet-stream",
-#         headers={
-#             "Content-Length": str(len(data)),
-#             "X-AetherGraph-Artifact-Id": artifact.artifact_id,
-#         },
-#     )
-#     return out
 
 
 @router.get("/artifacts/{artifact_id}/content")
 async def get_artifact_content(
     artifact_id: str,
-    identity: Annotated[RequestIdentity, Depends(get_identity)],
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> Response:
     container = current_services()
     index = getattr(container, "artifact_index", None)
     store = getattr(container, "artifacts", None)
-    if index is None or store is None:
+    rm = getattr(container, "run_manager", None)
+    if index is None or store is None or (identity.client_id and rm is None):
         raise HTTPException(status_code=503, detail="Artifact services not configured")
 
     artifact = await index.get(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+
+    # TEMP: demo-only run-based guard
+    if identity.client_id and artifact.run_id:
+        await _assert_run_belongs_to_client(artifact.run_id, identity.client_id, rm)
 
     # If user provided a fully qualified preview URI (e.g. S3 signed URL), you
     # can just redirect there instead of proxying bytes:
@@ -243,6 +232,60 @@ async def get_artifact_content(
             "X-AetherGraph-Artifact-Id": artifact.artifact_id,
         },
     )
+
+
+@router.post("/artifacts/{artifact_id}/pin")
+async def pin_artifact(
+    artifact_id: str,
+    pinned: Annotated[bool, Body()] = True,
+    identity: Annotated[RequestIdentity, Depends(get_identity)] = None,
+) -> dict:
+    """
+    Mark/unmark an artifact as pinned in the index.
+
+    Pinned artifacts can be treated as "keep" in GC policies or highlighted in UIs.
+    """
+    container = current_services()
+    rm = getattr(container, "run_manager", None)
+    index = getattr(container, "artifact_index", None)
+    if index is None:
+        raise HTTPException(status_code=503, detail="Artifact index not configured")
+
+    if identity.client_id and rm is None:
+        # Can't enforce client scoping without RunManager
+        raise HTTPException(status_code=503, detail="Run manager not configured")
+
+    artifact = await index.get(artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+    # TEMP: demo-only run-based guard
+    if identity.client_id and artifact.run_id:
+        await _assert_run_belongs_to_client(artifact.run_id, identity.client_id, rm)
+
+    await index.pin(artifact_id, pinned=pinned)
+    return {"artifact_id": artifact_id, "pinned": pinned}
+
+
+@router.get("/runs/{run_id}/artifacts", response_model=ArtifactListResponse)
+async def list_run_artifacts(
+    run_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> ArtifactListResponse:
+    """
+    List artifacts produced by a specific run.
+    """
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    rm = getattr(container, "run_manager", None)
+    if index is None or rm is None:
+        raise HTTPException(status_code=503, detail="Artifact index not configured")
+
+    # TEMP: demo-only scoping
+    await _assert_run_belongs_to_client(run_id, identity.client_id, rm)
+
+    artifacts = await index.list_for_run(run_id)
+    metas = [_artifact_to_meta(a) for a in artifacts]
+    return ArtifactListResponse(artifacts=metas, next_cursor=None)
 
 
 @router.post("/artifacts/search", response_model=ArtifactSearchResponse)
@@ -334,41 +377,3 @@ async def search_artifacts(
         )
 
     return ArtifactSearchResponse(hits=hits)
-
-
-@router.post("/artifacts/{artifact_id}/pin")
-async def pin_artifact(
-    artifact_id: str,
-    pinned: Annotated[bool, Body()] = True,
-    identity: Annotated[RequestIdentity, Depends(get_identity)] = None,
-) -> dict:
-    """
-    Mark/unmark an artifact as pinned in the index.
-
-    Pinned artifacts can be treated as "keep" in GC policies or highlighted in UIs.
-    """
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    if index is None:
-        raise HTTPException(status_code=503, detail="Artifact index not configured")
-
-    await index.pin(artifact_id, pinned=pinned)
-    return {"artifact_id": artifact_id, "pinned": pinned}
-
-
-@router.get("/runs/{run_id}/artifacts", response_model=ArtifactListResponse)
-async def list_run_artifacts(
-    run_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> ArtifactListResponse:
-    """
-    List artifacts produced by a specific run.
-    """
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    if index is None:
-        raise HTTPException(status_code=503, detail="Artifact index not configured")
-
-    artifacts = await index.list_for_run(run_id)
-    metas = [_artifact_to_meta(a) for a in artifacts]
-    return ArtifactListResponse(artifacts=metas, next_cursor=None)

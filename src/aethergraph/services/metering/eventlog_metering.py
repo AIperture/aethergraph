@@ -8,6 +8,12 @@ class EventLogMeteringService(MeteringService):
     """
     MeteringService implementation backed by a MeteringStore (which itself
     is backed by an EventLog).
+
+    Behavior notes:
+        - All events are tagged with "meter" for easy filtering
+        - Events are stored with their original metadata for later retrieval
+        - if run_ids is provided in read methods, only events matching those run_ids are returned.
+          This is useful for demo/multi-tenant isolation based on client-tagged runs.
     """
 
     def __init__(self, store: MeteringStore):
@@ -46,6 +52,7 @@ class EventLogMeteringService(MeteringService):
         kinds: list[str],
         user_id: str | None,
         org_id: str | None,
+        run_ids: set[str] | None = None,  # optional filter by run_ids
     ) -> list[dict[str, Any]]:
         cutoff = self._parse_window(window)
         rows = await self._store.query(
@@ -58,14 +65,28 @@ class EventLogMeteringService(MeteringService):
         out: list[dict[str, Any]] = []
 
         for e in rows:
-            if user_id == "local" or org_id == "local":
-                # Special case: include all local events
+            # 1) If we have an explicit run_ids scope, use that as the primary filter
+            if run_ids is not None:
+                rid = e.get("run_id")
+                if not rid or rid not in run_ids:
+                    continue
+
+                # When scoping by run_ids, *skip* user/org filtering.
+                # This is our demo isolation based on client-tagged runs.
                 out.append(e)
                 continue
+
+            # 2) Local/dev special case: include everything
+            if user_id == "local" or org_id == "local":
+                out.append(e)
+                continue
+
+            # 3) Normal cloud / multi-tenant: filter by user/org, if set
             if user_id is not None and e.get("user_id") != user_id:
                 continue
             if org_id is not None and e.get("org_id") != org_id:
                 continue
+
             out.append(e)
 
         return out
@@ -181,12 +202,14 @@ class EventLogMeteringService(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: set[str] | None = None,
     ) -> dict[str, int]:
         llm = await self._query(
             window=window,
             kinds=["meter.llm"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
 
         runs = await self._query(
@@ -194,18 +217,21 @@ class EventLogMeteringService(MeteringService):
             kinds=["meter.run"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
         artifacts = await self._query(
             window=window,
             kinds=["meter.artifact"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
         events = await self._query(
             window=window,
             kinds=["meter.event"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
 
         return {
@@ -226,12 +252,14 @@ class EventLogMeteringService(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: set[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         rows = await self._query(
             window=window,
             kinds=["meter.llm"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
         stats: dict[str, dict[str, int]] = {}
         for e in rows:
@@ -248,12 +276,14 @@ class EventLogMeteringService(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: set[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         rows = await self._query(
             window=window,
             kinds=["meter.run"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
         stats: dict[str, dict[str, int]] = {}
         for e in rows:
@@ -275,6 +305,7 @@ class EventLogMeteringService(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: set[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         """
         Return aggregated stats by artifact kind, e.g.:
@@ -289,6 +320,7 @@ class EventLogMeteringService(MeteringService):
             kinds=["meter.artifact"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
         stats: dict[str, dict[str, int]] = {}
         for e in rows:
@@ -305,7 +337,6 @@ class EventLogMeteringService(MeteringService):
             if pinned:
                 s["pinned_count"] += 1
                 s["pinned_bytes"] += b
-
         return stats
 
     async def get_memory_stats(
@@ -315,12 +346,14 @@ class EventLogMeteringService(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: set[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         rows = await self._query(
             window=window,
             kinds=["meter.event"],
             user_id=user_id,
             org_id=org_id,
+            run_ids=run_ids,
         )
         stats: dict[str, dict[str, int]] = {}
         for e in rows:

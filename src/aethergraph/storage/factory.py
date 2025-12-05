@@ -5,6 +5,7 @@ from aethergraph.config.config import AppSettings, ContinuationStoreSettings
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.kv import AsyncKV
 from aethergraph.contracts.services.memory import HotLog, Indices, Persistence
+from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
@@ -181,6 +182,42 @@ def build_graph_state_store(cfg: AppSettings) -> GraphStateStore:
         raise ValueError(f"Unknown graph_state backend: {gs_cfg.backend!r}")
 
     return GraphStateStoreImpl(doc_store=docs, event_log=log)
+
+
+def build_run_store(cfg: AppSettings) -> RunStore:
+    """
+    Factory for RunStore:
+
+      - "memory": InMemoryRunStore (no persistence)
+      - "fs":     DocRunStore on top of FSDocStore
+      - "sqlite": DocRunStore on top of SqliteDocStore
+    """
+    rs_cfg = cfg.storage.runs
+
+    if rs_cfg.backend == "memory":
+        from aethergraph.storage.runs.inmen_store import InMemoryRunStore
+
+        return InMemoryRunStore()
+
+    if rs_cfg.backend == "fs":
+        from aethergraph.storage.docstore.fs_doc import FSDocStore
+        from aethergraph.storage.runs.doc_store import DocRunStore
+
+        base = os.path.join(cfg.root, rs_cfg.fs_root)
+        docs = FSDocStore(base)
+        return DocRunStore(
+            docs, prefix="run-"
+        )  # use "run-" prefix to avoid OS path issues on Windows
+
+    if rs_cfg.backend == "sqlite":
+        from aethergraph.storage.docstore.sqlite_doc import SqliteDocStore
+        from aethergraph.storage.runs.doc_store import DocRunStore
+
+        db_path = os.path.join(cfg.root, rs_cfg.sqlite_path)
+        docs = SqliteDocStore(db_path)
+        return DocRunStore(docs, prefix="run-")
+
+    raise ValueError(f"Unknown run storage backend: {rs_cfg.backend!r}")
 
 
 def _secret_bytes(secret_key: str) -> bytes:

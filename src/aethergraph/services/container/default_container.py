@@ -67,11 +67,11 @@ from aethergraph.storage.factory import (
     build_memory_hotlog,
     build_memory_indices,
     build_memory_persistence,
+    build_run_store,
     build_vector_index,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
-from aethergraph.storage.runs.inmen_store import InMemoryRunStore
 
 SERVICE_KEYS = [
     # core
@@ -292,8 +292,8 @@ def build_default_container(
         rag_facade=rag_facade,
     )
 
-    # TODO: name run store configurable -- for now, just in-memory
-    run_store = InMemoryRunStore()
+    # run store and manager
+    run_store = build_run_store(cfg)
     run_manager = RunManager(run_store=run_store, registry=registry, sched_registry=sched_registry)
 
     # Metering service
