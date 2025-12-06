@@ -8,22 +8,17 @@ from fastapi.testclient import TestClient
 import pytest
 
 from aethergraph.api.v1 import artifacts as artifacts_api
-from aethergraph.contracts.services.artifacts import Artifact
+from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.contracts.storage.artifact_index import Artifact
 
 # -----------------------------
-# Fake identity & container
+# Fake services
 # -----------------------------
-
-
-class FakeIdentity:
-    def __init__(self, user_id: str | None = None, org_id: str | None = None):
-        self.user_id = user_id
-        self.org_id = org_id
 
 
 class FakeArtifactIndex:
     """
-    Simple in-memory implementation of AsyncArtifactIndex for testing.
+    Simple in-memory implementation of an ArtifactIndex-like interface for testing.
     """
 
     def __init__(self, artifacts: list[Artifact]):
@@ -32,7 +27,7 @@ class FakeArtifactIndex:
         self.pin_calls: list[tuple[str, bool]] = []
         self.occurrences: list[tuple[str, dict | None]] = []
 
-    # --- required protocol methods ---
+    # --- required protocol methods --- #
 
     async def upsert(self, a: Artifact) -> None:
         self._artifacts[a.artifact_id] = a
@@ -135,7 +130,7 @@ class FakeArtifactIndex:
 
 class FakeArtifactStore:
     """
-    Minimal AsyncArtifactStore-like for testing content endpoint.
+    Minimal artifact store-like class for testing content endpoint.
     """
 
     def __init__(self, data_by_uri: dict[str, bytes]):
@@ -146,10 +141,26 @@ class FakeArtifactStore:
         return self._data_by_uri[uri]
 
 
+class FakeRunManager:
+    """
+    Minimal RunManager-like for endpoints that require run_manager presence.
+    """
+
+    async def get_record(self, run_id: str):
+        # For local tests we don't enforce client scoping, so this is unused.
+        return None
+
+
 class FakeContainer:
-    def __init__(self, index: FakeArtifactIndex, store: FakeArtifactStore):
+    def __init__(
+        self,
+        index: FakeArtifactIndex,
+        store: FakeArtifactStore,
+        run_manager: FakeRunManager,
+    ):
         self.artifact_index = index
         self.artifacts = store
+        self.run_manager = run_manager
 
 
 # -----------------------------
@@ -227,7 +238,8 @@ def client(monkeypatch) -> TestClient:
             "fs://fake/a3.txt": b"CONTENT-a3",
         }
     )
-    container = FakeContainer(index=index, store=store)
+    run_manager = FakeRunManager()
+    container = FakeContainer(index=index, store=store, run_manager=run_manager)
 
     # Patch current_services used inside artifacts API
     monkeypatch.setattr(
@@ -242,14 +254,22 @@ def client(monkeypatch) -> TestClient:
     from aethergraph.api.v1.artifacts import get_identity
 
     async def fake_get_identity():
-        return FakeIdentity(user_id="u1", org_id="o1")
+        # Local mode, no client scoping
+        return RequestIdentity(
+            user_id="u1",
+            org_id="o1",
+            roles=["dev"],
+            client_id=None,
+            mode="local",
+        )
 
     app.dependency_overrides[get_identity] = fake_get_identity
 
     client = TestClient(app)
-    # attach fakes for inspection
+    # attach fakes for inspection in tests
     client.fake_index = index
     client.fake_store = store
+    client.fake_run_manager = run_manager
     return client
 
 
@@ -274,7 +294,8 @@ def test_list_artifacts_basic(client: TestClient):
 def test_list_artifacts_with_filters(client: TestClient):
     # Filter: scope1 + kind=file + tags=foo
     resp = client.get(
-        "/api/v1/artifacts", params={"scope_id": "scope1", "kind": "file", "tags": "foo"}
+        "/api/v1/artifacts",
+        params={"scope_id": "scope1", "kind": "file", "tags": "foo"},
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -308,7 +329,9 @@ def test_get_artifact_content(client: TestClient):
     resp = client.get("/api/v1/artifacts/a1/content")
     assert resp.status_code == 200
     assert resp.content == b"CONTENT-a1"
+    # content-type from Response(media_type=...)
     assert resp.headers["content-type"].startswith("text/plain")
+    # header is case-insensitive; router sets "X-AetherGraph-Artifact-Id"
     assert resp.headers["x-aethergraph-artifact-id"] == "a1"
 
 

@@ -128,7 +128,7 @@ async def _wait_for_continuation(env, *, timeout_s: float = 5.0):
 
     deadline = asyncio.get_event_loop().time() + timeout_s
     while asyncio.get_event_loop().time() < deadline:
-        conts = await store.list_cont_by_runs(env.run_id)
+        conts = await store.list_cont_by_run(env.run_id)
         if conts:
             # In more complex graphs, filter by kind == "approval"
             return conts[0]

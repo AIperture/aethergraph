@@ -1,4 +1,3 @@
-# tests/test_run_manager_rate_limit.py
 import asyncio
 
 from fastapi import HTTPException
@@ -10,11 +9,11 @@ from aethergraph.core.runtime.run_types import RunRecord, RunStatus
 
 class DummyRunStore:
     async def create(self, record: RunRecord) -> None:
-        # No-op for this test
+        # minimal stub
         self._last_created = record
 
     async def update_status(self, *args, **kwargs) -> None:
-        # No-op
+        # minimal stub
         pass
 
 
@@ -25,7 +24,6 @@ async def test_run_manager_max_concurrent_runs_blocks_extra(monkeypatch):
       - The first submit_run acquires the slot and keeps it busy.
       - A second concurrent submit_run should raise HTTPException(429).
     """
-    # Create a RunManager with max_concurrent_runs = 1
     store = DummyRunStore()
     rm = RunManager(
         run_store=store,
@@ -50,10 +48,18 @@ async def test_run_manager_max_concurrent_runs_blocks_extra(monkeypatch):
     # Patch _run_and_finalize so the first run "blocks" until we release an event.
     block_event = asyncio.Event()
 
-    async def fake_run_and_finalize(self, *, record, **kwargs):
-        # Wait until test code allows this to finish, so the slot stays occupied.
+    async def fake_run_and_finalize(
+        self,
+        *,
+        record,
+        target,
+        graph_id,
+        inputs,
+        user_id,
+        org_id,
+    ):
+        # Keep the slot occupied until the test unblocks it
         await block_event.wait()
-        # Simulate successful completion
         record.status = RunStatus.succeeded
         return record, {}, False, []
 
@@ -63,7 +69,7 @@ async def test_run_manager_max_concurrent_runs_blocks_extra(monkeypatch):
         fake_run_and_finalize,
     )
 
-    # Start the first run (it will schedule a background task that waits on block_event)
+    # Start the first run: it will schedule _bg which waits on block_event
     task1 = asyncio.create_task(
         rm.submit_run(
             "graph-1",
@@ -73,7 +79,7 @@ async def test_run_manager_max_concurrent_runs_blocks_extra(monkeypatch):
         )
     )
 
-    # Give the first submit_run a moment to acquire the slot
+    # Give the first submit_run a moment to acquire the slot and start _bg
     await asyncio.sleep(0.01)
 
     # Now start a second run; it should hit the concurrency limit and raise HTTPException(429)

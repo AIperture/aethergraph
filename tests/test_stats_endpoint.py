@@ -74,6 +74,7 @@ class FakeMetering(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: str | None = None,
     ) -> dict[str, int]:
         # assert calls are wired correctly
         assert window == "24h"
@@ -96,6 +97,7 @@ class FakeMetering(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: str | None = None,
     ) -> dict[str, dict[str, int]]:
         # Example: stats per model
         return {
@@ -117,6 +119,7 @@ class FakeMetering(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: str | None = None,
     ) -> dict[str, dict[str, int]]:
         # Example: stats keyed by graph_id
         return {
@@ -140,6 +143,7 @@ class FakeMetering(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: str | None = None,
     ) -> dict[str, dict[str, int]]:
         # Example: stats keyed by artifact kind
         return {
@@ -164,6 +168,7 @@ class FakeMetering(MeteringService):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: str | None = None,
     ) -> dict[str, dict[str, int]]:
         # Example: memory kinds, we only track count
         base = {

@@ -64,6 +64,7 @@ class MeteringService(Protocol):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",  # e.g., "24h", "7d", "30d"
+        run_ids: list[str] | None = None,
     ) -> dict[str, int]:
         """Get an overview of usage metrics."""
         ...
@@ -74,6 +75,7 @@ class MeteringService(Protocol):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: list[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         """Get LLM usage statistics."""
         ...
@@ -84,6 +86,7 @@ class MeteringService(Protocol):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: list[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         """Get graph usage statistics."""
         ...
@@ -94,6 +97,7 @@ class MeteringService(Protocol):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: list[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         """Get artifact usage statistics."""
         ...
@@ -105,6 +109,7 @@ class MeteringService(Protocol):
         user_id: str | None = None,
         org_id: str | None = None,
         window: str = "24h",
+        run_ids: list[str] | None = None,
     ) -> dict[str, dict[str, int]]:
         """Get memory usage statistics."""
         ...

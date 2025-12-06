@@ -243,7 +243,6 @@ class ChannelSession:
         timeout_s: int = 3600,
         channel: str | None = None,
     ) -> dict[str, Any]:
-        print("🍎 ChannelSession: ask_approval called")
         payload = await self._ask_core(
             kind="approval",
             payload={"prompt": {"title": prompt, "buttons": list(options)}},
@@ -251,7 +250,6 @@ class ChannelSession:
             timeout_s=timeout_s,
         )
         choice = payload.get("choice")
-        print("🍎 ChannelSession: ask_approval got choice:", choice)
         # Normalize return
         # 1) If adapter explicitly sets approved, trust it
         buttons = list(options)  # just plan list, not Button objects

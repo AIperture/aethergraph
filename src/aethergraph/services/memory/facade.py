@@ -945,6 +945,7 @@ class MemoryFacade:
         preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
 
         evt = Event(
+            scope_id=self.memory_scope_id or self.run_id,
             event_id=stable_event_id(
                 {
                     "ts": now_iso(),

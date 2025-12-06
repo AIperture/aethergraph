@@ -33,12 +33,72 @@ def _is_graphfn(obj: Any) -> bool:
 
 class RunManager:
     """
-    Core coordinator for runs:
+    High-level coordinator for running graphs.
 
-    - Resolves targets from the UnifiedRegistry.
-    - Calls run_or_resume_async for TaskGraph/GraphFunction.
-    - Records metadata in RunStore.
-    - TODO: (Later) can coordinate cancellation via sched_registry or best effort with graph_fn.
+    Responsibilities
+    ----------------
+    - Resolve graph targets (TaskGraph / GraphFunction) from the UnifiedRegistry.
+    - Create and persist RunRecord metadata in the RunStore.
+    - Enforce a soft concurrency limit via an in-process run slot counter.
+    - Drive execution via run_or_resume_async and record status / errors.
+    - Emit metering events (duration, status, user/org, graph_id).
+    - Best-effort cancellation by talking to the scheduler registry.
+
+    Key entrypoints
+    ---------------
+    submit_run(...)
+        Non-blocking API entrypoint (used by HTTP routes).
+        - Acquires a run slot (respecting max_concurrent_runs).
+        - Creates a RunRecord (status=running) and saves it.
+        - Schedules a background coroutine (_bg) that:
+            * Calls _run_and_finalize(...)
+            * Always releases the run slot in a finally block.
+        - Returns immediately with the RunRecord so the caller can poll status.
+
+    start_run(...)
+        Blocking helper (tests / CLI).
+        - Same setup as submit_run, but runs _run_and_finalize(...) inline.
+        - Returns (RunRecord, outputs, has_waits, continuations).
+
+    _run_and_finalize(...)
+        Shared core logic used by both submit_run and start_run.
+        - Calls run_or_resume_async(target, inputs, run_id, session_id).
+        - Maps successful results into a dict of outputs.
+        - Handles:
+            * Normal completion  -> status = succeeded.
+            * GraphHasPendingWaits -> status = failed (for now), has_waits=True.
+            * asyncio.CancelledError -> status = canceled.
+            * Other exceptions -> status = failed, error message recorded.
+        - Updates RunStore status fields (finished_at, error).
+        - Sends a metering event with status / duration.
+
+    Concurrency model
+    -----------------
+    - _acquire_run_slot / _release_run_slot protect a _running counter with an
+      asyncio.Lock to enforce max_concurrent_runs within this process.
+    - submit_run takes ownership of a slot until responsibility is handed to
+      the background runner (_bg). Once _bg is scheduled, it is responsible
+      for releasing the slot in its finally block.
+    - If submit_run fails before the handoff, it releases the slot itself to
+      avoid leaks.
+
+    Cancellation
+    ------------
+    cancel_run(run_id)
+        - Looks up the RunRecord (if available) and, if not terminal, marks it
+          as cancellation_requested in the RunStore.
+        - Uses the scheduler registry to find the scheduler for this run:
+            * GlobalForwardScheduler: terminate_run(run_id)
+            * ForwardScheduler: terminate()
+        - The actual transition to RunStatus.canceled happens when the
+          scheduler cancels the task and run_or_resume_async raises
+          asyncio.CancelledError, which _run_and_finalize() translates into
+          a canceled run.
+
+    TODO: for global schedulers, we may want to have a dedicated run manager -- current
+    implementation utilize the async_run which create a local ForwardScheduler instance
+    each graph run. This is fine for concurrent graphs under thousands but may
+    not scale well for large number of concurrent graphs.
     """
 
     def __init__(
@@ -224,6 +284,10 @@ class RunManager:
         """
         # Acquire run slot (rate limiting)
         await self._acquire_run_slot()
+        # Tracks whether responsibility for releasing the slot has been handed
+        # over to the background runner (_bg). If False, submit_run must
+        # release the slot on exception; if True, _bg will do it its finally.
+        slot_handed_to_bg = False
 
         try:
             tags = tags or []
@@ -252,7 +316,7 @@ class RunManager:
 
             # use run_id as session_id if not provided
             if session_id is None:
-                session_id = run_id
+                session_id = rid
 
             record = RunRecord(
                 run_id=rid,
@@ -297,17 +361,20 @@ class RunManager:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
                 # Not inside a running loop – e.g., CLI usage.
-                try:
-                    await _bg()
-                except Exception:
-                    await self._release_run_slot()
+                slot_handed_to_bg = True
+                # _bg() is responsible for releasing the slot in its finally.
+                await _bg()
             else:
+                slot_handed_to_bg = True
+                # Background tasks; _bg() will release the slot in its finally.
                 loop.create_task(_bg())
 
             return record
         except Exception:
-            # If submit_run itself fails, release the run slot
-            await self._release_run_slot()
+            # If submit_run itself fails *before* handing off to _bg, we must release the slot here.
+            # Once slot_handed_to_bg is True, _bg is responsible for releasing the slot.
+            if not slot_handed_to_bg:
+                await self._release_run_slot()
             raise
 
     # -------- old: blocking start_run (CLI/tests) --------
@@ -359,7 +426,7 @@ class RunManager:
 
         # use run_id as session_id if not provided
         if session_id is None:
-            session_id = run_id
+            session_id = rid
 
         record = RunRecord(
             run_id=rid,
