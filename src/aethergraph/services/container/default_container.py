@@ -48,6 +48,7 @@ from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
 
 # ---- RAG components ----
+from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
 from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
@@ -156,6 +157,7 @@ class DefaultContainer:
     redactor: RegexRedactor | None = None
 
     metering: MeteringService | None = None
+    rate_limiter: SimpleRateLimiter | None = None
     tracer: NoopTracer | None = None
     secrets: EnvSecrets | None = None
 
@@ -294,12 +296,24 @@ def build_default_container(
 
     # run store and manager
     run_store = build_run_store(cfg)
-    run_manager = RunManager(run_store=run_store, registry=registry, sched_registry=sched_registry)
+    run_manager = RunManager(
+        run_store=run_store,
+        registry=registry,
+        sched_registry=sched_registry,
+        max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
+    )
 
     # Metering service
     # TODO: make metering service configurable
     metering_store = EventLogMeteringStore(event_log=eventlog)
     metering = EventLogMeteringService(store=metering_store)
+
+    # rate limiter
+    rl_settings = cfg.rate_limit
+    rate_limiter = SimpleRateLimiter(
+        max_events=rl_settings.burst_max_runs,
+        window_seconds=rl_settings.burst_window_seconds,
+    )
 
     container = DefaultContainer(
         root=str(root_p),
@@ -332,6 +346,7 @@ def build_default_container(
         authz=None,
         redactor=None,
         metering=metering,
+        rate_limiter=rate_limiter,
         tracer=None,
         settings=cfg,
     )

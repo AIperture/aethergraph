@@ -10,21 +10,39 @@ from aethergraph.services.llm.generic_client import GenericLLMClient
 _current = ContextVar("aeg_services", default=None)
 # process-wide fallback (handles contextvar boundary issues)
 _services_global: Any = None
+# allow registering external services before main services are ready
+_pending_ext_services: dict[str, Any] = {}
 
 
 def install_services(services: Any) -> None:
-    global _services_global
+    global _services_global, _pending_ext_services
     _services_global = services
+
+    # Attach any services that were registered before install_services().
+    ext = getattr(services, "ext_services", None)
+    if isinstance(ext, dict) and _pending_ext_services:
+        # Don't clobber anything that was already present.
+        for name, svc in _pending_ext_services.items():
+            ext.setdefault(name, svc)
+        _pending_ext_services = {}
+
     return _current.set(services)
 
 
 def ensure_services_installed(factory: Callable[[], Any]) -> Any:
-    global _services_global
+    global _services_global, _pending_ext_services
     svc = _current.get() or _services_global
     if svc is None:
         svc = factory()
         _services_global = svc
-    _current.set(svc)  # keep ContextVar in sync for this context
+
+        # hydrate pending external services here too
+        ext = getattr(svc, "ext_services", None)
+        if isinstance(ext, dict) and _pending_ext_services:
+            for name, s in _pending_ext_services.items():
+                ext.setdefault(name, s)
+            _pending_ext_services = {}
+    _current.set(svc)
     return svc
 
 
@@ -175,7 +193,23 @@ def current_logger_factory() -> Any:
 
 # --------- External context services ---------
 def register_context_service(name: str, service: Any) -> None:
-    svc = current_services()
+    """
+    Register an external service that NodeContext can access.
+
+    If a services container is already installed, attach it immediately.
+    Otherwise, stash it in a global pending registry and attach it the
+    next time install_services() is called.
+    """
+    global _pending_ext_services
+
+    try:
+        svc = current_services()
+    except RuntimeError:
+        # No container yet: keep it in the staging area.
+        _pending_ext_services[name] = service
+        return
+
+    # Container exists: attach immediately.
     svc.ext_services[name] = service
 
 

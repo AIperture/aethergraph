@@ -1,10 +1,9 @@
-# stub for auth/identity management dependencies
-
-
 from typing import Literal
 
-from fastapi import Header, Request
+from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
+
+from aethergraph.core.runtime.runtime_services import current_services
 
 
 class RequestIdentity(BaseModel):
@@ -69,3 +68,67 @@ async def get_identity(
         client_id=None,
         mode="local",
     )
+
+
+def _rate_key(identity: RequestIdentity) -> str:
+    """
+    Compute a stable key for rate limiting.
+
+    - CLOUD: prefer org_id, then user_id
+    - DEMO: use client_id if present, else "demo"
+    - LOCAL: just "local"
+    """
+    if identity.mode == "cloud":
+        return identity.org_id or identity.user_id or "anonymous"
+
+    if identity.mode == "demo":
+        # Each browser/client gets its own key if possible
+        return identity.client_id or "demo"
+
+    # local / dev
+    return "local"
+
+
+async def enforce_run_rate_limits(
+    request: Request,
+    identity: RequestIdentity = Depends(get_identity),  # noqa B008
+) -> None:
+    container = current_services()
+    settings = getattr(container, "settings", None)
+    if not settings or not settings.rate_limit.enabled:
+        return
+
+    # In local/dev mode, don't annoy you with limits
+    if identity.mode == "local":
+        return
+
+    rl_cfg = settings.rate_limit
+
+    # ---------- 1) Long-window per-identity cap via metering ----------
+    meter = getattr(container, "metering", None)
+    if meter is not None:
+        # For demo mode this will be user_id="demo", org_id="demo",
+        # so all demo clients share the hourly cap. That's fine for now.
+        overview = await meter.get_overview(
+            user_id=identity.user_id,
+            org_id=identity.org_id,
+            window=rl_cfg.runs_window,
+        )
+        if overview.get("runs", 0) >= rl_cfg.max_runs_per_window:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=(
+                    f"Run limit exceeded: at most "
+                    f"{rl_cfg.max_runs_per_window} runs per {rl_cfg.runs_window}."
+                ),
+            )
+
+    # ---------- 2) Short-burst limiter (in-memory) ----------
+    limiter = getattr(container, "run_burst_limiter", None)
+    if limiter is not None:
+        key = _rate_key(identity)
+        if not limiter.allow(key):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many runs started in a short period. Please wait a moment.",
+            )

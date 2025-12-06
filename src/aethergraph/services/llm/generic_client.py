@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from aethergraph.config.config import RateLimitSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
@@ -67,6 +68,8 @@ class GenericLLMClient(LLMClientProtocol):
         timeout: float = 60.0,
         # metering
         metering: MeteringService | None = None,
+        # rate limit
+        rate_limit_cfg: RateLimitSettings | None = None,
     ):
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
@@ -100,6 +103,11 @@ class GenericLLMClient(LLMClientProtocol):
 
         self.metering = metering
 
+        # Rate limit settings
+        self._rate_limit_cfg = rate_limit_cfg
+        self._per_run_calls: dict[str, int] = {}
+        self._per_run_tokens: dict[str, int] = {}
+
     # ---------------- internal helpers for metering ----------------
     @staticmethod
     def _normalize_usage(usage: dict[str, Any]) -> dict[str, int]:
@@ -120,6 +128,59 @@ class GenericLLMClient(LLMClientProtocol):
             completion_i = 0
 
         return prompt_i, completion_i
+
+    def _get_rate_limit_cfg(self) -> RateLimitSettings | None:
+        if self._rate_limit_cfg is not None:
+            return self._rate_limit_cfg
+        # Lazy-load from container if available
+        try:
+            from aethergraph.core.runtime.runtime_services import (
+                current_services,  # local import to avoid cycles
+            )
+
+            container = current_services()
+            settings = getattr(container, "settings", None)
+            if settings is not None and getattr(settings, "rate_limit", None) is not None:
+                self._rate_limit_cfg = settings.rate_limit
+                return self._rate_limit_cfg
+        except Exception:
+            pass
+
+    def _enforce_llm_limits_for_run(self, *, usage: dict[str, Any]) -> None:
+        cfg = self._get_rate_limit_cfg()
+        if cfg is None or not cfg.enabled:
+            return
+
+        # get current run_id from context
+        ctx = current_meter_context.get()
+        run_id = ctx.get("run_id")
+        if not run_id:
+            # no run_id context; cannot enforce per-run limits
+            return
+
+        prompt_tokens, completion_tokens = self._normalize_usage(usage)
+        total_tokens = prompt_tokens + completion_tokens
+
+        calls = self._per_run_calls.get(run_id, 0) + 1
+        tokens = self._per_run_tokens.get(run_id, 0) + total_tokens
+
+        # store updated counts
+        self._per_run_calls[run_id] = calls
+        self._per_run_tokens[run_id] = tokens
+
+        if cfg.max_llm_calls_per_run and calls > cfg.max_llm_calls_per_run:
+            raise RuntimeError(
+                f"LLM call limit exceeded for this run "
+                f"({calls} > {cfg.max_llm_calls_per_run}). "
+                "Consider simplifying the graph or raising the limit."
+            )
+
+        if cfg.max_llm_tokens_per_run and tokens > cfg.max_llm_tokens_per_run:
+            raise RuntimeError(
+                f"LLM token limit exceeded for this run "
+                f"({tokens} > {cfg.max_llm_tokens_per_run}). "
+                "Consider simplifying the graph or raising the limit."
+            )
 
     async def _record_llm_usage(
         self,
@@ -184,6 +245,11 @@ class GenericLLMClient(LLMClientProtocol):
             start = time.perf_counter()
             text, usage = await self._chat_by_provider(messages, **kw)
             latency_ms = int((time.perf_counter() - start) * 1000)
+
+            # Enforce rate limits
+            self._enforce_llm_limits_for_run(usage=usage)
+
+            # Record metering
             await self._record_llm_usage(
                 model=model,
                 usage=usage,
@@ -256,6 +322,11 @@ class GenericLLMClient(LLMClientProtocol):
         start = time.perf_counter()
         text, usage = await self._retry.run(_call)
         latency_ms = int((time.perf_counter() - start) * 1000)
+
+        # Enforce rate limits
+        self._enforce_llm_limits_for_run(usage=usage)
+
+        # Record metering
         await self._record_llm_usage(
             model=model,
             usage=usage,

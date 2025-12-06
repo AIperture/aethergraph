@@ -10,7 +10,7 @@ from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
-from .deps import RequestIdentity, get_identity
+from .deps import RequestIdentity, enforce_run_rate_limits, get_identity
 from .schemas import (
     NodeSnapshot,
     RunChannelEvent,
@@ -25,7 +25,11 @@ from .schemas import (
 router = APIRouter(tags=["runs"])
 
 
-@router.post("/graphs/{graph_id}/runs", response_model=RunCreateResponse)
+@router.post(
+    "/graphs/{graph_id}/runs",
+    response_model=RunCreateResponse,
+    dependencies=[Depends(enforce_run_rate_limits)],  # noqa: B008
+)
 async def create_run(
     graph_id: str,
     body: RunCreateRequest,

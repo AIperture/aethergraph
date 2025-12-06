@@ -47,10 +47,34 @@ class RunManager:
         run_store: RunStore | None = None,
         registry: UnifiedRegistry | None = None,
         sched_registry: Any | None = None,  # placeholder for future use
+        max_concurrent_runs: int | None = None,
     ):
         self._store = run_store
         self._registry = registry
         self._sched_registry = sched_registry
+        self._max_concurrent_runs = max_concurrent_runs
+        self._running = 0
+        self._lock = asyncio.Lock()
+
+    # -------- concurrency helpers --------
+    async def _acquire_run_slot(self) -> None:
+        if self._max_concurrent_runs is None:
+            return
+        async with self._lock:
+            if self._running >= self._max_concurrent_runs:
+                from fastapi import HTTPException, status
+
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many runs are currently executing. Please wait and try again.",
+                )
+            self._running += 1
+
+    async def _release_run_slot(self) -> None:
+        if self._max_concurrent_runs is None:
+            return
+        async with self._lock:
+            self._running = max(0, self._running - 1)
 
     # -------- registry helpers --------
 
@@ -198,82 +222,95 @@ class RunManager:
         - Schedules background execution via asyncio.create_task.
         - Returns immediately with the record (for run_id, status, etc).
         """
-        tags = tags or []
-        target = await self._resolve_target(graph_id)
-        rid = run_id or f"run-{uuid4().hex[:8]}"
-        started_at = _utcnow()
+        # Acquire run slot (rate limiting)
+        await self._acquire_run_slot()
 
-        if _is_task_graph(target):
-            kind = "taskgraph"
-        elif _is_graphfn(target):
-            kind = "graphfn"
-        else:
-            kind = "other"
+        try:
+            tags = tags or []
+            target = await self._resolve_target(graph_id)
+            rid = run_id or f"run-{uuid4().hex[:8]}"
+            started_at = _utcnow()
 
-        # pull flow_id and entrypoint from registry if possible
-        flow_id: str | None = None
-        reg = self.registry()
-        if reg is not None:
-            if kind == "taskgraph":
-                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
-            elif kind == "graphfn":
-                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+            if _is_task_graph(target):
+                kind = "taskgraph"
+            elif _is_graphfn(target):
+                kind = "graphfn"
             else:
-                meta = {}
-            flow_id = meta.get("flow_id") or graph_id
+                kind = "other"
 
-        # use run_id as session_id if not provided
-        if session_id is None:
-            session_id = run_id
+            # pull flow_id and entrypoint from registry if possible
+            flow_id: str | None = None
+            reg = self.registry()
+            if reg is not None:
+                if kind == "taskgraph":
+                    meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+                elif kind == "graphfn":
+                    meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+                else:
+                    meta = {}
+                flow_id = meta.get("flow_id") or graph_id
 
-        record = RunRecord(
-            run_id=rid,
-            graph_id=graph_id,
-            kind=kind,
-            status=RunStatus.running,  # we go straight to running as before
-            started_at=started_at,
-            tags=list(tags),
-            user_id=user_id,
-            org_id=org_id,
-            meta={},
-        )
+            # use run_id as session_id if not provided
+            if session_id is None:
+                session_id = run_id
 
-        if flow_id:
-            record.meta["flow_id"] = flow_id
-            if f"flow:{flow_id}" not in record.tags:
-                record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
-        if session_id:
-            record.meta["session_id"] = session_id
-            if f"session:{session_id}" not in record.tags:
-                record.tags.append(f"session:{session_id}")  # add session tag if missing
-
-        if self._store is not None:
-            await self._store.create(record)
-
-        async def _bg():
-            await self._run_and_finalize(
-                record=record,
-                target=target,
+            record = RunRecord(
+                run_id=rid,
                 graph_id=graph_id,
-                inputs=inputs,
+                kind=kind,
+                status=RunStatus.running,  # we go straight to running as before
+                started_at=started_at,
+                tags=list(tags),
                 user_id=user_id,
                 org_id=org_id,
+                meta={},
             )
 
-        # If we're in an event loop (server), schedule in the background.
-        # If not (CLI), just run inline so behaviour is still sane.
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # Not inside a running loop – e.g., CLI usage.
-            await _bg()
-        else:
-            loop.create_task(_bg())
+            if flow_id:
+                record.meta["flow_id"] = flow_id
+                if f"flow:{flow_id}" not in record.tags:
+                    record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
+            if session_id:
+                record.meta["session_id"] = session_id
+                if f"session:{session_id}" not in record.tags:
+                    record.tags.append(f"session:{session_id}")  # add session tag if missing
 
-        return record
+            if self._store is not None:
+                await self._store.create(record)
+
+            async def _bg():
+                try:
+                    await self._run_and_finalize(
+                        record=record,
+                        target=target,
+                        graph_id=graph_id,
+                        inputs=inputs,
+                        user_id=user_id,
+                        org_id=org_id,
+                    )
+                finally:
+                    await self._release_run_slot()
+
+            # If we're in an event loop (server), schedule in the background.
+            # If not (CLI), just run inline so behaviour is still sane.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Not inside a running loop – e.g., CLI usage.
+                try:
+                    await _bg()
+                except Exception:
+                    await self._release_run_slot()
+            else:
+                loop.create_task(_bg())
+
+            return record
+        except Exception:
+            # If submit_run itself fails, release the run slot
+            await self._release_run_slot()
+            raise
 
     # -------- old: blocking start_run (CLI/tests) --------
-
     async def start_run(
         self,
         graph_id: str,

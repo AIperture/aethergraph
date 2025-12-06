@@ -163,12 +163,10 @@ class ChannelSession:
         timeout_s: int,
     ) -> dict:
         ch_key = self._resolve_key(channel)
-
         # 1) Create continuation (with audit/security)
         cont = await self.ctx.create_continuation(
             channel=ch_key, kind=kind, payload=payload, deadline_s=timeout_s
         )
-
         # 2) PREPARE the wait future BEFORE notifying (prevents race)
         fut = self.ctx.prepare_wait_for_resume(cont.token)
 
@@ -245,6 +243,7 @@ class ChannelSession:
         timeout_s: int = 3600,
         channel: str | None = None,
     ) -> dict[str, Any]:
+        print("🍎 ChannelSession: ask_approval called")
         payload = await self._ask_core(
             kind="approval",
             payload={"prompt": {"title": prompt, "buttons": list(options)}},
@@ -252,7 +251,7 @@ class ChannelSession:
             timeout_s=timeout_s,
         )
         choice = payload.get("choice")
-
+        print("🍎 ChannelSession: ask_approval got choice:", choice)
         # Normalize return
         # 1) If adapter explicitly sets approved, trust it
         buttons = list(options)  # just plan list, not Button objects
