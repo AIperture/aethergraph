@@ -17,6 +17,7 @@ from .node_services import NodeServices
 @dataclass
 class NodeContext:
     run_id: str
+    session_id: str
     graph_id: str
     node_id: str
     services: NodeServices
@@ -70,7 +71,7 @@ class NodeContext:
         """
         Get an LLM client by profile.
         - If no overrides are provided, just return existing profile.
-        - If overrides are provided, create/update that profile at runtime.
+        - If overrides are provided, cr`eate/update that profile at runtime.
         """
         svc = self.services.llm
 

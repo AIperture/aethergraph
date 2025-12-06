@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 from typing import Any
 
-from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.stores.fs_store import FSContinuationStore
+from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.mcp.service import MCPService
 from aethergraph.services.memory.facade import MemoryFacade
@@ -25,6 +25,6 @@ class NodeServices:
     kv: Any | None = None
     memory: Any | None = None  # MemoryFactory (for cross-session needs)
     memory_facade: MemoryFacade | None = None  # bound memory for this node
-    llm: LLMClientProtocol | None = None  # LLMService
+    llm: LLMService | None = None  # LLMService
     rag: RAGFacade | None = None  # RAGService
     mcp: MCPService | None = None  # MCPService

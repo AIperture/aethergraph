@@ -19,6 +19,7 @@ class _AdhocNode:
 async def build_adhoc_context(
     *,
     run_id: str | None = None,
+    session_id: str | None = None,
     graph_id: str = "adhoc",
     node_id: str = "adhoc",
     **rt_overrides,

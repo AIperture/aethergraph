@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, is_dataclass
+import datetime
 import inspect
 from typing import Any
 import uuid
@@ -19,6 +20,10 @@ from .visualize import ascii_overview, to_dot, visualize
 # small helper to turn a dataclass (spec) into plain dict safely
 def _dataclass_to_plain(d):
     return asdict(d) if is_dataclass(d) else d
+
+
+def _utc_ts() -> float:
+    return datetime.datetime.now(tz=datetime.timezone.utc).timestamp()
 
 
 @dataclass
@@ -412,10 +417,44 @@ class TaskGraph:
             "set_outputs() is not implemented yet. Use set_node_outputs() instead."
         )
 
+    # async def set_node_status(self, node_id: str, status: NodeStatus) -> None:
+    #     state = self.state.nodes.get(node_id)
+    #     if state.status is status:
+    #         return
+    #     state.status = status
+    #     self.state.rev += 1
+    #     await self._notify_status_change(node_id)
+
     async def set_node_status(self, node_id: str, status: NodeStatus) -> None:
         state = self.state.nodes.get(node_id)
-        if state.status is status:
+        if state is None:
+            # or however you want to handle missing nodes
+            raise KeyError(f"Unknown node_id: {node_id}")
+
+        # no-op if unchanged
+        if state.status is status or state.status == status:
             return
+
+        # --- timestamps ---
+
+        # 1) First time we go to RUNNING → set started_at (but don't overwrite on resume)
+        if status == NodeStatus.RUNNING and getattr(state, "started_at", None) is None:
+            state.started_at = _utc_ts()
+
+        # 2) Terminal states → set finished_at if not already set
+        TERMINAL_STATES = {
+            getattr(NodeStatus, "DONE", "DONE"),
+            getattr(NodeStatus, "FAILED", "FAILED"),
+            getattr(NodeStatus, "SKIPPED", "SKIPPED"),
+            getattr(NodeStatus, "CANCELLED", None) or getattr(NodeStatus, "CANCELED", None),
+        }
+        # filter out any Nones in case some names don't exist
+        TERMINAL_STATES = {s for s in TERMINAL_STATES if s is not None}
+
+        if status in TERMINAL_STATES and getattr(state, "finished_at", None) is None:
+            state.finished_at = _utc_ts()
+
+        # --- actual status change + rev bump ---
         state.status = status
         self.state.rev += 1
         await self._notify_status_change(node_id)

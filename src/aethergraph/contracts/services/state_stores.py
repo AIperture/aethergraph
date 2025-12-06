@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 
@@ -13,6 +14,8 @@ class GraphSnapshot:
     created_at: float  # epoch seconds
     spec_hash: str  # detect spec drift
     state: dict[str, Any]  # JSON-serializable TaskGraphState
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 @dataclass

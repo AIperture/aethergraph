@@ -46,17 +46,29 @@ class SQLiteDocStoreSync:
     def put(self, doc_id: str, doc: dict[str, Any]) -> None:
         payload = json.dumps(doc, ensure_ascii=False)
         now = time.time()
+        # TEMP: tiny backoff to avoid rare SQLite stalls under continuations.
+        # This is a hacky workaround.
+        # It happens when following conditions align:
+        # 1) continuation store using sqlite doc to save
+        # 2) the continuation is created under if/else or for loop nodes
+        # NOTE: this bug only appears in SQLite and not in other DBs.
+        # Remove once we move continuations to Postgres or refactor SQLite usage.
+        time.sleep(0.01)
         with self._lock:
-            self._db.execute(
-                """
-                INSERT INTO docs (doc_id, data_json, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(doc_id) DO UPDATE SET
-                    data_json = excluded.data_json,
-                    updated_at = excluded.updated_at
-                """,
-                (doc_id, payload, now),
-            )
+            try:
+                self._db.execute(
+                    """
+                    INSERT INTO docs (doc_id, data_json, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(doc_id) DO UPDATE SET
+                        data_json = excluded.data_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (doc_id, payload, now),
+                )
+            except sqlite3.Error as e:
+                print("🍓 SQLiteDocStoreSync ERROR during put:", doc_id, repr(e))
+                raise
 
     def get(self, doc_id: str) -> dict[str, Any] | None:
         with self._lock:

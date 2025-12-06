@@ -1,0 +1,568 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from aethergraph.contracts.errors.errors import GraphHasPendingWaits
+from aethergraph.contracts.services.runs import RunStore
+from aethergraph.core.execution.forward_scheduler import ForwardScheduler
+from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
+from aethergraph.core.runtime.run_types import RunRecord, RunStatus
+from aethergraph.core.runtime.runtime_metering import current_metering
+from aethergraph.core.runtime.runtime_registry import current_registry
+from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.services.registry.unified_registry import UnifiedRegistry
+
+
+def _utcnow() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _is_task_graph(obj: Any) -> bool:
+    # Replace with proper isinstance check in your codebase
+    return hasattr(obj, "spec") and hasattr(obj, "io_signature")
+
+
+def _is_graphfn(obj: Any) -> bool:
+    from aethergraph.core.graph.graph_fn import GraphFunction  # adjust path
+
+    return isinstance(obj, GraphFunction)
+
+
+class RunManager:
+    """
+    High-level coordinator for running graphs.
+
+    Responsibilities
+    ----------------
+    - Resolve graph targets (TaskGraph / GraphFunction) from the UnifiedRegistry.
+    - Create and persist RunRecord metadata in the RunStore.
+    - Enforce a soft concurrency limit via an in-process run slot counter.
+    - Drive execution via run_or_resume_async and record status / errors.
+    - Emit metering events (duration, status, user/org, graph_id).
+    - Best-effort cancellation by talking to the scheduler registry.
+
+    Key entrypoints
+    ---------------
+    submit_run(...)
+        Non-blocking API entrypoint (used by HTTP routes).
+        - Acquires a run slot (respecting max_concurrent_runs).
+        - Creates a RunRecord (status=running) and saves it.
+        - Schedules a background coroutine (_bg) that:
+            * Calls _run_and_finalize(...)
+            * Always releases the run slot in a finally block.
+        - Returns immediately with the RunRecord so the caller can poll status.
+
+    start_run(...)
+        Blocking helper (tests / CLI).
+        - Same setup as submit_run, but runs _run_and_finalize(...) inline.
+        - Returns (RunRecord, outputs, has_waits, continuations).
+
+    _run_and_finalize(...)
+        Shared core logic used by both submit_run and start_run.
+        - Calls run_or_resume_async(target, inputs, run_id, session_id).
+        - Maps successful results into a dict of outputs.
+        - Handles:
+            * Normal completion  -> status = succeeded.
+            * GraphHasPendingWaits -> status = failed (for now), has_waits=True.
+            * asyncio.CancelledError -> status = canceled.
+            * Other exceptions -> status = failed, error message recorded.
+        - Updates RunStore status fields (finished_at, error).
+        - Sends a metering event with status / duration.
+
+    Concurrency model
+    -----------------
+    - _acquire_run_slot / _release_run_slot protect a _running counter with an
+      asyncio.Lock to enforce max_concurrent_runs within this process.
+    - submit_run takes ownership of a slot until responsibility is handed to
+      the background runner (_bg). Once _bg is scheduled, it is responsible
+      for releasing the slot in its finally block.
+    - If submit_run fails before the handoff, it releases the slot itself to
+      avoid leaks.
+
+    Cancellation
+    ------------
+    cancel_run(run_id)
+        - Looks up the RunRecord (if available) and, if not terminal, marks it
+          as cancellation_requested in the RunStore.
+        - Uses the scheduler registry to find the scheduler for this run:
+            * GlobalForwardScheduler: terminate_run(run_id)
+            * ForwardScheduler: terminate()
+        - The actual transition to RunStatus.canceled happens when the
+          scheduler cancels the task and run_or_resume_async raises
+          asyncio.CancelledError, which _run_and_finalize() translates into
+          a canceled run.
+
+    TODO: for global schedulers, we may want to have a dedicated run manager -- current
+    implementation utilize the async_run which create a local ForwardScheduler instance
+    each graph run. This is fine for concurrent graphs under thousands but may
+    not scale well for large number of concurrent graphs.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_store: RunStore | None = None,
+        registry: UnifiedRegistry | None = None,
+        sched_registry: Any | None = None,  # placeholder for future use
+        max_concurrent_runs: int | None = None,
+    ):
+        self._store = run_store
+        self._registry = registry
+        self._sched_registry = sched_registry
+        self._max_concurrent_runs = max_concurrent_runs
+        self._running = 0
+        self._lock = asyncio.Lock()
+
+    # -------- concurrency helpers --------
+    async def _acquire_run_slot(self) -> None:
+        if self._max_concurrent_runs is None:
+            return
+        async with self._lock:
+            if self._running >= self._max_concurrent_runs:
+                from fastapi import HTTPException, status
+
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many runs are currently executing. Please wait and try again.",
+                )
+            self._running += 1
+
+    async def _release_run_slot(self) -> None:
+        if self._max_concurrent_runs is None:
+            return
+        async with self._lock:
+            self._running = max(0, self._running - 1)
+
+    # -------- registry helpers --------
+
+    def registry(self) -> UnifiedRegistry:
+        return self._registry or current_registry()
+
+    async def _resolve_target(self, graph_id: str) -> Any:
+        reg = self.registry()
+        # Try static TaskGraph
+        try:
+            return reg.get_graph(name=graph_id, version=None)
+        except KeyError:
+            pass
+        # Try GraphFunction
+        try:
+            return reg.get_graphfn(name=graph_id, version=None)
+        except KeyError:
+            pass
+        raise KeyError(f"Graph '{graph_id}' not found")
+
+    # -------- core execution helper --------
+
+    async def _run_and_finalize(
+        self,
+        *,
+        record: RunRecord,
+        target: Any,
+        graph_id: str,
+        inputs: dict[str, Any],
+        user_id: str | None,
+        org_id: str | None,
+    ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+        """
+        Shared core logic that actually calls run_or_resume_async, updates
+        RunStore, and records metering.
+
+        Returns:
+          (record, outputs, has_waits, continuations)
+        """
+        from aethergraph.core.runtime.graph_runner import run_or_resume_async
+
+        # tags = record.tags or []
+        started_at = record.started_at or _utcnow()
+
+        outputs: dict[str, Any] | None = None
+        has_waits = False
+        continuations: list[dict[str, Any]] = []
+        error_msg: str | None = None
+
+        try:
+            result = await run_or_resume_async(
+                target, inputs or {}, run_id=record.run_id, session_id=record.meta.get("session_id")
+            )
+
+            # If we get here without GraphHasPendingWaits, run is completed
+            outputs = result if isinstance(result, dict) else {"result": result}
+            record.status = RunStatus.succeeded
+            record.finished_at = _utcnow()
+
+        except asyncio.CancelledError:
+            # Cancellation path: scheduler.terminate() or external cancel.
+            import logging
+
+            record.status = RunStatus.canceled
+            record.finished_at = _utcnow()
+            error_msg = "Run cancelled by user"
+            logging.getLogger("aethergraph.runtime.run_manager").info(
+                "Run %s was cancelled", record.run_id
+            )
+
+        except GraphHasPendingWaits as e:
+            # Graph quiesced with pending waits
+            record.status = RunStatus.failed  # consider 'waiting' status later
+            has_waits = True
+            continuations = getattr(e, "continuations", [])
+            # outputs remain None
+
+        except Exception as exc:  # noqa: BLE001
+            record.status = RunStatus.failed
+            record.finished_at = _utcnow()
+            error_msg = str(exc)
+            record.error = error_msg
+            import logging
+
+            logging.getLogger("aethergraph.runtime.run_manager").exception(
+                "Run %s failed with exception: %s", record.run_id, error_msg
+            )
+
+        # Persist status update
+        if self._store is not None:
+            await self._store.update_status(
+                record.run_id,
+                record.status,
+                finished_at=record.finished_at,
+                error=error_msg,
+            )
+
+        # Metering
+        meter = current_metering()
+        finished_at = record.finished_at or _utcnow()
+        duration_s = (finished_at - started_at).total_seconds()
+
+        if has_waits:
+            meter_status = "waiting"
+        else:
+            status_str = getattr(record.status, "value", str(record.status))
+            meter_status = status_str
+
+        try:
+            await meter.record_run(
+                user_id=user_id,
+                org_id=org_id,
+                run_id=record.run_id,
+                graph_id=graph_id,
+                status=meter_status,
+                duration_s=duration_s,
+            )
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger("aethergraph.runtime.run_manager").exception(
+                "Error recording run metering for run_id=%s", record.run_id
+            )
+
+        return record, outputs, has_waits, continuations
+
+    # -------- new: non-blocking submit_run --------
+
+    async def submit_run(
+        self,
+        graph_id: str,
+        *,
+        inputs: dict[str, Any],
+        run_id: str | None = None,
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+    ) -> RunRecord:
+        """
+        Non-blocking entrypoint for the HTTP API.
+
+        - Creates a RunRecord (status=running).
+        - Persists it to RunStore.
+        - Schedules background execution via asyncio.create_task.
+        - Returns immediately with the record (for run_id, status, etc).
+        """
+        # Acquire run slot (rate limiting)
+        await self._acquire_run_slot()
+        # Tracks whether responsibility for releasing the slot has been handed
+        # over to the background runner (_bg). If False, submit_run must
+        # release the slot on exception; if True, _bg will do it its finally.
+        slot_handed_to_bg = False
+
+        try:
+            tags = tags or []
+            target = await self._resolve_target(graph_id)
+            rid = run_id or f"run-{uuid4().hex[:8]}"
+            started_at = _utcnow()
+
+            if _is_task_graph(target):
+                kind = "taskgraph"
+            elif _is_graphfn(target):
+                kind = "graphfn"
+            else:
+                kind = "other"
+
+            # pull flow_id and entrypoint from registry if possible
+            flow_id: str | None = None
+            reg = self.registry()
+            if reg is not None:
+                if kind == "taskgraph":
+                    meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+                elif kind == "graphfn":
+                    meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+                else:
+                    meta = {}
+                flow_id = meta.get("flow_id") or graph_id
+
+            # use run_id as session_id if not provided
+            if session_id is None:
+                session_id = rid
+
+            record = RunRecord(
+                run_id=rid,
+                graph_id=graph_id,
+                kind=kind,
+                status=RunStatus.running,  # we go straight to running as before
+                started_at=started_at,
+                tags=list(tags),
+                user_id=user_id,
+                org_id=org_id,
+                meta={},
+            )
+
+            if flow_id:
+                record.meta["flow_id"] = flow_id
+                if f"flow:{flow_id}" not in record.tags:
+                    record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
+            if session_id:
+                record.meta["session_id"] = session_id
+                if f"session:{session_id}" not in record.tags:
+                    record.tags.append(f"session:{session_id}")  # add session tag if missing
+
+            if self._store is not None:
+                await self._store.create(record)
+
+            async def _bg():
+                try:
+                    await self._run_and_finalize(
+                        record=record,
+                        target=target,
+                        graph_id=graph_id,
+                        inputs=inputs,
+                        user_id=user_id,
+                        org_id=org_id,
+                    )
+                finally:
+                    await self._release_run_slot()
+
+            # If we're in an event loop (server), schedule in the background.
+            # If not (CLI), just run inline so behaviour is still sane.
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Not inside a running loop – e.g., CLI usage.
+                slot_handed_to_bg = True
+                # _bg() is responsible for releasing the slot in its finally.
+                await _bg()
+            else:
+                slot_handed_to_bg = True
+                # Background tasks; _bg() will release the slot in its finally.
+                loop.create_task(_bg())
+
+            return record
+        except Exception:
+            # If submit_run itself fails *before* handing off to _bg, we must release the slot here.
+            # Once slot_handed_to_bg is True, _bg is responsible for releasing the slot.
+            if not slot_handed_to_bg:
+                await self._release_run_slot()
+            raise
+
+    # -------- old: blocking start_run (CLI/tests) --------
+    async def start_run(
+        self,
+        graph_id: str,
+        *,
+        inputs: dict[str, Any],
+        run_id: str | None = None,
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+    ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+        """
+        Blocking helper (original behaviour).
+
+        - Resolves target.
+        - Creates RunRecord with status=running.
+        - Runs once via run_or_resume_async.
+        - Updates store + metering.
+        - Returns (record, outputs, has_waits, continuations).
+
+        Still useful for tests/CLI, but the HTTP route should prefer submit_run().
+        """
+        tags = tags or []
+        target = await self._resolve_target(graph_id)
+        rid = run_id or f"run-{uuid4().hex[:8]}"
+        started_at = _utcnow()
+
+        if _is_task_graph(target):
+            kind = "taskgraph"
+        elif _is_graphfn(target):
+            kind = "graphfn"
+        else:
+            kind = "other"
+
+        # pull flow_id and entrypoint from registry if possible
+        flow_id: str | None = None
+        reg = self.registry()
+        if reg is not None:
+            if kind == "taskgraph":
+                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+            elif kind == "graphfn":
+                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+            else:
+                meta = {}
+            flow_id = meta.get("flow_id") or graph_id
+
+        # use run_id as session_id if not provided
+        if session_id is None:
+            session_id = rid
+
+        record = RunRecord(
+            run_id=rid,
+            graph_id=graph_id,
+            kind=kind,
+            status=RunStatus.running,
+            started_at=started_at,
+            tags=list(tags),
+            user_id=user_id,
+            org_id=org_id,
+            meta={},
+        )
+
+        if flow_id:
+            record.meta["flow_id"] = flow_id
+            if f"flow:{flow_id}" not in record.tags:
+                record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
+        if session_id:
+            record.meta["session_id"] = session_id
+            if f"session:{session_id}" not in record.tags:
+                record.tags.append(f"session:{session_id}")  # add session tag if missing
+
+        if self._store is not None:
+            await self._store.create(record)
+
+        return await self._run_and_finalize(
+            record=record,
+            target=target,
+            graph_id=graph_id,
+            inputs=inputs,
+            user_id=user_id,
+            org_id=org_id,
+        )
+
+    async def get_record(self, run_id: str) -> RunRecord | None:
+        if self._store is None:
+            return None
+        out = await self._store.get(run_id)
+        return out
+
+    async def list_records(
+        self,
+        *,
+        graph_id: str | None = None,
+        status: RunStatus | None = None,
+        flow_id: str | None = None,  # NEW
+        limit: int = 100,
+    ) -> list[RunRecord]:
+        if self._store is None:
+            return []
+
+        # First filter by graph_id/status in the store (TODO: implement self._store.list with flow_id for efficiency)
+        records = await self._store.list(graph_id=graph_id, status=status, limit=limit)
+
+        if flow_id is not None:
+            records = [r for r in records if r.meta.get("flow_id") == flow_id]
+
+        return records
+
+    def _get_sched_registry(self):
+        if self._sched_registry is not None:
+            return self._sched_registry
+        try:
+            container = current_services()
+        except Exception:
+            return None
+        return getattr(container, "sched_registry", None)
+
+    async def cancel_run(self, run_id: str) -> RunRecord | None:
+        """
+        Best-effort cancellation for a run.
+
+        Behaviour:
+        - If the run is found and not yet terminal:
+            - Mark status = cancellation_requested and persist.
+            - Look up scheduler in sched_registry and call terminate().
+        - If the run is already terminal, return it unchanged.
+        - If no record is found, we still try scheduler-level termination
+          (in case the run hasn't been persisted yet), then return None.
+
+        The actual transition to RunStatus.canceled happens inside
+        _run_and_finalize() when the scheduler raises asyncio.CancelledError.
+        """
+        record: RunRecord | None = None
+        if self._store is not None:
+            record = await self._store.get(run_id)
+
+        # Helper: scheduler-level termination
+        async def _terminate_scheduler() -> None:
+            reg = self._get_sched_registry()
+            if reg is None:
+                return
+            sched = reg.get(run_id)
+            if sched is None:
+                return
+
+            try:
+                # if local scheduler -> terminate
+                # if global scheduler -> terminate_run(run_id)
+                if isinstance(sched, GlobalForwardScheduler):
+                    await sched.terminate_run(run_id)
+                    return
+                elif isinstance(sched, ForwardScheduler):
+                    await sched.terminate()
+                    return
+            except Exception:  # noqa: BLE001
+                import logging
+
+                logging.getLogger("aethergraph.runtime.run_manager").exception(
+                    "Error terminating scheduler for run_id=%s", run_id
+                )
+
+        # No record in store – still try to terminate scheduler, then bail
+        if record is None:
+            await _terminate_scheduler()
+            return None
+
+        # If already terminal, don't change status
+        if record.status in {
+            RunStatus.succeeded,
+            RunStatus.failed,
+            RunStatus.canceled,
+        }:
+            return record
+
+        # Mark cancellation requested so UI can react immediately
+        record.status = RunStatus.cancellation_requested
+        if self._store is not None:
+            await self._store.update_status(
+                run_id,
+                RunStatus.cancellation_requested,
+                finished_at=None,
+                error=None,
+            )
+
+        # Ask the scheduler to stop
+        await _terminate_scheduler()
+
+        return record

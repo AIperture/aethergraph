@@ -8,6 +8,25 @@ from .llm import LLMSettings
 from .storage import StorageSettings
 
 
+class RateLimitSettings(BaseSettings):
+    enabled: bool = True
+
+    # Concurrency
+    max_concurrent_runs: int = 8
+
+    # Per-identity, per-window run limits (using metering)
+    runs_window: str = "1h"
+    max_runs_per_window: int = 100
+
+    # Short-burst, in-memory limiter for POST /runs
+    burst_max_runs: int = 10
+    burst_window_seconds: int = 10
+
+    # Optional LLM caps *per run*
+    max_llm_calls_per_run: int = 200
+    max_llm_tokens_per_run: int = 200_000
+
+
 class LoggingSettings(BaseModel):
     nspace: str = Field("aethergraph", description="Root logger namespace")
     level: str = Field("INFO", description="Root log level")
@@ -107,6 +126,7 @@ class AppSettings(BaseSettings):
     # top-level for workspace root
     root: str = "./aethergraph_data"
 
+    rate_limit: RateLimitSettings = RateLimitSettings()
     logging: LoggingSettings = LoggingSettings()
     slack: SlackSettings = SlackSettings()
     telegram: TelegramSettings = TelegramSettings()

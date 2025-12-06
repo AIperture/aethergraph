@@ -5,6 +5,7 @@ from aethergraph.config.config import AppSettings, ContinuationStoreSettings
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.kv import AsyncKV
 from aethergraph.contracts.services.memory import HotLog, Indices, Persistence
+from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
@@ -40,7 +41,7 @@ def build_doc_store(cfg: AppSettings) -> DocStore:
     raise ValueError(f"Unknown DocStore backend: {dc.backend!r}")
 
 
-def build_event_log(cfg: AppSettings) -> EventLog | None:
+def build_event_log(cfg: AppSettings, service_name: str | None = None) -> EventLog | None:
     """
     Global EventLog factory.
     Used by:
@@ -57,14 +58,17 @@ def build_event_log(cfg: AppSettings) -> EventLog | None:
     if ec.backend == "sqlite":
         from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 
-        path = root / ec.sqlite_path
+        # If you use a different DB file per service, you get isolation between services,
+        # but lose global querying and may have more files to manage.
+        # If you use a single DB file, all services share the same event log table(s).
+        path = root / ec.sqlite_path  # You could do: root / f"{service_name}_{ec.sqlite_path}"
         path.parent.mkdir(parents=True, exist_ok=True)
         return SqliteEventLog(path=str(path))
 
     if ec.backend == "fs":
         from aethergraph.storage.eventlog.fs_event import FSEventLog
 
-        ev_root = root / ec.fs_dir
+        ev_root = root / ec.fs_dir if not service_name else root / ec.fs_dir / service_name
         ev_root.mkdir(parents=True, exist_ok=True)
         return FSEventLog(root=str(ev_root))
 
@@ -178,6 +182,42 @@ def build_graph_state_store(cfg: AppSettings) -> GraphStateStore:
         raise ValueError(f"Unknown graph_state backend: {gs_cfg.backend!r}")
 
     return GraphStateStoreImpl(doc_store=docs, event_log=log)
+
+
+def build_run_store(cfg: AppSettings) -> RunStore:
+    """
+    Factory for RunStore:
+
+      - "memory": InMemoryRunStore (no persistence)
+      - "fs":     DocRunStore on top of FSDocStore
+      - "sqlite": DocRunStore on top of SqliteDocStore
+    """
+    rs_cfg = cfg.storage.runs
+
+    if rs_cfg.backend == "memory":
+        from aethergraph.storage.runs.inmen_store import InMemoryRunStore
+
+        return InMemoryRunStore()
+
+    if rs_cfg.backend == "fs":
+        from aethergraph.storage.docstore.fs_doc import FSDocStore
+        from aethergraph.storage.runs.doc_store import DocRunStore
+
+        base = os.path.join(cfg.root, rs_cfg.fs_root)
+        docs = FSDocStore(base)
+        return DocRunStore(
+            docs, prefix="run-"
+        )  # use "run-" prefix to avoid OS path issues on Windows
+
+    if rs_cfg.backend == "sqlite":
+        from aethergraph.storage.docstore.sqlite_doc import SqliteDocStore
+        from aethergraph.storage.runs.doc_store import DocRunStore
+
+        db_path = os.path.join(cfg.root, rs_cfg.sqlite_path)
+        docs = SqliteDocStore(db_path)
+        return DocRunStore(docs, prefix="run-")
+
+    raise ValueError(f"Unknown run storage backend: {rs_cfg.backend!r}")
 
 
 def _secret_bytes(secret_key: str) -> bytes:

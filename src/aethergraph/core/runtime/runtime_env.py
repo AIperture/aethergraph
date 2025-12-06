@@ -32,6 +32,7 @@ class RuntimeEnv:
 
     run_id: str
     graph_id: str | None = None
+    session_id: str | None = None
     graph_inputs: dict[str, Any] = field(default_factory=dict)
     outputs_by_node: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -142,6 +143,7 @@ class RuntimeEnv:
         )
         return ExecutionContext(
             run_id=self.run_id,
+            session_id=self.session_id,
             graph_id=self.graph_id,
             graph_inputs=self.graph_inputs,
             outputs_by_node=self.outputs_by_node,

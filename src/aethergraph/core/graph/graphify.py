@@ -7,7 +7,15 @@ from .task_graph import TaskGraph
 
 
 def graphify(
-    *, name="default_graph", inputs=(), outputs=None, version="0.1.0", agent: str | None = None
+    name="default_graph",
+    inputs=(),
+    outputs=None,
+    version="0.1.0",
+    agent: str | None = None,
+    *,
+    entrypoint: bool = False,
+    flow_id: str | None = None,
+    tags: list[str] | None = None,
 ):
     """
     Decorator that builds a TaskGraph from a function body using the builder context.
@@ -116,12 +124,26 @@ def graphify(
         if hub is not None:
             # Prefer registering the FACTORY, not a single built instance
             # fallback: register a concrete instance now
-            hub.register(nspace="graph", name=name, version=version, obj=_build())
+            meta = {
+                "kind": "graph",
+                "entrypoint": entrypoint,
+                "flow_id": flow_id or name,  # if no flow_id is given, use name as default
+                "tags": tags or [],
+            }
+            hub.register(nspace="graph", name=name, version=version, obj=_build(), meta=meta)
 
             if agent:
                 # we will have agent API later, now just register a graph as agent
+                agent_meta = {
+                    "kind": "agent",
+                    "flow_id": meta["flow_id"],
+                    "tags": meta["tags"],
+                    "backing": {"type": "graph", "name": name, "version": version},
+                }
                 agent_id = agent
-                hub.register(nspace="agent", name=agent_id, version=version, obj=_build())
+                hub.register(
+                    nspace="agent", name=agent_id, version=version, obj=_build(), meta=agent_meta
+                )
 
         return _build
 

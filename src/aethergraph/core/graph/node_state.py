@@ -10,6 +10,7 @@ class NodeStatus:
     DONE = "DONE"
     FAILED = "FAILED"
     SKIPPED = "SKIPPED"
+    CANCELLED = "CANCELLED"
     FAILED_TIMEOUT = "FAILED_TIMEOUT"
     WAITING_HUMAN = "WAITING_HUMAN"
     WAITING_ROBOT = "WAITING_ROBOT"
@@ -56,6 +57,8 @@ class TaskNodeState:
     next_wakeup_at: str | None = None  # ISO timestamp
     wait_token: str | None = None  # for external wait/resume with Continuation
     wait_spec: dict[str, Any] | None = None  # spec for waiting (kind, channel, meta, etc.)
+    started_at: str | None = None  # ISO timestamp
+    finished_at: str | None = None  # ISO timestamp
 
     @property
     def output(self):

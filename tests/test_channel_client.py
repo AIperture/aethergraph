@@ -1,5 +1,3 @@
-import asyncio
-
 from fastapi import FastAPI
 import httpx
 import pytest
@@ -127,7 +125,3 @@ async def test_channel_http_roundtrip_with_client():
     assert token == "tok-1"
     assert payload["text"] == "hello from outside"
     assert payload["meta"]["foo"] == "bar"
-
-
-if __name__ == "__main__":
-    asyncio.run(test_channel_http_roundtrip_with_client())

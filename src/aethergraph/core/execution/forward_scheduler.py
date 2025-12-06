@@ -200,6 +200,9 @@ class ForwardScheduler(BaseScheduler):
         # logger
         self.logger = logger
 
+        # termination flag
+        self._cancelled = False
+
     def bind_loop(self, loop: asyncio.AbstractEventLoop | None = None):
         """Bind an event loop to this scheduler (for cross-thread resume calls)."""
         self.loop = loop or asyncio.get_running_loop()
@@ -322,6 +325,12 @@ class ForwardScheduler(BaseScheduler):
                 if not ctrl.done():
                     ctrl.cancel()
 
+        if self._cancelled:
+            # propagate an explicit cancellation upwards
+            raise asyncio.CancelledError(
+                f"ForwardScheduler for run_id={self.env.run_id} was terminated"
+            )
+
     async def run_from(self, node_ids: list[str]):
         """Run starting from specific nodes (e.g. after external event)."""
         for nid in node_ids:
@@ -340,6 +349,8 @@ class ForwardScheduler(BaseScheduler):
     async def terminate(self):
         """Terminate execution; running tasks will complete but no new tasks will be started."""
         self._terminated = True
+        self._cancelled = True
+
         # cancel backoff tasks
         for task in self._backoff_tasks.values():
             task.cancel()
@@ -700,10 +711,10 @@ class ForwardScheduler(BaseScheduler):
 
             except NotImplementedError:
                 # subgraph logic not handled here; escalate to orchestrator
-                await node.set_status(NodeStatus.FAILED)
+                await self.graph.set_node_status(node_id, NodeStatus.FAILED)
             except asyncio.CancelledError:
                 # task cancelled (e.g. on terminate);
-                await node.set_status(NodeStatus.FAILED)
+                await self.graph.set_node_status(node_id, NodeStatus.CANCELLED)
             finally:
                 # remove from running tasks in caller
                 pass

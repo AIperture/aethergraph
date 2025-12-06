@@ -141,11 +141,16 @@ def tool(
         # registry behavior
         registry = current_registry()
         if registry is not None:
+            meta = {
+                "kind": "tool",
+                "tags": [],
+            }
             registry.register(
                 nspace="tool",
                 name=name or getattr(impl, "__name__", "tool"),
                 version=version,
                 obj=impl,
+                meta=meta,
             )
 
         return proxy

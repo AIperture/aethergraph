@@ -11,7 +11,7 @@ import uvicorn
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
 
-from ..plugins.channel.routes.webui_routes import install_web_channel
+# from ..plugins.channel.routes.webui_routes import install_web_channel
 from .app_factory import create_app
 
 _started = False
@@ -89,7 +89,7 @@ def start_server(
     _started = True
     _url = f"http://{host}:{picked_port}"
 
-    install_web_channel(app)
+    # install_web_channel(app)
 
     if return_container:
         return _url, app.state.container

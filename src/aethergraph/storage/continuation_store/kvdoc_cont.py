@@ -106,7 +106,7 @@ class KVDocContinuationStore(AsyncContinuationStore):
         data = await self._docs.get(doc_id)
         return await self._doc_to_cont(data)
 
-    async def list_cont_by_runs(self, run_id: str) -> list[Continuation]:
+    async def list_cont_by_run(self, run_id: str) -> list[Continuation]:
         prefix = f"{self._ns}/runs/{run_id}/nodes/"
         ids = await self._docs.list()
         out: list[Continuation] = []

@@ -1,134 +1,107 @@
-# src/aethergraph/plugins/channel/adapters/webui.py
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import asdict, is_dataclass
-import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
+import uuid
 
-from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
+from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.services.continuations.continuation import Correlator
 
 
-class WebSessionHub:
-    def __init__(self, backlog_size: int = 100):
-        self._conns: dict[str, set] = {}
-        self._backlog: dict[str, deque[dict]] = {}
-        self._backlog_size = backlog_size
-
-    async def attach(self, session_id: str, sender):
-        self._conns.setdefault(session_id, set()).add(sender)
-        # flush backlog to this new connection
-        for payload in list(self._backlog.get(session_id, [])):
-            try:
-                await sender(payload)
-            except Exception:
-                logger = logging.getLogger("aethergraph.plugins.channel.adapters.webui")
-                logger.warning(f"Failed to flush backlog payload to session {session_id}")
-
-    async def detach(self, session_id: str, sender):
-        s = self._conns.get(session_id)
-        if s and sender in s:
-            s.remove(sender)
-            if not s:
-                self._conns.pop(session_id, None)
-
-    async def emit(self, session_id: str, payload: dict):
-        conns = list(self._conns.get(session_id, []))
-        if conns:
-            for send in conns:
-                try:
-                    await send(payload)
-                except Exception:
-                    await self.detach(session_id, send)
-            return
-
-        # no live connections → store to backlog
-        q = self._backlog.setdefault(session_id, deque(maxlen=self._backlog_size))
-        q.append(payload)
+@dataclass
+class UIChannelEvent:
+    id: str
+    run_id: str
+    channel_key: str
+    type: str  # original OutEvent.type, e.g. "agent.message"
+    text: str | None
+    buttons: list[dict[str, Any]]
+    file: dict[str, Any] | None
+    meta: dict[str, Any]
+    ts: float
 
 
-def _serialize_event(event: OutEvent) -> dict:
-    """Dataclass → dict; normalize buttons; strip file bytes; drop None."""
-    if is_dataclass(event):
-        payload = asdict(event)
-    else:
-        # be lenient if a pydantic-like instance sneaks in
-        payload = (
-            (getattr(event, "model_dump", None) and event.model_dump())
-            or (getattr(event, "dict", None) and event.dict())
-            or dict(event)
-        )
-
-    # normalize buttons dict -> list
-    btns = payload.get("buttons")
-    if isinstance(btns, dict):
-        payload["buttons"] = list(btns.values())
-
-    # drop binary bytes from file
-    f = payload.get("file")
-    if isinstance(f, dict) and "bytes" in f:
-        f = f.copy()
-        f.pop("bytes", None)
-        payload["file"] = f
-
-    # clean None
-    return {k: v for k, v in payload.items() if v is not None}
-
-
-class WebChannelAdapter(ChannelAdapter):
+class WebUIChannelAdapter(ChannelAdapter):
     """
-    Channel key: 'web:session/{session_id}'
-    Mirrors Slack adapter semantics for:
-      - correlators
-      - stream/progress upserts via upsert_key
-      - buttons/image/file payload shapes
+    Channel adapter for the AetherGraph web UI.
+
+    - channel_key format (d0): "ui:run/<run_id>"
+    - Writes normalized UI events into EventLog with scope_id=f"run-ui:{run_id}"
     """
 
-    capabilities: set[str] = {"text", "buttons", "image", "file", "edit", "stream"}
+    capabilities: set[str] = {"text", "buttons", "file", "stream", "edit"}
 
-    def __init__(self, hub: WebSessionHub):
-        self.hub = hub
-        self._first_msg_by_key: dict[
-            tuple[str, str], str
-        ] = {}  # (channel, upsert_key) -> synthetic message id
-        self._seq_by_chan: dict[str, int] = {}
+    def __init__(self, event_log: EventLog):
+        self.event_log = event_log
 
-    @staticmethod
-    def _parse(channel_key: str) -> dict:
-        # "web:session/{id}" -> {"session": "..."}
-        parts = channel_key.split(":", 1)[1]  # session/{id}
-        k, v = parts.split("/", 1)
-        return {k: v}
+    def _extract_run_id(self, channel_key: str) -> str:
+        """
+        Parse "ui:run/<run_id>" channel key to get run_id.
+        """
+        try:
+            scheme, rest = channel_key.split(":", 1)
+        except ValueError as exc:
+            raise ValueError(f"Invalid UI channel key: {channel_key!r}") from exc
 
-    def _next_seq(self, ch: str) -> str:
-        n = self._seq_by_chan.get(ch, 0) + 1
-        self._seq_by_chan[ch] = n
-        return str(n)
+        if scheme != "ui":
+            raise ValueError(f"Invalid UI channel key scheme: {scheme!r}")
 
-    async def peek_thread(self, channel_key: str) -> str | None:
-        # no threads in web adapter
-        return None
+        # for d0, expect "run/<run_id>"
+        if not rest.startswith("run/"):
+            # future-compat: allow direct run_id, but warn
+            # e.g. "ui:<run_id>"
+            return rest  # assume rest is run_id directly
+
+        return rest.split("/", 1)[1]  # get run_id
+
+    def _button_to_dict(self, b: Button | Any) -> dict[str, Any]:
+        # Be defensive: Button is a dataclass, but Slack adapter also handles light-weight objects
+        return {
+            "label": getattr(b, "label", None),
+            "value": getattr(b, "value", None),
+            "style": getattr(b, "style", None),
+            "url": getattr(b, "url", None),
+        }
 
     async def send(self, event: OutEvent) -> dict | None:
-        meta = self._parse(event.channel)
-        session_id = meta["session"]
+        """
+        Normalize OutEvent -> UIChannelEvent dict and append to EventLog.
+        """
+        run_id = self._extract_run_id(event.channel)
 
-        # upsert bookkeeping like Slack: ensure a stable logical message per upsert_key
-        if event.upsert_key:
-            key = (event.channel, event.upsert_key)
-            if key not in self._first_msg_by_key:
-                self._first_msg_by_key[key] = self._next_seq(event.channel)
+        raw_buttons = getattr(event, "buttons", None) or []
+        buttons = [self._button_to_dict(b) for b in raw_buttons]
 
-        payload: dict[str, Any] = _serialize_event(event)
-        await self.hub.emit(session_id, payload)
+        file_info = getattr(event, "file", None) or None
 
-        # return correlator so ChannelSession can bind (consistent with Slack)
+        scope_id = event.meta.get("run_id") if event.meta else None
+        if not scope_id and run_id:
+            scope_id = run_id
+
+        row = {
+            "id": str(uuid.uuid4()),
+            "ts": datetime.now(timezone.utc).timestamp(),
+            "scope_id": scope_id,
+            "kind": "run_channel",
+            "payload": {
+                "type": event.type,
+                "text": event.text,
+                "buttons": buttons,
+                "file": file_info,
+                "meta": event.meta or {},
+            },
+        }
+        await self.event_log.append(row)
+
+        # Optional correlator for consistency with other adapters
         return {
+            "run_id": run_id,
             "correlator": Correlator(
-                scheme="web",
+                scheme="ui",
                 channel=event.channel,
-                thread=None,
-                message=self._next_seq(event.channel),
-            )
+                thread="",
+                message=None,
+            ),
         }

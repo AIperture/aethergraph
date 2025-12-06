@@ -77,7 +77,7 @@ async def ask_files(
 
 @tool(name="send_text", outputs=["ok"])
 async def send_text(
-    *, text: str, meta: dict[str, Any] | None = None, channel: str | None = None, context=None
+    text: str, *, meta: dict[str, Any] | None = None, channel: str | None = None, context=None
 ):
     ch = context.channel(channel)
     await ch.send_text(text, meta=meta or {})

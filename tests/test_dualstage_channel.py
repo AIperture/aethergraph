@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from aethergraph import graphify, tool
-from aethergraph.core.execution.global_scheduler import RunSettings
+from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler, RunSettings
 from aethergraph.core.runtime.graph_runner import _build_env, _resolve_graph_outputs
 from aethergraph.core.tools.waitable import DualStageTool, WaitSpec
 from aethergraph.server.clients.channel_client import ChannelClient
@@ -90,10 +90,20 @@ async def _setup_wait_demo_run(x: int = 7):
     # 2) Build env + schedulers
     env, retry_policy, max_conc = await _build_env(task_graph, inputs={"x": x})
 
-    scheds = getattr(env, "schedulers", None) or getattr(
-        getattr(env, "container", None), "schedulers", None
+    # This is the correct way to get the global scheduler, but not used for pytest
+    # scheds = getattr(env, "schedulers", None) or getattr(
+    #     getattr(env, "container", None), "schedulers", None
+    # )
+    # global_sched = scheds["global"]
+
+    # Instead, manually build GlobalForwardScheduler here
+    sched_registry = env.container.sched_registry
+    logger_factory = env.container.logger
+    global_sched = GlobalForwardScheduler(
+        registry=sched_registry,
+        global_max_concurrency=None,  # TODO: make configurable
+        logger=logger_factory.for_scheduler(),
     )
-    global_sched = scheds["global"]
 
     settings = RunSettings(
         max_concurrency=2,
@@ -142,7 +152,7 @@ def _build_test_app(env) -> FastAPI:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.anyio
+@pytest.mark.asyncio
 async def test_dualstage_resume_via_http_client():
     # 1) Set up run + scheduler
     task_graph, env, waiter = await _setup_wait_demo_run(x=7)
@@ -188,7 +198,7 @@ async def test_dualstage_resume_via_http_client():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.anyio
+@pytest.mark.asyncio
 async def test_dualstage_resume_via_channel_client():
     # 1) Set up run + scheduler
     task_graph, env, waiter = await _setup_wait_demo_run(x=7)
@@ -237,11 +247,11 @@ async def test_dualstage_resume_via_channel_client():
         await async_client.aclose()
 
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
 
-    async def main():
-        # Call tests sequentially on the SAME event loop
-        await test_dualstage_resume_via_http_client()
-        await test_dualstage_resume_via_channel_client()
+#     async def main():
+#         # Call tests sequentially on the SAME event loop
+#         await test_dualstage_resume_via_http_client()
+#         await test_dualstage_resume_via_channel_client()
 
-    asyncio.run(main())
+#     asyncio.run(main())

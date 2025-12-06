@@ -11,12 +11,17 @@ from aethergraph.config.config import AppSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
+from aethergraph.contracts.services.metering import MeteringService
+from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
+from aethergraph.core.runtime.run_manager import RunManager
+from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
 from aethergraph.services.auth.dev import AllowAllAuthz, DevTokenAuthn
 from aethergraph.services.channel.channel_bus import ChannelBus
 
@@ -37,12 +42,13 @@ from aethergraph.services.mcp.service import MCPService
 
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
-from aethergraph.services.metering.noop import NoopMetering
+from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
 from aethergraph.services.prompts.file_store import FilePromptStore
 from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
 
 # ---- RAG components ----
+from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
 from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
@@ -57,13 +63,16 @@ from aethergraph.storage.factory import (
     build_artifact_store,
     build_continuation_store,
     build_doc_store,
+    build_event_log,
     build_graph_state_store,
     build_memory_hotlog,
     build_memory_indices,
     build_memory_persistence,
+    build_run_store,
     build_vector_index,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
+from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 
 SERVICE_KEYS = [
     # core
@@ -126,6 +135,7 @@ class DefaultContainer:
     kv_hot: EphemeralKV
     artifacts: AsyncArtifactStore
     artifact_index: AsyncArtifactIndex
+    eventlog: EventLog
 
     # memory
     memory_factory: MemoryFactory
@@ -135,13 +145,19 @@ class DefaultContainer:
     rag: RAGFacade | None = None
     mcp: MCPService | None = None
 
+    # run controls -- for http endpoints and run manager
+    run_store: RunStore | None = None
+    run_manager: RunManager | None = None  # RunManager
+
     # optional services (not used by default)
     event_bus: InMemoryEventBus | None = None
     prompts: FilePromptStore | None = None
     authn: DevTokenAuthn | None = None
     authz: AllowAllAuthz | None = None
     redactor: RegexRedactor | None = None
-    metering: NoopMetering | None = None
+
+    metering: MeteringService | None = None
+    rate_limiter: SimpleRateLimiter | None = None
     tracer: NoopTracer | None = None
     secrets: EnvSecrets | None = None
 
@@ -181,12 +197,18 @@ def build_default_container(
     (root_p / "index").mkdir(parents=True, exist_ok=True)
     (root_p / "memory").mkdir(parents=True, exist_ok=True)
 
+    # event log for metering and channel events --
+    # TODO: make configurable from cfg
+    eventlog = build_event_log(cfg)
+
     # core services
     logger_factory = StdLoggerService.build(
         LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs"))
     )
     clock = SystemClock()
-    registry = UnifiedRegistry()
+    # registry = UnifiedRegistry()
+    registry: UnifiedRegistry = current_registry()
+    set_current_registry(registry)  # set global registry, ensure singleton (optional)
 
     # continuations and resume
     cont_store = build_continuation_store(cfg)
@@ -218,7 +240,7 @@ def build_default_container(
     }
 
     # channels
-    channel_adapters = make_channel_adapters_from_env(cfg)
+    channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog)
     channels = build_bus(
         channel_adapters,
         default="console:stdin",
@@ -227,7 +249,7 @@ def build_default_container(
         cont_store=cont_store,
     )
 
-    # storage and artifacts
+    # storage and artifacts -- kv_hot has special methods for hot data, do not use other persistent kv here
     kv_hot = EphemeralKV()
 
     artifacts = build_artifact_store(cfg)
@@ -272,6 +294,27 @@ def build_default_container(
         rag_facade=rag_facade,
     )
 
+    # run store and manager
+    run_store = build_run_store(cfg)
+    run_manager = RunManager(
+        run_store=run_store,
+        registry=registry,
+        sched_registry=sched_registry,
+        max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
+    )
+
+    # Metering service
+    # TODO: make metering service configurable
+    metering_store = EventLogMeteringStore(event_log=eventlog)
+    metering = EventLogMeteringService(store=metering_store)
+
+    # rate limiter
+    rl_settings = cfg.rate_limit
+    rate_limiter = SimpleRateLimiter(
+        max_events=rl_settings.burst_max_runs,
+        window_seconds=rl_settings.burst_window_seconds,
+    )
+
     container = DefaultContainer(
         root=str(root_p),
         schedulers=schedulers,
@@ -289,17 +332,21 @@ def build_default_container(
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,
+        eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
         rag=rag_facade,
         mcp=mcp,
+        run_store=run_store,
+        run_manager=run_manager,
         secrets=secrets,
         event_bus=None,
         prompts=None,
         authn=None,
         authz=None,
         redactor=None,
-        metering=None,
+        metering=metering,
+        rate_limiter=rate_limiter,
         tracer=None,
         settings=cfg,
     )

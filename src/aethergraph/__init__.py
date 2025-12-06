@@ -3,6 +3,10 @@ __version__ = "0.1.0a1"
 
 # Server
 # Channel buttons
+# Setup a default null logger to avoid "No handler found" warnings
+from contextlib import suppress
+import logging
+
 from .contracts.services.channel import Button
 
 # Graphs
@@ -24,6 +28,12 @@ from .server.start import (
     stop_server,  # stop the sidecar server
 )
 
+logging.getLogger("aethergraph").addHandler(logging.NullHandler())
+
+# import all demos if available
+with suppress(ImportError):
+    from .demos import *  # noqa: F403
+
 __all__ = [
     # Server
     "start_server",
@@ -34,16 +44,9 @@ __all__ = [
     "graph_fn",
     "graphify",
     "TaskGraph",
-    "RuntimeEnv",
     "NodeContext",
     # Services
     "Service",
     # Channel buttons
     "Button",
 ]
-
-
-# Setup a default null logger to avoid "No handler found" warnings
-import logging
-
-logging.getLogger("aethergraph").addHandler(logging.NullHandler())

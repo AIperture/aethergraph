@@ -3,6 +3,7 @@ import functools
 import inspect
 from typing import Any
 
+from aethergraph.contracts.services.channel import OutEvent
 from aethergraph.services.continuations.continuation import Continuation
 
 from ..graph.graph_refs import RESERVED_INJECTABLES  # {"context", "resume", "self"}
@@ -397,7 +398,15 @@ async def _enter_wait(
     # 3) Notify only if the tool hasn't already done it
     if not spec.get("notified", False):
         try:
-            await ctx.channels.notify(cont)
+            # TODO: This is a temporary fix. The proper way is to have the channel bus injected into the NodeContext
+            bus = node_ctx.services.channels
+            event = OutEvent(
+                type=cont.kind,
+                channel=cont.channel,
+                text=cont.prompt,
+                meta={"continuation_token": cont.token},
+            )
+            await bus.publish(event)
             if lg:
                 lg.debug("notified channel=%s", cont.channel)
         except Exception as e:

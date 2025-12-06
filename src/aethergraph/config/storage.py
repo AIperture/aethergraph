@@ -57,7 +57,7 @@ class SqliteArtifactIndexSettings(BaseModel):
 
 
 class ArtifactIndexSettings(BaseModel):
-    backend: Literal["jsonl", "sqlite"] = "jsonl"
+    backend: Literal["jsonl", "sqlite"] = "sqlite"
     jsonl: JsonlArtifactIndexSettings = JsonlArtifactIndexSettings()
     sqlite: SqliteArtifactIndexSettings = SqliteArtifactIndexSettings()
 
@@ -174,6 +174,16 @@ class MemorySettings(BaseModel):
     indices: MemoryIndicesSettings = MemoryIndicesSettings()
 
 
+class RunStorageSettings(BaseModel):
+    backend: Literal["memory", "fs", "sqlite"] = "fs"
+
+    # FS backend: relative to AppSettings.root
+    fs_root: str = "runs"  # will become <root>/runs
+
+    # SQLite backend: relative to AppSettings.root
+    sqlite_path: str = "runs/runs.db"
+
+
 class StorageSettings(BaseModel):
     docs: DocStoreSettings = DocStoreSettings()
     eventlog: EventLogSettings = EventLogSettings()
@@ -185,3 +195,4 @@ class StorageSettings(BaseModel):
     continuation: ContinuationStoreSettings = ContinuationStoreSettings()
     vector_index: VectorIndexStorageSettings = VectorIndexStorageSettings()
     memory: MemorySettings = MemorySettings()
+    runs: RunStorageSettings = RunStorageSettings()

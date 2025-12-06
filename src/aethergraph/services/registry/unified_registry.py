@@ -37,9 +37,20 @@ class UnifiedRegistry:
         self._lock = threading.RLock()
         self._allow_overwrite = allow_overwrite
 
+        # per-version metadata
+        self._meta: dict[tuple[str, str, str], dict[str, Any]] = {}
+
     # ---------- registration ----------
 
-    def register(self, *, nspace: str, name: str, version: str, obj: RegistryValue) -> None:
+    def register(
+        self,
+        *,
+        nspace: str,
+        name: str,
+        version: str,
+        obj: RegistryValue,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
         if nspace not in NS:
             raise ValueError(f"Unknown namespace: {nspace}")
         key = (nspace, name)
@@ -51,6 +62,10 @@ class UnifiedRegistry:
                 )
             versions[version] = obj
             self._latest[key] = self._pick_latest(versions.keys())
+
+            # Store metadata
+            if meta is not None:
+                self._meta[(nspace, name, version)] = meta
 
     def register_latest(
         self, *, nspace: str, name: str, obj: RegistryValue, version: str = "0.0.0"
@@ -85,11 +100,13 @@ class UnifiedRegistry:
                 raise KeyError(f"Version not found: {key.nspace}:{key.name}@{ver}")
 
             val = versions[ver]
-            # Materialize factories lazily (and cache)
-            if callable(val):
-                obj = val()
-                versions[ver] = obj
-                return obj
+
+            ## Materialize if factory -> we handle it when executing the graphs. Here it can cause
+            # the graph_fn returns a coroutine inside the GraphFunction object, not the expected function.
+            # if callable(val):
+            #     obj = val()
+            #     versions[ver] = obj
+            #     return obj
             return val
 
     # ---------- listing / admin ----------
@@ -123,6 +140,10 @@ class UnifiedRegistry:
                 self._store.pop(k, None)
                 self._latest.pop(k, None)
                 self._aliases.pop(k, None)
+                # NEW: drop all meta for this (ns,name)
+                for key in list(self._meta.keys()):
+                    if key[0] == nspace and key[1] == name:
+                        self._meta.pop(key, None)
                 return
             vers = self._store[k]
             vers.pop(version, None)
@@ -131,6 +152,8 @@ class UnifiedRegistry:
                 for tag, v in list(self._aliases[k].items()):
                     if v == version:
                         self._aliases[k].pop(tag, None)
+            # drop meta for this version
+            self._meta.pop((nspace, name, version), None)
             # recompute latest
             if vers:
                 self._latest[k] = self._pick_latest(vers.keys())
@@ -144,6 +167,7 @@ class UnifiedRegistry:
             self._store.clear()
             self._latest.clear()
             self._aliases.clear()
+            self._meta.clear()
 
     # ---------- typed getters ----------
 
@@ -158,6 +182,43 @@ class UnifiedRegistry:
 
     def get_agent(self, name: str, version: str | None = None) -> Any:
         return self.get(Key(nspace="agent", name=name, version=version))
+
+    def get_meta(
+        self,
+        *,
+        nspace: str,
+        name: str,
+        version: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        Return metadata for a given registered object, or None if not set.
+        Follows the same version resolution as `get()`: explicit → alias → latest.
+        """
+        if nspace not in NS:
+            raise ValueError(f"Unknown namespace: {nspace}")
+        key = (nspace, name)
+        with self._lock:
+            versions = self._store.get(key)
+            if not versions:
+                return None
+
+            ver = version
+            # resolve aliases or default to latest
+            ver = self._aliases.get(key, {}).get(ver, ver) if ver else self._latest.get(key)
+            if ver is None:
+                return None
+
+            return self._meta.get((nspace, name, ver))
+
+    # ---------- list typed ----------
+    def list_tools(self) -> dict[str, str]:
+        return self.list(nspace="tool")
+
+    def list_graphs(self) -> dict[str, str]:
+        return self.list(nspace="graph")
+
+    def list_graphfns(self) -> dict[str, str]:
+        return self.list(nspace="graphfn")
 
     # ---------- helpers ----------
 

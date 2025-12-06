@@ -51,6 +51,8 @@ Issues = "https://github.com/AIperture/aethergraph/issues"
 
 [project.scripts]
 aethergraph = "aethergraph.cli.main:main"
+aethergraph-server = "aethergraph.server.server:main"
+
 
 [project.optional-dependencies]
 # Keep extras small and purposeful; add more as modularize features.

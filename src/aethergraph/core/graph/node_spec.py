@@ -39,8 +39,6 @@ class TaskNodeSpec:
     condition: bool | dict[str, Any] | callable[[dict[str, Any]], bool] = True
 
     metadata: dict[str, Any] = field(default_factory=dict)
-    reads: set[str] = field(default_factory=set)  # state keys to read
-    writes: set[str] = field(default_factory=set)  # state keys to write
 
     tool_name: str | None = None  # used for logging/monitoring
     tool_version: str | None = None  # used for logging/monitoring

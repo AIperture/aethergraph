@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -60,6 +60,20 @@ class SQLiteEventLogSync:
         ts = row.get("ts")
         if isinstance(ts, datetime):
             ts = ts.timestamp()
+        elif isinstance(ts, int | float):
+            ts = float(ts)
+        elif isinstance(ts, str):
+            # Handle ISO 8601 timestamps like '2025-11-27T19:48:09.758687+00:00' or ...Z
+            try:
+                s = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                ts = dt.timestamp()
+            except Exception:
+                # Fallback: current time if we can't parse
+                ts = time.time()
+
         if ts is None:
             ts = time.time()
 
@@ -67,6 +81,9 @@ class SQLiteEventLogSync:
         kind = row.get("kind")
         tags = row.get("tags") or []
         tags_json = json.dumps(tags, ensure_ascii=False)
+
+        # Optionally overwrite the ts in the payload to the normalized float
+        row["ts"] = ts
         payload = json.dumps(row, ensure_ascii=False)
 
         with self._lock:
