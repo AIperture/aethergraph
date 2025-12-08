@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 
 # ---- artifact services ----
@@ -33,6 +34,7 @@ class RuntimeEnv:
     run_id: str
     graph_id: str | None = None
     session_id: str | None = None
+    identity: RequestIdentity | None = None
     graph_inputs: dict[str, Any] = field(default_factory=dict)
     outputs_by_node: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -115,6 +117,18 @@ class RuntimeEnv:
             node_id=node.node_id,
         )
 
+        node_scope = (
+            self.container.scope_factory.for_node(
+                identity=self.identity,
+                run_id=self.run_id,
+                graph_id=self.graph_id,
+                node_id=node.node_id,
+                session_id=self.session_id,
+            )
+            if self.container.scope_factory
+            else None
+        )
+
         from aethergraph.services.artifacts.facade import ArtifactFacade
 
         artifact_facade = ArtifactFacade(
@@ -125,6 +139,7 @@ class RuntimeEnv:
             tool_version=node.tool_version,  # to be filled from node if available
             store=self.artifacts,
             index=self.artifact_index,
+            scope=node_scope,
         )
 
         services = NodeServices(
@@ -144,6 +159,7 @@ class RuntimeEnv:
         return ExecutionContext(
             run_id=self.run_id,
             session_id=self.session_id,
+            identity=self.identity,
             graph_id=self.graph_id,
             graph_inputs=self.graph_inputs,
             outputs_by_node=self.outputs_by_node,
@@ -152,6 +168,7 @@ class RuntimeEnv:
             clock=self.clock,
             resume_payload=resume_payload,
             should_run_fn=self.should_run_fn,
+            scope=node_scope,
             # Back-compat shim for old ctx.mem()
             bound_memory=BoundMemoryAdapter(mem, defaults),
             resume_router=self.resume_router,

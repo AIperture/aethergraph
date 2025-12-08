@@ -5,6 +5,7 @@ import threading
 from typing import Any
 import uuid
 
+from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.graph.task_graph import TaskGraph
@@ -53,7 +54,7 @@ async def _attach_persistence(graph, env, spec, snapshot_every=1) -> Persistence
 
 
 async def _build_env(
-    owner, inputs: dict[str, Any], **rt_overrides
+    owner, inputs: dict[str, Any], identity: RequestIdentity | None = None, **rt_overrides
 ) -> tuple[RuntimeEnv, RetryPolicy, int]:
     container = _get_container()
     # apply optional overrides onto the container instance
@@ -68,6 +69,7 @@ async def _build_env(
         run_id=run_id,
         graph_id=graph_id,
         session_id=session_id,
+        identity=identity,
         graph_inputs=inputs,
         outputs_by_node={},
         container=container,
@@ -231,7 +233,12 @@ def _register_metering_context(
 
 
 # ---------- public API ----------
-async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides):
+async def run_async(
+    target,
+    inputs: dict[str, Any] | None = None,
+    identity: RequestIdentity | None = None,
+    **rt_overrides,
+):
     """
     Generic async runner for TaskGraph or GraphFunction.
     - GraphFunction → delegates to gf.run(env=..., **inputs)
@@ -240,7 +247,7 @@ async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides
     inputs = inputs or {}
     # GraphFunction path
     if isinstance(target, GraphFunction):
-        env, retry, max_conc = await _build_env(target, inputs, **rt_overrides)
+        env, retry, max_conc = await _build_env(target, inputs, identity=identity, **rt_overrides)
         token = _register_metering_context(env, target)  # set metering context
         try:
             return await target.run(env=env, max_concurrency=max_conc, **inputs)
@@ -250,7 +257,7 @@ async def run_async(target, inputs: dict[str, Any] | None = None, **rt_overrides
 
     # TaskGraph path
     graph = _materialize_task_graph(target)
-    env, retry, max_conc = await _build_env(graph, inputs, **rt_overrides)
+    env, retry, max_conc = await _build_env(graph, inputs, identity=identity, **rt_overrides)
 
     # Extract spec for run/recovery ...
     spec = getattr(graph, "spec", None) or getattr(graph, "get_spec", lambda: None)()
@@ -341,6 +348,7 @@ async def run_or_resume_async(
     *,
     run_id: str | None = None,
     session_id: str | None = None,
+    identity: RequestIdentity | None = None,
     **rt_overrides,
 ):
     """
@@ -351,7 +359,7 @@ async def run_or_resume_async(
         rt_overrides = dict(rt_overrides or {}, run_id=run_id)
     if session_id is not None:
         rt_overrides = dict(rt_overrides or {}, session_id=session_id)
-    return await run_async(target, inputs, **rt_overrides)
+    return await run_async(target, inputs, identity=identity, **rt_overrides)
 
 
 # sync adapter (optional, safe in notebooks/servers)

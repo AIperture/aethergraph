@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.execution.forward_scheduler import ForwardScheduler
@@ -164,6 +165,7 @@ class RunManager:
         target: Any,
         graph_id: str,
         inputs: dict[str, Any],
+        identity: RequestIdentity | None,
         user_id: str | None,
         org_id: str | None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
@@ -186,7 +188,11 @@ class RunManager:
 
         try:
             result = await run_or_resume_async(
-                target, inputs or {}, run_id=record.run_id, session_id=record.meta.get("session_id")
+                target,
+                inputs or {},
+                run_id=record.run_id,
+                session_id=record.meta.get("session_id"),
+                identity=identity,
             )
 
             # If we get here without GraphHasPendingWaits, run is completed
@@ -271,8 +277,9 @@ class RunManager:
         run_id: str | None = None,
         session_id: str | None = None,
         tags: list[str] | None = None,
-        user_id: str | None = None,
-        org_id: str | None = None,
+        identity: RequestIdentity | None = None,
+        user_id: str | None = None,  # back-compat
+        org_id: str | None = None,  # back-compat
     ) -> RunRecord:
         """
         Non-blocking entrypoint for the HTTP API.
@@ -282,6 +289,10 @@ class RunManager:
         - Schedules background execution via asyncio.create_task.
         - Returns immediately with the record (for run_id, status, etc).
         """
+        if identity is not None:
+            user_id = user_id or identity.user_id
+            org_id = org_id or identity.org_id
+
         # Acquire run slot (rate limiting)
         await self._acquire_run_slot()
         # Tracks whether responsibility for releasing the slot has been handed
@@ -351,6 +362,7 @@ class RunManager:
                         inputs=inputs,
                         user_id=user_id,
                         org_id=org_id,
+                        identity=identity,
                     )
                 finally:
                     await self._release_run_slot()

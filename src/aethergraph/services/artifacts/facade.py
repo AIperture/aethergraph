@@ -13,8 +13,9 @@ from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStor
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.services.artifacts.paths import _from_uri_or_path
+from aethergraph.services.scope.scope import Scope
 
-Scope = Literal["node", "run", "graph", "all"]
+ArtifactView = Literal["node", "graph", "run", "all"]
 
 
 class ArtifactFacade:
@@ -36,6 +37,7 @@ class ArtifactFacade:
         tool_version: str,
         store: AsyncArtifactStore,
         index: AsyncArtifactIndex,
+        scope: Scope | None = None,
     ) -> None:
         self.run_id = run_id
         self.graph_id = graph_id
@@ -45,22 +47,111 @@ class ArtifactFacade:
         self.store = store
         self.index = index
 
+        # set scope -- this should be done outside in NodeContext and passed in, but here is a fallback
+        self.scope = scope
+        print("🍎", self.scope)
+
         # Keep track of the last created artifact
         self.last_artifact: Artifact | None = None
+
+    # ---------- Helpers for scopes ----------
+    def _with_scope_labels(self, labels: dict[str, Any] | None) -> dict[str, Any]:
+        """Merge given labels with scope labels."""
+        out: dict[str, Any] = dict(labels or {})
+        if self.scope:
+            out.update(self.scope.artifact_scope_labels())
+        print(out)
+        return out
+
+    def _tenant_labels_for_search(self) -> dict[str, Any]:
+        """
+        Tenant filter for search/list.
+        In cloud/demo mode, we AND these on.
+        In local mode, these are no-ops.
+        """
+        if self.scope is None:
+            return {}
+
+        if self.scope.mode == "local":
+            return {}
+
+        labels: dict[str, Any] = {}
+        if self.scope.org_id:
+            labels["org_id"] = self.scope.org_id
+        if self.scope.user_id:
+            labels["user_id"] = self.scope.user_id
+        if self.scope.client_id:
+            labels["client_id"] = self.scope.client_id
+        return labels
+
+    def _view_labels(self, view: ArtifactView) -> dict[str, Any]:
+        """Labels to filter by for a given ArtifactView.
+        view options:
+          - "node": filter by (run_id, graph_id, node_id)
+          - "graph": filter by (run_id, graph_id)
+          - "run": filter by (run_id)   [default]
+          - "all": no implicit filters
+
+          In cloud/demo mode, we AND tenant filters on.
+          In local mode, tenants are no-ops.
+        """
+        base: dict[str, Any] = {}
+
+        if view == "node":
+            base = {"run_id": self.run_id, "graph_id": self.graph_id, "node_id": self.node_id}
+        elif view == "graph":
+            base = {"run_id": self.run_id, "graph_id": self.graph_id}
+        elif view == "run":
+            base = {"run_id": self.run_id}
+        # "all" => no run/graph/node filter
+
+        base.update(self._tenant_labels_for_search())
+        print("🍊", base)
+        return base
 
     # Metering-enhanced record
     async def _record(self, a: Artifact) -> None:
         """Record artifact in index and occurrence log."""
+        # 1) Sync cononical tenant fields from labels/scope into artifact
+        if self.scope:
+            scope_labels = self.scope.artifact_scope_labels()
+
+            # Ensure labels contains scope info
+            a.labels = {**scope_labels, **(a.labels or {})}
+
+            # Fill canoncial fields if missing
+            a.org_id = a.org_id or self.scope.get("org_id")
+            a.user_id = a.user_id or self.scope.get("user_id")
+            a.client_id = a.client_id or self.scope.get("client_id")
+            a.app_id = a.app_id or self.scope.get("app_id")
+            a.session_id = a.session_id or self.scope.get("session_id")
+            # run_id/graph_id/node_id should already be set
+
+        # 2) Record in index + occurrence log
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
         self.last_artifact = a
 
-        # metering hook for artifact writes
+        # 3) Metering hook for artifact writes
         try:
             meter = current_metering()
             ctx = current_meter_context.get() or {}
 
-            # Try a few common size fields, fallback to 0
+            run_id = getattr(a, "run_id", self.run_id)
+            graph_id = getattr(a, "graph_id", self.graph_id)
+            user_id = None
+            org_id = None
+
+            if self.scope is not None:
+                dims = self.scope.metering_dimensions()
+                user_id = dims.get("user_id", ctx.get("user_id"))
+                org_id = dims.get("org_id", ctx.get("org_id"))
+                run_id = dims.get("run_id", run_id)
+                graph_id = dims.get("graph_id", graph_id)
+            else:
+                user_id = ctx.get("user_id")
+                org_id = ctx.get("org_id")
+
             size = (
                 getattr(a, "bytes", None)
                 or getattr(a, "size_bytes", None)
@@ -68,13 +159,11 @@ class ArtifactFacade:
                 or 0
             )
 
-            # record artifact metering event -- using getattr to avoid tight coupling
-            # TODO: consider standardizing artifact attributes via a protocol/base class
             await meter.record_artifact(
-                user_id=ctx.get("user_id"),
-                org_id=ctx.get("org_id"),
-                run_id=getattr(a, "run_id", self.run_id),
-                graph_id=getattr(a, "graph_id", self.graph_id),
+                user_id=user_id,
+                org_id=org_id,
+                run_id=run_id,
+                graph_id=graph_id,
                 kind=getattr(a, "kind", "unknown"),
                 bytes=int(size),
                 pinned=bool(getattr(a, "pinned", False)),
@@ -104,6 +193,7 @@ class ArtifactFacade:
         pin: bool = False,
     ) -> Artifact:
         """Ingest a staged file and record it in the index."""
+        labels = self._with_scope_labels(labels)
         a = await self.store.ingest_staged_file(
             staged_path=staged_path,
             kind=kind,
@@ -130,6 +220,8 @@ class ArtifactFacade:
         then index it.
         Additional kwargs are passed to store.ingest_directory (kind, labels, etc.).
         """
+        labels = self._with_scope_labels(kwargs.pop("labels", None))
+        kwargs["labels"] = labels
         a = await self.store.ingest_directory(
             staged_dir=staged_dir,
             run_id=self.run_id,
@@ -155,6 +247,7 @@ class ArtifactFacade:
         cleanup: bool = True,
     ) -> Artifact:
         """Save an existing file and index it."""
+        labels = self._with_scope_labels(labels)
         a = await self.store.save_file(
             path=path,
             kind=kind,
@@ -382,35 +475,21 @@ class ArtifactFacade:
         return path
 
     # ---------- indexing helpers ----------
-    async def list(self, *, scope: Scope = "run") -> list[Artifact]:
+    async def list(self, *, view: ArtifactView = "run") -> list[Artifact]:
         """
         Quick listing scoped to current run/graph/node by default.
-        scope:
+        view options:
           - "node": filter by (run_id, graph_id, node_id)
           - "graph": filter by (run_id, graph_id)
           - "run": filter by (run_id)   [default]
           - "all": no implicit filters
         """
-        if scope == "node":
-            arts = await self.index.search(
-                labels={"graph_id": self.graph_id, "node_id": self.node_id},
-            )
-            return [a for a in arts if a.run_id == self.run_id]
-
-        if scope == "graph":
-            arts = await self.index.search(
-                labels={"graph_id": self.graph_id},
-            )
-            return [a for a in arts if a.run_id == self.run_id]
-
-        if scope == "run":
-            return await self.index.list_for_run(self.run_id)
-
-        if scope == "all":
-            return await self.index.search()
-
-        # should not reach here
-        return await self.index.search(labels=self._scope_labels(scope))
+        if view == "all":
+            # still tenant-scoped
+            labels = self._tenant_labels_for_search()
+            return await self.index.search(labels=labels or None)
+        labels = self._view_labels(view)
+        return await self.index.search(labels=labels or None)
 
     async def search(
         self,
@@ -419,16 +498,16 @@ class ArtifactFacade:
         labels: dict[str, str] | None = None,
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
-        scope: Scope = "run",
+        view: ArtifactView = "run",
         extra_scope_labels: dict[str, str] | None = None,
         limit: int | None = None,
     ) -> list[Artifact]:
         """Pass-thorough search with scoping."""
         eff_labels: dict[str, str] = dict(labels or {})
-        if scope in ("node", "graph"):
-            eff_labels.update(self._scope_labels(scope))
+        eff_labels.update(self._view_labels(view))
         if extra_scope_labels:
             eff_labels.update(extra_scope_labels)
+
         return await self.index.search(
             kind=kind,
             labels=eff_labels or None,
@@ -443,14 +522,12 @@ class ArtifactFacade:
         kind: str,
         metric: str,
         mode: Literal["max", "min"],
-        scope: Scope = "run",
+        view: ArtifactView = "run",
         filters: dict[str, str] | None = None,
     ) -> Artifact | None:
         eff_filters: dict[str, str] = dict(filters or {})
-        if scope in ("node", "graph"):
-            eff_filters.update(self._scope_labels(scope))
-        if scope == "run":
-            eff_filters.setdefault("run_id", self.run_id)
+        eff_filters.update(self._view_labels(view))
+
         return await self.index.best(
             kind=kind,
             metric=metric,

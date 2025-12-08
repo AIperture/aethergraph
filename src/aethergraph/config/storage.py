@@ -141,7 +141,7 @@ class ChromaVectorIndexSettings(BaseModel):
 
 
 class VectorIndexStorageSettings(BaseModel):
-    backend: Literal["sqlite", "faiss", "chroma"] = "faiss"
+    backend: Literal["sqlite", "faiss", "chroma"] = "sqlite"
 
     sqlite: SQLiteVectorIndexSettings = SQLiteVectorIndexSettings()
     faiss: FAISSVectorIndexSettings = FAISSVectorIndexSettings()

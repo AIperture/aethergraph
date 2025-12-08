@@ -54,6 +54,7 @@ from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
+from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.waits.wait_registry import WaitRegistry
@@ -110,6 +111,9 @@ SERVICE_KEYS = [
 class DefaultContainer:
     # root
     root: str
+
+    # scope
+    scope_factory: ScopeFactory
 
     # schedulers
     schedulers: dict[str, Any]
@@ -196,6 +200,9 @@ def build_default_container(
     (root_p / "kv").mkdir(parents=True, exist_ok=True)
     (root_p / "index").mkdir(parents=True, exist_ok=True)
     (root_p / "memory").mkdir(parents=True, exist_ok=True)
+
+    # Scope factory
+    scope_factory = ScopeFactory()
 
     # event log for metering and channel events --
     # TODO: make configurable from cfg
@@ -317,6 +324,7 @@ def build_default_container(
 
     container = DefaultContainer(
         root=str(root_p),
+        scope_factory=scope_factory,
         schedulers=schedulers,
         registry=registry,
         logger=logger_factory,

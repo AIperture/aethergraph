@@ -8,6 +8,7 @@ from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.scope.scope import Scope
 
 from .base_service import _ServiceHandle
 from .bound_memory import BoundMemoryAdapter
@@ -22,6 +23,7 @@ class NodeContext:
     node_id: str
     services: NodeServices
     resume_payload: dict[str, Any] | None = None
+    scope: Scope | None = None
     bound_memory: BoundMemoryAdapter | None = None  # back-compat
 
     # --- accessors (compatible names) ---
