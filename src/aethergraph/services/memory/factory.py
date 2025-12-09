@@ -7,6 +7,7 @@ from aethergraph.contracts.services.artifacts import AsyncArtifactStore  # gener
 from aethergraph.contracts.services.memory import HotLog, Indices, Persistence
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.scope.scope import Scope
 
 """
     # --- Artifacts (async FS store)
@@ -61,12 +62,14 @@ class MemoryFactory:
         graph_id: str | None = None,
         node_id: str | None = None,
         session_id: str | None = None,
+        scope: Scope | None = None,
     ) -> MemoryFacade:
         return MemoryFacade(
             run_id=run_id,
             graph_id=graph_id,
             session_id=session_id,
             node_id=node_id,
+            scope=scope,
             hotlog=self.hotlog,
             persistence=self.persistence,
             indices=self.indices,

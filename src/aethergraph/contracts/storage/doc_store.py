@@ -16,6 +16,17 @@ It is used in various parts of the system for storing structured documents.
 
 
 class DocStore(Protocol):
+    """
+    Generic doc_id → JSON dict store.
+
+    NOTE:
+      - This is intentionally low-level and schema-agnostic.
+      - Higher-level stores (RunStore, EventLog, ArtifactIndex, etc.) are responsible
+        for applying domain-specific filtering, sorting, and pagination.
+      - DocStore.list() may scan all docs; it is not intended as a scalable
+        query interface for large, structured datasets.
+    """
+
     async def put(self, doc_id: str, doc: dict[str, Any]) -> None: ...
     async def get(self, doc_id: str) -> dict[str, Any] | None: ...
     async def delete(self, doc_id: str) -> None: ...

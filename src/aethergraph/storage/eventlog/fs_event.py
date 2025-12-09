@@ -69,7 +69,15 @@ class FSEventLog(EventLog):
         kinds: list[str] | None = None,
         limit: int | None = None,
         tags: list[str] | None = None,
+        offset: int = 0,
     ) -> list[dict]:
+        # NOTE: FSEventLog reads the single events.jsonl file linearly, applies
+        # all filters (scope_id, time window, kinds, tags) in Python, and then
+        # slices via offset + limit.
+        #
+        # This is fine for dev/demo / low event volumes, but if event volume grows
+        # we should move to SQLiteEventLog or another DB-backed implementation
+        # and use indexed queries + keyset/offset pagination.
         if not self._log_path.exists():
             return []
 
@@ -102,6 +110,12 @@ class FSEventLog(EventLog):
                     out.append(row)
                     if limit is not None and len(out) >= limit:
                         break
+
+            if offset > 0:
+                out = out[offset:]
+            if limit is not None:
+                out = out[:limit]
+
             return out
 
         return await asyncio.to_thread(_read)

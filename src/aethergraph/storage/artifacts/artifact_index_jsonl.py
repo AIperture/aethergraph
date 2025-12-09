@@ -52,7 +52,12 @@ class JsonlArtifactIndexSync:
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
         limit: int | None = None,
+        offset: int = 0,
     ) -> list[Artifact]:
+        # NOTE: JSONL index keeps all artifacts in memory (_by_id.values()) and
+        # performs filtering / sorting in Python, then applies offset + limit.
+        # This is intended for small/medium local installs and tests only.
+        # For anything larger, use SqliteArtifactIndex or a dedicated DB-backed index.
         rows = list(self._by_id.values())
 
         if kind:
@@ -65,6 +70,9 @@ class JsonlArtifactIndexSync:
         if metric and mode:
             rows = [r for r in rows if metric in r.get("metrics", {})]
             rows.sort(key=lambda r: r["metrics"][metric], reverse=(mode == "max"))
+
+        if offset > 0:
+            rows = rows[offset:]
 
         if limit is not None:
             rows = rows[:limit]

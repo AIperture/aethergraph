@@ -6,11 +6,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
-from .deps import RequestIdentity, enforce_run_rate_limits, get_identity
+from .deps import RequestIdentity, enforce_run_rate_limits, get_identity, require_runs_execute
 from .schemas import (
     NodeSnapshot,
     RunChannelEvent,
@@ -33,7 +34,7 @@ router = APIRouter(tags=["runs"])
 async def create_run(
     graph_id: str,
     body: RunCreateRequest,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+    identity: RequestIdentity = Depends(require_runs_execute),  # noqa: B008
 ) -> RunCreateResponse:
     container = current_services()
     rm = getattr(container, "run_manager", None)
@@ -109,11 +110,14 @@ async def list_runs(
     if rm is None:
         raise HTTPException(status_code=503, detail="Run manager not configured")
 
+    offset = decode_cursor(cursor)
+
     records = await rm.list_records(
         graph_id=graph_id,
         status=status,
         flow_id=flow_id,
         limit=limit,
+        offset=offset,
     )
 
     # --- TEMP: client_id-based soft filtering for the demo ---
@@ -164,7 +168,10 @@ async def list_runs(
             )
         )
 
-    return RunListResponse(runs=summaries, next_cursor=None)
+        # Update next_cursor for pagination
+        next_cursor = encode_cursor(offset + limit) if len(records) == limit else None
+
+    return RunListResponse(runs=summaries, next_cursor=next_cursor)
 
 
 @router.get("/runs/{run_id}", response_model=RunSummary)

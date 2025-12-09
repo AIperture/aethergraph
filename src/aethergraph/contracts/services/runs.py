@@ -29,4 +29,5 @@ class RunStore(Protocol):
         graph_id: str | None = None,
         status: RunStatus | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[RunRecord]: ...

@@ -22,7 +22,8 @@ from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 # ---- artifact services ----
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
-from aethergraph.services.auth.dev import AllowAllAuthz, DevTokenAuthn
+from aethergraph.services.auth.authn import DevTokenAuthn
+from aethergraph.services.auth.authz import AllowAllAuthz
 from aethergraph.services.channel.channel_bus import ChannelBus
 
 # ---- channel services ----
@@ -322,6 +323,10 @@ def build_default_container(
         window_seconds=rl_settings.burst_window_seconds,
     )
 
+    # auth services
+    authn = DevTokenAuthn()
+    authz = AllowAllAuthz()
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -350,8 +355,8 @@ def build_default_container(
         secrets=secrets,
         event_bus=None,
         prompts=None,
-        authn=None,
-        authz=None,
+        authn=authn,
+        authz=authz,
         redactor=None,
         metering=metering,
         rate_limiter=rate_limiter,

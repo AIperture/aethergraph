@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.services.scope.scope import Scope
 
 from .chunker import TextSplitter
 from .utils.hybrid import topk_fuse
@@ -95,7 +96,13 @@ class RAGFacade:
         return os.path.join(self.root, make_fs_key(corpus_id))
 
     # ---------- ingestion ----------
-    async def add_corpus(self, corpus_id: str, meta: dict[str, Any] | None = None):
+    async def add_corpus(
+        self,
+        corpus_id: str,
+        meta: dict[str, Any] | None = None,
+        *,
+        scope_labels: dict[str, str] | None = None,
+    ):
         """Create a new corpus with optional metadata.
         Args:
             corpus_id: Unique identifier for the corpus.
@@ -105,18 +112,27 @@ class RAGFacade:
         os.makedirs(p, exist_ok=True)
         meta_path = os.path.join(p, "corpus.json")
         if not os.path.exists(meta_path):
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "corpus_id": corpus_id,
-                        "fs_key": make_fs_key(corpus_id),  # for reference
-                        "created_at": _now_iso(),
-                        "meta": meta or {},
-                    },
-                    f,
-                )
+            full_meta = {
+                "corpus_id": corpus_id,
+                "fs_key": make_fs_key(corpus_id),
+                "created_at": _now_iso(),
+                "meta": meta or {},
+            }
+            if scope_labels:
+                full_meta.setdefault("meta", {})
+                full_meta["meta"]["scope"] = dict(scope_labels)
 
-    async def upsert_docs(self, corpus_id: str, docs: list[dict[str, Any]]) -> dict[str, Any]:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(full_meta, f)
+
+    async def upsert_docs(
+        self,
+        corpus_id: str,
+        docs: list[dict[str, Any]],
+        *,
+        scope: Scope | None = None,
+        scope_id: str | None = None,  # e.g. memory_scope_id if tied to memory
+    ) -> dict[str, Any]:
         """Ingest and index a list of documents into the specified corpus.
         Args:
             corpus_id: The target corpus identifier.
@@ -126,10 +142,16 @@ class RAGFacade:
             - File-based documents: {"path": "/path/to/doc.pdf", "labels": {...}}
             - Inline text documents: {"text": "Document content...", "title": "Doc Title", "labels": {...}}
         """
+
         if not self.embed:
             raise RuntimeError("RAGFacade: embed client not configured")
 
-        await self.add_corpus(corpus_id)
+        scope_labels: dict[str, str] = {}
+        if scope is not None:
+            scope_labels = scope.rag_labels(scope_id=scope_id)
+
+        await self.add_corpus(corpus_id, meta=None, scope_labels=scope_labels)
+
         cdir = self._cdir(corpus_id)
         docs_jl = os.path.join(cdir, "docs.jsonl")
         chunks_jl = os.path.join(cdir, "chunks.jsonl")
@@ -140,7 +162,8 @@ class RAGFacade:
         total_chunks = 0
 
         for d in docs:
-            labels = d.get("labels", {})
+            # Merge scope labels into provided labels
+            labels = {**scope_labels, **(d.get("labels", {}) or {})}
             title = d.get("title") or os.path.basename(d.get("path", "")) or "untitled"
             doc_id = _stable_id({"title": title, "labels": labels, "ts": _now_iso()})
             text = None
@@ -151,9 +174,9 @@ class RAGFacade:
                 uri = await self.artifacts.save_file(
                     path=d["path"],
                     kind="doc",
-                    run_id="rag",
-                    graph_id="rag",
-                    node_id="rag",
+                    run_id=scope.run_id if scope else "rag",
+                    graph_id=scope.graph_id if scope else "rag",
+                    node_id=scope.node_id if scope else "rag",
                     tool_name="rag.upsert",
                     tool_version="0.1.0",
                     labels=labels,
@@ -190,9 +213,9 @@ class RAGFacade:
                 a = await self.artifacts.save_file(
                     path=staged,
                     kind="doc",
-                    run_id="rag",
-                    graph_id="rag",
-                    node_id="rag",
+                    run_id=scope.run_id if scope else "rag",
+                    graph_id=scope.graph_id if scope else "rag",
+                    node_id=scope.node_id if scope else "rag",
                     tool_name="rag.upsert",
                     tool_version="0.1.0",
                     labels=labels,
@@ -207,7 +230,7 @@ class RAGFacade:
                     self.logger.warning(f"RAG: empty text for doc {title}")
                 continue
 
-            # write doc record
+            # write doc record with labels including scope
             with open(docs_jl, "a", encoding="utf-8") as f:
                 f.write(
                     json.dumps(
@@ -229,6 +252,7 @@ class RAGFacade:
             chunks = self.chunker.split(text)
             if not chunks:
                 continue
+
             # batch embed
             vecs = await self.embed.embed(chunks)
             for i, (chunk_text, vec) in enumerate(zip(chunks, vecs, strict=True)):
@@ -277,6 +301,40 @@ class RAGFacade:
                 out[obj["chunk_id"]] = obj
         return out
 
+    def _apply_filters(
+        self,
+        corpus_id: str,
+        hits: list[dict[str, Any]],
+        filters: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Apply filters to the search hits."""
+        if not filters:
+            return hits
+
+        # We need labels to test filters. They are in meta["labels"] for each chunk.
+        # hits come from index.search as [{"chunk_id", "score", "meta": {...}}, ...].
+        # It works as follows:
+        # 1. For each hit, we extract the labels from the meta information.
+        # 2. We then check if the labels match the desired filters.
+        out = []
+        for h in hits:
+            meta = h.get("meta", {}) or {}
+            labels = meta.get("labels", {}) or {}
+            ok = True
+            for k, want in filters.items():
+                val = labels.get(k)
+                if isinstance(want, list | tuple | set):
+                    if val not in want:
+                        ok = False
+                        break
+                else:
+                    if val != want:
+                        ok = False
+                        break
+            if ok:
+                out.append(h)
+        return out
+
     async def search(
         self,
         corpus_id: str,
@@ -299,7 +357,13 @@ class RAGFacade:
         # dense search via index then optional lexical fusion
         qvec = (await self.embed.embed([query]))[0]
         dense_hits = await self.index.search(corpus_id, qvec, max(24, k))
+
+        # apply filters before fusion
+        dense_hits = self._apply_filters(corpus_id, dense_hits, filters=filters)
+
         chunks_map = self._load_chunks_map(corpus_id)
+
+        # if only dense or no hits, return directly
         if mode == "dense" or not dense_hits:
             dense_hits = dense_hits[:k]
             return [
@@ -314,6 +378,7 @@ class RAGFacade:
                 for h in dense_hits
             ]
 
+        # hybrid fusion: i.e. dense + lexical
         fused = topk_fuse(
             query, dense_hits, {cid: rec.get("text", "") for cid, rec in chunks_map.items()}, k
         )
@@ -331,6 +396,38 @@ class RAGFacade:
                 )
             )
         return out
+
+    async def search_scoped(
+        self,
+        *,
+        curpus_id: str,
+        query: str,
+        scope: Scope | None = None,
+        scope_id: str | None = None,  # e.g. memory_scope_id if tied to memory, can be None
+        k: int = 8,
+        mode: str = "hybrid",
+    ) -> list[SearchHit]:
+        """
+        Convenience wrapper to search with scope-based filters.
+        Args:
+            curpus_id: Target corpus identifier.
+            query: The search query string.
+            scope: Scope object for filtering.
+            k: Number of top results to return.
+            mode: Search mode - "dense", "hybrid".
+        """
+        filters: dict[str, Any] | None = None
+        if scope is not None:
+            # build filters from scope labels
+            filters = scope.rag_filter(scope_id=scope_id)  # scope_id is optional
+
+        return await self.search(
+            curpus_id,
+            query,
+            k=k,
+            filters=filters,
+            mode=mode,
+        )
 
     async def retrieve(
         self, corpus_id: str, query: str, k: int = 6, rerank: bool = True
@@ -354,6 +451,8 @@ class RAGFacade:
         style: str = "concise",
         with_citations: bool = True,
         k: int = 6,
+        scope: Scope | None = None,
+        scope_id: str | None = None,  # e.g. memory_scope_id if tied to memory, can be None
     ) -> dict[str, Any]:
         """Answer a question using retrieved context from the corpus.
         Args:
@@ -368,7 +467,19 @@ class RAGFacade:
             # use default LLM client
             llm = self.llm
 
-        hits = await self.retrieve(corpus_id, question, k=k, rerank=True)
+        filters: dict[str, Any] | None = None
+        if scope is not None:
+            # build filters from scope labels
+            filters = scope.rag_filter(scope_id=scope_id)  # scope_id is optional
+
+        hits = await self.search(
+            corpus_id,
+            question,
+            k=k,
+            filters=filters,
+            mode="hybrid",
+        )
+
         context = "\n\n".join([f"[{i + 1}] {h.text}" for i, h in enumerate(hits)])
         sys = "You answer strictly from the provided context. Cite chunk numbers like [1],[2]. If insufficient, say you don't know."
         if style == "detailed":

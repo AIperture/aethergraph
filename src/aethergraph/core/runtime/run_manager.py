@@ -486,12 +486,15 @@ class RunManager:
         status: RunStatus | None = None,
         flow_id: str | None = None,  # NEW
         limit: int = 100,
+        offset: int = 0,
     ) -> list[RunRecord]:
         if self._store is None:
             return []
 
         # First filter by graph_id/status in the store (TODO: implement self._store.list with flow_id for efficiency)
-        records = await self._store.list(graph_id=graph_id, status=status, limit=limit)
+        records = await self._store.list(
+            graph_id=graph_id, status=status, limit=limit, offset=offset
+        )
 
         if flow_id is not None:
             records = [r for r in records if r.meta.get("flow_id") == flow_id]

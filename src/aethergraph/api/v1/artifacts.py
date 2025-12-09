@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
 
+from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.api.v1.runs import _assert_run_belongs_to_client, _has_client_tag
 from aethergraph.contracts.storage.artifact_index import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
@@ -118,7 +119,15 @@ async def list_artifacts(
       - `kind` -> search(kind=...)
       - `scope_id` -> labels["scope_id"]
       - `tags` -> labels["tags"] (list of tags)
-    Pagination cursor is not yet implemented.
+
+    NOTE:
+      - Cursor is implemented as an offset passed into AsyncArtifactIndex.search.
+      - JsonlArtifactIndex and SqliteArtifactIndex currently load matching rows
+        into Python and then apply metric-based sorting + offset/limit in memory.
+      - This is fine for small/medium artifact volumes; for large-scale use,
+        AsyncArtifactIndex should be backed by an index that can handle filtering,
+        ordering, and pagination directly (e.g. SQL with indexes or a dedicated
+        search/metadata store).
     """
     container = current_services()
     index = getattr(container, "artifact_index", None)
@@ -141,12 +150,16 @@ async def list_artifacts(
         if tag_list:
             label_filters["tags"] = tag_list
 
+    # cursor -> offset
+    offset = decode_cursor(cursor)
+
     artifacts = await index.search(
         kind=kind,
         labels=label_filters or None,
         metric=None,
         mode=None,
         limit=limit,
+        offset=offset,
     )
 
     # TEMP: demo-only client filter via run tags
@@ -161,8 +174,10 @@ async def list_artifacts(
         artifacts = filtered
 
     metas = [_artifact_to_meta(a) for a in artifacts]
-    # TODO: implement proper pagination with cursor in ArtifactIndex
-    return ArtifactListResponse(artifacts=metas, next_cursor=None)
+
+    # compute next cursor
+    next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
+    return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
 
 
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactMeta)

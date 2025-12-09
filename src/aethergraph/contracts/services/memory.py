@@ -22,8 +22,15 @@ class Event:
     # --------- Core fields ---------
     event_id: str
     ts: str
+
+    # --------- Execution / Tenant Identity ---------
     run_id: str
     scope_id: str
+    user_id: str | None = None
+    org_id: str | None = None
+    client_id: str | None = None
+    app_id: str | None = None
+    session_id: str | None = None
 
     # --------- Core semantics ---------
     kind: EventKind = None  # logical type: "chat_user", "tool_start", etc.

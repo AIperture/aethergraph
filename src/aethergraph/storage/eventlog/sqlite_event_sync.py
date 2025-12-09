@@ -104,7 +104,17 @@ class SQLiteEventLogSync:
         kinds: list[str] | None = None,
         limit: int | None = None,
         tags: list[str] | None = None,
+        offset: int = 0,  # 🔹 NEW
     ) -> list[dict]:
+        # NOTE: This pushes scope/time/kind filters and ts ordering into SQL,
+        # then:
+        #   - Loads all matching rows into Python
+        #   - Applies tag filtering
+        #   - Applies offset + limit on the filtered list
+        #
+        # For large event volumes, we'd want to:
+        #   - Normalize tags into a separate table or use better JSON indexing, and
+        #   - Do tag filtering + LIMIT/OFFSET (or keyset) in SQL instead of Python.
         where: list[str] = []
         params: list[Any] = []
 
@@ -128,19 +138,24 @@ class SQLiteEventLogSync:
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY ts ASC"
-        if limit is not None:
-            sql += f" LIMIT {int(limit)}"
 
         with self._lock:
             rows = self._db.execute(sql, params).fetchall()
 
-        out: list[dict] = []
         tags_set = set(tags or [])
+        filtered: list[dict] = []
         for payload_str, tags_json in rows:
             evt = json.loads(payload_str)
             if tags:
                 row_tags = set(json.loads(tags_json) or [])
                 if not row_tags.issuperset(tags_set):
                     continue
-            out.append(evt)
-        return out
+            filtered.append(evt)
+
+        # Apply offset + limit AFTER all filters
+        if offset:
+            filtered = filtered[offset:]
+        if limit is not None:
+            filtered = filtered[:limit]
+
+        return filtered

@@ -4,6 +4,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.services.auth.authz import AuthZService
 
 
 class RequestIdentity(BaseModel):
@@ -87,6 +88,22 @@ def _rate_key(identity: RequestIdentity) -> str:
 
     # local / dev
     return "local"
+
+
+def get_authz() -> AuthZService:
+    container = current_services()
+    return container.authz  # type: ignore[return-value]
+
+
+async def require_runs_execute(
+    identity: RequestIdentity = Depends(get_identity),  # noqa B008
+) -> RequestIdentity:
+    print("🍏 Checking runs:execute for identity =", identity)
+    container = current_services()
+    if container.authz:
+        print("🍎 Enforcing runs:execute for identity =", identity)
+        await container.authz.authorize(identity=identity, scope="runs", action="execute")
+    return identity
 
 
 async def enforce_run_rate_limits(

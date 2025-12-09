@@ -151,6 +151,7 @@ class AsyncArtifactIndex(Protocol):
         labels: dict | None = None,
         metric: str | None = None,
         mode: str | None = None,
+        limit: int | None = None,
     ) -> list[Artifact]: ...
     async def best(
         self, *, kind: str, metric: str, mode: str, filters: dict | None = None

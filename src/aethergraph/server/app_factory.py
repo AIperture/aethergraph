@@ -7,7 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from aethergraph.api.v1.artifacts import router as artifacts_router
 from aethergraph.api.v1.graphs import router as graphs_router
+from aethergraph.api.v1.identity import router as identity_router
 from aethergraph.api.v1.memory import router as memory_router
+from aethergraph.api.v1.misc import router as misc_router
 from aethergraph.api.v1.runs import router as runs_router
 from aethergraph.api.v1.stats import router as stats_router
 
@@ -105,6 +107,9 @@ def create_app(
     app.include_router(router=artifacts_router, prefix="/api/v1")
     app.include_router(router=memory_router, prefix="/api/v1")
     app.include_router(router=stats_router, prefix="/api/v1")
+    app.include_router(router=identity_router, prefix="/api/v1")
+    app.include_router(router=misc_router, prefix="/api/v1")
+
     # Webui router
     from aethergraph.plugins.channel.routes.webui_routes import router as webui_router
 

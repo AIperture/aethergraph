@@ -33,6 +33,7 @@ class AsyncArtifactIndex(Protocol):
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
         limit: int | None = None,
+        offset: int = 0,
     ) -> list[Artifact]:
         """
         Generic search:
@@ -41,6 +42,7 @@ class AsyncArtifactIndex(Protocol):
           - metric: if provided with mode, order by metrics[metric]
           - mode: "max" or "min" for metric
           - limit: optional max number of results
+          - offset: pagination offset, i.e. skip this many rows before returning results
         """
         ...
 

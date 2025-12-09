@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
-from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.services.artifacts.paths import _from_uri_or_path
 from aethergraph.services.scope.scope import Scope
 
@@ -49,7 +49,6 @@ class ArtifactFacade:
 
         # set scope -- this should be done outside in NodeContext and passed in, but here is a fallback
         self.scope = scope
-        print("🍎", self.scope)
 
         # Keep track of the last created artifact
         self.last_artifact: Artifact | None = None
@@ -112,20 +111,21 @@ class ArtifactFacade:
     # Metering-enhanced record
     async def _record(self, a: Artifact) -> None:
         """Record artifact in index and occurrence log."""
-        # 1) Sync cononical tenant fields from labels/scope into artifact
-        if self.scope:
-            scope_labels = self.scope.artifact_scope_labels()
 
-            # Ensure labels contains scope info
+        # 1) Sync canonical tenant fields from labels/scope into artifact
+        if self.scope is not None:
+            # Ensure labels contain scope info (tenant + session/run/graph/node)
+            scope_labels = self.scope.artifact_scope_labels()
             a.labels = {**scope_labels, **(a.labels or {})}
 
-            # Fill canoncial fields if missing
-            a.org_id = a.org_id or self.scope.get("org_id")
-            a.user_id = a.user_id or self.scope.get("user_id")
-            a.client_id = a.client_id or self.scope.get("client_id")
-            a.app_id = a.app_id or self.scope.get("app_id")
-            a.session_id = a.session_id or self.scope.get("session_id")
-            # run_id/graph_id/node_id should already be set
+            # Fill canonical fields if missing, using metering_dimensions
+            dims = self.scope.metering_dimensions()
+            a.org_id = a.org_id or dims.get("org_id")
+            a.user_id = a.user_id or dims.get("user_id")
+            a.client_id = a.client_id or dims.get("client_id")
+            a.app_id = a.app_id or dims.get("app_id")
+            a.session_id = a.session_id or dims.get("session_id")
+            # run_id / graph_id / node_id are already set at creation
 
         # 2) Record in index + occurrence log
         await self.index.upsert(a)
@@ -135,23 +135,8 @@ class ArtifactFacade:
         # 3) Metering hook for artifact writes
         try:
             meter = current_metering()
-            ctx = current_meter_context.get() or {}
 
-            run_id = getattr(a, "run_id", self.run_id)
-            graph_id = getattr(a, "graph_id", self.graph_id)
-            user_id = None
-            org_id = None
-
-            if self.scope is not None:
-                dims = self.scope.metering_dimensions()
-                user_id = dims.get("user_id", ctx.get("user_id"))
-                org_id = dims.get("org_id", ctx.get("org_id"))
-                run_id = dims.get("run_id", run_id)
-                graph_id = dims.get("graph_id", graph_id)
-            else:
-                user_id = ctx.get("user_id")
-                org_id = ctx.get("org_id")
-
+            # Try a few common size fields, fallback to 0
             size = (
                 getattr(a, "bytes", None)
                 or getattr(a, "size_bytes", None)
@@ -160,10 +145,7 @@ class ArtifactFacade:
             )
 
             await meter.record_artifact(
-                user_id=user_id,
-                org_id=org_id,
-                run_id=run_id,
-                graph_id=graph_id,
+                scope=self.scope,  # Scope carries user/org/run/graph/app/session
                 kind=getattr(a, "kind", "unknown"),
                 bytes=int(size),
                 pinned=bool(getattr(a, "pinned", False)),
@@ -235,6 +217,54 @@ class ArtifactFacade:
         return a
 
     # ---------- core save APIs ----------
+
+    # Metering-enhanced record
+    async def _record(self, a: Artifact) -> None:
+        """Record artifact in index and occurrence log."""
+
+        # 1) Sync canonical tenant fields from labels/scope into artifact
+        if self.scope is not None:
+            # Ensure labels contain scope info (tenant + session/run/graph/node)
+            scope_labels = self.scope.artifact_scope_labels()
+            a.labels = {**scope_labels, **(a.labels or {})}
+
+            # Fill canonical fields if missing, using metering_dimensions
+            dims = self.scope.metering_dimensions()
+            a.org_id = a.org_id or dims.get("org_id")
+            a.user_id = a.user_id or dims.get("user_id")
+            a.client_id = a.client_id or dims.get("client_id")
+            a.app_id = a.app_id or dims.get("app_id")
+            a.session_id = a.session_id or dims.get("session_id")
+            # run_id / graph_id / node_id are already set at creation
+
+        # 2) Record in index + occurrence log
+        await self.index.upsert(a)
+        await self.index.record_occurrence(a)
+        self.last_artifact = a
+
+        # 3) Metering hook for artifact writes
+        try:
+            meter = current_metering()
+
+            # Try a few common size fields, fallback to 0
+            size = (
+                getattr(a, "bytes", None)
+                or getattr(a, "size_bytes", None)
+                or getattr(a, "size", None)
+                or 0
+            )
+
+            await meter.record_artifact(
+                scope=self.scope,  # Scope carries user/org/run/graph/app/session
+                kind=getattr(a, "kind", "unknown"),
+                bytes=int(size),
+                pinned=bool(getattr(a, "pinned", False)),
+            )
+        except Exception:
+            import logging
+
+            logging.getLogger("aethergraph.metering").exception("record_artifact_failed")
+
     async def save_file(
         self,
         path: str,

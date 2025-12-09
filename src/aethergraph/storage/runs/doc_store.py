@@ -149,8 +149,14 @@ class DocRunStore(RunStore):
         graph_id: str | None = None,
         status: RunStatus | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[RunRecord]:
-        # Require DocStore.list; if not implemented, raise a clear error
+        # NOTE: This implementation is fine for small/medium numbers of runs, but it:
+        #   - Calls DocStore.list() to load ALL doc_ids
+        #   - Loads each run doc and filters in Python
+        #   - Sorts in memory by started_at
+        # For large volumes / multi-tenant cloud use, replace this with a real DB-backed
+        # RunStore that pushes filtering + sorting + LIMIT/OFFSET (or keyset) into SQL.
         if not hasattr(self._ds, "list"):
             raise RuntimeError(
                 "Underlying DocStore does not implement list(); " "cannot support RunStore.list()."
@@ -177,4 +183,10 @@ class DocRunStore(RunStore):
 
         # Sort newest first, then truncate
         records.sort(key=lambda r: r.started_at, reverse=True)
-        return records[:limit]
+
+        # apply offset
+        if offset > 0:
+            records = records[offset:]
+        if limit is not None:
+            records = records[:limit]
+        return records

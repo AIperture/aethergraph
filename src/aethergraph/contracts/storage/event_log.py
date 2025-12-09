@@ -27,4 +27,5 @@ class EventLog(Protocol):
         kinds: list[str] | None = None,  # filter by event kinds
         limit: int | None = None,  # max number of events to return
         tags: list[str] | None = None,  # filter by tags
+        offset: int = 0,  # pagination offset
     ) -> list[dict]: ...

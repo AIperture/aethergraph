@@ -18,6 +18,7 @@ from aethergraph.services.continuations.stores.fs_store import (
 
 # ---- memory services ----
 from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.rag.node_rag import NodeRAG
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.waits.wait_registry import WaitRegistry
 
@@ -111,10 +112,24 @@ class RuntimeEnv:
             "tags": [],
             "entities": [],
         }
+        mem_scope = (
+            self.container.scope_factory.for_memory(
+                identity=self.identity,
+                run_id=self.run_id,
+                graph_id=self.graph_id,
+                node_id=node.node_id,
+                session_id=self.session_id,
+            )
+            if self.container.scope_factory
+            else None
+        )
+
         mem: MemoryFacade = self.memory_factory.for_session(
             run_id=self.run_id,
             graph_id=self.graph_id,
             node_id=node.node_id,
+            session_id=self.session_id,
+            scope=mem_scope,
         )
 
         node_scope = (
@@ -142,6 +157,15 @@ class RuntimeEnv:
             scope=node_scope,
         )
 
+        # ------- RAG Facade in Memory tied to this node/run -------'
+        rag_for_node = None
+        if self.rag_facade is not None and node_scope is not None:
+            rag_for_node = NodeRAG(
+                rag=self.rag_facade,
+                scope=node_scope,
+                default_scope_id=(mem_scope.memory_scope_id() if mem_scope else None),
+            )
+
         services = NodeServices(
             channels=self.channels,
             continuation_store=self.continuation_store,
@@ -153,7 +177,7 @@ class RuntimeEnv:
             memory=self.memory_factory,  # factory (for other sessions if needed)
             memory_facade=mem,  # bound memory for this run/node
             llm=self.llm_service,  # LLMService
-            rag=self.rag_facade,  # RAGService
+            rag=rag_for_node,  # RAGService
             mcp=self.mcp_service,  # MCPService
         )
         return ExecutionContext(

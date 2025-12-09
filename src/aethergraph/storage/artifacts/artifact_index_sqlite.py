@@ -152,7 +152,18 @@ class SqliteArtifactIndexSync:
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
         limit: int | None = None,
+        offset: int = 0,  # 🔹 NEW
     ) -> list[Artifact]:
+        # NOTE: Current implementation:
+        #   - Pushes basic WHERE (kind, labels_json LIKE) and ORDER BY created_at into SQL
+        #   - Loads ALL matching rows into Python
+        #   - Applies metric-based filtering/sorting and then offset + limit in memory
+        #
+        # This is OK for moderate artifact counts, but if artifacts grow large we should:
+        #   - Promote frequently queried fields (user_id, org_id, scope_id, metric columns)
+        #     to real indexed columns, and
+        #   - Push ORDER BY + LIMIT/OFFSET (or keyset pagination) down into SQL instead of
+        #     slicing in Python.
         where = []
         params: list[Any] = []
 
@@ -167,30 +178,30 @@ class SqliteArtifactIndexSync:
                 # crude but works: `"k": "v"` substring
                 params.append(f'%"{k}": "{v}"%')
 
-        order_by = "created_at ASC"
-        if metric and mode:
-            # We'll compute metrics ordering in Python after fetch for simplicity.
-            order_by = "created_at ASC"
-
         sql = "SELECT * FROM artifacts"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += f" ORDER BY {order_by}"
 
-        if limit is not None:
-            sql += f" LIMIT {int(limit)}"
+        # Base ordering by created_at (oldest→newest or vice versa as you prefer)
+        sql += " ORDER BY created_at ASC"
 
-        cur = self._conn.execute(sql, params)
-        rows = [self._row_to_artifact(r) for r in cur.fetchall()]
+        with self._conn:  # or just self._conn.execute
+            cur = self._conn.execute(sql, params)
+            rows = [self._row_to_artifact(r) for r in cur.fetchall()]
 
+        # Metric sorting in Python if requested
         if metric and mode:
             rows = [a for a in rows if metric in (a.metrics or {})]
             rows.sort(
                 key=lambda a: a.metrics[metric],
                 reverse=(mode == "max"),
             )
-            if limit is not None:
-                rows = rows[:limit]
+
+        # 🔹 Apply offset + limit AFTER all filtering/sorting
+        if offset:
+            rows = rows[offset:]
+        if limit is not None:
+            rows = rows[:limit]
 
         return rows
 
