@@ -141,8 +141,6 @@ class MemoryFacade:
         self.memory_scope_id = (
             self.scope.memory_scope_id() if self.scope else self.session_id or self.run_id
         )
-        # print("🍎 MemoryFacade initialized with scope_id =", self.memory_scope_id)
-        # print("  scope =", self.scope)
 
     # ---------- recording ----------
     async def record_raw(

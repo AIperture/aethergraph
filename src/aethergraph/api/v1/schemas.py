@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, RootModel
 
+from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility, SessionKind
+
 
 # --------- Graphs ---------
 class GraphListItem(BaseModel):
@@ -81,9 +83,15 @@ class RunSummary(BaseModel):
 
     meta: dict[str, Any] = Field(default_factory=dict)
 
-    # 🔹 Python attribute names are snake_case, JSON keys are camelCase
+    # Python attribute names are snake_case, JSON keys are camelCase
     app_id: str | None = Field(default=None, alias="appId")
     app_name: str | None = Field(default=None, alias="appName")
+    agent_id: str | None = Field(default=None, alias="agentId")
+
+    # origin/visibility/importance could go here if desired
+    origin: RunOrigin | None = None
+    visibility: RunVisibility | None = None
+    importance: RunImportance | None = None
 
     class Config:
         populate_by_name = True  # allows setting via app_id/app_name in Python
@@ -96,6 +104,13 @@ class RunCreateRequest(BaseModel):
     tags: list[str] = []
     session_id: str | None = None
 
+    # origin/visibility/importance could go here if desired
+    origin: RunOrigin | None = None
+    visibility: RunVisibility | None = None
+    importance: RunImportance | None = None
+
+    # agent / app info
+    agent_id: str | None = Field(default=None, alias="agentId")
     app_id: str | None = Field(default=None, alias="appId")
     app_name: str | None = Field(default=None, alias="appName")
 
@@ -382,3 +397,74 @@ class LLMStats(RootModel[dict[str, LLMStatsEntry]]):
         "gpt-4o-mini": {"calls": 5, "prompt_tokens": 1234, "completion_tokens": 567}
       }
     """
+
+
+# ------ viz facade integration ------
+VizKind = Literal["scalar", "vector", "matrix", "image"]
+VizMode = Literal["append", "replace"]
+
+
+class VizPoint(BaseModel):
+    step: int = Field(..., description="Iteration / timestep")
+    value: float | None = None
+    vector: list[float] | None = None
+    matrix: list[list[float]] | None = None
+    artifact_id: str | None = Field(
+        None,
+        description="Artifact ID for image frames (or future 3D payloads).",
+    )
+    created_at: datetime | None = None
+
+
+class VizTrack(BaseModel):
+    track_id: str = Field(..., description="Developer-chosen ID, e.g. 'loss', 'design_shape'")
+    figure_id: str | None = Field(None, description="Optional panel/group ID, e.g. 'metrics_panel'")
+    node_id: str | None = Field(None, description="Node that emitted this track, if applicable")
+    viz_kind: VizKind
+    mode: VizMode = "append"
+    meta: dict[str, Any] | None = None
+    points: list[VizPoint]
+
+
+class VizFigure(BaseModel):
+    figure_id: str | None = Field(
+        None,
+        description="Panel/group identifier; tracks with same figure_id are shown together",
+    )
+    tracks: list[VizTrack]
+
+
+class RunVizResponse(BaseModel):
+    run_id: str
+    figures: list[VizFigure]
+
+
+# -------------- Session Schemas --------------
+class Session(BaseModel):
+    session_id: str
+    kind: SessionKind
+    title: str | None = None
+
+    user_id: str | None = None
+    org_id: str | None = None
+
+    source: str = "webui"  # "webui", "sidecar", "api", "sdk", etc.
+    external_ref: str | None = None  # e.g. chat ID, playground ID, notebook path, etc.
+
+    created_at: datetime
+    updated_at: datetime
+
+
+class SessionCreateRequest(BaseModel):
+    kind: SessionKind
+    title: str | None = None
+    external_ref: str | None = None
+
+
+class SessionListResponse(BaseModel):
+    items: list[Session]
+    next_cursor: str | None = None
+
+
+class SessionRunsResponse(BaseModel):
+    items: list[RunSummary]

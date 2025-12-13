@@ -18,6 +18,23 @@ class RequestIdentity(BaseModel):
     # How this request is “authenticated”
     mode: Literal["cloud", "demo", "local"] = "local"
 
+    @property
+    def is_cloud(self) -> bool:
+        return self.mode == "cloud"
+
+    @property
+    def is_demo(self) -> bool:
+        return self.mode == "demo"
+
+    @property
+    def is_local(self) -> bool:
+        return self.mode == "local"
+
+    @property
+    def tenant_key(self) -> tuple[str | None, str | None]:
+        """Convenience key for tenant scoping."""
+        return (self.org_id, self.user_id)
+
 
 async def get_identity(
     request: Request,
@@ -53,8 +70,10 @@ async def get_identity(
 
     # --- Demo mode: no auth, but we have a client_id ---
     if client_id:
+        # Treat client_id as the actual user_id for demo
+        demo_user_id = f"demo:{client_id}"
         return RequestIdentity(
-            user_id="demo",
+            user_id=demo_user_id,
             org_id="demo",
             roles=["demo"],
             client_id=client_id,
@@ -98,10 +117,8 @@ def get_authz() -> AuthZService:
 async def require_runs_execute(
     identity: RequestIdentity = Depends(get_identity),  # noqa B008
 ) -> RequestIdentity:
-    print("🍏 Checking runs:execute for identity =", identity)
     container = current_services()
     if container.authz:
-        print("🍎 Enforcing runs:execute for identity =", identity)
         await container.authz.authorize(identity=identity, scope="runs", action="execute")
     return identity
 

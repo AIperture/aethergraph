@@ -48,6 +48,7 @@ class ExecutionContext:
             session_id=self.session_id,
             node_id=node.node_id,
             services=self.services,
+            identity=self.identity,
             resume_payload=self.resume_payload,
             scope=self.scope,
             # back-compat for old ctx.mem()

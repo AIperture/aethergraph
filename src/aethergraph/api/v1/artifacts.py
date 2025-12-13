@@ -8,7 +8,6 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
-from aethergraph.api.v1.runs import _assert_run_belongs_to_client, _has_client_tag
 from aethergraph.contracts.storage.artifact_index import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
 
@@ -162,14 +161,13 @@ async def list_artifacts(
         offset=offset,
     )
 
-    # TEMP: demo-only client filter via run tags
-    if identity.mode == "demo" and identity.client_id:
+    if identity.mode in ("cloud", "demo"):
         filtered: list[Artifact] = []
         for a in artifacts:
             if not a.run_id:
                 continue
             rec = await rm.get_record(a.run_id)
-            if rec and _has_client_tag(rec.tags, identity.client_id):
+            if rec and rec.user_id == identity.user_id:
                 filtered.append(a)
         artifacts = filtered
 
@@ -198,10 +196,6 @@ async def get_artifact(
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
 
-    # TEMP: demo-only run-based guard
-    if identity.client_id and artifact.run_id:
-        await _assert_run_belongs_to_client(artifact.run_id, identity.client_id, rm)
-
     meta = _artifact_to_meta(artifact)
     return meta
 
@@ -221,10 +215,6 @@ async def get_artifact_content(
     artifact = await index.get(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
-
-    # TEMP: demo-only run-based guard
-    if identity.client_id and artifact.run_id:
-        await _assert_run_belongs_to_client(artifact.run_id, identity.client_id, rm)
 
     # If user provided a fully qualified preview URI (e.g. S3 signed URL), you
     # can just redirect there instead of proxying bytes:
@@ -273,9 +263,6 @@ async def pin_artifact(
     artifact = await index.get(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
-    # TEMP: demo-only run-based guard
-    if identity.client_id and artifact.run_id:
-        await _assert_run_belongs_to_client(artifact.run_id, identity.client_id, rm)
 
     await index.pin(artifact_id, pinned=pinned)
     return {"artifact_id": artifact_id, "pinned": pinned}
@@ -294,9 +281,6 @@ async def list_run_artifacts(
     rm = getattr(container, "run_manager", None)
     if index is None or rm is None:
         raise HTTPException(status_code=503, detail="Artifact index not configured")
-
-    # TEMP: demo-only scoping
-    await _assert_run_belongs_to_client(run_id, identity.client_id, rm)
 
     artifacts = await index.list_for_run(run_id)
     metas = [_artifact_to_meta(a) for a in artifacts]

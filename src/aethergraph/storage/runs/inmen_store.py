@@ -55,6 +55,7 @@ class InMemoryRunStore(RunStore):
         *,
         graph_id: str | None = None,
         status: RunStatus | None = None,
+        session_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[RunRecord]:
@@ -68,6 +69,8 @@ class InMemoryRunStore(RunStore):
                 records = [r for r in records if r.graph_id == graph_id]
             if status is not None:
                 records = [r for r in records if r.status == status]
+            if session_id is not None:
+                records = [r for r in records if r.session_id == session_id]
 
             records = sorted(records, key=lambda r: r.started_at, reverse=True)
 

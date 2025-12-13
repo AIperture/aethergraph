@@ -20,6 +20,7 @@ from aethergraph.services.continuations.stores.fs_store import (
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.rag.node_rag import NodeRAG
 from aethergraph.services.resume.router import ResumeRouter
+from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
 
 from ..graph.task_node import TaskNodeRuntime
@@ -157,6 +158,18 @@ class RuntimeEnv:
             scope=node_scope,
         )
 
+        # ------- Viz Service tied to this node/run -------'
+        vis_facade = VizFacade(
+            run_id=self.run_id,
+            graph_id=self.graph_id,
+            node_id=node.node_id,
+            tool_name=node.tool_name,
+            tool_version=node.tool_version,
+            artifacts=artifact_facade,
+            viz_service=self.container.viz_service,
+            scope=node_scope,
+        )
+
         # ------- RAG Facade in Memory tied to this node/run -------'
         rag_for_node = None
         if self.rag_facade is not None and node_scope is not None:
@@ -176,9 +189,11 @@ class RuntimeEnv:
             kv=self.container.kv_hot,  # keep using hot kv for ephemeral
             memory=self.memory_factory,  # factory (for other sessions if needed)
             memory_facade=mem,  # bound memory for this run/node
+            viz=vis_facade,
             llm=self.llm_service,  # LLMService
             rag=rag_for_node,  # RAGService
             mcp=self.mcp_service,  # MCPService
+            run_manager=self.container.run_manager,  # RunManager
         )
         return ExecutionContext(
             run_id=self.run_id,

@@ -10,7 +10,13 @@ from aethergraph.contracts.errors.errors import GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.execution.forward_scheduler import ForwardScheduler
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
-from aethergraph.core.runtime.run_types import RunRecord, RunStatus
+from aethergraph.core.runtime.run_types import (
+    RunImportance,
+    RunOrigin,
+    RunRecord,
+    RunStatus,
+    RunVisibility,
+)
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
@@ -165,9 +171,9 @@ class RunManager:
         target: Any,
         graph_id: str,
         inputs: dict[str, Any],
-        identity: RequestIdentity | None,
-        user_id: str | None,
-        org_id: str | None,
+        identity: RequestIdentity,
+        # user_id: str | None,
+        # org_id: str | None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
         """
         Shared core logic that actually calls run_or_resume_async, updates
@@ -177,6 +183,9 @@ class RunManager:
           (record, outputs, has_waits, continuations)
         """
         from aethergraph.core.runtime.graph_runner import run_or_resume_async
+
+        user_id = identity.user_id
+        org_id = identity.org_id
 
         # tags = record.tags or []
         started_at = record.started_at or _utcnow()
@@ -278,8 +287,11 @@ class RunManager:
         session_id: str | None = None,
         tags: list[str] | None = None,
         identity: RequestIdentity | None = None,
-        user_id: str | None = None,  # back-compat
-        org_id: str | None = None,  # back-compat
+        origin: RunOrigin | None = None,
+        visibility: RunVisibility | None = None,
+        importance: RunImportance | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
     ) -> RunRecord:
         """
         Non-blocking entrypoint for the HTTP API.
@@ -290,8 +302,8 @@ class RunManager:
         - Returns immediately with the record (for run_id, status, etc).
         """
         if identity is not None:
-            user_id = user_id or identity.user_id
-            org_id = org_id or identity.org_id
+            user_id = identity.user_id
+            org_id = identity.org_id
 
         # Acquire run slot (rate limiting)
         await self._acquire_run_slot()
@@ -339,6 +351,12 @@ class RunManager:
                 user_id=user_id,
                 org_id=org_id,
                 meta={},
+                session_id=session_id,
+                origin=origin or RunOrigin.app,  # app is a typical default for graph runs
+                visibility=visibility or RunVisibility.normal,
+                importance=importance or RunImportance.normal,
+                agent_id=agent_id,
+                app_id=app_id,
             )
 
             if flow_id:
@@ -360,8 +378,8 @@ class RunManager:
                         target=target,
                         graph_id=graph_id,
                         inputs=inputs,
-                        user_id=user_id,
-                        org_id=org_id,
+                        # user_id=user_id,
+                        # org_id=org_id,
                         identity=identity,
                     )
                 finally:
@@ -398,8 +416,7 @@ class RunManager:
         run_id: str | None = None,
         session_id: str | None = None,
         tags: list[str] | None = None,
-        user_id: str | None = None,
-        org_id: str | None = None,
+        identity: RequestIdentity | None = None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
         """
         Blocking helper (original behaviour).
@@ -412,6 +429,9 @@ class RunManager:
 
         Still useful for tests/CLI, but the HTTP route should prefer submit_run().
         """
+        if identity is None:
+            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+
         tags = tags or []
         target = await self._resolve_target(graph_id)
         rid = run_id or f"run-{uuid4().hex[:8]}"
@@ -444,12 +464,16 @@ class RunManager:
             run_id=rid,
             graph_id=graph_id,
             kind=kind,
-            status=RunStatus.running,
+            status=RunStatus.running,  # we go straight to running as before
             started_at=started_at,
             tags=list(tags),
-            user_id=user_id,
-            org_id=org_id,
+            user_id=identity.user_id,
+            org_id=identity.org_id,
             meta={},
+            session_id=session_id,
+            origin=RunOrigin.app,  # app is a typical default for graph runs
+            visibility=RunVisibility.normal,
+            importance=RunImportance.normal,
         )
 
         if flow_id:
@@ -469,8 +493,7 @@ class RunManager:
             target=target,
             graph_id=graph_id,
             inputs=inputs,
-            user_id=user_id,
-            org_id=org_id,
+            identity=identity,
         )
 
     async def get_record(self, run_id: str) -> RunRecord | None:
@@ -484,6 +507,7 @@ class RunManager:
         *,
         graph_id: str | None = None,
         status: RunStatus | None = None,
+        session_id: str | None = None,
         flow_id: str | None = None,  # NEW
         limit: int = 100,
         offset: int = 0,
@@ -493,7 +517,7 @@ class RunManager:
 
         # First filter by graph_id/status in the store (TODO: implement self._store.list with flow_id for efficiency)
         records = await self._store.list(
-            graph_id=graph_id, status=status, limit=limit, offset=offset
+            graph_id=graph_id, status=status, session_id=session_id, limit=limit, offset=offset
         )
 
         if flow_id is not None:

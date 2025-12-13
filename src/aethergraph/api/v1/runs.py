@@ -1,13 +1,12 @@
 # /runs
 
-from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
-from aethergraph.core.runtime.run_manager import RunManager
+from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
@@ -46,8 +45,12 @@ async def create_run(
         inputs=body.inputs or {},
         run_id=body.run_id,
         tags=body.tags,
-        user_id=identity.user_id,
-        org_id=identity.org_id,
+        identity=identity,
+        origin=body.origin or RunOrigin.app,
+        visibility=body.visibility or RunVisibility.normal,
+        importance=body.importance or RunImportance.normal,
+        agent_id=body.agent_id or None,
+        app_id=body.app_id or None,
     )
 
     return RunCreateResponse(
@@ -60,20 +63,6 @@ async def create_run(
         started_at=record.started_at,
         finished_at=record.finished_at,
     )
-
-
-def _has_client_tag(tags: Iterable[str] | None, client_id: str | None) -> bool:
-    """
-    TEMP: demo-only helper.
-    Returns True if tags contain a tag of the form `client:<client_id>`.
-    If client_id is None, always returns True (no filtering).
-    """
-    if not client_id:
-        return True
-    if not tags:
-        return False
-    needle = f"client:{client_id}"
-    return any(t == needle for t in tags)
 
 
 def _extract_app_id_from_tags(tags: list[str]) -> str | None:
@@ -94,7 +83,7 @@ async def list_runs(
     graph_id: str | None = Query(None),  # noqa: B008
     status: RunStatus | None = Query(None),  # noqa: B008
     flow_id: str | None = Query(None),  # noqa: B008
-    cursor: str | None = Query(None),  # noqa: B008 (unused for now)
+    cursor: str | None = Query(None),  # noqa: B008
     limit: int = Query(20, ge=1, le=100),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> RunListResponse:
@@ -123,8 +112,12 @@ async def list_runs(
     # --- TEMP: client_id-based soft filtering for the demo ---
     # In real multi-tenant setup, prefer identity.user_id/org_id instead.
     # And use a proper database-backed RunStore with query filtering.
-    if identity.mode == "demo" and identity.client_id:
-        records = [rec for rec in records if _has_client_tag(rec.tags, identity.client_id)]
+    if identity.mode in ("cloud", "demo"):
+        user, _ = identity.user_id, identity.org_id
+        if user is not None:
+            records = [rec for rec in records if rec.user_id == user]
+        else:
+            raise HTTPException(status_code=403, detail="User identity required")
 
     reg = getattr(container, "registry", None) or current_registry()
     summaries: list[RunSummary] = []
@@ -145,8 +138,8 @@ async def list_runs(
 
         effective_flow_id = rec.meta.get("flow_id") or flow_meta_id
 
-        # 🔹 derive app_id / app_name from record meta / tags
-        app_id = rec.meta.get("app_id") or _extract_app_id_from_tags(rec.tags)
+        # derive app_id / app_name from record meta / tags
+        app_id = rec.app_id  # or _extract_app_id_from_tags(rec.tags)
         app_name = rec.meta.get("app_name")  # optional, you can set later
 
         summaries.append(
@@ -165,11 +158,16 @@ async def list_runs(
                 meta=rec.meta or {},
                 app_id=app_id,
                 app_name=app_name,
+                agent_id=rec.meta.get("agent_id") or None,
+                session_id=rec.session_id or None,
+                origin=rec.origin,
+                visibility=rec.visibility,
+                importance=rec.importance,
             )
         )
 
-        # Update next_cursor for pagination
-        next_cursor = encode_cursor(offset + limit) if len(records) == limit else None
+    # Update next_cursor for pagination
+    next_cursor = encode_cursor(offset + limit) if len(records) == limit else None
 
     return RunListResponse(runs=summaries, next_cursor=next_cursor)
 
@@ -194,8 +192,13 @@ async def get_run(
     if rec is None:
         raise HTTPException(status_code=404, detail="Run not found")
 
-    if identity.mode == "demo" and not _has_client_tag(rec.tags, identity.client_id):
-        raise HTTPException(status_code=404, detail="Run not found")
+    if identity.mode in ("cloud", "demo"):
+        user, _ = identity.user_id, identity.org_id
+        if user is not None:
+            if rec.user_id != user:
+                raise HTTPException(status_code=404, detail="Run not found")
+        else:
+            raise HTTPException(status_code=403, detail="User identity required")
 
     reg = getattr(container, "registry", None) or current_registry()
     flow_id: str | None = None
@@ -212,9 +215,10 @@ async def get_run(
         flow_id = meta.get("flow_id")
         entrypoint = bool(meta.get("entrypoint", False))
 
-    # 🔹 derive app info
-    app_id = rec.meta.get("app_id") or _extract_app_id_from_tags(rec.tags)
+    app_id = rec.app_id or rec.meta.get("app_id") or _extract_app_id_from_tags(rec.tags)
     app_name = rec.meta.get("app_name")
+    agent_id = rec.agent_id or rec.meta.get("agent_id")
+
     return RunSummary(
         run_id=rec.run_id,
         graph_id=rec.graph_id,
@@ -230,6 +234,11 @@ async def get_run(
         meta=rec.meta or {},
         app_id=app_id,
         app_name=app_name,
+        agent_id=agent_id,
+        session_id=rec.session_id or None,
+        origin=rec.origin,
+        visibility=rec.visibility,
+        importance=rec.importance,
     )
 
 
@@ -490,31 +499,6 @@ async def get_run_snapshot(
     )
 
 
-def _has_client_tag(tags: list[str] | None, client_id: str) -> bool:
-    if not tags:
-        return False
-    needle = f"client:{client_id}"
-    return any(t == needle for t in tags)
-
-
-async def _assert_run_belongs_to_client(
-    run_id: str,
-    client_id: str | None,
-    rm: "RunManager",
-) -> None:
-    """
-    For demo: raise 404 if client_id is provided and the run is not tagged
-    with client:<client_id>. If client_id is None, do nothing.
-    """
-    if not client_id:
-        return
-
-    rec = await rm.get_record(run_id)
-    if rec is None or not _has_client_tag(rec.tags, client_id):
-        # Don't leak existence
-        raise HTTPException(status_code=404, detail="Run not found")
-
-
 @router.get("/runs/{run_id}/channel/events", response_model=list[RunChannelEvent])
 async def get_run_channel_events(
     run_id: str,
@@ -534,17 +518,6 @@ async def get_run_channel_events(
 
     if event_log is None or rm is None:
         raise HTTPException(status_code=503, detail="Event log or run manager not configured")
-
-    # --- Demo-only client_id guard (using the RUN tags, not event tags) ---
-    if identity.mode == "demo" and identity.client_id:
-        rec = await rm.get_record(run_id)
-        if rec is None:
-            # don't leak existence details
-            raise HTTPException(status_code=404, detail="Run not found")
-
-        if not _has_client_tag(rec.tags, identity.client_id):
-            # pretend it doesn't exist for this client
-            raise HTTPException(status_code=404, detail="Run not found")
 
     # --- Build the time filter ---
     since_dt: datetime | None = None
@@ -578,101 +551,3 @@ async def get_run_channel_events(
     # Sort ascending by ts for stable UI
     out.sort(key=lambda ev: ev.ts)
     return out
-
-
-# @router.get("/runs/{run_id}/channel/events", response_model=list[RunChannelEvent])
-# async def get_run_channel_events(
-#     run_id: str,
-#     request: Request,
-#     since_ts: float | None = None,
-# ):
-#     """
-#     Fetch normalized UI channel events for a run.
-
-#     Frontend can poll with since_ts for incremental updates.
-#     """
-#     try:
-#         container = request.app.state.container
-#         event_log = container.eventlog  # eventlog for channels or equivalent
-
-#         since_dt: datetime | None = None
-#         if since_ts is not None:
-#             # assuming ts stored as seconds since epoch (float)
-#             since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
-
-#         events = await event_log.query(
-#             scope_id=run_id,
-#             since=since_dt,
-#             kinds=["run_channel"],
-#             limit=200,  # some reasonable cap
-#         )
-
-#         # map to frontend shape
-#         out = []
-#         for e in events:
-#             payload = e.get("payload", {})
-#             event = RunChannelEvent(
-#                 id=e.get("id"),
-#                 run_id=e.get("scope_id") or run_id,
-#                 type=payload.get("type") or "agent.message",
-#                 text=payload.get("text"),
-#                 buttons=payload.get("buttons") or [],
-#                 file=payload.get("file"),
-#                 meta=payload.get("meta") or {},
-#                 ts=e.get("ts"),
-#             )
-#             out.append(event)
-
-#         # sort ascending by ts so UI is stable
-#         out.sort(key=lambda ev: ev.ts)
-#         return out
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e)) from e
-
-
-# @router.get("/runs/{run_id}/channel/events", response_model=list[RunChannelEvent])
-# async def get_run_channel_events(
-#     run_id: str,
-#     request: Request,
-#     since_ts: float | None = None,
-# ):
-#     """
-#     Fetch normalized UI channel events for a run.
-
-#     Frontend can poll with since_ts for incremental updates.
-#     """
-#     try:
-#         container = request.app.state.container
-#         event_log = container.eventlog  # eventlog for channels or equivalent
-
-#         since_dt = None
-#         if since_ts is not None:
-#             since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
-
-#         # EventLog.query signature may differ; adapt as needed.
-#         # We assume it filters by scope_id and time range.
-#         rows = await event_log.query(
-#             scope_id=f"run-ui:{run_id}",
-#             since=since_dt,
-#             until=None,
-#         )
-
-#         # Each row is the dict we appended in the adapter; ensure fields exist
-#         events: list[RunChannelEvent] = []
-#         for row in rows:
-#             events.append(
-#                 RunChannelEvent(
-#                     id=row.get("id"),
-#                     run_id=row.get("run_id", run_id),
-#                     type=row.get("type"),
-#                     text=row.get("text"),
-#                     buttons=row.get("buttons") or [],
-#                     file=row.get("file"),
-#                     meta=row.get("meta") or {},
-#                     ts=row.get("ts"),
-#                 )
-#             )
-
-#         return events
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e)) from e

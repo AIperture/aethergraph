@@ -13,6 +13,7 @@ from aethergraph.contracts.services.llm import LLMClientProtocol
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.contracts.services.runs import RunStore
+from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
@@ -58,6 +59,7 @@ from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.tracing.noop import NoopTracer
+from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
 from aethergraph.storage.factory import (
@@ -75,6 +77,7 @@ from aethergraph.storage.factory import (
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
+from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
 
 SERVICE_KEYS = [
     # core
@@ -145,6 +148,9 @@ class DefaultContainer:
     # memory
     memory_factory: MemoryFactory
 
+    # viz - only useful with frontend; otherwise this is a pure storage service for metrics and images
+    viz_service: VizService | None = None
+
     # optional llm service
     llm: LLMClientProtocol | None = None
     rag: RAGFacade | None = None
@@ -153,6 +159,7 @@ class DefaultContainer:
     # run controls -- for http endpoints and run manager
     run_store: RunStore | None = None
     run_manager: RunManager | None = None  # RunManager
+    session_store: SessionStore | None = None  # SessionStore
 
     # optional services (not used by default)
     event_bus: InMemoryEventBus | None = None
@@ -263,6 +270,8 @@ def build_default_container(
     artifacts = build_artifact_store(cfg)
     artifact_index = build_artifact_index(cfg)
 
+    viz_service = VizService(event_log=eventlog)
+
     # optional services
     secrets = (
         EnvSecrets()
@@ -310,7 +319,7 @@ def build_default_container(
         sched_registry=sched_registry,
         max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
     )
-
+    session_store = InMemorySessionStore()  # simple in-memory session store for development/testing
     # Metering service
     # TODO: make metering service configurable
     metering_store = EventLogMeteringStore(event_log=eventlog)
@@ -345,6 +354,7 @@ def build_default_container(
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,
+        viz_service=viz_service,
         eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
@@ -352,6 +362,7 @@ def build_default_container(
         mcp=mcp,
         run_store=run_store,
         run_manager=run_manager,
+        session_store=session_store,
         secrets=secrets,
         event_bus=None,
         prompts=None,
