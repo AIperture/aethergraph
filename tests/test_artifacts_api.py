@@ -43,6 +43,7 @@ class FakeArtifactIndex:
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
         limit: int | None = None,
+        offset: int | None = None,
     ) -> list[Artifact]:
         results = list(self._artifacts.values())
 

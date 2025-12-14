@@ -7,6 +7,13 @@ from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
 
 
+class Identity:
+    # Mock identity object - the real is under aethergraph.api.v1.deps RequestIdentity
+    def __init__(self, user_id: str, org_id: str):
+        self.user_id = user_id
+        self.org_id = org_id
+
+
 class DummyRunStore:
     async def create(self, record: RunRecord) -> None:
         # minimal stub
@@ -55,8 +62,7 @@ async def test_run_manager_max_concurrent_runs_blocks_extra(monkeypatch):
         target,
         graph_id,
         inputs,
-        user_id,
-        org_id,
+        identity,
     ):
         # Keep the slot occupied until the test unblocks it
         await block_event.wait()
@@ -70,12 +76,12 @@ async def test_run_manager_max_concurrent_runs_blocks_extra(monkeypatch):
     )
 
     # Start the first run: it will schedule _bg which waits on block_event
+
     task1 = asyncio.create_task(
         rm.submit_run(
             "graph-1",
             inputs={},
-            user_id="u1",
-            org_id="o1",
+            identity=Identity(user_id="u1", org_id="o1"),
         )
     )
 
@@ -87,8 +93,7 @@ async def test_run_manager_max_concurrent_runs_blocks_extra(monkeypatch):
         await rm.submit_run(
             "graph-1",
             inputs={},
-            user_id="u2",
-            org_id="o2",
+            identity=Identity(user_id="u2", org_id="o2"),
         )
 
     assert excinfo.value.status_code == 429

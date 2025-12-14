@@ -9,6 +9,13 @@ from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.storage.runs.inmen_store import InMemoryRunStore
 
 
+class Identity:
+    # Mock identity object - the real is under aethergraph.api.v1.deps RequestIdentity
+    def __init__(self, user_id: str, org_id: str):
+        self.user_id = user_id
+        self.org_id = org_id
+
+
 @pytest.fixture
 def dummy_meter(monkeypatch):
     """
@@ -61,13 +68,13 @@ async def test_run_manager_start_run_success(monkeypatch, dummy_meter):
         fake_run_or_resume_async,
     )
 
+    identity = Identity(user_id="u1", org_id="o1")
     record, outputs, has_waits, continuations = await rm.start_run(
         graph_id="my-graph",
         inputs={"x": 1},
         run_id=None,
         tags=["t1"],
-        user_id="u1",
-        org_id="o1",
+        identity=identity,
     )
 
     # RunRecord returned
@@ -225,11 +232,11 @@ async def test_run_manager_submit_run_non_blocking(monkeypatch, dummy_meter):
     )
 
     # Call submit_run: this should return quickly with a RunRecord
+    identity = Identity(user_id="u1", org_id="o1")
     record = await rm.submit_run(
         graph_id="my-graph",
         inputs={"x": 2},
-        user_id="u1",
-        org_id="o1",
+        identity=identity,
         tags=["t1"],
     )
 
