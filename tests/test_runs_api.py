@@ -33,16 +33,21 @@ class FakeRunManager:
         inputs,
         run_id=None,
         tags=None,
-        user_id=None,
-        org_id=None,
+        identity: FakeIdentity,
+        session_id: str | None = None,
+        origin: str | None = None,
+        visibility: str | None = None,
+        importance: str | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
     ):
         self.last_call = {
             "graph_id": graph_id,
             "inputs": inputs,
             "run_id": run_id,
             "tags": tags,
-            "user_id": user_id,
-            "org_id": org_id,
+            "user_id": identity.user_id,
+            "org_id": identity.org_id,
         }
         # For the HTTP API, submit_run returns just a RunRecord
         rec = RunRecord(
@@ -53,8 +58,8 @@ class FakeRunManager:
             started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
             finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
             tags=tags or [],
-            user_id=user_id,
-            org_id=org_id,
+            user_id=identity.user_id,
+            org_id=identity.org_id,
         )
         return rec
 
@@ -97,6 +102,12 @@ class FakeMetering:
         }
 
 
+class FakeAuthz:
+    async def authorize(self, identity, scope, action) -> None:
+        """Always allow."""
+        return
+
+
 class FakeSettings:
     """
     Minimal settings object with a .rate_limit field so the dependency can read it.
@@ -134,11 +145,13 @@ def client(monkeypatch) -> TestClient:
         max_runs_per_window=1000,  # effectively no window limit for baseline tests
         burst_max_runs=1000,  # effectively no burst limit
     )
+    fake_authz = FakeAuthz()
 
     class FakeContainer:
         run_manager = fake_rm
         metering = fake_meter
         settings = fake_settings
+        authz = fake_authz
         # No burst limiter for the baseline; the dependency will treat this as "no limiter"
         run_burst_limiter = None
 
@@ -214,6 +227,7 @@ def test_run_endpoint_window_rate_limit(monkeypatch):
         runs_window="1h",
         burst_max_runs=1000,  # large so burst limit won't trigger here
     )
+    fake_authz = FakeAuthz()
 
     # We do want a container instance type here
     class FakeContainer:
@@ -221,6 +235,7 @@ def test_run_endpoint_window_rate_limit(monkeypatch):
         metering = fake_meter
         settings = fake_settings
         run_burst_limiter = None
+        authz = fake_authz
 
     monkeypatch.setattr(
         "aethergraph.api.v1.runs.current_services",
@@ -271,12 +286,14 @@ def test_run_endpoint_burst_rate_limit(monkeypatch):
         max_events=fake_settings.rate_limit.burst_max_runs,
         window_seconds=fake_settings.rate_limit.burst_window_seconds,
     )
+    fake_authz = FakeAuthz()
 
     class FakeContainer:
         run_manager = fake_rm
         metering = fake_meter
         settings = fake_settings
         run_burst_limiter = burst_limiter
+        authz = fake_authz
 
     monkeypatch.setattr(
         "aethergraph.api.v1.runs.current_services",

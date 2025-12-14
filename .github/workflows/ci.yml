@@ -35,7 +35,7 @@ jobs:
           python -m pip install -U pip wheel
           pip install -e ".${{ matrix.extras }}"
           # Dev tools (adjust if you use Poetry/uv/tox)
-          pip install pytest pytest-cov mypy ruff trio
+          pip install pytest pytest-cov pytest-asyncio mypy ruff
 
       - name: Ruff auto-fix (one-time)
         if: ${{ github.ref == 'refs/heads/your-fix-branch' }}
