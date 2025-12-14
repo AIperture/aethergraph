@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aethergraph.contracts.services.metering import MeteringService, MeteringStore
+from aethergraph.services.scope.scope import Scope
 
 
 class EventLogMeteringService(MeteringService):
@@ -44,6 +45,47 @@ class EventLogMeteringService(MeteringService):
             delta = timedelta(0)
 
         return datetime.now(timezone.utc) - delta
+
+    @staticmethod
+    def _dims_from_scope(
+        scope: Scope | None,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        run_id: str | None = None,
+        graph_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Merge identity/execution dimensions from Scope + explicit overrides.
+
+        - If scope is None, we just return the explicit values.
+        - If scope is present, its metering_dimensions() provide defaults,
+          and explicit args win when provided.
+        """
+        if scope is None:
+            return {
+                "user_id": user_id,
+                "org_id": org_id,
+                "run_id": run_id,
+                "graph_id": graph_id,
+                "client_id": client_id,
+                "app_id": app_id,
+                "session_id": session_id,
+            }
+
+        s = scope.metering_dimensions()
+        return {
+            "user_id": user_id if user_id is not None else s.get("user_id"),
+            "org_id": org_id if org_id is not None else s.get("org_id"),
+            "run_id": run_id if run_id is not None else s.get("run_id"),
+            "graph_id": graph_id if graph_id is not None else s.get("graph_id"),
+            "client_id": client_id if client_id is not None else s.get("client_id"),
+            "app_id": app_id if app_id is not None else s.get("app_id"),
+            "session_id": session_id if session_id is not None else s.get("session_id"),
+        }
 
     async def _query(
         self,
@@ -101,21 +143,41 @@ class EventLogMeteringService(MeteringService):
     async def record_llm(
         self,
         *,
+        scope: Scope | None = None,
         user_id: str | None = None,
         org_id: str | None = None,
         run_id: str | None = None,
+        graph_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+        session_id: str | None = None,
         model: str,
         provider: str,
         prompt_tokens: int,
         completion_tokens: int,
         latency_ms: int | None = None,
     ) -> None:
+        dims = self._dims_from_scope(
+            scope,
+            user_id=user_id,
+            org_id=org_id,
+            run_id=run_id,
+            graph_id=graph_id,
+            client_id=client_id,
+            app_id=app_id,
+            session_id=session_id,
+        )
+
         await self._append(
             {
                 "kind": "meter.llm",
-                "user_id": user_id,
-                "org_id": org_id,
-                "run_id": run_id,
+                "user_id": dims["user_id"],
+                "org_id": dims["org_id"],
+                "client_id": dims["client_id"],
+                "app_id": dims["app_id"],
+                "session_id": dims["session_id"],
+                "run_id": dims["run_id"],
+                "graph_id": dims["graph_id"],
                 "model": model,
                 "provider": provider,
                 "prompt_tokens": int(prompt_tokens),
@@ -128,20 +190,38 @@ class EventLogMeteringService(MeteringService):
     async def record_run(
         self,
         *,
+        scope: Scope | None = None,
         user_id: str | None = None,
         org_id: str | None = None,
         run_id: str | None = None,
         graph_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+        session_id: str | None = None,
         status: str | None = None,
         duration_s: float | None = None,
     ) -> None:
+        dims = self._dims_from_scope(
+            scope,
+            user_id=user_id,
+            org_id=org_id,
+            run_id=run_id,
+            graph_id=graph_id,
+            client_id=client_id,
+            app_id=app_id,
+            session_id=session_id,
+        )
+
         await self._append(
             {
                 "kind": "meter.run",
-                "user_id": user_id,
-                "org_id": org_id,
-                "run_id": run_id,
-                "graph_id": graph_id,
+                "user_id": dims["user_id"],
+                "org_id": dims["org_id"],
+                "client_id": dims["client_id"],
+                "app_id": dims["app_id"],
+                "session_id": dims["session_id"],
+                "run_id": dims["run_id"],
+                "graph_id": dims["graph_id"],
                 "status": status,
                 "duration_s": float(duration_s) if duration_s is not None else None,
                 "tags": ["meter.run"],
@@ -151,21 +231,39 @@ class EventLogMeteringService(MeteringService):
     async def record_artifact(
         self,
         *,
+        scope: Scope | None = None,
         user_id: str | None = None,
         org_id: str | None = None,
         run_id: str | None = None,
         graph_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+        session_id: str | None = None,
         kind: str,
         bytes: int,
         pinned: bool = False,
     ) -> None:
+        dims = self._dims_from_scope(
+            scope,
+            user_id=user_id,
+            org_id=org_id,
+            run_id=run_id,
+            graph_id=graph_id,
+            client_id=client_id,
+            app_id=app_id,
+            session_id=session_id,
+        )
+
         await self._append(
             {
                 "kind": "meter.artifact",
-                "user_id": user_id,
-                "org_id": org_id,
-                "run_id": run_id,
-                "graph_id": graph_id,
+                "user_id": dims["user_id"],
+                "org_id": dims["org_id"],
+                "client_id": dims["client_id"],
+                "app_id": dims["app_id"],
+                "session_id": dims["session_id"],
+                "run_id": dims["run_id"],
+                "graph_id": dims["graph_id"],
                 "artifact_kind": kind,
                 "bytes": int(bytes),
                 "pinned": bool(pinned),
@@ -176,25 +274,43 @@ class EventLogMeteringService(MeteringService):
     async def record_event(
         self,
         *,
+        scope: Scope | None = None,
         user_id: str | None = None,
         org_id: str | None = None,
         run_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+        session_id: str | None = None,
         scope_id: str | None = None,
         kind: str,
     ) -> None:
+        dims = self._dims_from_scope(
+            scope,
+            user_id=user_id,
+            org_id=org_id,
+            run_id=run_id,
+            graph_id=None,
+            client_id=client_id,
+            app_id=app_id,
+            session_id=session_id,
+        )
+
         await self._append(
             {
                 "kind": "meter.event",
-                "user_id": user_id,
-                "org_id": org_id,
-                "run_id": run_id,
+                "user_id": dims["user_id"],
+                "org_id": dims["org_id"],
+                "client_id": dims["client_id"],
+                "app_id": dims["app_id"],
+                "session_id": dims["session_id"],
+                "run_id": dims["run_id"],
                 "event_kind": kind,
                 "scope_id": scope_id,
                 "tags": ["meter.event"],
             }
         )
 
-    # ---------- read methods ----------
+    # ---------- read methods (unchanged for now) ----------
 
     async def get_overview(
         self,
@@ -307,14 +423,6 @@ class EventLogMeteringService(MeteringService):
         window: str = "24h",
         run_ids: set[str] | None = None,
     ) -> dict[str, dict[str, int]]:
-        """
-        Return aggregated stats by artifact kind, e.g.:
-
-        {
-          "json":  {"count": N, "bytes": B, "pinned_count": Pn, "pinned_bytes": Pb},
-          "image": {...},
-        }
-        """
         rows = await self._query(
             window=window,
             kinds=["meter.artifact"],
@@ -364,7 +472,6 @@ class EventLogMeteringService(MeteringService):
             if not ek.startswith("memory."):
                 continue
 
-            # Group by the full "memory.<kind>" for now
             s = stats.setdefault(ek, {"count": 0})
             s["count"] += 1
         return stats

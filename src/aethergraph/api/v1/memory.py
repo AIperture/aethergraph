@@ -6,6 +6,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query
 
+from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.contracts.services.memory import Event
 from aethergraph.core.runtime.runtime_services import current_services
 
@@ -133,6 +134,15 @@ async def list_memory_events(
       - Implement cursor-based pagination.
       - Optionally map scope_id → multiple runs.
       - Filter by identity.user_id / org_id when multi-tenant.
+
+    NOTE:
+      - Currently reads from HotLog only (recent in-memory events),
+        NOT the long-term persistence/event log.
+      - Fetches up to hot_limit+10 and applies filters + cursor (offset) in Python.
+      - Pagination is therefore limited to the hot buffer; older events are not visible.
+    In the future, we may want to:
+      - Integrate with EventLog-based persistence for full history,
+      - Move filtering + pagination closer to the store layer.
     """
     container = current_services()
     mem_factory = getattr(container, "memory_factory", None)
@@ -171,12 +181,13 @@ async def list_memory_events(
                 continue
         filtered.append(evt)
 
-    # Latest events last, ehen slice to requested limit
-    if len(filtered) > limit:
-        filtered = filtered[-limit:]
+    # Apply offset and limit
+    offset = decode_cursor(cursor)
+    page = filtered[offset : offset + limit]
+    api_events = [_event_to_api_event(e) for e in page]
 
-    api_events = [_event_to_api_event(e) for e in filtered]
-    return MemoryEventListResponse(events=api_events, next_cursor=None)
+    next_cursor = encode_cursor(offset + limit) if len(filtered) > offset + limit else None
+    return MemoryEventListResponse(events=api_events, next_cursor=next_cursor)
 
 
 @router.get("/memory/summaries", response_model=MemorySummaryListResponse)

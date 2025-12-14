@@ -7,20 +7,36 @@ from typing import Any, Protocol
 
 @dataclass
 class Artifact:
+    # Basic artifact metadata
     artifact_id: str
     uri: str
     kind: str
     bytes: int
     sha256: str
     mime: str | None
+
+    # Provenance
     run_id: str
     graph_id: str
     node_id: str
     tool_name: str
     tool_version: str
     created_at: str
-    labels: dict[str, Any]
-    metrics: dict[str, Any]
+
+    # Optional metadata
+    org_id: str | None = None
+    user_id: str | None = None
+    client_id: str | None = None
+    app_id: str | None = None
+    session_id: str | None = None
+
+    # Labels and metrics
+    labels: dict[str, Any] | None = (
+        None  # this will also include provenance and metadata labels for indexing
+    )
+    metrics: dict[str, Any] | None = None
+
+    # Preview
     preview_uri: str | None = None  # for rendering previews in UI, not tied to storage
     pinned: bool = False
 
@@ -135,6 +151,7 @@ class AsyncArtifactIndex(Protocol):
         labels: dict | None = None,
         metric: str | None = None,
         mode: str | None = None,
+        limit: int | None = None,
     ) -> list[Artifact]: ...
     async def best(
         self, *, kind: str, metric: str, mode: str, filters: dict | None = None

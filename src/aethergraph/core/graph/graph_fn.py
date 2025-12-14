@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import inspect
+from typing import Any
 
 from aethergraph.core.runtime.run_registration import RunRegistrationGuard
 
@@ -192,46 +193,102 @@ def graph_fn(
     inputs: list[str] | None = None,
     outputs: list[str] | None = None,
     version: str = "0.1.0",
-    agent: str
-    | None = None,  # if agent is set, register this graph fn as an agent with given name,
     *,
     entrypoint: bool = False,
     flow_id: str | None = None,
     tags: list[str] | None = None,
+    as_agent: dict[str, Any] | None = None,
+    as_app: dict[str, Any] | None = None,
 ) -> Callable[[Callable], GraphFunction]:
     """Decorator to define a graph function."""
 
-    def decorator(fn: Callable):
+    def decorator(fn: Callable) -> GraphFunction:
         gf = GraphFunction(name=name, fn=fn, inputs=inputs, outputs=outputs, version=version)
-        # Register in registry if given
         registry = current_registry()
 
-        if registry is not None:
-            meta = {
-                "kind": "graphfn",
-                "entrypoint": entrypoint,
-                "flow_id": flow_id or name,  # if no flow_id is given, use name as default
-                "tags": tags or [],
+        if registry is None:
+            # no registry available, just return the graph function
+            return gf
+
+        base_tags = tags or []
+        graph_meta: dict[str, Any] = {
+            "kind": "graphfn",
+            "entrypoint": entrypoint,
+            "flow_id": flow_id or name,
+            "tags": base_tags,
+        }
+
+        registry.register(
+            nspace="graphfn",
+            name=name,
+            version=version,
+            obj=gf,
+            meta=graph_meta,
+        )
+
+        # Register as agent if requested
+        if as_agent is not None:
+            agent_meta = dict(as_agent)
+
+            agent_id = agent_meta.get("id", name)
+            agent_title = agent_meta.get("title", f"Agent for {name}")
+            agent_flow_id = agent_meta.get("flow_id", graph_meta["flow_id"])
+            agent_tags = agent_meta.get("tags", base_tags)
+
+            extra = {
+                k: v for k, v in agent_meta.items() if k not in {"id", "title", "flow_id", "tags"}
             }
+
+            full_agent_meta: dict[str, Any] = {
+                "kind": "agent",
+                "id": agent_id,
+                "title": agent_title,
+                "flow_id": agent_flow_id,
+                "tags": agent_tags,
+                "backing": {"type": "graphfn", "name": name, "version": version},
+                **extra,
+            }
+
             registry.register(
-                nspace="graphfn",
-                name=name,
+                nspace="agent",
+                name=agent_id,
                 version=version,
-                obj=gf,  # we register GraphFunction directly without spec -- graph function is already a runtime object
-                meta=meta,
+                obj=gf,
+                meta=full_agent_meta,
             )
 
-        if agent:
-            agent_meta = {
-                "kind": "agent",
-                "flow_id": meta["flow_id"],
-                "tags": meta["tags"],
-                "backing": {"type": "graphfn", "name": name, "version": version},
+        # Register as app if requested
+        if as_app is not None:
+            app_meta = dict(as_app)
+
+            app_id = app_meta.get("id", name)
+            app_flow_id = app_meta.get("flow_id", graph_meta["flow_id"])
+            app_name = app_meta.get("name", f"App for {name}")
+            app_tags = app_meta.get("tags", base_tags)
+
+            extra = {
+                k: v for k, v in app_meta.items() if k not in {"id", "name", "flow_id", "tags"}
             }
-            assert (
-                registry is not None
-            ), "No registry available to register agent, make sure to have a current_registry() set up."
-            registry.register(nspace="agent", name=agent, version=version, obj=gf, meta=agent_meta)
+
+            full_app_meta: dict[str, Any] = {
+                "kind": "app",
+                "id": app_id,
+                "name": app_name,
+                "graph_id": name,
+                "flow_id": app_flow_id,
+                "tags": app_tags,
+                "backing": {"type": "graphfn", "name": name, "version": version},
+                **extra,
+            }
+
+            registry.register(
+                nspace="app",
+                name=app_id,
+                version=version,
+                obj=gf,
+                meta=full_app_meta,
+            )
+
         return gf
 
     return decorator

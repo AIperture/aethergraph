@@ -36,9 +36,11 @@ class WebUIChannelAdapter(ChannelAdapter):
     def __init__(self, event_log: EventLog):
         self.event_log = event_log
 
-    def _extract_run_id(self, channel_key: str) -> str:
+    def _extract_target(self, channel_key: str) -> tuple[str, str]:
         """
-        Parse "ui:run/<run_id>" channel key to get run_id.
+        Parse "ui:run/<run_id>" or "ui:session/<session_id>".
+
+        Returns (scope_kind, id), where scope_kind in {"run", "session"}.
         """
         try:
             scheme, rest = channel_key.split(":", 1)
@@ -48,13 +50,13 @@ class WebUIChannelAdapter(ChannelAdapter):
         if scheme != "ui":
             raise ValueError(f"Invalid UI channel key scheme: {scheme!r}")
 
-        # for d0, expect "run/<run_id>"
-        if not rest.startswith("run/"):
-            # future-compat: allow direct run_id, but warn
-            # e.g. "ui:<run_id>"
-            return rest  # assume rest is run_id directly
+        if rest.startswith("run/"):
+            return "run", rest.split("/", 1)[1]
+        if rest.startswith("session/"):
+            return "session", rest.split("/", 1)[1]
 
-        return rest.split("/", 1)[1]  # get run_id
+        # fallback: treat as run id
+        return "run", rest
 
     def _button_to_dict(self, b: Button | Any) -> dict[str, Any]:
         # Be defensive: Button is a dataclass, but Slack adapter also handles light-weight objects
@@ -66,38 +68,43 @@ class WebUIChannelAdapter(ChannelAdapter):
         }
 
     async def send(self, event: OutEvent) -> dict | None:
-        """
-        Normalize OutEvent -> UIChannelEvent dict and append to EventLog.
-        """
-        run_id = self._extract_run_id(event.channel)
+        scope_kind, target_id = self._extract_target(event.channel)
 
         raw_buttons = getattr(event, "buttons", None) or []
         buttons = [self._button_to_dict(b) for b in raw_buttons]
-
         file_info = getattr(event, "file", None) or None
 
-        scope_id = event.meta.get("run_id") if event.meta else None
-        if not scope_id and run_id:
-            scope_id = run_id
+        meta = event.meta or {}
+
+        # Prefer explicit session_id / run_id from meta when present
+        session_id = meta.get("session_id")
+        run_id = meta.get("run_id")
+
+        if scope_kind == "session":
+            scope_id = session_id or target_id
+            kind = "session_chat"
+        else:  # "run"
+            scope_id = run_id or target_id
+            kind = "run_channel"
 
         row = {
             "id": str(uuid.uuid4()),
             "ts": datetime.now(timezone.utc).timestamp(),
             "scope_id": scope_id,
-            "kind": "run_channel",
+            "kind": kind,
             "payload": {
                 "type": event.type,
                 "text": event.text,
                 "buttons": buttons,
                 "file": file_info,
-                "meta": event.meta or {},
+                "meta": meta,
             },
         }
         await self.event_log.append(row)
 
-        # Optional correlator for consistency with other adapters
+        # Correlator remains run-based for now (session may not map 1-1)
         return {
-            "run_id": run_id,
+            "run_id": run_id or target_id,
             "correlator": Correlator(
                 scheme="ui",
                 channel=event.channel,

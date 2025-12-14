@@ -13,8 +13,9 @@ from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persistence
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
-from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.services.rag.facade import RAGFacade
+from aethergraph.services.scope.scope import Scope
 
 from .utils import _summary_prefix
 
@@ -106,6 +107,7 @@ class MemoryFacade:
         session_id: str | None,
         graph_id: str | None,
         node_id: str | None,
+        scope: Scope | None = None,
         hotlog: HotLog,
         persistence: Persistence,
         indices: Indices,
@@ -114,7 +116,6 @@ class MemoryFacade:
         hot_limit: int = 1000,
         hot_ttl_s: int = 7 * 24 * 3600,
         default_signal_threshold: float = 0.0,
-        memory_scope_id: str | None = None,  # determines scope for sticky storage
         logger=None,
         rag: RAGFacade | None = None,
         llm: LLMClientProtocol | None = None,
@@ -123,6 +124,7 @@ class MemoryFacade:
         self.session_id = session_id
         self.graph_id = graph_id
         self.node_id = node_id
+        self.scope = scope
         self.hotlog = hotlog
         self.persistence = persistence
         self.indices = indices
@@ -131,12 +133,14 @@ class MemoryFacade:
         self.hot_limit = hot_limit
         self.hot_ttl_s = hot_ttl_s
         self.default_signal_threshold = default_signal_threshold
-        self.memory_scope_id = (
-            memory_scope_id or self.session_id or self.run_id
-        )  # order of precedence
         self.logger = logger
         self.rag = rag
         self.llm = llm  # optional LLM service for RAG answering, etc.
+
+        # order of precedence for memory scope ID:
+        self.memory_scope_id = (
+            self.scope.memory_scope_id() if self.scope else self.session_id or self.run_id
+        )
 
     # ---------- recording ----------
     async def record_raw(
@@ -148,10 +152,33 @@ class MemoryFacade:
     ) -> Event:
         ts = now_iso()
 
-        base.setdefault("run_id", self.run_id)
-        base.setdefault("graph_id", self.graph_id)
-        base.setdefault("node_id", self.node_id)
-        base.setdefault("scope_id", self.memory_scope_id or self.run_id)
+        # 1) Derive identity/execution dimentions from Scope
+        dims: dict[str, str] = {}
+        if self.scope is not None:
+            dims = self.scope.metering_dimensions()
+
+        run_id = base.get("run_id") or dims.get("run_id") or self.run_id
+        graph_id = base.get("graph_id") or dims.get("graph_id") or self.graph_id
+        node_id = base.get("node_id") or dims.get("node_id") or self.node_id
+        session_id = base.get("session_id") or dims.get("session_id") or self.session_id
+
+        user_id = base.get("user_id") or dims.get("user_id")
+        org_id = base.get("org_id") or dims.get("org_id")
+        client_id = base.get("client_id") or dims.get("client_id")
+        app_id = base.get("app_id") or dims.get("app_id")
+
+        # Memory scope key (for multi-tenant memory within a run)
+        scope_id = base.get("scope_id") or self.memory_scope_id or session_id or run_id
+
+        base.setdefault("run_id", run_id)
+        base.setdefault("graph_id", graph_id)
+        base.setdefault("node_id", node_id)
+        base.setdefault("scope_id", scope_id)
+        base.setdefault("user_id", user_id)
+        base.setdefault("org_id", org_id)
+        base.setdefault("client_id", client_id)
+        base.setdefault("app_id", app_id)
+        base.setdefault("session_id", session_id)
 
         severity = int(base.get("severity", 2))
         signal = base.get("signal")
@@ -179,16 +206,21 @@ class MemoryFacade:
         evt = Event(
             event_id=eid,
             ts=ts,
-            run_id=base["run_id"],
-            scope_id=base["scope_id"],
+            run_id=run_id,
+            scope_id=scope_id,
+            user_id=user_id,
+            org_id=org_id,
+            client_id=client_id,
+            app_id=app_id,
+            session_id=session_id,
             kind=kind,
             stage=base.get("stage"),
             text=text,
             tags=base.get("tags"),
             data=base.get("data"),
             metrics=metrics,
-            graph_id=base.get("graph_id"),
-            node_id=base.get("node_id"),
+            graph_id=graph_id,
+            node_id=node_id,
             tool=base.get("tool"),
             topic=base.get("topic"),
             severity=severity,
@@ -200,18 +232,16 @@ class MemoryFacade:
             version=2,
         )
 
+        # 2) persist to HotLog + Persistence
         await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
         await self.persistence.append_event(self.run_id, evt)
 
         # Metering hook
         try:
             meter = current_metering()
-            ctx = current_meter_context.get() or {}
             await meter.record_event(
-                user_id=ctx.get("user_id"),
-                org_id=ctx.get("org_id"),
-                run_id=self.run_id,
-                scope_id=base["scope_id"],
+                scope=self.scope,
+                scope_id=scope_id,
                 kind=f"memory.{kind}",
             )
         except Exception:
@@ -515,6 +545,7 @@ class MemoryFacade:
           - RAG promotion,
           - or analytics.
         """
+        scope_id = scope_id or self.memory_scope_id  # order of precedence
         if use_llm:
             if not self.llm:
                 raise RuntimeError("LLM client not configured in MemoryFacade for LLM distillation")
@@ -586,6 +617,8 @@ class MemoryFacade:
             "num_source_summaries": N,
           }
         """
+        scope_id = scope_id or self.memory_scope_id  # order of precedence
+
         if not use_llm:
             # Placeholder for a future non-LLM meta summarizer if desired.
             raise NotImplementedError("Non-LLM meta summarization is not implemented yet")
@@ -670,16 +703,23 @@ class MemoryFacade:
         if not self.rag:
             raise RuntimeError("RAG facade not configured")
 
-        if corpus_id:
-            if create_if_missing:
-                await self.rag.add_corpus(corpus_id, meta=labels or {})
-            return corpus_id
+        mem_scope = self.memory_scope_id  # derived from Scope
+        # dims = self.scope.metering_dimensions() if self.scope else {}
 
-        # prefer explicit key; else stable from run_id
-        chosen = key or self.run_id
-        cid = f"run:{_slug(chosen)}-{_short_hash(chosen, 12)}"
+        if corpus_id:
+            cid = corpus_id
+        else:
+            logical_key = key or "default"
+            base = f"{mem_scope}:{logical_key}"
+            cid = f"mem:{_slug(mem_scope)}:{_slug(logical_key)}-{_short_hash(base, 8)}"
+
+        scope_labels = {}
+        if self.scope:
+            scope_labels = self.scope.rag_labels(scope_id=mem_scope)
+
+        meta = {"scope": scope_labels, **(labels or {})}
         if create_if_missing:
-            await self.rag.add_corpus(cid, meta=labels or {})
+            await self.rag.add_corpus(cid, meta=meta, scope_labels=scope_labels)
         return cid
 
     async def rag_status(self, *, corpus_id: str) -> dict:
@@ -751,7 +791,11 @@ class MemoryFacade:
         docs: list[dict] = []
         for e in events:
             title = f"{e.kind}:{(e.tool or e.stage or 'n/a')}:{e.ts}"
+            scope_labels = (
+                self.scope.rag_labels(scope_id=self.memory_scope_id) if self.scope else {}
+            )
             labels = {
+                **scope_labels,
                 "kind": e.kind,
                 "tool": e.tool,
                 "stage": e.stage,
@@ -805,7 +849,12 @@ class MemoryFacade:
         """Thin pass-through, but returns serializable dicts."""
         if not self.rag:
             raise RuntimeError("RAG facade not configured in MemoryFacade")
-        hits = await self.rag.search(corpus_id, query, k=k, filters=filters, mode=mode)
+
+        scope = self.scope
+        s_filters = scope.rag_filter(scope_id=self.memory_scope_id) if scope else {}
+        if filters:
+            s_filters.update(filters)
+        hits = await self.rag.search(corpus_id, query, k=k, filters=s_filters, mode=mode)
         return [
             dict(
                 chunk_id=h.chunk_id,
@@ -865,7 +914,7 @@ class MemoryFacade:
         mem/{scope_id}/summaries/{summary_tag}/{ts}
         so it works regardless of persistence backend.
         """
-        scope_id = scope_id or self.memory_scope_id or self.run_id
+        scope_id = scope_id or self.memory_scope_id
         prefix = _summary_prefix(scope_id, summary_tag)
 
         try:
@@ -900,7 +949,7 @@ class MemoryFacade:
 
         Ordered oldest→newest (so the last item is the most recent).
         """
-        scope_id = scope_id or self.memory_scope_id or self.run_id
+        scope_id = scope_id or self.memory_scope_id
         prefix = _summary_prefix(scope_id, summary_tag)
 
         try:
@@ -937,6 +986,7 @@ class MemoryFacade:
         Load the last summary JSON for this tag (if any) and log a small hydrate Event
         into the current run's HotLog. Returns the loaded summary dict, or None.
         """
+        scope_id = scope_id or self.memory_scope_id
         summary = await self.load_last_summary(scope_id=scope_id, summary_tag=summary_tag)
         if not summary:
             return None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 from ..runtime.runtime_registry import current_registry
 from .task_graph import TaskGraph
@@ -11,11 +12,12 @@ def graphify(
     inputs=(),
     outputs=None,
     version="0.1.0",
-    agent: str | None = None,
     *,
     entrypoint: bool = False,
     flow_id: str | None = None,
     tags: list[str] | None = None,
+    as_agent: dict[str, Any] | None = None,
+    as_app: dict[str, Any] | None = None,
 ):
     """
     Decorator that builds a TaskGraph from a function body using the builder context.
@@ -60,7 +62,7 @@ def graphify(
                 injected_kwargs = {p: arg(p) for p in overlap}
 
                 # Run user body
-                ret = fn(**injected_kwargs)  # ← key line
+                ret = fn(**injected_kwargs)
 
                 # expose logic (fixed typo + single-output collapse)
                 def _is_ref(x):
@@ -120,30 +122,89 @@ def graphify(
         _build.io = _io
 
         # ---- Register graph + optional agent ----
-        hub = current_registry()
-        if hub is not None:
-            # Prefer registering the FACTORY, not a single built instance
-            # fallback: register a concrete instance now
-            meta = {
-                "kind": "graph",
-                "entrypoint": entrypoint,
-                "flow_id": flow_id or name,  # if no flow_id is given, use name as default
-                "tags": tags or [],
-            }
-            hub.register(nspace="graph", name=name, version=version, obj=_build(), meta=meta)
 
-            if agent:
-                # we will have agent API later, now just register a graph as agent
-                agent_meta = {
-                    "kind": "agent",
-                    "flow_id": meta["flow_id"],
-                    "tags": meta["tags"],
-                    "backing": {"type": "graph", "name": name, "version": version},
-                }
-                agent_id = agent
-                hub.register(
-                    nspace="agent", name=agent_id, version=version, obj=_build(), meta=agent_meta
-                )
+        registry = current_registry()
+        if registry is None:
+            return _build
+
+        base_tags = tags or []
+        graph_meta: dict[str, Any] = {
+            "kind": "graph",
+            "entrypoint": entrypoint,
+            "flow_id": flow_id or name,
+            "tags": base_tags,
+        }
+
+        registry.register(
+            nspace="graph",
+            name=name,
+            version=version,
+            obj=_build(),
+            meta=graph_meta,
+        )
+
+        # Register as agent if requested
+        if as_agent is not None:
+            agent_meta = dict(as_agent)
+
+            agent_id = agent_meta.get("id", name)
+            agent_title = agent_meta.get("title", f"Agent for {name}")
+            agent_flow_id = agent_meta.get("flow_id", graph_meta["flow_id"])
+            agent_tags = agent_meta.get("tags", base_tags)
+
+            extra = {
+                k: v for k, v in agent_meta.items() if k not in {"id", "title", "flow_id", "tags"}
+            }
+
+            full_agent_meta: dict[str, Any] = {
+                "kind": "agent",
+                "id": agent_id,
+                "title": agent_title,
+                "flow_id": agent_flow_id,
+                "tags": agent_tags,
+                "backing": {"type": "graphfn", "name": name, "version": version},
+                **extra,
+            }
+
+            registry.register(
+                nspace="agent",
+                name=agent_id,
+                version=version,
+                obj=_build(),
+                meta=full_agent_meta,
+            )
+
+        # Register as app if requested
+        if as_app is not None:
+            app_meta = dict(as_app)
+
+            app_id = app_meta.get("id", name)
+            app_flow_id = app_meta.get("flow_id", graph_meta["flow_id"])
+            app_name = app_meta.get("name", f"App for {name}")
+            app_tags = app_meta.get("tags", base_tags)
+
+            extra = {
+                k: v for k, v in app_meta.items() if k not in {"id", "name", "flow_id", "tags"}
+            }
+
+            full_app_meta: dict[str, Any] = {
+                "kind": "app",
+                "id": app_id,
+                "name": app_name,
+                "graph_id": name,
+                "flow_id": app_flow_id,
+                "tags": app_tags,
+                "backing": {"type": "graphfn", "name": name, "version": version},
+                **extra,
+            }
+
+            registry.register(
+                nspace="app",
+                name=app_id,
+                version=version,
+                obj=_build(),
+                meta=full_app_meta,
+            )
 
         return _build
 

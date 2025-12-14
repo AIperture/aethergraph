@@ -1,13 +1,19 @@
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from aethergraph.core.runtime.run_manager import RunManager
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.scope.scope import Scope
+from aethergraph.services.viz.facade import VizFacade
 
 from .base_service import _ServiceHandle
 from .bound_memory import BoundMemoryAdapter
@@ -21,12 +27,57 @@ class NodeContext:
     graph_id: str
     node_id: str
     services: NodeServices
+    identity: Any = None
     resume_payload: dict[str, Any] | None = None
+    scope: Scope | None = None
     bound_memory: BoundMemoryAdapter | None = None  # back-compat
 
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:
         return self.services
+
+    async def spawn_run(
+        self,
+        graph_id: str,
+        *,
+        inputs: dict[str, Any],
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+        visibility: RunVisibility | None = None,
+        origin: RunOrigin | None = None,
+        importance: RunImportance | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        run_id: str | None = None,
+    ) -> str:
+        """
+        Launch a new run from within this node/graph.
+
+        - Uses RunManager.submit_run under the hood.
+        - Does NOT wait for completion; just returns the new run_id.
+        - session_id defaults to this context's session_id.
+        """
+        rm: RunManager | None = getattr(self.services, "run_manager", None)
+        if rm is None:
+            raise RuntimeError("NodeContext.services.run_manager is not configured")
+        print("🍎 NodeContext.spawn_run identity:", self.identity)
+        effective_session_id = session_id or self.session_id
+
+        record = await rm.submit_run(
+            graph_id=graph_id,
+            inputs=inputs,
+            run_id=run_id,
+            session_id=effective_session_id,
+            tags=tags,
+            visibility=visibility or RunVisibility.normal,
+            origin=origin or (RunOrigin.agent if agent_id is not None else RunOrigin.app),
+            importance=importance or RunImportance.normal,
+            agent_id=agent_id,
+            app_id=app_id,
+            identity=self.identity,  # internal spawn; not coming from HTTP directly
+        )
+
+        return record.run_id
 
     def logger(self):
         return self.services.logger.for_node_ctx(
@@ -56,6 +107,11 @@ class NodeContext:
         if not self.services.kv:
             raise RuntimeError("KV not available")
         return self.services.kv
+
+    def viz(self) -> VizFacade:
+        if not self.services.viz:
+            raise RuntimeError("Viz service (facade) not available")
+        return self.services.viz
 
     def llm(
         self,

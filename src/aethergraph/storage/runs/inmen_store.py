@@ -55,15 +55,28 @@ class InMemoryRunStore(RunStore):
         *,
         graph_id: str | None = None,
         status: RunStatus | None = None,
+        session_id: str | None = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[RunRecord]:
+        # NOTE: InMemoryRunStore is for dev/sidecar/demo only.
+        # It scans all in-memory records and sorts in Python.
+        # Do NOT use this in any environment where run counts can grow large;
+        # prefer DocRunStore + SQLite/FS or a proper DB-backed RunStore.
         async with self._lock:
             records: list[RunRecord] = list(self._records.values())
             if graph_id is not None:
                 records = [r for r in records if r.graph_id == graph_id]
             if status is not None:
                 records = [r for r in records if r.status == status]
+            if session_id is not None:
+                records = [r for r in records if r.session_id == session_id]
 
             records = sorted(records, key=lambda r: r.started_at, reverse=True)
+
+            if offset > 0:
+                records = records[offset:]
+            if limit is not None:
+                records = records[:limit]
             # return copies
-            return [RunRecord(**asdict(r)) for r in records[:limit]]
+            return [RunRecord(**asdict(r)) for r in records]

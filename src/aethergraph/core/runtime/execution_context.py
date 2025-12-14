@@ -7,6 +7,9 @@ from datetime import datetime
 import importlib
 from typing import TYPE_CHECKING, Any
 
+from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.services.scope.scope import Scope
+
 if TYPE_CHECKING:
     from aethergraph.core.graph.task_node import TaskNodeRuntime
 
@@ -25,6 +28,7 @@ class ExecutionContext:
     run_id: str
     graph_id: str | None
     session_id: str | None
+    identity: RequestIdentity | None
     graph_inputs: dict[str, Any]
     outputs_by_node: dict[str, dict[str, Any]]
     services: NodeServices
@@ -33,7 +37,7 @@ class ExecutionContext:
     resume_payload: dict[str, Any] | None = None
     should_run_fn: Callable[[], bool] | None = None
     resume_router: ResumeRouter | None = None  # ResumeRouter
-
+    scope: Scope | None = None  # Node Scope
     # Back-compat shim
     bound_memory: BoundMemoryAdapter | None = None
 
@@ -44,7 +48,9 @@ class ExecutionContext:
             session_id=self.session_id,
             node_id=node.node_id,
             services=self.services,
+            identity=self.identity,
             resume_payload=self.resume_payload,
+            scope=self.scope,
             # back-compat for old ctx.mem()
             bound_memory=self.bound_memory,
         )
