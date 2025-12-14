@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import re
 
-NS = {"tool", "graph", "graphfn", "agent"}
+NS = {"tool", "graph", "graphfn", "agent", "app"}
 
 # Simple ref regex to detect optional leading 'registry:'
 _REG_PREFIX = re.compile(r"^registry:(.+)$", re.I)

@@ -222,6 +222,14 @@ class UnifiedRegistry:
     def list_graphfns(self) -> dict[str, str]:
         return self.list(nspace="graphfn")
 
+    def list_agents(self) -> dict[str, str]:
+        # Return {'agent:<id>': '<latest_version>'}
+        return self.list(nspace="agent")
+
+    def list_apps(self) -> dict[str, str]:
+        # Return {'app:<id>': '<latest_version>'}
+        return self.list(nspace="app")
+
     # ---------- helpers ----------
 
     @staticmethod

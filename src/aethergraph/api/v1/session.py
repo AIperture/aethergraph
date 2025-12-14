@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
@@ -6,6 +8,7 @@ from aethergraph.api.v1.runs import _extract_app_id_from_tags
 from aethergraph.api.v1.schemas import (
     RunSummary,
     Session,
+    SessionChatEvent,
     SessionCreateRequest,
     SessionListResponse,
     SessionRunsResponse,
@@ -182,3 +185,46 @@ async def get_session_runs(
         )
 
     return SessionRunsResponse(items=summaries)
+
+
+@router.get("/sessions/{session_id}/chat/events", response_model=list[SessionChatEvent])
+async def get_session_chat_events(
+    session_id: str,
+    request: Request,
+    since_ts: float | None = Query(None),  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> list[SessionChatEvent]:
+    container = current_services()
+    event_log = container.eventlog
+
+    if event_log is None:
+        raise HTTPException(status_code=503, detail="EventLog not available")
+
+    since_dt: datetime | None = None
+    if since_ts is not None:
+        since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+
+    events = await event_log.query(
+        scope_id=session_id,
+        since=since_dt,
+        kinds=["session_chat"],
+        limit=1000,
+    )
+
+    out: list[SessionChatEvent] = []
+    for ev in events:
+        payload = ev.get("payload", {})
+        out.append(
+            SessionChatEvent(
+                id=ev.get("id"),
+                session_id=session_id,
+                ts=ev.get("ts"),
+                type=payload.get("type") or "agent.message",
+                text=payload.get("text"),
+                buttons=payload.get("buttons", []),
+                file=payload.get("file"),
+                meta=payload.get("meta", {}),
+            )
+        )
+    out.sort(key=lambda e: e.ts)
+    return out

@@ -468,3 +468,40 @@ class SessionListResponse(BaseModel):
 
 class SessionRunsResponse(BaseModel):
     items: list[RunSummary]
+
+
+class SessionChatEvent(BaseModel):
+    id: str
+    session_id: str
+    type: str
+    text: str | None
+    buttons: list[dict[str, Any]]
+    file: dict[str, Any] | None
+    meta: dict[str, Any]
+    ts: float
+
+
+# ------ Agent and App Schemas ------
+class AgentDescriptor(BaseModel):
+    """
+    Lightweight wrapper for an agent's registry metadata.
+
+    We only enforce an `id` and keep the rest as a free-form `meta` dict
+    so we can evolve the UI without breaking older agents.
+    """
+
+    id: str
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class AppDescriptor(BaseModel):
+    """
+    Lightweight wrapper for an app's registry metadata.
+
+    `graph_id` tells the frontend which graph to run when this app is launched.
+    Everything else lives inside a free-form `meta` dict for now.
+    """
+
+    id: str
+    graph_id: str
+    meta: dict[str, Any] = Field(default_factory=dict)
