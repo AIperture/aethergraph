@@ -202,6 +202,8 @@ class RunManager:
                 run_id=record.run_id,
                 session_id=record.meta.get("session_id"),
                 identity=identity,
+                agent_id=record.agent_id,
+                app_id=record.app_id,
             )
 
             # If we get here without GraphHasPendingWaits, run is completed
@@ -417,6 +419,8 @@ class RunManager:
         session_id: str | None = None,
         tags: list[str] | None = None,
         identity: RequestIdentity | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
         """
         Blocking helper (original behaviour).
@@ -428,6 +432,10 @@ class RunManager:
         - Returns (record, outputs, has_waits, continuations).
 
         Still useful for tests/CLI, but the HTTP route should prefer submit_run().
+
+        NOTE:
+        agent_id and app_id will override any value pulled from original graphs. Use it
+        only when you want to explicitly set these fields for tracking purpose.
         """
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
@@ -474,6 +482,8 @@ class RunManager:
             origin=RunOrigin.app,  # app is a typical default for graph runs
             visibility=RunVisibility.normal,
             importance=RunImportance.normal,
+            agent_id=agent_id,
+            app_id=app_id,
         )
 
         if flow_id:
@@ -494,6 +504,8 @@ class RunManager:
             graph_id=graph_id,
             inputs=inputs,
             identity=identity,
+            agent_id=agent_id,
+            app_id=app_id,
         )
 
     async def get_record(self, run_id: str) -> RunRecord | None:

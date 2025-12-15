@@ -184,6 +184,16 @@ class RunStorageSettings(BaseModel):
     sqlite_path: str = "runs/runs.db"
 
 
+class SessionStorageSettings(BaseModel):
+    backend: Literal["memory", "fs", "sqlite"] = "fs"
+
+    # FS backend: relative to AppSettings.root
+    fs_root: str = "sessions"  # will become <root>/sessions
+
+    # SQLite backend: relative to AppSettings.root
+    sqlite_path: str = "sessions/sessions.db"
+
+
 class StorageSettings(BaseModel):
     docs: DocStoreSettings = DocStoreSettings()
     eventlog: EventLogSettings = EventLogSettings()
@@ -196,3 +206,4 @@ class StorageSettings(BaseModel):
     vector_index: VectorIndexStorageSettings = VectorIndexStorageSettings()
     memory: MemorySettings = MemorySettings()
     runs: RunStorageSettings = RunStorageSettings()
+    sessions: SessionStorageSettings = SessionStorageSettings()

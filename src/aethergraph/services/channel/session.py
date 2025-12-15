@@ -35,6 +35,41 @@ class ChannelSession:
     def _node_id(self):
         return self.ctx.node_id
 
+    @property
+    def _session_id(self):
+        return self.ctx.session_id
+
+    def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        """
+        Merge caller-provided meta with context-derived metadata
+        (run_id, session_id, agent_id, app_id, graph_id, node_id).
+
+        Caller-supplied keys win; we only fill in defaults.
+        """
+        base: dict[str, Any] = dict(meta or {})
+        ctx = self.ctx
+
+        # Use setdefault so explicit meta wins.
+        if getattr(ctx, "run_id", None) is not None:
+            base.setdefault("run_id", ctx.run_id)
+
+        if getattr(ctx, "graph_id", None) is not None:
+            base.setdefault("graph_id", ctx.graph_id)
+
+        if getattr(ctx, "node_id", None) is not None:
+            base.setdefault("node_id", ctx.node_id)
+
+        if getattr(ctx, "session_id", None) is not None:
+            base.setdefault("session_id", ctx.session_id)
+
+        if getattr(ctx, "agent_id", None) is not None:
+            base.setdefault("agent_id", ctx.agent_id)
+
+        if getattr(ctx, "app_id", None) is not None:
+            base.setdefault("app_id", ctx.app_id)
+
+        return base
+
     def _resolve_default_key(self) -> str:
         """Unified default resolver (bus default → console)."""
         return self._bus.get_default_channel_key() or "console:stdin"
@@ -72,13 +107,19 @@ class ChannelSession:
     # -------- send --------
     async def send(self, event: OutEvent, *, channel: str | None = None):
         event = self._ensure_channel(event, channel=channel)
+
+        # merge context meta
+        event.meta = self._inject_context_meta(event.meta)
         await self._bus.publish(event)
 
     async def send_text(
         self, text: str, *, meta: dict[str, Any] | None = None, channel: str | None = None
     ):
         event = OutEvent(
-            type="agent.message", channel=self._resolve_key(channel), text=text, meta=meta or {}
+            type="agent.message",
+            channel=self._resolve_key(channel),
+            text=text,
+            meta=self._inject_context_meta(meta),
         )
         await self._bus.publish(event)
 
@@ -96,7 +137,7 @@ class ChannelSession:
                 channel=self._resolve_key(channel),
                 text=text,
                 rich=rich,
-                meta=meta or {},
+                meta=self._inject_context_meta(meta),
             )
         )
 
@@ -114,6 +155,7 @@ class ChannelSession:
                 channel=self._resolve_key(channel),
                 text=title or alt,
                 image={"url": url or "", "alt": alt, "title": title or ""},
+                meta=self._inject_context_meta(None),
             )
         )
 
@@ -132,7 +174,13 @@ class ChannelSession:
         if file_bytes is not None:
             file["bytes"] = file_bytes
         await self._bus.publish(
-            OutEvent(type="file.upload", channel=self._resolve_key(channel), text=title, file=file)
+            OutEvent(
+                type="file.upload",
+                channel=self._resolve_key(channel),
+                text=title,
+                file=file,
+                meta=self._inject_context_meta(None),
+            )
         )
 
     async def send_buttons(
@@ -149,7 +197,7 @@ class ChannelSession:
                 channel=self._resolve_key(channel),
                 text=text,
                 buttons=buttons,
-                meta=meta or {},
+                meta=self._inject_context_meta(meta),
             )
         )
 
@@ -352,6 +400,7 @@ class ChannelSession:
                         type="agent.stream.start",
                         channel=self._channel_key,
                         upsert_key=self._upsert_key,
+                        meta=self._inject_context_meta(None),
                     )
                 )
 
@@ -366,6 +415,7 @@ class ChannelSession:
                     channel=self._channel_key,
                     text="".join(buf),
                     upsert_key=self._upsert_key,
+                    meta=self._inject_context_meta(None),
                 )
             )
 
@@ -377,11 +427,15 @@ class ChannelSession:
                         channel=self._channel_key,
                         text=full_text,
                         upsert_key=self._upsert_key,
+                        meta=self._inject_context_meta(None),
                     )
                 )
             await self._outer._bus.publish(
                 OutEvent(
-                    type="agent.stream.end", channel=self._channel_key, upsert_key=self._upsert_key
+                    type="agent.stream.end",
+                    channel=self._channel_key,
+                    upsert_key=self._upsert_key,
+                    meta=self._inject_context_meta(None),
                 )
             )
 
@@ -432,6 +486,7 @@ class ChannelSession:
                             "total": self._total,
                             "current": self._current,
                         },
+                        meta=self._inject_context_meta(None),
                     )
                 )
 
@@ -465,6 +520,7 @@ class ChannelSession:
                     channel=self._channel_key,
                     upsert_key=self._upsert_key,
                     rich=payload,
+                    meta=self._inject_context_meta(None),
                 )
             )
 
@@ -481,6 +537,7 @@ class ChannelSession:
                         "total": self._total,
                         "current": self._total if self._total is not None else None,
                     },
+                    meta=self._inject_context_meta(None),
                 )
             )
 

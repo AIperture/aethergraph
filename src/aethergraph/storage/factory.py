@@ -220,6 +220,42 @@ def build_run_store(cfg: AppSettings) -> RunStore:
     raise ValueError(f"Unknown run storage backend: {rs_cfg.backend!r}")
 
 
+def build_session_store(cfg: AppSettings):
+    """
+    Factory for SessionStore:
+
+      - "memory": InMemorySessionStore (no persistence)
+      - "fs":     DocSessionStore on top of FSDocStore
+      - "sqlite": DocSessionStore on top of SqliteDocStore
+    """
+    ss_cfg = cfg.storage.sessions
+
+    if ss_cfg.backend == "memory":
+        # If you want pure dict-backed like your original snippet, keep it.
+        # Otherwise you can also implement InMemoryDocStore + DocSessionStore.
+        from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
+
+        return InMemorySessionStore()
+
+    if ss_cfg.backend == "fs":
+        from aethergraph.storage.docstore.fs_doc import FSDocStore
+        from aethergraph.storage.sessions.doc_store import DocSessionStore
+
+        base = os.path.join(cfg.root, ss_cfg.fs_root)
+        docs = FSDocStore(base)
+        return DocSessionStore(docs, prefix="session-")  # windows-safe
+
+    if ss_cfg.backend == "sqlite":
+        from aethergraph.storage.docstore.sqlite_doc import SqliteDocStore
+        from aethergraph.storage.sessions.doc_store import DocSessionStore
+
+        db_path = os.path.join(cfg.root, ss_cfg.sqlite_path)
+        docs = SqliteDocStore(db_path)
+        return DocSessionStore(docs, prefix="session-")
+
+    raise ValueError(f"Unknown session storage backend: {ss_cfg.backend!r}")
+
+
 def _secret_bytes(secret_key: str) -> bytes:
     # simple default; support hex/env later if needed
     return secret_key.encode("utf-8")

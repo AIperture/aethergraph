@@ -23,6 +23,8 @@ class GraphFunction:
         inputs: list[str] | None = None,
         outputs: list[str] | None = None,
         version: str = "0.1.0",
+        agent_id: str | None = None,
+        app_id: str | None = None,
     ):
         self.graph_id = name
         self.name = name
@@ -34,6 +36,8 @@ class GraphFunction:
         self.last_graph = None
         self.last_context = None
         self.last_memory_snapshot = None
+        self.agent_id = agent_id
+        self.app_id = app_id
 
     async def run(
         self,
@@ -63,7 +67,7 @@ class GraphFunction:
         )
         node_ctx = runtime_ctx.create_node_context(node=node_spec)
 
-        with graph(name=self.graph_id) as G:
+        with graph(name=self.graph_id, agent_id=self.agent_id, app_id=self.app_id) as G:
             interp = Interpreter(G, env, retry=retry, max_concurrency=max_concurrency)
             run_id = env.run_id
 
@@ -203,7 +207,17 @@ def graph_fn(
     """Decorator to define a graph function."""
 
     def decorator(fn: Callable) -> GraphFunction:
-        gf = GraphFunction(name=name, fn=fn, inputs=inputs, outputs=outputs, version=version)
+        agent_id = as_agent.get("id") if as_agent else None
+        app_id = as_app.get("id") if as_app else None
+        gf = GraphFunction(
+            name=name,
+            fn=fn,
+            inputs=inputs,
+            outputs=outputs,
+            version=version,
+            agent_id=agent_id,
+            app_id=app_id,
+        )
         registry = current_registry()
 
         if registry is None:

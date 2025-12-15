@@ -51,7 +51,10 @@ def graphify(
             from .graph_builder import graph
             from .graph_refs import arg
 
-            with graph(name=name) as g:
+            agent_id = as_agent.get("id") if as_agent else None
+            app_id = as_app.get("id") if as_app else None
+
+            with graph(name=name, agent_id=agent_id, app_id=app_id) as g:
                 # declarations unchanged...
                 if isinstance(inputs, dict):
                     g.declare_inputs(required=[], optional=inputs)

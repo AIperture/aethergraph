@@ -75,6 +75,13 @@ class WebUIChannelAdapter(ChannelAdapter):
         file_info = getattr(event, "file", None) or None
 
         meta = event.meta or {}
+        # Agent_id
+        # prefer cononical agent_id; otherwise fall back to legacy field
+        agent_id = meta.get("agent_id") or meta.get("agent")
+        if agent_id:
+            meta["agent_id"] = agent_id
+        # else:
+        #     raise ValueError("agent_id must be provided in event meta for UIChannelEvent")
 
         # Prefer explicit session_id / run_id from meta when present
         session_id = meta.get("session_id")
@@ -100,6 +107,7 @@ class WebUIChannelAdapter(ChannelAdapter):
                 "meta": meta,
             },
         }
+
         await self.event_log.append(row)
 
         # Correlator remains run-based for now (session may not map 1-1)

@@ -479,6 +479,7 @@ class SessionChatEvent(BaseModel):
     file: dict[str, Any] | None
     meta: dict[str, Any]
     ts: float
+    agent_id: str | None = None  # optional agent_id associated with this event
 
 
 # ------ Agent and App Schemas ------

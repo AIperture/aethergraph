@@ -224,7 +224,9 @@ async def get_session_chat_events(
                 buttons=payload.get("buttons", []),
                 file=payload.get("file"),
                 meta=payload.get("meta", {}),
+                agent_id=payload.get("agent_id"),
             )
         )
     out.sort(key=lambda e: e.ts)
+
     return out

@@ -12,8 +12,8 @@ from aethergraph import NodeContext, graph_fn
     inputs=["message", "files", "session_id", "user_meta"],
     outputs=["reply"],
     as_agent={
-        "id": "default_chat",  # <- canonical agent_id
-        "title": "Default Chat",
+        "id": "chat_agent",  # <- canonical agent_id
+        "title": "Chat",
         "description": "Built-in chat agent that uses the configured LLM.",
         "icon": "message-circle",
         "color": "sky",
@@ -54,11 +54,9 @@ async def default_chat_agent(
         # model=None -> let your client pick default, or pass a default model name
     )
 
-    print(f"🍎 default_chat_agent responding with: {resp}")
     channel_key = "ui:session/" + (session_id or "unknown")
     chan = context.channel(channel_key=channel_key)
     await chan.send_text(resp)
-    print(f"🍎 default_chat_agent sent reply to channel {channel_key}")
     return {
         "kind": "reply_only",
         "reply": resp,

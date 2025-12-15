@@ -30,6 +30,8 @@ class NodeContext:
     identity: Any = None
     resume_payload: dict[str, Any] | None = None
     scope: Scope | None = None
+    agent_id: str | None = None  # for agent-invoked runs
+    app_id: str | None = None  # for app-invoked runs
     bound_memory: BoundMemoryAdapter | None = None  # back-compat
 
     # --- accessors (compatible names) ---
@@ -60,7 +62,6 @@ class NodeContext:
         rm: RunManager | None = getattr(self.services, "run_manager", None)
         if rm is None:
             raise RuntimeError("NodeContext.services.run_manager is not configured")
-        print("🍎 NodeContext.spawn_run identity:", self.identity)
         effective_session_id = session_id or self.session_id
 
         record = await rm.submit_run(
@@ -83,6 +84,24 @@ class NodeContext:
         return self.services.logger.for_node_ctx(
             run_id=self.run_id, node_id=self.node_id, graph_id=self.graph_id
         )
+
+    def ui_session_channel(self) -> "ChannelSession":
+        """
+        Convenience helper for the web UI: channel bound to this context's session.
+
+        Uses channel key: "ui:session/<session_id>".
+        """
+        if not self.session_id:
+            raise RuntimeError("NodeContext.session_id is not set")
+        return ChannelSession(self, f"ui:session/{self.session_id}")
+
+    def ui_run_channel(self) -> "ChannelSession":
+        """
+        Convenience helper for the web UI: channel bound to this specific run.
+
+        Uses channel key: "ui:run/<run_id>".
+        """
+        return ChannelSession(self, f"ui:run/{self.run_id}")
 
     def channel(self, channel_key: str | None = None):
         return ChannelSession(self, channel_key)
@@ -242,6 +261,10 @@ class NodeContext:
             created_at=self._now(),
             attempts=attempts,
             payload=payload,
+            session_id=getattr(self, "session_id", None),
+            agent_id=getattr(self, "agent_id", None),
+            app_id=getattr(self, "app_id", None),
+            graph_id=getattr(self, "graph_id", None),
         )
         await self.services.continuation_store.save(continuation)
         return continuation

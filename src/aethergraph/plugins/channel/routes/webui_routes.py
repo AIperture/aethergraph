@@ -137,15 +137,12 @@ async def session_chat_incoming(
     - If nothing resumed, spawns a new agent run for this session.
     """
     try:
-        print("🍎 session_chat_incoming called with session_id=", session_id)
         container = current_services()
-        print("🍎 obtained container:", container)
         ingress: ChannelIngress = container.channel_ingress
         event_log = container.eventlog
         rm: RunManager = container.run_manager
         registry: UnifiedRegistry = container.registry
 
-        print("🍎 obtained services: ingress, event_log, run_manager, registry")
         # 1) Normalize files into IncomingFile list (future use)
         files: list[IncomingFile] = []
         if body.files:
@@ -161,7 +158,6 @@ async def session_chat_incoming(
                         extra=f.get("extra") or {},
                     )
                 )
-        print("🍎 normalized files:", files)
         text = body.text or body.choice or ""
         if text:
             now_ts = datetime.now(timezone.utc).timestamp()
@@ -184,7 +180,6 @@ async def session_chat_incoming(
             }
             await event_log.append(row)
 
-        print("🍎 logged user.message event for session:", session_id)
         # 2) Try to resume any waiting continuation via ChannelIngress
         resumed = await ingress.handle(
             IncomingMessage(
@@ -212,7 +207,6 @@ async def session_chat_incoming(
 
             # Resolve agent meta -> backing graph
             agent_meta = registry.get_meta(nspace="agent", name=agent_id)
-            print("🍎 resolved agent_meta:", agent_meta)
             if not agent_meta:
                 raise HTTPException(
                     status_code=404,

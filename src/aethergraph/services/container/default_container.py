@@ -73,11 +73,11 @@ from aethergraph.storage.factory import (
     build_memory_indices,
     build_memory_persistence,
     build_run_store,
+    build_session_store,
     build_vector_index,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
-from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
 
 SERVICE_KEYS = [
     # core
@@ -319,7 +319,8 @@ def build_default_container(
         sched_registry=sched_registry,
         max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
     )
-    session_store = InMemorySessionStore()  # simple in-memory session store for development/testing
+    session_store = build_session_store(cfg)
+
     # Metering service
     # TODO: make metering service configurable
     metering_store = EventLogMeteringStore(event_log=eventlog)

@@ -65,6 +65,22 @@ async def _build_env(
     run_id = rt_overrides.get("run_id") or f"run-{uuid.uuid4().hex[:8]}"
     session_id = rt_overrides.get("session_id")
     graph_id = getattr(owner, "graph_id", None) or getattr(owner, "name", None)
+
+    # Prefer runtime overrides (from RunRecord) over static graph metadata -- UI provenance
+    agent_id = (
+        rt_overrides.get("agent_id")
+        or getattr(owner, "agent_id", None)
+        or getattr(getattr(owner, "spec", None) or {}, "agent_id", None)
+        or (getattr(owner, "spec", None) or {}).get("agent_id")  # for dict-like spec
+    )
+
+    app_id = (
+        rt_overrides.get("app_id")
+        or getattr(owner, "app_id", None)
+        or getattr(getattr(owner, "spec", None) or {}, "app_id", None)
+        or (getattr(owner, "spec", None) or {}).get("app_id")
+    )
+
     env = RuntimeEnv(
         run_id=run_id,
         graph_id=graph_id,
@@ -73,7 +89,10 @@ async def _build_env(
         graph_inputs=inputs,
         outputs_by_node={},
         container=container,
+        agent_id=agent_id,
+        app_id=app_id,
     )
+
     retry = rt_overrides.get("retry") or RetryPolicy()
     max_conc = rt_overrides.get("max_concurrency", getattr(owner, "max_concurrency", 4))
     return env, retry, max_conc

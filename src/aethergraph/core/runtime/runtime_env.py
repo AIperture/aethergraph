@@ -40,6 +40,10 @@ class RuntimeEnv:
     graph_inputs: dict[str, Any] = field(default_factory=dict)
     outputs_by_node: dict[str, dict[str, Any]] = field(default_factory=dict)
 
+    # agent and app ids
+    agent_id: str | None = None  # for agent-invoked runs
+    app_id: str | None = None  # for app-invoked runs
+
     # container (DI)
     container: DefaultContainer = field(default_factory=get_container)
 
@@ -200,6 +204,8 @@ class RuntimeEnv:
             session_id=self.session_id,
             identity=self.identity,
             graph_id=self.graph_id,
+            agent_id=self.agent_id,
+            app_id=self.app_id,
             graph_inputs=self.graph_inputs,
             outputs_by_node=self.outputs_by_node,
             services=services,
