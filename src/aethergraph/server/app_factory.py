@@ -133,9 +133,4 @@ def create_app(
     app.state.settings = settings
     app.state.container = container
 
-    # # DEBUG: print registered apps and agents
-    # registry = container.registry
-    # print("🍎 Registered Apps:", registry.list_apps())
-    # print("🍎 Registered Agents:", registry.list_agents())
-
     return app

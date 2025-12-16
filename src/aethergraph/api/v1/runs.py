@@ -40,6 +40,17 @@ async def create_run(
     if rm is None:
         raise HTTPException(status_code=503, detail="Run manager not configured")
 
+    app_vis = None
+    app_imp = None
+    reg = getattr(container, "registry", None) or current_registry()
+    if body.app_id and reg is not None:
+        app_meta = reg.get_meta(nspace="app", name=body.app_id)
+        if app_meta:
+            app_vis = app_meta.get("run_visibility")
+            app_imp = app_meta.get("run_importance")
+            app_vis = RunVisibility(app_vis) if app_vis else None
+            app_imp = RunImportance(app_imp) if app_imp else None
+
     record = await rm.submit_run(
         graph_id=graph_id,
         inputs=body.inputs or {},
@@ -47,8 +58,8 @@ async def create_run(
         tags=body.tags,
         identity=identity,
         origin=body.origin or RunOrigin.app,
-        visibility=body.visibility or RunVisibility.normal,
-        importance=body.importance or RunImportance.normal,
+        visibility=body.visibility or app_vis or RunVisibility.normal,
+        importance=body.importance or app_imp or RunImportance.normal,
         agent_id=body.agent_id or None,
         app_id=body.app_id or None,
     )
@@ -108,6 +119,15 @@ async def list_runs(
         limit=limit,
         offset=offset,
     )
+
+    # 🔹 Global Runs page policy (for now):
+    # - Only show runs with visibility == normal AND importance == normal.
+    #   (inline/hidden/ephemeral are filtered out; UI toggles can be added later.)
+    records = [
+        rec
+        for rec in records
+        if rec.visibility == RunVisibility.normal and rec.importance == RunImportance.normal
+    ]
 
     # --- TEMP: client_id-based soft filtering for the demo ---
     # In real multi-tenant setup, prefer identity.user_id/org_id instead.

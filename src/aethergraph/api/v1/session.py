@@ -12,8 +12,9 @@ from aethergraph.api.v1.schemas import (
     SessionCreateRequest,
     SessionListResponse,
     SessionRunsResponse,
+    SessionUpdateRequest,
 )
-from aethergraph.core.runtime.run_types import RunVisibility, SessionKind
+from aethergraph.core.runtime.run_types import RunImportance, RunVisibility, SessionKind
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
@@ -134,8 +135,21 @@ async def get_session_runs(
         offset=0,
     )
 
-    if not include_inline:
-        records = [rec for rec in records if rec.visibility != RunVisibility.inline]
+    # 🔹 Visibility & importance policy for session views:
+    # - Always require importance == normal (ephemeral hidden for now).
+    # - If include_inline is False:
+    #       include only visibility == normal
+    #   Else:
+    #       include visibility in {normal, inline}
+    visible_states = {RunVisibility.normal}
+    if include_inline:
+        visible_states.add(RunVisibility.inline)
+
+    records = [
+        rec
+        for rec in records
+        if rec.visibility in visible_states and rec.importance == RunImportance.normal
+    ]
 
     reg = getattr(container, "registry", None) or current_registry()
     summaries: list[RunSummary] = []
@@ -230,3 +244,69 @@ async def get_session_chat_events(
     out.sort(key=lambda e: e.ts)
 
     return out
+
+
+@router.patch("/sessions/{session_id}", response_model=Session)
+async def update_session(
+    session_id: str,
+    body: SessionUpdateRequest,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> Session:
+    container = current_services()
+    ss = getattr(container, "session_store", None)
+    if ss is None:
+        raise HTTPException(status_code=500, detail="SessionStore not available")
+
+    existing = await ss.get(session_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Enforce ownership for non-local modes
+    if identity.mode != "local":
+        if (
+            identity.user_id
+            and existing.user_id is not None
+            and existing.user_id != identity.user_id
+        ):
+            raise HTTPException(status_code=403, detail="Access denied")
+        if identity.org_id and existing.org_id is not None and existing.org_id != identity.org_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    updated = await ss.update(
+        session_id,
+        title=body.title,
+        external_ref=body.external_ref,
+    )
+    if updated is None:
+        # Defensive; shouldn't happen given we already fetched it
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return updated
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def delete_session(
+    session_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> None:
+    container = current_services()
+    ss = getattr(container, "session_store", None)
+    if ss is None:
+        raise HTTPException(status_code=500, detail="SessionStore not available")
+
+    existing = await ss.get(session_id)
+    if existing is None:
+        # 204 for idempotent delete
+        return
+
+    if identity.mode != "local":
+        if (
+            identity.user_id
+            and existing.user_id is not None
+            and existing.user_id != identity.user_id
+        ):
+            raise HTTPException(status_code=403, detail="Access denied")
+        if identity.org_id and existing.org_id is not None and existing.org_id != identity.org_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+
+    await ss.delete(session_id)

@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 import uuid
 
 from aethergraph.api.v1.schemas import Session
+from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.core.runtime.run_types import SessionKind
 
 
-class InMemorySessionStore:
+class InMemorySessionStore(SessionStore):
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
         self._lock = asyncio.Lock()  # TODO: confirm async lock is fine bc this will only be used inside uvicorn process with UI.
@@ -81,3 +82,29 @@ class InMemorySessionStore:
             if not sess:
                 return
             sess.updated_at = updated_at or datetime.now(timezone.utc)
+
+    async def update(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        external_ref: str | None = None,
+    ) -> Session | None:
+        async with self._lock:
+            sess = self._sessions.get(session_id)
+            if not sess:
+                return None
+
+            # Mutate in-place (Session is a Pydantic model or similar)
+            if title is not None:
+                sess.title = title
+            if external_ref is not None:
+                sess.external_ref = external_ref
+
+            sess.updated_at = datetime.now(timezone.utc)
+            self._sessions[session_id] = sess
+            return sess
+
+    async def delete(self, session_id: str) -> None:
+        async with self._lock:
+            self._sessions.pop(session_id, None)

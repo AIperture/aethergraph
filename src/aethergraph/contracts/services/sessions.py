@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
+from aethergraph.api.v1.schemas import Session
 from aethergraph.core.runtime.run_types import SessionKind
 
 
@@ -15,14 +18,14 @@ class SessionStore(Protocol):
         title: str | None = None,
         source: str = "webui",
         external_ref: str | None = None,
-    ) -> None:
+    ) -> Session:
         """
-        Create a new session.
+        Create a new session and return it.
         """
 
-    async def get(self, session_id: str) -> None:
+    async def get(self, session_id: str) -> Session | None:
         """
-        Get a session by its ID.
+        Get a session by its ID, or None if not found.
         """
 
     async def list_for_user(
@@ -33,7 +36,7 @@ class SessionStore(Protocol):
         kind: SessionKind | None = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> Sequence[None]:
+    ) -> Sequence[Session]:
         """
         List sessions for a specific user, optionally filtered by kind.
         """
@@ -46,5 +49,23 @@ class SessionStore(Protocol):
     ) -> None:
         """
         Update session's updated_at (e.g., when new message/run occurs).
+        No-op if session doesn't exist.
+        """
+
+    async def update(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        external_ref: str | None = None,
+    ) -> Session | None:
+        """
+        Update session metadata, returning the updated session.
+        No-op if session doesn't exist (returns None).
+        """
+
+    async def delete(self, session_id: str) -> None:
+        """
+        Delete a session by its ID.
         No-op if session doesn't exist.
         """

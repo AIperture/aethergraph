@@ -482,6 +482,11 @@ class SessionChatEvent(BaseModel):
     agent_id: str | None = None  # optional agent_id associated with this event
 
 
+class SessionUpdateRequest(BaseModel):
+    title: str | None = None
+    external_ref: str | None = None
+
+
 # ------ Agent and App Schemas ------
 class AgentDescriptor(BaseModel):
     """

@@ -213,6 +213,15 @@ async def session_chat_incoming(
                     detail=f"Agent not found: {agent_id}",
                 )
 
+            run_vis_str = agent_meta.get(
+                "run_visibility", RunVisibility.inline.value
+            )  # default inline
+            run_imp_str = agent_meta.get(
+                "run_importance", RunImportance.ephemeral.value
+            )  # default ephemeral
+            run_vis = RunVisibility(run_vis_str)
+            run_imp = RunImportance(run_imp_str)
+
             backing = agent_meta.get("backing", {})
             if backing.get("type") != "graphfn":
                 raise HTTPException(
@@ -236,8 +245,8 @@ async def session_chat_incoming(
                 session_id=session_id,
                 identity=identity,
                 origin=RunOrigin.chat,
-                visibility=RunVisibility.normal,
-                importance=RunImportance.normal,
+                visibility=run_vis,
+                importance=run_imp,
                 agent_id=agent_id,
                 app_id=agent_meta.get("app_id"),  # optional, if you attach this
                 tags=["session:" + session_id, "agent:" + agent_id],

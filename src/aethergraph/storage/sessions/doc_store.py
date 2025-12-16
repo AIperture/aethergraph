@@ -6,6 +6,7 @@ from typing import Any
 import uuid
 
 from aethergraph.api.v1.schemas import Session
+from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.contracts.storage.doc_store import (
     DocStore,  # wherever your DocStore Protocol lives
 )
@@ -38,7 +39,7 @@ def _doc_to_session(doc: dict[str, Any]) -> Session:
     return Session(**doc)
 
 
-class DocSessionStore:
+class DocSessionStore(SessionStore):
     """
     SessionStore backed by an arbitrary DocStore.
 
@@ -151,6 +152,31 @@ class DocSessionStore:
                 return
             doc["updated_at"] = _encode_dt(updated_at or datetime.now(timezone.utc))
             await self._ds.put(doc_id, doc)
+
+    async def update(
+        self,
+        session_id: str,
+        *,
+        title: str | None = None,
+        external_ref: str | None = None,
+    ) -> Session | None:
+        doc_id = self._doc_id(session_id)
+        async with self._lock:
+            doc = await self._ds.get(doc_id)
+            if doc is None:
+                return None
+
+            if title is not None:
+                doc["title"] = title
+            if external_ref is not None:
+                doc["external_ref"] = external_ref
+
+            # Always bump updated_at
+            doc["updated_at"] = _encode_dt(datetime.now(timezone.utc))
+
+            await self._ds.put(doc_id, doc)
+
+        return _doc_to_session(doc)
 
     async def delete(self, session_id: str) -> None:
         async with self._lock:
