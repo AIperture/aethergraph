@@ -117,6 +117,9 @@ class RuntimeEnv:
             "tags": [],
             "entities": [],
         }
+
+        level, custom_scope_id = self._resolve_memory_config()
+        # print(f"🍏 [RuntimeEnv] Resolved memory config: level={level}, custom_scope_id={custom_scope_id}")
         mem_scope = (
             self.container.scope_factory.for_memory(
                 identity=self.identity,
@@ -124,6 +127,8 @@ class RuntimeEnv:
                 graph_id=self.graph_id,
                 node_id=node.node_id,
                 session_id=self.session_id,
+                level=level,
+                custom_scope_id=custom_scope_id,
             )
             if self.container.scope_factory
             else None
@@ -218,3 +223,65 @@ class RuntimeEnv:
             bound_memory=BoundMemoryAdapter(mem, defaults),
             resume_router=self.resume_router,
         )
+
+    def _resolve_memory_config(self) -> tuple[str, str | None]:
+        """
+        Returns (level, custom_scope_id).
+
+        Resolution order:
+        1) If this run has an agent_id, read from the agent registry meta.
+        2) Else if this run has an app_id, read from the app registry meta.
+        3) Else fall back to graph/graphfn meta.
+        4) Defaults:
+           - agent/app-backed runs -> "session"
+           - plain graph runs      -> "run"
+        """
+        registry = self.registry
+        level: str = "session"  # safe default
+        custom_scope_id: str | None = None
+        meta: dict[str, Any] = {}
+
+        if registry:
+            # Prefer agent meta
+            if self.agent_id:
+                meta = (
+                    registry.get_meta(
+                        nspace="agent",
+                        name=self.agent_id,
+                        version=None,
+                    )
+                    or {}
+                )
+            # Then app meta
+            elif self.app_id:
+                meta = (
+                    registry.get_meta(
+                        nspace="app",
+                        name=self.app_id,
+                        version=None,
+                    )
+                    or {}
+                )
+            # Finally, bare graph meta (graphfn or taskgraph)
+            elif self.graph_id:
+                meta = (
+                    registry.get_meta("graphfn", self.graph_id, None)
+                    or registry.get_meta("graph", self.graph_id, None)
+                    or {}
+                )
+
+        if meta:
+            # Top-level keys from as_agent/as_app extras
+            if "memory_level" in meta:
+                level = meta["memory_level"]
+            else:
+                # Fallback by kind if not explicitly set
+                kind = meta.get("kind")
+                level = "session" if kind == "agent" else "run"
+
+            custom_scope_id = meta.get("memory_scope_id")
+        else:
+            # If we have an agent_id but no meta, still bias to session-level
+            level = "session" if self.agent_id else "run"
+
+        return level, custom_scope_id

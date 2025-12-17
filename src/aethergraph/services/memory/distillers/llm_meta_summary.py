@@ -207,6 +207,7 @@ class LLMMetaSummaryDistiller(Distiller):
     async def distill(
         self,
         run_id: str,
+        timeline_id: str,
         scope_id: str = None,
         *,
         hotlog: HotLog,
@@ -365,8 +366,8 @@ class LLMMetaSummaryDistiller(Distiller):
             }
         )
 
-        await hotlog.append(run_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
-        await persistence.append_event(run_id, evt)
+        await hotlog.append(timeline_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
+        await persistence.append_event(timeline_id, evt)
 
         # Metering: record summary event
         try:

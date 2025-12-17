@@ -303,9 +303,11 @@ class RunManager:
         - Schedules background execution via asyncio.create_task.
         - Returns immediately with the record (for run_id, status, etc).
         """
-        if identity is not None:
-            user_id = identity.user_id
-            org_id = identity.org_id
+        if identity is None:
+            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+
+        user_id = identity.user_id
+        org_id = identity.org_id
 
         # Acquire run slot (rate limiting)
         await self._acquire_run_slot()
@@ -504,8 +506,8 @@ class RunManager:
             graph_id=graph_id,
             inputs=inputs,
             identity=identity,
-            agent_id=agent_id,
-            app_id=app_id,
+            # agent_id=agent_id,
+            # app_id=app_id,
         )
 
     async def get_record(self, run_id: str) -> RunRecord | None:

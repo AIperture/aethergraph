@@ -94,6 +94,7 @@ class LongTermSummarizer(Distiller):
     async def distill(
         self,
         run_id: str,
+        timeline_id: str,
         scope_id: str = None,
         *,
         hotlog: HotLog,
@@ -113,7 +114,7 @@ class LongTermSummarizer(Distiller):
           5) Log a summary Event to hotlog + persistence, with data.summary_uri.
         """
         # 1) fetch more than we might keep to give filter some slack
-        raw = await hotlog.recent(run_id, kinds=None, limit=self.max_events * 2)
+        raw = await hotlog.recent(timeline_id, kinds=None, limit=self.max_events * 2)
         kept = self._filter_events(raw)
         if not kept:
             return {}
@@ -192,8 +193,8 @@ class LongTermSummarizer(Distiller):
             }
         )
 
-        await hotlog.append(run_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
-        await persistence.append_event(run_id, evt)
+        await hotlog.append(timeline_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
+        await persistence.append_event(timeline_id, evt)
 
         # Metering: record summary event
         try:

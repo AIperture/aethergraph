@@ -180,6 +180,7 @@ async def test_run_manager_start_run_failure(monkeypatch, dummy_meter):
     record, outputs, has_waits, continuations = await rm.start_run(
         graph_id="my-graph",
         inputs={"x": 1},
+        # agent_id="agent_123",
     )
 
     assert record.graph_id == "my-graph"

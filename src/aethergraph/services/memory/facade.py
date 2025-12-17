@@ -141,6 +141,7 @@ class MemoryFacade:
         self.memory_scope_id = (
             self.scope.memory_scope_id() if self.scope else self.session_id or self.run_id
         )
+        self.timeline_id = self.memory_scope_id or self.run_id  # key for timeline events
 
     # ---------- recording ----------
     async def record_raw(
@@ -233,8 +234,8 @@ class MemoryFacade:
         )
 
         # 2) persist to HotLog + Persistence
-        await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
-        await self.persistence.append_event(self.run_id, evt)
+        await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
+        await self.persistence.append_event(self.timeline_id, evt)
 
         # Metering hook
         try:
@@ -357,7 +358,7 @@ class MemoryFacade:
             text=message,
             metrics=metrics,
         )
-        await self.indices.update(self.run_id, evt)
+        await self.indices.update(self.timeline_id, evt)
         return evt
 
     async def write_tool_result(
@@ -387,7 +388,7 @@ class MemoryFacade:
     # ---------- retrieval ----------
     async def recent(self, *, kinds: list[str] | None = None, limit: int = 50) -> list[Event]:
         """Return recent events from HotLog (most recent last), optionally filtered by kind."""
-        return await self.hotlog.recent(self.run_id, kinds=kinds, limit=limit)
+        return await self.hotlog.recent(self.timeline_id, kinds=kinds, limit=limit)
 
     async def recent_data(
         self,
@@ -421,18 +422,18 @@ class MemoryFacade:
 
     async def last_by_name(self, name: str):
         """Return the last output value by `name` from Indices (fast path)."""
-        return await self.indices.last_by_name(self.run_id, name)
+        return await self.indices.last_by_name(self.timeline_id, name)
 
     async def last_output_by_name(self, name: str):
         """Return the last output value (Value.value) by `name` from Indices (fast path)."""
-        out = await self.indices.last_by_name(self.run_id, name)
+        out = await self.indices.last_by_name(self.timeline_id, name)
         if out is None:
             return None
         return out.get("value")  # type: ignore
 
     async def last_outputs_by_topic(self, topic: str):
         """Return the last output map for a given topic (tool/flow/agent) from Indices."""
-        return await self.indices.last_outputs_by_topic(self.run_id, topic)
+        return await self.indices.last_outputs_by_topic(self.timeline_id, topic)
 
     # replace last_tool_result_outputs
     async def last_tool_result_outputs(self, tool: str) -> dict[str, Any] | None:
@@ -440,7 +441,7 @@ class MemoryFacade:
         Convenience wrapper around KVIndices.last_outputs_by_topic for this run.
         Returns the last outputs map for a given tool, or None.
         """
-        return await self.indices.last_outputs_by_topic(self.run_id, tool)
+        return await self.indices.last_outputs_by_topic(self.timeline_id, tool)
 
     async def recent_tool_results(
         self,
@@ -462,7 +463,7 @@ class MemoryFacade:
 
     async def latest_refs_by_kind(self, kind: str, *, limit: int = 50):
         """Return latest ref outputs by ref.kind (fast path, KV-backed)."""
-        return await self.indices.latest_refs_by_kind(self.run_id, kind, limit=limit)
+        return await self.indices.latest_refs_by_kind(self.timeline_id, kind, limit=limit)
 
     async def search(
         self,
@@ -561,7 +562,8 @@ class MemoryFacade:
                 min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
             )
             return await d.distill(
-                self.run_id,
+                run_id=self.run_id,
+                timeline_id=self.timeline_id,
                 scope_id=scope_id or self.memory_scope_id,
                 hotlog=self.hotlog,
                 persistence=self.persistence,
@@ -581,7 +583,8 @@ class MemoryFacade:
             min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
         )
         return await d.distill(
-            self.run_id,
+            run_id=self.run_id,
+            timeline_id=self.timeline_id,
             scope_id=scope_id or self.memory_scope_id,
             hotlog=self.hotlog,
             persistence=self.persistence,
@@ -640,7 +643,8 @@ class MemoryFacade:
             min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
         )
         return await d.distill(
-            self.run_id,
+            run_id=self.run_id,
+            timeline_id=self.timeline_id,
             scope_id=scope_id or self.memory_scope_id,
             hotlog=self.hotlog,
             persistence=self.persistence,
@@ -1017,8 +1021,8 @@ class MemoryFacade:
             signal=0.4,
         )
 
-        await self.hotlog.append(self.run_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
-        await self.persistence.append_event(self.run_id, evt)
+        await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
+        await self.persistence.append_event(self.timeline_id, evt)
         return summary
 
     # ----- Stubs for future memory facade features -----
