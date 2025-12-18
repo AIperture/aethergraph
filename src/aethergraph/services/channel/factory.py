@@ -17,7 +17,7 @@ from aethergraph.services.channel.channel_bus import ChannelBus
 def make_channel_adapters_from_env(
     cfg: AppSettings, event_log: EventLog | None = None
 ) -> dict[str, Any]:
-    print("🔌 Setting up channel adapters... with config:", cfg.telegram)
+    print("Setting up channel adapters... with config:", cfg.telegram)
     # Always include console adapter
     adapters = {"console": ConsoleChannelAdapter()}
 
