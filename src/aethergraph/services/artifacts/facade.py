@@ -59,7 +59,6 @@ class ArtifactFacade:
         out: dict[str, Any] = dict(labels or {})
         if self.scope:
             out.update(self.scope.artifact_scope_labels())
-        print(out)
         return out
 
     def _tenant_labels_for_search(self) -> dict[str, Any]:
@@ -105,7 +104,6 @@ class ArtifactFacade:
         # "all" => no run/graph/node filter
 
         base.update(self._tenant_labels_for_search())
-        print("🍊", base)
         return base
 
     # Metering-enhanced record

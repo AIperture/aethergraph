@@ -58,6 +58,16 @@ class Scope:
             out["graph_id"] = self.graph_id
         if self.node_id:
             out["node_id"] = self.node_id
+
+        # canonicial scope ids
+        if self.session_id:
+            out["scope_id"] = self.session_id  # session-centric
+        elif self.run_id:
+            out["scope_id"] = self.run_id  # run-centric for non-session runs
+        elif self.graph_id:
+            out["scope_id"] = f"graph:{self.graph_id}"  # graph-centric for non-run artifacts
+        elif self.node_id:
+            out["scope_id"] = f"node:{self.node_id}"  # node-centric for non-graph artifacts
         return out
 
     def metering_dimensions(self) -> dict[str, Any]:

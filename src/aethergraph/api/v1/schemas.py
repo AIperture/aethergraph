@@ -470,16 +470,25 @@ class SessionRunsResponse(BaseModel):
     items: list[RunSummary]
 
 
+class SessionChatFile(BaseModel):
+    url: str | None = None
+    name: str | None = None
+    mimetype: str | None = None
+    size: int | None = None
+    uri: str | None = None  # optional, useful for artifact URIs
+
+
 class SessionChatEvent(BaseModel):
     id: str
     session_id: str
     type: str
     text: str | None
     buttons: list[dict[str, Any]]
-    file: dict[str, Any] | None
+    file: SessionChatFile | None = None  # legacy/single
+    files: list[SessionChatFile] | None = None  # NEW: multi
     meta: dict[str, Any]
     ts: float
-    agent_id: str | None = None  # optional agent_id associated with this event
+    agent_id: str | None = None
 
 
 class SessionUpdateRequest(BaseModel):
