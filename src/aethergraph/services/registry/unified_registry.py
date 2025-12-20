@@ -187,7 +187,6 @@ class UnifiedRegistry:
 
     def get_meta(
         self,
-        *,
         nspace: str,
         name: str,
         version: str | None = None,

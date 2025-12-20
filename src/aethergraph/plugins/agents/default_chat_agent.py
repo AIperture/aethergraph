@@ -27,6 +27,7 @@ async def default_chat_agent(
     files: list[Any] | None = None,
     session_id: str | None = None,
     user_meta: dict[str, Any] | None = None,
+    context_refs: list[dict[str, Any]] | None = None,
     *,
     context: NodeContext,
 ):

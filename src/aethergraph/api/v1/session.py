@@ -224,7 +224,6 @@ async def get_session_chat_events(
         kinds=["session_chat"],
         limit=1000,
     )
-
     out: list[SessionChatEvent] = []
     for ev in events:
         payload = ev.get("payload", {}) or {}
