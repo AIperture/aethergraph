@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 
@@ -14,6 +15,27 @@ from aethergraph.config.config import RateLimitSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.services.llm.types import (
+    ChatOutputFormat,
+    GeneratedImage,
+    ImageFormat,
+    ImageGenerationResult,
+    ImageResponseFormat,
+    LLMUnsupportedFeatureError,
+)
+from aethergraph.services.llm.utils import (
+    _azure_images_generations_url,
+    _data_url_to_b64_and_mime,
+    _ensure_system_json_directive,
+    _extract_json_text,
+    _guess_mime_from_format,
+    _is_data_url,
+    _normalize_base_url_no_trailing_slash,
+    _normalize_openai_responses_input,
+    _to_anthropic_blocks,
+    _to_gemini_parts,
+    _validate_json_schema,
+)
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -110,7 +132,7 @@ class GenericLLMClient(LLMClientProtocol):
 
     # ---------------- internal helpers for metering ----------------
     @staticmethod
-    def _normalize_usage(usage: dict[str, Any]) -> dict[str, int]:
+    def _normalize_usage(usage: dict[str, Any]) -> tuple[int, int]:
         """Normalize usage dict to standard keys: prompt_tokens, completion_tokens."""
         if not usage:
             return 0, 0
@@ -234,99 +256,49 @@ class GenericLLMClient(LLMClientProtocol):
         *,
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
+        output_format: ChatOutputFormat = "text",
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "output",
+        strict_schema: bool = True,
+        validate_json: bool = True,
+        fail_on_unsupported: bool = True,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         await self._ensure_client()
         model = kw.get("model", self.model)
 
-        if self.provider != "openai":
-            # Make sure _chat_by_provider ALSO returns (str, usage),
-            # or wraps provider-specific structures into text.
-            start = time.perf_counter()
-            text, usage = await self._chat_by_provider(messages, **kw)
-            latency_ms = int((time.perf_counter() - start) * 1000)
-
-            # Enforce rate limits
-            self._enforce_llm_limits_for_run(usage=usage)
-
-            # Record metering
-            await self._record_llm_usage(
-                model=model,
-                usage=usage,
-                latency_ms=latency_ms,
-            )
-            return text, usage
-
-        body: dict[str, Any] = {
-            "model": model,
-            "input": messages,
-        }
-        if reasoning_effort is not None:
-            body["reasoning"] = {"effort": reasoning_effort}
-        if max_output_tokens is not None:
-            body["max_output_tokens"] = max_output_tokens
-
-        temperature = kw.get("temperature")
-        top_p = kw.get("top_p")
-        if temperature is not None:
-            body["temperature"] = temperature
-        if top_p is not None:
-            body["top_p"] = top_p
-
-        async def _call():
-            r = await self._client.post(
-                f"{self.base_url}/responses",
-                headers=self._headers_openai_like(),
-                json=body,
-            )
-
-            try:
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
-
-            data = r.json()
-            output = data.get("output")
-            txt = ""
-
-            # NEW: handle list-of-messages shape
-            if isinstance(output, list) and output:
-                first = output[0]
-                if isinstance(first, dict) and first.get("type") == "message":
-                    parts = first.get("content") or []
-                    chunks: list[str] = []
-                    for p in parts:
-                        if "text" in p:
-                            chunks.append(p["text"])
-                    txt = "".join(chunks)
-
-            elif isinstance(output, dict) and output.get("type") == "message":
-                msg = output.get("message") or output
-                parts = msg.get("content") or []
-                chunks: list[str] = []
-                for p in parts:
-                    if "text" in p:
-                        chunks.append(p["text"])
-                txt = "".join(chunks)
-
-            elif isinstance(output, str):
-                txt = output
-
-            else:
-                txt = str(output) if output is not None else ""
-
-            usage = data.get("usage", {}) or {}
-            return txt, usage
-
-        # Measure latency for metering
         start = time.perf_counter()
-        text, usage = await self._retry.run(_call)
+
+        # Provider-specific call (now symmetric)
+        text, usage = await self._chat_dispatch(
+            messages,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            fail_on_unsupported=fail_on_unsupported,
+            **kw,
+        )
+
+        # JSON postprocessing/validation is centralized here (consistent behavior)
+        text = self._postprocess_structured_output(
+            text=text,
+            output_format=output_format,
+            json_schema=json_schema,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+        )
+
         latency_ms = int((time.perf_counter() - start) * 1000)
 
-        # Enforce rate limits
+        # Enforce rate limits (existing)
         self._enforce_llm_limits_for_run(usage=usage)
 
-        # Record metering
+        # Metering (existing)
         await self._record_llm_usage(
             model=model,
             usage=usage,
@@ -335,187 +307,800 @@ class GenericLLMClient(LLMClientProtocol):
 
         return text, usage
 
-    # ---------------- Chat ----------------
-    async def _chat_by_provider(
-        self, messages: list[dict[str, Any]], **kw
+    async def _chat_dispatch(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+        validate_json: bool,
+        fail_on_unsupported: bool,
+        **kw: Any,
     ) -> tuple[str, dict[str, int]]:
-        await self._ensure_client()
+        # OpenAI is now symmetric too
+        if self.provider == "openai":
+            return await self._chat_openai_responses(
+                messages,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
+                output_format=output_format,
+                json_schema=json_schema,
+                schema_name=schema_name,
+                strict_schema=strict_schema,
+            )
 
-        temperature = kw.get("temperature", 0.5)
-        top_p = kw.get("top_p", 1.0)
-        model = kw.get("model", self.model)
-
+        # Everyone else
         if self.provider in {"openrouter", "lmstudio", "ollama"}:
-
-            async def _call():
-                body = {
-                    "model": model,
-                    "messages": messages,
-                }
-
-                r = await self._client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self._headers_openai_like(),
-                    json=body,
-                )
-
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPError as e:
-                    raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
-                data = r.json()
-                txt, _ = _first_text(data.get("choices", []))
-                return txt, data.get("usage", {}) or {}
-
-            return await self._retry.run(_call)
+            return await self._chat_openai_like_chat_completions(
+                messages,
+                model=model,
+                output_format=output_format,
+                json_schema=json_schema,
+                fail_on_unsupported=fail_on_unsupported,
+                **kw,
+            )
 
         if self.provider == "azure":
-            if not (self.base_url and self.azure_deployment):
-                raise RuntimeError(
-                    "Azure OpenAI requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT"
-                )
-
-            async def _call():
-                r = await self._client.post(
-                    f"{self.base_url}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2024-08-01-preview",
-                    headers={"api-key": self.api_key, "Content-Type": "application/json"},
-                    json={"messages": messages, "temperature": temperature, "top_p": top_p},
-                )
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPError as e:
-                    raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
-
-                data = r.json()
-                txt, _ = _first_text(data.get("choices", []))
-                return txt, data.get("usage", {}) or {}
-
-            return await self._retry.run(_call)
+            return await self._chat_azure_chat_completions(
+                messages,
+                model=model,
+                output_format=output_format,
+                json_schema=json_schema,
+                fail_on_unsupported=fail_on_unsupported,
+                **kw,
+            )
 
         if self.provider == "anthropic":
-            # Convert OpenAI-style messages -> Anthropic Messages API format
-            # 1) Collect system messages (as strings)
-            sys_msgs = [m["content"] for m in messages if m["role"] == "system"]
-
-            # 2) Convert non-system messages into Anthropic blocks
-            conv = []
-            for m in messages:
-                role = m["role"]
-                if role == "system":
-                    continue  # handled via `system` field
-
-                # Anthropic only accepts "user" or "assistant"
-                anthro_role = "assistant" if role == "assistant" else "user"
-
-                content = m["content"]
-                # Wrap string content into text blocks; if caller is already giving blocks, pass them through.
-                if isinstance(content, str):
-                    content_blocks = [{"type": "text", "text": content}]
-                else:
-                    # Assume caller knows what they're doing for multimodal content
-                    content_blocks = content
-
-                conv.append({"role": anthro_role, "content": content_blocks})
-
-            # 3) Build payload
-            payload = {
-                "model": model,
-                "max_tokens": kw.get("max_tokens", 1024),
-                "messages": conv,
-                "temperature": temperature,
-                "top_p": top_p,
-            }
-
-            # ✅ Anthropic  v1/messages now expects `system` to be a list
-            if sys_msgs:
-                payload["system"] = "\n\n".join(sys_msgs)
-
-            async def _call():
-                r = await self._client.post(
-                    f"{self.base_url}/v1/messages",
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    # keep the nice debugging message
-                    raise RuntimeError(f"Anthropic API error: {e.response.text}") from e
-
-                data = r.json()
-                # data["content"] is a list of blocks
-                blocks = data.get("content") or []
-                txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-                return txt, data.get("usage", {}) or {}
-
-            return await self._retry.run(_call)
+            return await self._chat_anthropic_messages(
+                messages,
+                model=model,
+                output_format=output_format,
+                json_schema=json_schema,
+                **kw,
+            )
 
         if self.provider == "google":
-            # Merge system messages into a single preamble
-            system = "\n".join([m["content"] for m in messages if m["role"] == "system"])
-
-            # Non-system messages
-            turns = [
-                {
-                    "role": "user" if m["role"] == "user" else "model",
-                    "parts": [{"text": m["content"]}],
-                }
-                for m in messages
-                if m["role"] != "system"
-            ]
-
-            if system:
-                turns.insert(
-                    0,
-                    {
-                        "role": "user",
-                        "parts": [{"text": f"System instructions: {system}"}],
-                    },
-                )
-
-            async def _call():
-                payload = {
-                    "contents": turns,
-                    "generationConfig": {
-                        "temperature": temperature,
-                        "topP": top_p,
-                    },
-                }
-
-                r = await self._client.post(
-                    f"{self.base_url}/v1/models/{model}:generateContent?key={self.api_key}",
-                    headers={"Content-Type": "application/json"},
-                    json=payload,
-                )
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    raise RuntimeError(
-                        f"Gemini generateContent failed ({e.response.status_code}): {e.response.text}"
-                    ) from e
-
-                data = r.json()
-                cand = (data.get("candidates") or [{}])[0]
-                txt = "".join(
-                    p.get("text", "") for p in (cand.get("content", {}).get("parts") or [])
-                )
-                return txt, {}  # usage parsing optional
-
-            return await self._retry.run(_call)
-
-        if self.provider == "openai":
-            raise RuntimeError(
-                "Internal error: OpenAI provider should use chat() or responses_chat() directly."
+            return await self._chat_gemini_generate_content(
+                messages,
+                model=model,
+                output_format=output_format,
+                json_schema=json_schema,
+                fail_on_unsupported=fail_on_unsupported,
+                **kw,
             )
 
         raise NotImplementedError(f"provider {self.provider}")
 
+    def _postprocess_structured_output(
+        self,
+        *,
+        text: str,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        strict_schema: bool,
+        validate_json: bool,
+    ) -> str:
+        if output_format not in ("json_object", "json_schema"):
+            return text
+
+        if not validate_json:
+            return text
+
+        json_text = _extract_json_text(text)
+        try:
+            obj = json.loads(json_text)
+        except Exception as e:
+            raise RuntimeError(f"Model did not return valid JSON. Raw output:\n{text}") from e
+
+        if output_format == "json_schema" and json_schema is not None and strict_schema:
+            _validate_json_schema(obj, json_schema)
+
+        # Canonical JSON string output (makes downstream robust)
+        return json.dumps(obj, ensure_ascii=False)
+
+    async def _chat_openai_responses(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+    ) -> tuple[str, dict[str, int]]:
+        await self._ensure_client()
+        assert self._client is not None
+
+        url = f"{self.base_url}/responses"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        # Normalize input so vision works if caller used image_url parts
+        input_messages = _normalize_openai_responses_input(messages)
+
+        body: dict[str, Any] = {"model": model, "input": input_messages}
+        if reasoning_effort is not None:
+            body["reasoning"] = {"effort": reasoning_effort}
+        if max_output_tokens is not None:
+            body["max_output_tokens"] = max_output_tokens
+
+        # Structured output (Responses API style)
+        if output_format == "json_object":
+            body["text"] = {"format": {"type": "json_object"}}
+        elif output_format == "json_schema":
+            if json_schema is None:
+                raise ValueError("output_format='json_schema' requires json_schema")
+            body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "schema": json_schema,
+                    "strict": bool(strict_schema),
+                }
+            }
+
+        async def _call():
+            r = await self._client.post(url, headers=headers, json=body)
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
+
+            data = r.json()
+            output = data.get("output")
+            txt = ""
+
+            # Your existing parsing logic, but robust for list shape
+            if isinstance(output, list) and output:
+                # concat all message outputs if multiple
+                chunks: list[str] = []
+                for item in output:
+                    if isinstance(item, dict) and item.get("type") == "message":
+                        parts = item.get("content") or []
+                        for p in parts:
+                            if isinstance(p, dict) and "text" in p:
+                                chunks.append(p["text"])
+                txt = "".join(chunks)
+
+            elif isinstance(output, dict) and output.get("type") == "message":
+                msg = output.get("message") or output
+                parts = msg.get("content") or []
+                chunks: list[str] = []
+                for p in parts:
+                    if isinstance(p, dict) and "text" in p:
+                        chunks.append(p["text"])
+                txt = "".join(chunks)
+
+            elif isinstance(output, str):
+                txt = output
+            else:
+                txt = ""
+
+            usage = data.get("usage", {}) or {}
+            return txt, usage
+
+        return await self._retry.run(_call)
+
+    async def _chat_openai_like_chat_completions(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        fail_on_unsupported: bool,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        """
+        Docstring for _chat_openai_like_chat_completions
+
+        :param self: Description
+        :param messages: Description
+        :type messages: list[dict[str, Any]]
+        :param model: Description
+        :type model: str
+        :param output_format: Description
+        :type output_format: ChatOutputFormat
+        :param json_schema: Description
+        :type json_schema: dict[str, Any] | None
+        :param fail_on_unsupported: Description
+        :type fail_on_unsupported: bool
+        :param kw: Description
+        :type kw: Any
+        :return: Description
+        :rtype: tuple[str, dict[str, int]]
+
+        Call OpenAI-like /chat/completions endpoint.
+        """
+        await self._ensure_client()
+        assert self._client is not None
+
+        temperature = kw.get("temperature", 0.5)
+        top_p = kw.get("top_p", 1.0)
+
+        msg_for_provider = messages
+        response_format = None
+
+        if output_format == "json_object":
+            response_format = {"type": "json_object"}
+            msg_for_provider = _ensure_system_json_directive(messages, schema=None)
+        elif output_format == "json_schema":
+            # not truly native in most openai-like providers
+            if fail_on_unsupported:
+                raise RuntimeError(f"provider {self.provider} does not support native json_schema")
+            msg_for_provider = _ensure_system_json_directive(messages, schema=json_schema)
+
+        async def _call():
+            body: dict[str, Any] = {
+                "model": model,
+                "messages": msg_for_provider,
+                "temperature": temperature,
+                "top_p": top_p,
+            }
+            if response_format is not None:
+                body["response_format"] = response_format
+
+            r = await self._client.post(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers_openai_like(),
+                json=body,
+            )
+            try:
+                r.raise_for_status()
+            except httpx.HTTPError as e:
+                raise RuntimeError(f"OpenAI-like chat/completions error: {e.response.text}") from e
+
+            data = r.json()
+            txt, _ = _first_text(data.get("choices", []))  # you already have _first_text in file
+            usage = data.get("usage", {}) or {}
+            return txt, usage
+
+        return await self._retry.run(_call)
+
+    async def _chat_azure_chat_completions(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        fail_on_unsupported: bool,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        await self._ensure_client()
+        assert self._client is not None
+
+        if not (self.base_url and self.azure_deployment):
+            raise RuntimeError(
+                "Azure OpenAI requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT"
+            )
+
+        temperature = kw.get("temperature", 0.5)
+        top_p = kw.get("top_p", 1.0)
+
+        msg_for_provider = messages
+        payload: dict[str, Any] = {
+            "messages": msg_for_provider,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+
+        if output_format == "json_object":
+            payload["response_format"] = {"type": "json_object"}
+            payload["messages"] = _ensure_system_json_directive(messages, schema=None)
+        elif output_format == "json_schema":
+            if fail_on_unsupported:
+                raise RuntimeError(
+                    "Azure native json_schema not guaranteed; set fail_on_unsupported=False for best-effort"
+                )
+            payload["messages"] = _ensure_system_json_directive(messages, schema=json_schema)
+
+        async def _call():
+            r = await self._client.post(
+                f"{self.base_url}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2024-08-01-preview",
+                headers={"api-key": self.api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
+            try:
+                r.raise_for_status()
+            except httpx.HTTPError as e:
+                raise RuntimeError(f"Azure chat/completions error: {e.response.text}") from e
+
+            data = r.json()
+            txt, _ = _first_text(data.get("choices", []))
+            usage = data.get("usage", {}) or {}
+            return txt, usage
+
+        return await self._retry.run(_call)
+
+    async def _chat_anthropic_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        await self._ensure_client()
+        assert self._client is not None
+
+        temperature = kw.get("temperature", 0.5)
+        top_p = kw.get("top_p", 1.0)
+
+        # System text aggregation
+        sys_msgs: list[str] = []
+        for m in messages:
+            if m.get("role") == "system":
+                c = m.get("content")
+                sys_msgs.append(c if isinstance(c, str) else str(c))
+
+        if output_format in ("json_object", "json_schema"):
+            sys_msgs.insert(0, "Return ONLY valid JSON. No markdown, no commentary.")
+            if output_format == "json_schema" and json_schema is not None:
+                sys_msgs.insert(
+                    1,
+                    "JSON MUST conform to this schema:\n"
+                    + json.dumps(json_schema, ensure_ascii=False),
+                )
+
+        # Convert messages to Anthropic format (blocks)
+        conv: list[dict[str, Any]] = []
+        for m in messages:
+            role = m.get("role")
+            if role == "system":
+                continue
+            anthro_role = "assistant" if role == "assistant" else "user"
+            content_blocks = _to_anthropic_blocks(m.get("content"))
+            conv.append({"role": anthro_role, "content": content_blocks})
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "max_tokens": kw.get("max_tokens", 1024),
+            "messages": conv,
+            "temperature": temperature,
+            "top_p": top_p,
+        }
+        if sys_msgs:
+            payload["system"] = "\n\n".join(sys_msgs)
+
+        async def _call():
+            r = await self._client.post(
+                f"{self.base_url}/v1/messages",
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                body = e.response.text or ""
+                if e.response.status_code == 404:
+                    # Often model not found, or wrong base URL.
+                    hint = (
+                        "Anthropic returned 404. Common causes:\n"
+                        "1) base_url should be https://api.anthropic.com (no /v1 suffix)\n"
+                        "2) model id is invalid / unavailable for your key\n"
+                        f"Request URL: {e.request.url}\n"
+                    )
+                    raise RuntimeError(hint + "Response body:\n" + body) from e
+
+                raise RuntimeError(f"Anthropic API error ({e.response.status_code}): {body}") from e
+
+            data = r.json()
+            blocks = data.get("content") or []
+            txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+            usage = data.get("usage", {}) or {}
+            return txt, usage
+
+        return await self._retry.run(_call)
+
+    async def _chat_gemini_generate_content(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        fail_on_unsupported: bool,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        await self._ensure_client()
+        assert self._client is not None
+
+        temperature = kw.get("temperature", 0.5)
+        top_p = kw.get("top_p", 1.0)
+
+        # Merge system messages into preamble
+        system_parts: list[str] = []
+        for m in messages:
+            if m.get("role") == "system":
+                c = m.get("content")
+                system_parts.append(c if isinstance(c, str) else str(c))
+        system = "\n".join(system_parts)
+
+        turns: list[dict[str, Any]] = []
+        for m in messages:
+            if m.get("role") == "system":
+                continue
+            role = "user" if m.get("role") == "user" else "model"
+            parts = _to_gemini_parts(m.get("content"))
+            turns.append({"role": role, "parts": parts})
+
+        if system:
+            turns.insert(0, {"role": "user", "parts": [{"text": f"System instructions: {system}"}]})
+
+        async def _call():
+            gen_cfg: dict[str, Any] = {"temperature": temperature, "topP": top_p}
+
+            # Gemini native structured outputs
+            if output_format == "json_object":
+                gen_cfg["responseMimeType"] = "application/json"
+            elif output_format == "json_schema":
+                if json_schema is None:
+                    raise ValueError("output_format='json_schema' requires json_schema")
+                gen_cfg["responseMimeType"] = "application/json"
+                gen_cfg["responseJsonSchema"] = json_schema
+
+            payload = {"contents": turns, "generationConfig": gen_cfg}
+
+            r = await self._client.post(
+                f"{self.base_url}/v1/models/{model}:generateContent?key={self.api_key}",
+                headers={"Content-Type": "application/json"},
+                json=payload,
+            )
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise RuntimeError(
+                    f"Gemini generateContent failed ({e.response.status_code}): {e.response.text}"
+                ) from e
+
+            data = r.json()
+            cand = (data.get("candidates") or [{}])[0]
+            txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
+
+            um = data.get("usageMetadata") or {}
+            usage = {
+                "input_tokens": int(um.get("promptTokenCount", 0) or 0),
+                "output_tokens": int(um.get("candidatesTokenCount", 0) or 0),
+            }
+            return txt, usage
+
+        return await self._retry.run(_call)
+
+    # ---------------- Image Generation ----------------
+
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        model: str | None = None,
+        n: int = 1,
+        size: str | None = None,  # e.g. "1024x1024"
+        quality: str | None = None,  # OpenAI: "high|medium|low|auto" or dall-e: "hd|standard"
+        style: str | None = None,  # dall-e-3: "vivid|natural"
+        output_format: ImageFormat | None = None,  # OpenAI GPT image models: png|jpeg|webp
+        response_format: ImageResponseFormat | None = None,  # dall-e: url|b64_json (OpenAI/azure)
+        background: str | None = None,  # OpenAI GPT image models: "transparent|opaque|auto"
+        # Optional image inputs for providers that can do edit-style generation via "prompt + image(s)"
+        input_images: list[str] | None = None,  # data: URLs (base64) for now
+        # Provider-specific knobs
+        azure_api_version: str | None = None,
+        **kw: Any,
+    ) -> ImageGenerationResult:
+        await self._ensure_client()
+        model = model or self.model
+
+        start = time.perf_counter()
+
+        result = await self._image_dispatch(
+            prompt,
+            model=model,
+            n=n,
+            size=size,
+            quality=quality,
+            style=style,
+            output_format=output_format,
+            response_format=response_format,
+            background=background,
+            input_images=input_images,
+            azure_api_version=azure_api_version,
+            **kw,
+        )
+
+        # Rate limits: count as a call; tokens are typically not reported for images
+        self._enforce_llm_limits_for_run(usage=result.usage or {})
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        await self._record_llm_usage(model=model, usage=result.usage or {}, latency_ms=latency_ms)
+
+        return result
+
+    async def _image_dispatch(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        n: int,
+        size: str | None,
+        quality: str | None,
+        style: str | None,
+        output_format: ImageFormat | None,
+        response_format: ImageResponseFormat | None,
+        background: str | None,
+        input_images: list[str] | None,
+        azure_api_version: str | None,
+        **kw: Any,
+    ) -> ImageGenerationResult:
+        if self.provider == "openai":
+            return await self._image_openai_generate(
+                prompt,
+                model=model,
+                n=n,
+                size=size,
+                quality=quality,
+                style=style,
+                output_format=output_format,
+                response_format=response_format,
+                background=background,
+                **kw,
+            )
+
+        if self.provider == "azure":
+            return await self._image_azure_generate(
+                prompt,
+                model=model,
+                n=n,
+                size=size,
+                quality=quality,
+                style=style,
+                output_format=output_format,
+                response_format=response_format,
+                background=background,
+                azure_api_version=azure_api_version,
+                **kw,
+            )
+
+        if self.provider == "google":
+            return await self._image_gemini_generate(
+                prompt,
+                model=model,
+                input_images=input_images,
+                **kw,
+            )
+
+        if self.provider == "anthropic":
+            raise LLMUnsupportedFeatureError(
+                "Anthropic does not support image generation via Claude API (vision is input-only)."
+            )
+
+        # openrouter/lmstudio/ollama: no single standard image endpoint
+        raise LLMUnsupportedFeatureError(
+            f"provider '{self.provider}' does not support generate_image() in this client."
+        )
+
+    async def _image_openai_generate(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        n: int,
+        size: str | None,
+        quality: str | None,
+        style: str | None,
+        output_format: ImageFormat | None,
+        response_format: ImageResponseFormat | None,
+        background: str | None,
+        **kw: Any,
+    ) -> ImageGenerationResult:
+        assert self._client is not None
+
+        url = f"{_normalize_base_url_no_trailing_slash(self.base_url)}/images/generations"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        body: dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "n": n,
+        }
+        if size is not None:
+            body["size"] = size
+        if quality is not None:
+            body["quality"] = quality
+        if style is not None:
+            body["style"] = style
+        if output_format is not None:
+            body["output_format"] = output_format
+        if background is not None:
+            body["background"] = background
+
+        # For dall-e models, response_format can be url|b64_json.
+        # GPT image models generally return base64 and may ignore response_format. :contentReference[oaicite:4]{index=4}
+        if response_format is not None:
+            body["response_format"] = response_format
+
+        async def _call():
+            r = await self._client.post(url, headers=headers, json=body)
+            try:
+                r.raise_for_status()
+            except Exception as e:
+                raise RuntimeError(f"OpenAI image generation error: {r.text}") from e
+
+            data = r.json()
+            imgs: list[GeneratedImage] = []
+            for item in data.get("data", []) or []:
+                imgs.append(
+                    GeneratedImage(
+                        b64=item.get("b64_json"),
+                        url=item.get("url"),
+                        mime_type=_guess_mime_from_format(output_format or "png")
+                        if item.get("b64_json")
+                        else None,
+                        revised_prompt=item.get("revised_prompt"),
+                    )
+                )
+
+            # OpenAI images endpoints often don't return token usage; keep empty usage.
+            return ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data)
+
+        return await self._retry.run(_call)
+
+    async def _image_azure_generate(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        n: int,
+        size: str | None,
+        quality: str | None,
+        style: str | None,
+        output_format: ImageFormat | None,
+        response_format: ImageResponseFormat | None,
+        background: str | None,
+        azure_api_version: str | None,
+        **kw: Any,
+    ) -> ImageGenerationResult:
+        assert self._client is not None
+
+        if not self.base_url or not self.azure_deployment:
+            raise RuntimeError(
+                "Azure generate_image requires base_url=<resource endpoint> and azure_deployment=<deployment name>"
+            )
+
+        api_version = (
+            azure_api_version or "2025-04-01-preview"
+        )  # doc example for GPT-image-1 series :contentReference[oaicite:6]{index=6}
+        url = _azure_images_generations_url(self.base_url, self.azure_deployment, api_version)
+
+        headers = {"api-key": self.api_key, "Content-Type": "application/json"}
+
+        body: dict[str, Any] = {"prompt": prompt, "n": n}
+
+        # For GPT-image-1 series Azure expects "model" in body (per docs). :contentReference[oaicite:7]{index=7}
+        if model:
+            body["model"] = model
+
+        if size is not None:
+            body["size"] = size
+        if quality is not None:
+            body["quality"] = quality
+        if style is not None:
+            body["style"] = style
+
+        # Azure docs: GPT-image-1 series returns base64; DALL-E supports url/b64_json. :contentReference[oaicite:8]{index=8}
+        if response_format is not None:
+            body["response_format"] = response_format
+        if output_format is not None:
+            # Azure uses output_format like PNG/JPEG for some image models; you can pass through as-is.
+            body["output_format"] = output_format.upper()
+        if background is not None:
+            body["background"] = background
+
+        async def _call():
+            r = await self._client.post(url, headers=headers, json=body)
+            try:
+                r.raise_for_status()
+            except Exception as e:
+                raise RuntimeError(f"Azure image generation error: {r.text}") from e
+
+            data = r.json()
+            imgs: list[GeneratedImage] = []
+            for item in data.get("data", []) or []:
+                imgs.append(
+                    GeneratedImage(
+                        b64=item.get("b64_json"),
+                        url=item.get("url"),
+                        mime_type=_guess_mime_from_format((output_format or "png").lower())
+                        if item.get("b64_json")
+                        else None,
+                        revised_prompt=item.get("revised_prompt"),
+                    )
+                )
+
+            return ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data)
+
+        return await self._retry.run(_call)
+
+    async def _image_gemini_generate(
+        self,
+        prompt: str,
+        *,
+        model: str,
+        input_images: list[str] | None,
+        **kw: Any,
+    ) -> ImageGenerationResult:
+        assert self._client is not None
+
+        # Gemini REST endpoint uses generativelanguage.googleapis.com and API key header. :contentReference[oaicite:10]{index=10}
+        # Your self.base_url should already be something like: https://generativelanguage.googleapis.com
+        base = (
+            _normalize_base_url_no_trailing_slash(self.base_url)
+            or "https://generativelanguage.googleapis.com"
+        )
+        url = f"{base}/v1beta/models/{model}:generateContent"
+
+        parts: list[dict[str, Any]] = []
+        if input_images:
+            for img in input_images:
+                if not _is_data_url(img):
+                    raise ValueError("Gemini input_images must be data: URLs (base64) for now.")
+                b64, mime = _data_url_to_b64_and_mime(img)
+                parts.append({"inline_data": {"mime_type": mime, "data": b64}})
+
+        parts.append({"text": prompt})
+
+        payload: dict[str, Any] = {
+            "contents": [{"parts": parts}],
+        }
+        # Optional: ImageConfig etc. could be added here later per Gemini docs. :contentReference[oaicite:11]{index=11}
+
+        async def _call():
+            r = await self._client.post(
+                url,
+                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+                json=payload,
+            )
+            try:
+                r.raise_for_status()
+            except Exception as e:
+                raise RuntimeError(f"Gemini image generation error: {r.text}") from e
+
+            data = r.json()
+            cand = (data.get("candidates") or [{}])[0]
+            content = cand.get("content") or {}
+            out_parts = content.get("parts") or []
+
+            imgs: list[GeneratedImage] = []
+            for p in out_parts:
+                inline = p.get("inlineData") or p.get("inline_data")
+                if inline and inline.get("data"):
+                    mime = inline.get("mimeType") or inline.get("mime_type")
+                    imgs.append(GeneratedImage(b64=inline["data"], mime_type=mime))
+
+            # Usage shape varies; keep best-effort.
+            um = data.get("usageMetadata") or {}
+            usage = {
+                "input_tokens": int(um.get("promptTokenCount", 0) or 0),
+                "output_tokens": int(um.get("candidatesTokenCount", 0) or 0),
+            }
+
+            return ImageGenerationResult(images=imgs, usage=usage, raw=data)
+
+        return await self._retry.run(_call)
+
     # ---------------- Embeddings ----------------
-    async def embed(self, texts: list[str], **kw) -> list[list[float]]:
+    async def embed_deprecated(self, texts: list[str], **kw) -> list[list[float]]:
         # model override order: kw > self.embed_model > ENV > default
         await self._ensure_client()
 
@@ -587,6 +1172,192 @@ class GenericLLMClient(LLMClientProtocol):
             return await self._retry.run(_call)
 
         # Anthropic: no embeddings endpoint
+        raise NotImplementedError(f"Embeddings not supported for {self.provider}")
+
+    async def embed(self, texts: list[str], **kw) -> list[list[float]]:
+        """
+        Provider-agnostic embeddings.
+
+        Contract:
+        - Input: list[str]
+        - Output: list[list[float]] of same length as texts
+        - Raises: RuntimeError with informative message for provider/model/config issues
+
+        Notes:
+        - For google, uses batchEmbedContents if available; otherwise falls back to per-item embedContent.
+        - For azure, requires azure_deployment.
+        """
+        await self._ensure_client()
+        assert self._client is not None
+
+        # ---- validate input ----
+        if not isinstance(texts, list) or any(not isinstance(t, str) for t in texts):
+            raise TypeError("embed(texts) expects list[str]")
+        if len(texts) == 0:
+            return []
+
+        # ---- resolve model ----
+        # model override order: kw > self.embed_model > ENV > default
+        model = (
+            kw.get("model")
+            or self.embed_model
+            or os.getenv("EMBED_MODEL")
+            or "text-embedding-3-small"
+        )
+
+        # ---- capability + config checks ----
+        if self.provider == "anthropic":
+            raise NotImplementedError("Embeddings not supported for anthropic")
+
+        if self.provider == "azure" and not self.azure_deployment:
+            raise RuntimeError(
+                "Azure embeddings requires AZURE_OPENAI_DEPLOYMENT (azure_deployment)"
+            )
+
+        # Optional knobs
+        azure_api_version = kw.get("azure_api_version") or "2024-08-01-preview"
+        # For OpenAI-like, some providers support extra fields like dimensions/user; pass-through if present
+        extra_body = kw.get("extra_body") or {}
+
+        # ---- build request spec (within one function) ----
+        # spec = (url, headers, json_body, parser_fn)
+        if self.provider in {"openai", "openrouter", "lmstudio", "ollama"}:
+            url = f"{self.base_url}/embeddings"
+            headers = self._headers_openai_like()
+            body: dict[str, object] = {"model": model, "input": texts}
+            if isinstance(extra_body, dict):
+                body.update(extra_body)
+
+            def parse(data: dict) -> list[list[float]]:
+                items = data.get("data", []) or []
+                embs = [d.get("embedding") for d in items]
+                # Ensure shape consistency
+                if len(embs) != len(texts) or any(e is None for e in embs):
+                    raise RuntimeError(
+                        f"Embeddings response shape mismatch: got {len(embs)} items for {len(texts)} inputs"
+                    )
+                return embs  # type: ignore[return-value]
+
+            async def _call():
+                r = await self._client.post(url, headers=headers, json=body)
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    raise RuntimeError(
+                        f"Embeddings request failed ({e.response.status_code}): {e.response.text}"
+                    ) from e
+                return parse(r.json())
+
+            return await self._retry.run(_call)
+
+        if self.provider == "azure":
+            # Azure embeddings are typically per-deployment; model sometimes optional/ignored
+            url = f"{self.base_url}/openai/deployments/{self.azure_deployment}/embeddings?api-version={azure_api_version}"
+            headers = {"api-key": self.api_key, "Content-Type": "application/json"}
+            body: dict[str, object] = {"input": texts}
+            # Some Azure variants also accept "model" or dimensions; keep pass-through flexible
+            if model:
+                body["model"] = model
+            if isinstance(extra_body, dict):
+                body.update(extra_body)
+
+            def parse(data: dict) -> list[list[float]]:
+                items = data.get("data", []) or []
+                embs = [d.get("embedding") for d in items]
+                if len(embs) != len(texts) or any(e is None for e in embs):
+                    raise RuntimeError(
+                        f"Azure embeddings response shape mismatch: got {len(embs)} items for {len(texts)} inputs"
+                    )
+                return embs  # type: ignore[return-value]
+
+            async def _call():
+                r = await self._client.post(url, headers=headers, json=body)
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    raise RuntimeError(
+                        f"Embeddings request failed ({e.response.status_code}): {e.response.text}"
+                    ) from e
+                return parse(r.json())
+
+            return await self._retry.run(_call)
+
+        if self.provider == "google":
+            # Goal: return one embedding per input.
+            # Preferred: batchEmbedContents if supported by your endpoint/model.
+            # If it 404s/400s, fallback to per-item embedContent.
+            base = self.base_url.rstrip("/")
+            # Newer APIs often live under v1beta; your current code uses v1. Keep v1 but fallback to v1beta if needed.
+            batch_url_v1 = f"{base}/v1/models/{model}:batchEmbedContents?key={self.api_key}"
+            embed_url_v1 = f"{base}/v1/models/{model}:embedContent?key={self.api_key}"
+            batch_url_v1beta = f"{base}/v1beta/models/{model}:batchEmbedContents?key={self.api_key}"
+            embed_url_v1beta = f"{base}/v1beta/models/{model}:embedContent?key={self.api_key}"
+
+            headers = {"Content-Type": "application/json"}
+
+            def parse_single(data: dict) -> list[float]:
+                return (data.get("embedding") or {}).get("values") or []
+
+            def parse_batch(data: dict) -> list[list[float]]:
+                # Typical shape: {"embeddings":[{"values":[...]} , ...]}
+                embs = []
+                for e in data.get("embeddings") or []:
+                    embs.append((e or {}).get("values") or [])
+                if len(embs) != len(texts):
+                    raise RuntimeError(
+                        f"Gemini batch embeddings mismatch: got {len(embs)} for {len(texts)}"
+                    )
+                return embs
+
+            async def try_batch(url: str) -> list[list[float]] | None:
+                body = {"requests": [{"content": {"parts": [{"text": t}]}} for t in texts]}
+                r = await self._client.post(url, headers=headers, json=body)
+                if r.status_code in (404, 400):
+                    return None
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    raise RuntimeError(
+                        f"Gemini batchEmbedContents failed ({e.response.status_code}): {e.response.text}"
+                    ) from e
+                return parse_batch(r.json())
+
+            async def call_single(url: str) -> list[list[float]]:
+                out: list[list[float]] = []
+                for t in texts:
+                    r = await self._client.post(
+                        url, headers=headers, json={"content": {"parts": [{"text": t}]}}
+                    )
+                    try:
+                        r.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        raise RuntimeError(
+                            f"Gemini embedContent failed ({e.response.status_code}): {e.response.text}"
+                        ) from e
+                    out.append(parse_single(r.json()))
+                if len(out) != len(texts):
+                    raise RuntimeError(
+                        f"Gemini embeddings mismatch: got {len(out)} for {len(texts)}"
+                    )
+                return out
+
+            async def _call():
+                # Try v1 batch, then v1beta batch, then fallback to v1 single, then v1beta single
+                res = await try_batch(batch_url_v1)
+                if res is not None:
+                    return res
+                res = await try_batch(batch_url_v1beta)
+                if res is not None:
+                    return res
+
+                # fallback loop
+                try:
+                    return await call_single(embed_url_v1)
+                except RuntimeError:
+                    return await call_single(embed_url_v1beta)
+
+            return await self._retry.run(_call)
+
         raise NotImplementedError(f"Embeddings not supported for {self.provider}")
 
     # ---------------- Internals ----------------

@@ -158,13 +158,16 @@ def start_server(
             # (container is attached to app only when we start it; see below)
             pass
         else:
+            print(" - reusing existing in-process server at", _url)
             return _url
 
+    print(" - acquiring workspace lock...")
     # Cross-process coordination: one workspace => one server
     with workspace_lock(workspace):
         running_url = get_running_url_if_any(workspace)
         if running_url:
             # Reuse the already-running sidecar for this workspace
+            print(" - reusing existing sidecar server at", running_url)
             _started = True
             _url = running_url
             # Cross-process: we cannot return container/handle
@@ -186,7 +189,6 @@ def start_server(
         cfg = load_settings()
         set_current_settings(cfg)
         app = create_app(workspace=workspace, cfg=cfg, log_level=log_level)
-
         # Optional debug info
         app.state.last_load_report = getattr(_loader, "last_report", None)
 
