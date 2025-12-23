@@ -65,7 +65,15 @@ class JsonlArtifactIndexSync:
 
         if labels:
             for k, v in labels.items():
-                rows = [r for r in rows if r.get("labels", {}).get(k) == v]
+                if isinstance(v, list):
+                    rows = [
+                        r
+                        for r in rows
+                        if isinstance(r.get("labels", {}).get(k), list)
+                        and set(v).issubset(set(r["labels"][k]))
+                    ]
+                else:
+                    rows = [r for r in rows if r.get("labels", {}).get(k) == v]
 
         if metric and mode:
             rows = [r for r in rows if metric in r.get("metrics", {})]

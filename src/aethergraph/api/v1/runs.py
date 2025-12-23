@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
+from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
@@ -36,7 +37,7 @@ async def create_run(
     identity: RequestIdentity = Depends(require_runs_execute),  # noqa: B008
 ) -> RunCreateResponse:
     container = current_services()
-    rm = getattr(container, "run_manager", None)
+    rm: RunManager = getattr(container, "run_manager", None)
     if rm is None:
         raise HTTPException(status_code=503, detail="Run manager not configured")
 

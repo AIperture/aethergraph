@@ -138,6 +138,11 @@ async def list_artifacts(
         # Can't enforce client scoping without RunManager
         raise HTTPException(status_code=503, detail="Run manager not configured")
 
+    scope_id = scope_id.strip() if scope_id and scope_id.strip() else None
+    kind = kind.strip() if kind and kind.strip() else None
+    tags = tags.strip() if tags and tags.strip() else None
+    cursor = cursor.strip() if cursor and cursor.strip() else None
+
     # Build label filters
     label_filters: dict[str, Any] = {}
     if scope_id is not None:

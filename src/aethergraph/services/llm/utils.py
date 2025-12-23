@@ -10,7 +10,11 @@ ChatOutputFormat = Literal["text", "json_object", "json_schema"]
 
 
 def _is_data_url(s: str) -> bool:
-    return s.startswith("data:") and ";base64," in s
+    return isinstance(s, str) and s.startswith("data:") and ";base64," in s
+
+
+def _image_bytes_to_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
 
 
 def _data_url_to_b64_and_mime(url: str) -> tuple[str, str]:
@@ -93,16 +97,6 @@ def _normalize_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, An
 
 def _has_images(norm: Sequence[dict[str, Any]]) -> bool:
     return any(p.get("type") == "image" for m in norm for p in m.get("parts", []))
-
-
-def _is_data_url(s: str) -> bool:
-    return isinstance(s, str) and s.startswith("data:") and ";base64," in s
-
-
-def _data_url_to_b64_and_mime(url: str) -> tuple[str, str]:
-    head, b64 = url.split(",", 1)
-    mime = head.split(";")[0].split(":", 1)[1]
-    return b64, mime
 
 
 def _strip_code_fences(s: str) -> str:
@@ -288,17 +282,3 @@ def _guess_mime_from_format(fmt: str) -> str:
     if fmt == "webp":
         return "image/webp"
     return "application/octet-stream"
-
-
-def _is_data_url(s: str) -> bool:
-    return isinstance(s, str) and s.startswith("data:") and ";base64," in s
-
-
-def _data_url_to_b64_and_mime(url: str) -> tuple[str, str]:
-    head, b64 = url.split(",", 1)
-    mime = head.split(";")[0].split(":", 1)[1]
-    return b64, mime
-
-
-def _image_bytes_to_b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")

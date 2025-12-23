@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from aethergraph import NodeContext, graph_fn
+from aethergraph.plugins.agents.shared import build_session_memory_prompt_segments
 
 
 @graph_fn(
@@ -12,14 +13,15 @@ from aethergraph import NodeContext, graph_fn
     inputs=["message", "files", "session_id", "user_meta"],
     outputs=["reply"],
     as_agent={
-        "id": "chat_agent",  # <- canonical agent_id
+        "id": "chat_agent",
         "title": "Chat",
         "description": "Built-in chat agent that uses the configured LLM.",
         "icon": "message-circle",
         "color": "sky",
         "session_kind": "chat",
-        "mode": "chat_v1",  # <- your chat schema {message, files}
-        # optional: "tool_graphs": [...],
+        "mode": "chat_v1",
+        "memory_level": "session",
+        "memory_scope": "session.global",
     },
 )
 async def default_chat_agent(
@@ -36,29 +38,45 @@ async def default_chat_agent(
 
     - Takes {message, files}
     - Calls the configured LLM
-    - Returns a single `reply` string
-
-    Later we can make this agent smart enough to spawn runs, look up memory, etc.
+    - Uses shared session memory (summary + recent events) in the prompt.
     """
 
-    # Adjust this depending on how your ctx exposes the LLM client.
     llm = context.llm()
-    prompt = (
-        "You are AetherGraph's built-in helper. "
-        "Answer concisely and be explicit when you don't know something.\n\n"
-        f"User message:\n{message}\n"
+    chan = context.ui_session_channel()
+
+    # 1) Build memory segments for this session
+    session_summary, recent_events = await build_session_memory_prompt_segments(
+        context,
+        summary_tag="session",
+        recent_limit=12,
     )
 
-    # Adapt this call to your actual GenericLLMClient API
-    resp, _ = await llm.chat(
-        messages=[{"role": "user", "content": prompt}],
-        # model=None -> let your client pick default, or pass a default model name
+    # 2) System + user messages (you can move this into PromptStore later)
+    system_prompt = (
+        "You are AetherGraph's built-in session helper.\n\n"
+        "You can see a short summary of the session and a few recent events from all agents.\n"
+        "Use them to answer questions about previous steps or runs, but do not invent details.\n"
+        "If you are unsure, say that clearly.\n"
     )
 
-    channel_key = "ui:session/" + (session_id or "unknown")
-    chan = context.channel(channel_key=channel_key)
+    memory_context = ""
+    if session_summary:
+        memory_context += f"Session summary:\n{session_summary}\n\n"
+    if recent_events:
+        memory_context += f"Recent events:\n{recent_events}\n\n"
+
+    user_prompt = f"{memory_context}" "User message:\n" f"{message}\n"
+
+    # 3) Call LLM with chat-style API
+    resp, _usage = await llm.chat(
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
     await chan.send_text(resp)
+
     return {
-        "kind": "reply_only",
         "reply": resp,
     }

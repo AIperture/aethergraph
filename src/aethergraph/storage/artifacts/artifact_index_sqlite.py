@@ -174,8 +174,20 @@ class SqliteArtifactIndexSync:
         # label filters: naive JSON LIKE for now (can be improved later)
         if labels:
             for k, v in labels.items():
+                if k == "tags":
+                    # accept str | list[str]
+                    tag_list = v if isinstance(v, list) else [v]
+                    tag_list = [t for t in (t.strip() for t in tag_list) if t]
+                    if tag_list:
+                        ors = []
+                        for t in tag_list:
+                            # looks for `"tags": [` ... `"t"` ... `]`
+                            ors.append("labels_json LIKE ?")
+                            params.append(f'%"{k}":%"{t}"%')
+                        where.append("(" + " OR ".join(ors) + ")")
+                    continue
+
                 where.append("labels_json LIKE ?")
-                # crude but works: `"k": "v"` substring
                 params.append(f'%"{k}": "{v}"%')
 
         sql = "SELECT * FROM artifacts"
