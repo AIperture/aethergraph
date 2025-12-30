@@ -261,6 +261,7 @@ class MemoryFacade:
         outputs_ref=None,
         metrics: dict[str, float] | None = None,
         signal: float | None = None,
+        text: str | None = None,  # optional override
     ) -> Event:
         """
         Convenience wrapper around record_raw() with common fields.
@@ -273,10 +274,11 @@ class MemoryFacade:
         - inputs_ref / outputs_ref : optional Value[] references
         - metrics  : numeric map (latency, tokens, etc.)
         - signal   : optional override for signal strength
+        - text     : optional preview text override (if None, derived from data)
         """
+
         # 1) derive short preview text
-        text: str | None = None
-        if data is not None:
+        if text is None and data is not None:
             if isinstance(data, str):
                 text = data
             else:
@@ -318,6 +320,305 @@ class MemoryFacade:
 
         return await self.record_raw(base=base, text=text, metrics=metrics)
 
+    # ------------ chat recording ------------
+    async def record_chat(
+        self,
+        role: Literal["user", "assistant", "system", "tool"],
+        text: str,
+        *,
+        tags: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        severity: int = 2,
+        signal: float | None = None,
+    ) -> Event:
+        """
+        Record a single chat turn in a normalized way.
+
+        - role: "user" | "assistant" | "system" | "tool"
+        - text: primary message text
+        - tags: optional extra tags (we always add "chat")
+        - data: extra JSON payload merged into {"role", "text"}
+        """
+        extra_tags = ["chat"]
+        if tags:
+            extra_tags.extend(tags)
+        payload: dict[str, Any] = {"role": role, "text": text}
+        if data:
+            payload.update(data)
+
+        return await self.record(
+            kind="chat.turn",
+            text=text,
+            data=payload,
+            tags=extra_tags,
+            severity=severity,
+            stage=role,
+            signal=signal,
+        )
+
+    async def record_chat_user(
+        self,
+        text: str,
+        *,
+        tags: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        severity: int = 2,
+        signal: float | None = None,
+    ) -> Event:
+        """DX sugar: record a user chat turn."""
+        return await self.record_chat(
+            "user",
+            text,
+            tags=tags,
+            data=data,
+            severity=severity,
+            signal=signal,
+        )
+
+    async def record_chat_assistant(
+        self,
+        text: str,
+        *,
+        tags: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        severity: int = 2,
+        signal: float | None = None,
+    ) -> Event:
+        """DX sugar: record an assistant chat turn."""
+        return await self.record_chat(
+            "assistant",
+            text,
+            tags=tags,
+            data=data,
+            severity=severity,
+            signal=signal,
+        )
+
+    async def record_chat_system(
+        self,
+        text: str,
+        *,
+        tags: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        severity: int = 1,
+        signal: float | None = None,
+    ) -> Event:
+        """DX sugar: record a system message."""
+        return await self.record_chat(
+            "system",
+            text,
+            tags=tags,
+            data=data,
+            severity=severity,
+            signal=signal,
+        )
+
+    async def record_chat_tool(
+        self,
+        tool_name: str,
+        text: str,
+        *,
+        tags: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        severity: int = 2,
+        signal: float | None = None,
+    ) -> Event:
+        """
+        DX sugar: record a tool-related message as a chat turn.
+
+        Adds tag "tool:<tool_name>" and records tool_name in data.
+        """
+        tool_tags = list(tags or [])
+        tool_tags.append(f"tool:{tool_name}")
+        payload: dict[str, Any] = {"tool_name": tool_name}
+        if data:
+            payload.update(data)
+
+        return await self.record_chat(
+            "tool",
+            text,
+            tags=tool_tags,
+            data=payload,
+            severity=severity,
+            signal=signal,
+        )
+
+    async def recent_chat(
+        self,
+        *,
+        limit: int = 50,
+        roles: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Return the last `limit` chat.turns as a normalized list.
+
+        Each item: {"ts", "role", "text", "tags"}.
+
+        - roles: optional filter on role (e.g. {"user", "assistant"}).
+        """
+        events = await self.recent(kinds=["chat.turn"], limit=limit)
+        out: list[dict[str, Any]] = []
+
+        for e in events:
+            # 1) Resolve role (from stage or data)
+            role = (
+                getattr(e, "stage", None)
+                or ((e.data or {}).get("role") if getattr(e, "data", None) else None)
+                or "user"
+            )
+
+            if roles is not None and role not in roles:
+                continue
+
+            # 2) Resolve text:
+            #    - prefer Event.text
+            #    - fall back to data["text"]
+            raw_text = getattr(e, "text", "") or ""
+            if not raw_text and getattr(e, "data", None):
+                raw_text = (e.data or {}).get("text", "") or ""
+
+            out.append(
+                {
+                    "ts": getattr(e, "ts", None),
+                    "role": role,
+                    "text": raw_text,
+                    "tags": list(e.tags or []),
+                }
+            )
+
+        return out
+
+    async def chat_history_for_llm(
+        self,
+        *,
+        limit: int = 20,
+        include_system_summary: bool = True,
+        summary_tag: str = "session",
+        summary_scope_id: str | None = None,
+        max_summaries: int = 3,
+    ) -> dict[str, Any]:
+        """
+        Build a ready-to-send OpenAI-style chat message list.
+
+        Returns:
+          {
+            "summary": "<combined long-term summary or ''>",
+            "messages": [
+               {"role": "system", "content": "..."},
+               {"role": "user", "content": "..."},
+               ...
+            ]
+          }
+
+        Long-term summary handling:
+          - We load up to `max_summaries` recent summaries for the tag,
+            oldest → newest, and join their text with blank lines.
+        """
+        messages: list[dict[str, str]] = []
+        summary_text = ""
+
+        if include_system_summary:
+            try:
+                summaries = await self.load_recent_summaries(
+                    scope_id=summary_scope_id,
+                    summary_tag=summary_tag,
+                    limit=max_summaries,
+                )
+            except Exception:
+                summaries = []
+
+            parts: list[str] = []
+            for s in summaries:
+                st = s.get("summary") or s.get("text") or s.get("body") or s.get("value") or ""
+                if st:
+                    parts.append(st)
+
+            if parts:
+                summary_text = "\n\n".join(parts)
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": f"Summary of previous context:\n{summary_text}",
+                    }
+                )
+
+        # Append recent chat turns
+        for item in await self.recent_chat(limit=limit):
+            role = item["role"]
+            # Map unknown roles (e.g. "tool") to "assistant" by default
+            mapped_role = role if role in {"user", "assistant", "system"} else "assistant"
+            messages.append({"role": mapped_role, "content": item["text"]})
+
+        return {"summary": summary_text, "messages": messages}
+
+    async def build_prompt_segments(
+        self,
+        *,
+        recent_chat_limit: int = 12,
+        include_long_term: bool = True,
+        summary_tag: str = "session",
+        max_summaries: int = 3,
+        include_recent_tools: bool = False,
+        tool: str | None = None,
+        tool_limit: int = 10,
+    ) -> dict[str, Any]:
+        """
+        High-level helper to assemble memory context for prompts.
+
+        Returns:
+          {
+            "long_term": "<combined summary text or ''>",
+            "recent_chat": [ {ts, role, text, tags}, ... ],
+            "recent_tools": [ {ts, tool, message, inputs, outputs, tags}, ... ]
+          }
+        """
+        long_term_text = ""
+        if include_long_term:
+            try:
+                summaries = await self.load_recent_summaries(
+                    summary_tag=summary_tag,
+                    limit=max_summaries,
+                )
+            except Exception:
+                summaries = []
+
+            parts: list[str] = []
+            for s in summaries:
+                st = s.get("summary") or s.get("text") or s.get("body") or s.get("value") or ""
+                if st:
+                    parts.append(st)
+
+            if parts:
+                # multiple long-term summaries → concatenate oldest→newest
+                long_term_text = "\n\n".join(parts)
+
+        recent_chat = await self.recent_chat(limit=recent_chat_limit)
+
+        recent_tools: list[dict[str, Any]] = []
+        if include_recent_tools:
+            events = await self.recent_tool_results(
+                tool=tool,
+                limit=tool_limit,
+            )
+            for e in events:
+                recent_tools.append(
+                    {
+                        "ts": getattr(e, "ts", None),
+                        "tool": e.tool,
+                        "message": e.text,
+                        "inputs": getattr(e, "inputs", None),
+                        "outputs": getattr(e, "outputs", None),
+                        "tags": list(e.tags or []),
+                    }
+                )
+
+        return {
+            "long_term": long_term_text,
+            "recent_chat": recent_chat,
+            "recent_tools": recent_tools,
+        }
+
+    # ---------- typed result recording ----------
     async def write_result(
         self,
         *,
@@ -384,6 +685,91 @@ class MemoryFacade:
             message=message,
             severity=severity,
         )
+
+    async def record_tool_result(
+        self,
+        *,
+        tool: str,
+        inputs: list[dict[str, Any]] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        metrics: dict[str, float] | None = None,
+        message: str | None = None,
+        severity: int = 3,
+    ) -> Event:
+        """
+        DX-friendly alias for write_tool_result(); prefer this in new code.
+        """
+        return await self.write_tool_result(
+            tool=tool,
+            inputs=inputs,
+            outputs=outputs,
+            tags=tags,
+            metrics=metrics,
+            message=message,
+            severity=severity,
+        )
+
+    async def record_result(
+        self,
+        *,
+        tool: str | None = None,
+        inputs: list[dict[str, Any]] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        metrics: dict[str, float] | None = None,
+        message: str | None = None,
+        severity: int = 3,
+    ) -> Event:
+        """
+        Alias for write_result(); symmetric with record_tool_result().
+
+        Use this when you conceptually have a "result" but don't care whether
+        it's a tool vs agent vs flow.
+        """
+        return await self.write_result(
+            tool=tool,
+            inputs=inputs,
+            outputs=outputs,
+            tags=tags,
+            metrics=metrics,
+            message=message,
+            severity=severity,
+        )
+
+    async def last_tool_result(self, tool: str) -> Event | None:
+        """
+        Convenience: return the most recent tool_result Event for a given tool.
+        """
+        events = await self.recent_tool_results(tool=tool, limit=1)
+        return events[-1] if events else None
+
+    async def recent_tool_result_data(
+        self,
+        *,
+        tool: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """
+        Return a simplified view over recent tool_result events.
+
+        Each item:
+          {"ts", "tool", "message", "inputs", "outputs", "tags"}.
+        """
+        events = await self.recent_tool_results(tool=tool, limit=limit)
+        out: list[dict[str, Any]] = []
+        for e in events:
+            out.append(
+                {
+                    "ts": getattr(e, "ts", None),
+                    "tool": e.tool,
+                    "message": e.text,
+                    "inputs": getattr(e, "inputs", None),
+                    "outputs": getattr(e, "outputs", None),
+                    "tags": list(e.tags or []),
+                }
+            )
+        return out
 
     # ---------- retrieval ----------
     async def recent(self, *, kinds: list[str] | None = None, limit: int = 50) -> list[Event]:
@@ -1068,3 +1454,86 @@ class MemoryFacade:
         Not implemented yet; provided as an explicit extension hook.
         """
         raise NotImplementedError("save_core_fact_artifact is reserved for future memory policy")
+
+    # ----------- RAG: DX helpers (key-based) -----------
+    async def rag_remember_events(
+        self,
+        *,
+        key: str = "default",
+        where: dict | None = None,
+        policy: dict | None = None,
+    ) -> dict:
+        """
+        High-level: bind a RAG corpus by logical key and promote events into it.
+
+        Example:
+          await mem.rag_remember_events(
+              key="session",
+              where={"kinds": ["tool_result"], "limit": 200},
+              policy={"min_signal": 0.25},
+          )
+        """
+        corpus_id = await self.rag_bind(key=key, create_if_missing=True)
+        return await self.rag_promote_events(
+            corpus_id=corpus_id,
+            events=None,
+            where=where,
+            policy=policy,
+        )
+
+    async def rag_remember_docs(
+        self,
+        docs: Sequence[dict[str, Any]],
+        *,
+        key: str = "default",
+        labels: dict | None = None,
+    ) -> dict[str, Any]:
+        """
+        High-level: bind a RAG corpus by key and upsert docs into it.
+        """
+        corpus_id = await self.rag_bind(key=key, create_if_missing=True, labels=labels)
+        return await self.rag_upsert(corpus_id=corpus_id, docs=list(docs))
+
+    async def rag_search_by_key(
+        self,
+        *,
+        key: str = "default",
+        query: str,
+        k: int = 8,
+        filters: dict | None = None,
+        mode: Literal["hybrid", "dense"] = "hybrid",
+    ) -> list[dict]:
+        """
+        High-level: resolve corpus by logical key and run rag_search() on it.
+        """
+        corpus_id = await self.rag_bind(key=key, create_if_missing=False)
+        return await self.rag_search(
+            corpus_id=corpus_id,
+            query=query,
+            k=k,
+            filters=filters,
+            mode=mode,
+        )
+
+    async def rag_answer_by_key(
+        self,
+        *,
+        key: str = "default",
+        question: str,
+        style: Literal["concise", "detailed"] = "concise",
+        with_citations: bool = True,
+        k: int = 6,
+    ) -> dict:
+        """
+        High-level: RAG QA over a corpus referenced by logical key.
+
+        Internally calls rag_bind(..., create_if_missing=False) and rag_answer().
+        """
+        corpus_id = await self.rag_bind(key=key, create_if_missing=False)
+        return await self.rag_answer(
+            corpus_id=corpus_id,
+            question=question,
+            style=style,
+            with_citations=with_citations,
+            k=k,
+        )

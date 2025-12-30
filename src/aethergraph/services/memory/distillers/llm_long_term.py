@@ -10,7 +10,7 @@ from aethergraph.contracts.storage.doc_store import DocStore
 
 # metering
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
-from aethergraph.services.memory.facade import now_iso, stable_event_id
+from aethergraph.services.memory.facade.utils import now_iso, stable_event_id
 from aethergraph.services.memory.utils import _summary_doc_id
 
 

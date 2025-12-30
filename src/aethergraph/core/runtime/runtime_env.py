@@ -119,7 +119,6 @@ class RuntimeEnv:
         }
 
         level, custom_scope_id = self._resolve_memory_config()
-        # print(f"🍏 [RuntimeEnv] Resolved memory config: level={level}, custom_scope_id={custom_scope_id}")
         mem_scope = (
             self.container.scope_factory.for_memory(
                 identity=self.identity,

@@ -70,15 +70,10 @@ async def get_stats_overview(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
-    run_ids_for_client: set[str] | None = None
-    if identity.mode == "demo" and identity.client_id:
-        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
-
     raw: dict[str, int] = await meter.get_overview(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
-        run_ids=run_ids_for_client,
     )
     return StatsOverview(**raw)
 
@@ -100,15 +95,10 @@ async def get_graphs_stats(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
-    run_ids_for_client: set[str] | None = None
-    if identity.mode == "demo" and identity.client_id:
-        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
-
     raw_all: dict[str, dict[str, Any]] = await meter.get_graph_stats(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
-        run_ids=run_ids_for_client,
     )
     # raw_all: { "<graph_id>": {"runs":..., "succeeded":..., "failed":..., "total_duration_s":...}, ... }
 
@@ -156,16 +146,11 @@ async def get_memory_stats(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
-    run_ids_for_client: set[str] | None = None
-    if identity.mode == "demo" and identity.client_id:
-        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
-
     raw: dict[str, dict[str, int]] = await meter.get_memory_stats(
         scope_id=scope_id,
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
-        run_ids=run_ids_for_client,
     )
     # raw: { "memory.user_msg": {"count": N}, ... }
     return MemoryStats(root=raw)
@@ -185,15 +170,10 @@ async def get_artifacts_stats(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
-    run_ids_for_client: set[str] | None = None
-    if identity.mode == "demo" and identity.client_id:
-        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
-
     raw: dict[str, dict[str, int]] = await meter.get_artifact_stats(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
-        run_ids=run_ids_for_client,
     )
     # raw: { "json": {"count":..., "bytes":..., "pinned_count":..., "pinned_bytes":...}, ... }
     return ArtifactStats(root=raw)
@@ -213,15 +193,10 @@ async def get_stats_llm(
     if meter is None:
         raise HTTPException(status_code=501, detail="Metering service not available")
 
-    run_ids_for_client: set[str] | None = None
-    if identity.mode == "demo" and identity.client_id:
-        run_ids_for_client = await _get_run_ids_for_client(identity.client_id)
-
     raw: dict[str, dict[str, int]] = await meter.get_llm_stats(
         user_id=identity.user_id if identity and identity.user_id else None,
         org_id=identity.org_id if identity and identity.org_id else None,
         window=window,
-        run_ids=run_ids_for_client,
     )
     # raw: { "gpt-4o-mini": {"calls":..., "prompt_tokens":..., "completion_tokens":...}, ... }
     return LLMStats(root=raw)

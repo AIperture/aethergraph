@@ -81,6 +81,7 @@ async def _build_env(
         or (getattr(owner, "spec", None) or {}).get("app_id")
     )
 
+    print(f"identity in _build_env: {identity}")
     env = RuntimeEnv(
         run_id=run_id,
         graph_id=graph_id,
@@ -166,7 +167,7 @@ def _resolve_graph_outputs(
             continuations=continuations,
         ) from e
 
-    return next(iter(result.values())) if len(result) == 1 else result
+    return result
 
 
 def _resolve_graph_outputs_or_waits(graph, inputs, env, *, raise_on_waits: bool = True):
@@ -237,8 +238,8 @@ def _register_metering_context(
     )
 
     # user id etc through auth context if available
-    user_id = getattr(getattr(env, "auth", None), "user_id", None)
-    org_id = getattr(getattr(env, "auth", None), "org_id", None)
+    user_id = getattr(getattr(env, "identity", None), "user_id", None)
+    org_id = getattr(getattr(env, "identity", None), "org_id", None)
 
     token = current_meter_context.set(
         {

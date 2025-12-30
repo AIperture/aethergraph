@@ -6,7 +6,12 @@ if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
+from aethergraph.core.runtime.run_types import (
+    RunImportance,
+    RunOrigin,
+    RunRecord,
+    RunVisibility,
+)
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
@@ -79,6 +84,73 @@ class NodeContext:
         )
 
         return record.run_id
+
+    async def run_and_wait(
+        self,
+        graph_id: str,
+        *,
+        inputs: dict[str, Any],
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+        visibility: RunVisibility | None = None,
+        origin: RunOrigin | None = None,
+        importance: RunImportance | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        run_id: str | None = None,
+    ) -> tuple[str, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+        """
+        Run a child graph as a first-class RunManager run, and wait for completion.
+
+        Returns:
+          (child_run_id, outputs, has_waits, continuations)
+        """
+        rm: RunManager | None = getattr(self.services, "run_manager", None)
+        if rm is None:
+            raise RuntimeError("NodeContext.services.run_manager is not configured")
+
+        effective_session_id = session_id or self.session_id
+
+        record, outputs, has_waits, continuations = await rm.run_and_wait(
+            graph_id,
+            inputs=inputs,
+            run_id=run_id,
+            session_id=effective_session_id,
+            tags=tags,
+            visibility=visibility or RunVisibility.normal,
+            origin=origin or (RunOrigin.agent if agent_id is not None else RunOrigin.app),
+            importance=importance or RunImportance.normal,
+            agent_id=agent_id,
+            app_id=app_id,
+            identity=self.identity,  # keep provenance consistent with spawn_run
+            count_slot=False,  # nested orchestration: avoid deadlock
+        )
+
+        return record.run_id, outputs, has_waits, continuations
+
+    async def wait_run(
+        self,
+        run_id: str,
+        *,
+        timeout_s: float | None = None,
+    ) -> RunRecord:
+        """
+        Fetch and wait for a run to complete. This version simply polls the RunManager.
+        In the future, we will use ContinuationStore to manage waits more efficiently.
+
+        Example:
+            r1 = await context.spawn_run("g1", inputs={...})
+            r2 = await context.spawn_run("g2", inputs={...})
+
+            rec1, rec2 = await asyncio.gather(
+                context.wait_run(r1),
+                context.wait_run(r2),
+            )
+        """
+        rm: RunManager | None = getattr(self.services, "run_manager", None)
+        if rm is None:
+            raise RuntimeError("NodeContext.services.run_manager is not configured")
+        return await rm.wait_run(run_id, timeout_s=timeout_s)
 
     def logger(self):
         return self.services.logger.for_node_ctx(

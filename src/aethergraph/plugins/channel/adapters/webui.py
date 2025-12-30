@@ -74,14 +74,17 @@ class WebUIChannelAdapter(ChannelAdapter):
         buttons = [self._button_to_dict(b) for b in raw_buttons]
         file_info = getattr(event, "file", None) or None
 
+        # richer event support
+        files = getattr(event, "files", None) or None
+        rich = getattr(event, "rich", None) or None
+        upsert_key = getattr(event, "upsert_key", None)
+
         meta = event.meta or {}
         # Agent_id
         # prefer cononical agent_id; otherwise fall back to legacy field
         agent_id = meta.get("agent_id") or meta.get("agent")
         if agent_id:
             meta["agent_id"] = agent_id
-        # else:
-        #     raise ValueError("agent_id must be provided in event meta for UIChannelEvent")
 
         # Prefer explicit session_id / run_id from meta when present
         session_id = meta.get("session_id")
@@ -104,11 +107,20 @@ class WebUIChannelAdapter(ChannelAdapter):
                 "text": event.text,
                 "buttons": buttons,
                 "file": file_info,
+                "files": files,
+                "rich": rich,
+                "upsert_key": upsert_key,
                 "meta": meta,
+                # optional convenience copy:
+                "agent_id": meta.get("agent_id"),
             },
         }
-
         await self.event_log.append(row)
+
+        ## In the future, if an EventHub is available, broadcast to WebSocket subscribers.
+        ## self.event_log is always the source of truth.
+        # if self.event_hub is not None:
+        #     await self.event_hub.broadcast(row)
 
         # Correlator remains run-based for now (session may not map 1-1)
         return {

@@ -384,6 +384,9 @@ class ChannelSession:
             self._channel_key = outer._resolve_key(channel_key)
             self._upsert_key = f"{outer._run_id}:{outer._node_id}:stream"
 
+        def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+            return self._outer._inject_context_meta(meta)
+
         def _buf(self):
             return getattr(self, "__buf", None)
 
@@ -471,6 +474,9 @@ class ChannelSession:
             # Resolve once (explicit -> bound -> default)
             self._channel_key = outer._resolve_key(channel_key)
             self._upsert_key = f"{outer._run_id}:{outer._node_id}:{key_suffix}"
+
+        def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+            return self._outer._inject_context_meta(meta)
 
         async def start(self, *, subtitle: str | None = None):
             if not self._started:

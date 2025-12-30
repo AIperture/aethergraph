@@ -167,7 +167,6 @@ class EventLogMeteringService(MeteringService):
             app_id=app_id,
             session_id=session_id,
         )
-
         await self._append(
             {
                 "kind": "meter.llm",

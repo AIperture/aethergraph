@@ -224,6 +224,11 @@ async def get_session_chat_events(
         kinds=["session_chat"],
         limit=1000,
     )
+
+    if since_ts is not None:
+        # make cursor exclusive -- only return events after since_ts to avoid duplicates
+        events = [ev for ev in events if (ev.get("ts") or 0) > since_ts]
+
     out: list[SessionChatEvent] = []
     for ev in events:
         payload = ev.get("payload", {}) or {}
@@ -236,9 +241,10 @@ async def get_session_chat_events(
                 text=payload.get("text"),
                 buttons=payload.get("buttons", []),
                 file=payload.get("file"),  # may be None
-                files=payload.get("files") or None,  # 🔹 forward list
+                files=payload.get("files") or None,  # forward list
                 meta=payload.get("meta", {}) or {},
                 agent_id=payload.get("agent_id"),
+                upsert_key=payload.get("upsert_key"),  # forward idempotent key
             )
         )
     out.sort(key=lambda e: e.ts)

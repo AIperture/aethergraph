@@ -241,6 +241,7 @@ class ArtifactMeta(BaseModel):
     run_id: str | None = None
     graph_id: str | None = None
     node_id: str | None = None
+    session_id: str | None = None
 
 
 class ArtifactListResponse(BaseModel):
@@ -489,6 +490,7 @@ class SessionChatEvent(BaseModel):
     meta: dict[str, Any]
     ts: float
     agent_id: str | None = None
+    upsert_key: str | None = None  # for idempotent updates
 
 
 class SessionUpdateRequest(BaseModel):
