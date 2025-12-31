@@ -42,8 +42,16 @@ class SqliteArtifactIndexSync:
                 created_at TEXT,
                 labels_json TEXT,
                 metrics_json TEXT,
-                pinned INTEGER DEFAULT 0
-                -- NOTE: older DBs created without uri/preview_uri columns
+                pinned INTEGER DEFAULT 0,
+                -- tenant / scope columns
+                org_id TEXT,
+                user_id TEXT,
+                client_id TEXT,
+                app_id TEXT,
+                session_id TEXT,
+                -- uri columns (may be missing in older DBs)
+                uri TEXT,
+                preview_uri TEXT
             )
             """
         )
@@ -63,7 +71,7 @@ class SqliteArtifactIndexSync:
             """
         )
 
-        # Migration: add uri / preview_uri columns if missing
+        # Migration: add uri / preview_uri / tenant columns if missing
         cur.execute("PRAGMA table_info(artifacts)")
         cols = {row["name"] for row in cur.fetchall()}
 
@@ -72,12 +80,35 @@ class SqliteArtifactIndexSync:
         if "preview_uri" not in cols:
             cur.execute("ALTER TABLE artifacts ADD COLUMN preview_uri TEXT")
 
+        # 🔹 NEW tenant columns (for existing DBs)
+        if "org_id" not in cols:
+            cur.execute("ALTER TABLE artifacts ADD COLUMN org_id TEXT")
+        if "user_id" not in cols:
+            cur.execute("ALTER TABLE artifacts ADD COLUMN user_id TEXT")
+        if "client_id" not in cols:
+            cur.execute("ALTER TABLE artifacts ADD COLUMN client_id TEXT")
+        if "app_id" not in cols:
+            cur.execute("ALTER TABLE artifacts ADD COLUMN app_id TEXT")
+        if "session_id" not in cols:
+            cur.execute("ALTER TABLE artifacts ADD COLUMN session_id TEXT")
+
+        # Existing indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_sha ON artifacts(sha256)")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_occ_artifact ON artifact_occurrences(artifact_id)"
         )
+
+        # 🔹 NEW tenant-oriented indexes (tune as needed)
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_user ON artifacts(user_id, created_at)"
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_org ON artifacts(org_id, created_at)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, created_at)"
+        )
+
         self._conn.commit()
 
     def upsert(self, a: Artifact) -> None:
@@ -88,15 +119,49 @@ class SqliteArtifactIndexSync:
         self._conn.execute(
             """
             INSERT INTO artifacts (
-                artifact_id, run_id, graph_id, node_id,
-                tool_name, tool_version, kind, sha256,
-                bytes, mime, created_at, labels_json, metrics_json,
-                pinned, uri, preview_uri
+                artifact_id,
+                run_id,
+                graph_id,
+                node_id,
+                tool_name,
+                tool_version,
+                kind,
+                sha256,
+                bytes,
+                mime,
+                created_at,
+                labels_json,
+                metrics_json,
+                pinned,
+                uri,
+                preview_uri,
+                org_id,
+                user_id,
+                client_id,
+                app_id,
+                session_id
             ) VALUES (
-                :artifact_id, :run_id, :graph_id, :node_id,
-                :tool_name, :tool_version, :kind, :sha256,
-                :bytes, :mime, :created_at, :labels_json, :metrics_json,
-                :pinned, :uri, :preview_uri
+                :artifact_id,
+                :run_id,
+                :graph_id,
+                :node_id,
+                :tool_name,
+                :tool_version,
+                :kind,
+                :sha256,
+                :bytes,
+                :mime,
+                :created_at,
+                :labels_json,
+                :metrics_json,
+                :pinned,
+                :uri,
+                :preview_uri,
+                :org_id,
+                :user_id,
+                :client_id,
+                :app_id,
+                :session_id
             )
             ON CONFLICT(artifact_id) DO UPDATE SET
                 run_id        = excluded.run_id,
@@ -113,25 +178,35 @@ class SqliteArtifactIndexSync:
                 metrics_json  = excluded.metrics_json,
                 pinned        = excluded.pinned,
                 uri           = excluded.uri,
-                preview_uri   = excluded.preview_uri
+                preview_uri   = excluded.preview_uri,
+                org_id        = excluded.org_id,
+                user_id       = excluded.user_id,
+                client_id     = excluded.client_id,
+                app_id        = excluded.app_id,
+                session_id    = excluded.session_id
             """,
             {
                 "artifact_id": rec["artifact_id"],
-                "run_id": rec["run_id"],
-                "graph_id": rec["graph_id"],
-                "node_id": rec["node_id"],
-                "tool_name": rec["tool_name"],
-                "tool_version": rec["tool_version"],
-                "kind": rec["kind"],
-                "sha256": rec["sha256"],
-                "bytes": rec["bytes"],
-                "mime": rec["mime"],
-                "created_at": rec["created_at"],
+                "run_id": rec.get("run_id"),
+                "graph_id": rec.get("graph_id"),
+                "node_id": rec.get("node_id"),
+                "tool_name": rec.get("tool_name"),
+                "tool_version": rec.get("tool_version"),
+                "kind": rec.get("kind"),
+                "sha256": rec.get("sha256"),
+                "bytes": rec.get("bytes"),
+                "mime": rec.get("mime"),
+                "created_at": rec.get("created_at"),
                 "labels_json": labels_json,
                 "metrics_json": metrics_json,
                 "pinned": int(rec.get("pinned") or 0),
                 "uri": rec.get("uri"),
                 "preview_uri": rec.get("preview_uri"),
+                "org_id": rec.get("org_id"),
+                "user_id": rec.get("user_id"),
+                "client_id": rec.get("client_id"),
+                "app_id": rec.get("app_id"),
+                "session_id": rec.get("session_id"),
             },
         )
         self._conn.commit()
@@ -152,18 +227,23 @@ class SqliteArtifactIndexSync:
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
         limit: int | None = None,
-        offset: int = 0,  # 🔹 NEW
+        offset: int = 0,
     ) -> list[Artifact]:
-        # NOTE: Current implementation:
-        #   - Pushes basic WHERE (kind, labels_json LIKE) and ORDER BY created_at into SQL
-        #   - Loads ALL matching rows into Python
-        #   - Applies metric-based filtering/sorting and then offset + limit in memory
-        #
-        # This is OK for moderate artifact counts, but if artifacts grow large we should:
-        #   - Promote frequently queried fields (user_id, org_id, scope_id, metric columns)
-        #     to real indexed columns, and
-        #   - Push ORDER BY + LIMIT/OFFSET (or keyset pagination) down into SQL instead of
-        #     slicing in Python.
+        """Search artifacts with optional filtering and ranking.
+        Args:
+            kind: Optional kind to filter by.
+            labels: Optional dict of labels to filter by (exact match).
+            metric: Optional metric name to rank by.
+            mode: "max" or "min" for metric ranking.
+            limit: Optional max number of results to return.
+            offset: Number of results to skip from start.
+
+        Returns:
+            List of matching Artifact objects.
+
+        NOTE: If metric and mode are provided, ranking is done in Python
+        after fetching all candidates, which may be slower for large datasets.
+        """
         where = []
         params: list[Any] = []
 
@@ -171,45 +251,66 @@ class SqliteArtifactIndexSync:
             where.append("kind = ?")
             params.append(kind)
 
-        # label filters: naive JSON LIKE for now (can be improved later)
+        TENANT_KEYS = {
+            "org_id": "org_id",
+            "user_id": "user_id",
+            "client_id": "client_id",
+            "app_id": "app_id",
+            "session_id": "session_id",
+            "run_id": "run_id",
+        }
+
         if labels:
             for k, v in labels.items():
                 if k == "tags":
-                    # accept str | list[str]
                     tag_list = v if isinstance(v, list) else [v]
                     tag_list = [t for t in (t.strip() for t in tag_list) if t]
                     if tag_list:
                         ors = []
                         for t in tag_list:
-                            # looks for `"tags": [` ... `"t"` ... `]`
                             ors.append("labels_json LIKE ?")
                             params.append(f'%"{k}":%"{t}"%')
                         where.append("(" + " OR ".join(ors) + ")")
                     continue
 
+                if k in TENANT_KEYS:
+                    where.append(f"{TENANT_KEYS[k]} = ?")
+                    params.append(v)
+                    continue
+
                 where.append("labels_json LIKE ?")
                 params.append(f'%"{k}": "{v}"%')
 
-        sql = "SELECT * FROM artifacts"
+        base_sql = "SELECT * FROM artifacts"
         if where:
-            sql += " WHERE " + " AND ".join(where)
+            base_sql += " WHERE " + " AND ".join(where)
 
-        # Base ordering by created_at (oldest→newest or vice versa as you prefer)
-        sql += " ORDER BY created_at ASC"
+        # Fast path: no metric-based ranking → push ORDER + LIMIT/OFFSET to SQL
+        if not metric or not mode:
+            sql = base_sql + " ORDER BY created_at DESC"
+            if limit is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            elif offset:
+                # offset without limit is weird; just add a huge limit for safety
+                sql += " LIMIT -1 OFFSET ?"
+                params.append(offset)
 
-        with self._conn:  # or just self._conn.execute
             cur = self._conn.execute(sql, params)
             rows = [self._row_to_artifact(r) for r in cur.fetchall()]
+            return rows
 
-        # Metric sorting in Python if requested
-        if metric and mode:
-            rows = [a for a in rows if metric in (a.metrics or {})]
-            rows.sort(
-                key=lambda a: a.metrics[metric],
-                reverse=(mode == "max"),
-            )
+        # Slow path: metric sorting in Python (same as before)
+        sql = base_sql + " ORDER BY created_at DESC"
+        cur = self._conn.execute(sql, params)
+        rows = [self._row_to_artifact(r) for r in cur.fetchall()]
 
-        # 🔹 Apply offset + limit AFTER all filtering/sorting
+        rows = [a for a in rows if metric in (a.metrics or {})]
+        rows.sort(
+            key=lambda a: a.metrics[metric],
+            reverse=(mode == "max"),
+        )
+
         if offset:
             rows = rows[offset:]
         if limit is not None:

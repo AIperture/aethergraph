@@ -14,7 +14,8 @@ from aethergraph import NodeContext, graph_fn
     as_agent={
         "id": "chat_agent",
         "title": "Chat",
-        "description": "Built-in chat agent that uses the configured LLM.",
+        "short_description": "General-purpose chat agent.",
+        "description": "Built-in chat agent that uses the configured LLM and memory across sessions.",
         "icon": "message-circle",
         "color": "sky",
         "session_kind": "chat",

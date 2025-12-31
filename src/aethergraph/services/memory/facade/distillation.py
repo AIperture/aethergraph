@@ -79,9 +79,6 @@ class DistillationMixin:
         use_llm: bool = False,
     ) -> dict[str, Any]:
         scope_id = scope_id or self.memory_scope_id
-        print(
-            f"🍏 Starting distillation of long-term summary (tag={summary_tag}, kind={summary_kind})"
-        )
 
         if use_llm:
             if not self.llm:

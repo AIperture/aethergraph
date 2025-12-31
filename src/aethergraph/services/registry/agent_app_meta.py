@@ -200,13 +200,20 @@ def build_agent_meta(
     memory_level = cfg.get("memory_level", "none")
     memory_scope = cfg.get("memory_scope")
 
+    description = cfg.get("description")
+
+    # unified icon key + accent color (optional)
+    icon_key = cfg.get("icon_key") or cfg.get("icon")  # allow both
+    accent_color = cfg.get("color")
+
     meta: dict[str, Any] = {
         "kind": "agent",
         "id": agent_id,
         "title": agent_title,
-        "description": cfg.get("description"),
+        "description": description,
         "icon": cfg.get("icon"),
-        "color": cfg.get("color"),
+        "icon_key": icon_key,  # to match apps, preferred
+        "color": accent_color,
         "badge": cfg.get("badge"),
         "category": cfg.get("category"),
         "status": cfg.get("status", "available"),
@@ -227,6 +234,26 @@ def build_agent_meta(
             "name": graph_name,
             "version": version,
         },
+        "extra": extra,
+    }
+
+    # unified gallery view
+    meta["gallery"] = {
+        "kind": "agent",
+        "id": agent_id,
+        "title": agent_title,
+        "subtitle": cfg.get("session_kind") or cfg.get("mode"),
+        "badge": cfg.get("badge"),
+        "category": cfg.get("category"),
+        "status": meta["status"],
+        "short_description": description,
+        "description": description,
+        "icon_key": icon_key,
+        "accent_color": accent_color,
+        "tags": agent_tags,
+        "github_url": cfg.get("github_url"),
+        "flow_id": agent_flow_id,
+        "backing": meta["backing"],
         "extra": extra,
     }
 
@@ -258,6 +285,12 @@ def build_app_meta(
 
     extra = {k: v for k, v in cfg.items() if k not in APP_CORE_KEYS}
 
+    short_description = cfg.get("short_description") or cfg.get("description")
+    description = cfg.get("description")
+
+    icon_key = cfg.get("icon_key")
+    accent_color = cfg.get("color")
+
     meta: dict[str, Any] = {
         "kind": "app",
         "id": app_id,
@@ -266,10 +299,11 @@ def build_app_meta(
         "flow_id": app_flow_id,
         "badge": cfg.get("badge"),
         "category": cfg.get("category"),
-        "short_description": cfg.get("short_description"),
-        "description": cfg.get("description"),
+        "short_description": short_description,
+        "description": description,
         "status": cfg.get("status", "available"),
-        "icon_key": cfg.get("icon_key"),
+        "icon_key": icon_key,
+        "color": accent_color,
         "tags": app_tags,
         "features": cfg.get("features", []),
         "run_visibility": cfg.get("run_visibility", "normal"),
@@ -280,6 +314,26 @@ def build_app_meta(
             "name": graph_name,
             "version": version,
         },
+        "extra": extra,
+    }
+
+    # unified gallery view
+    meta["gallery"] = {
+        "kind": "app",
+        "id": app_id,
+        "title": app_name,
+        "subtitle": cfg.get("category"),
+        "badge": cfg.get("badge"),
+        "category": cfg.get("category"),
+        "status": meta["status"],
+        "short_description": short_description,
+        "description": description,
+        "icon_key": icon_key,
+        "accent_color": accent_color,
+        "tags": app_tags,
+        "github_url": cfg.get("github_url"),
+        "flow_id": app_flow_id,
+        "backing": meta["backing"],
         "extra": extra,
     }
 

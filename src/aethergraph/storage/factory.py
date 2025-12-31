@@ -210,12 +210,10 @@ def build_run_store(cfg: AppSettings) -> RunStore:
         )  # use "run-" prefix to avoid OS path issues on Windows
 
     if rs_cfg.backend == "sqlite":
-        from aethergraph.storage.docstore.sqlite_doc import SqliteDocStore
-        from aethergraph.storage.runs.doc_store import DocRunStore
+        from aethergraph.storage.runs.sqlite_run_store import SQLiteRunStore
 
         db_path = os.path.join(cfg.root, rs_cfg.sqlite_path)
-        docs = SqliteDocStore(db_path)
-        return DocRunStore(docs, prefix="run-")
+        return SQLiteRunStore(path=db_path)
 
     raise ValueError(f"Unknown run storage backend: {rs_cfg.backend!r}")
 
@@ -246,13 +244,10 @@ def build_session_store(cfg: AppSettings):
         return DocSessionStore(docs, prefix="session-")  # windows-safe
 
     if ss_cfg.backend == "sqlite":
-        from aethergraph.storage.docstore.sqlite_doc import SqliteDocStore
-        from aethergraph.storage.sessions.doc_store import DocSessionStore
+        from aethergraph.storage.sessions.sqlite_session_store import SQLiteSessionStore
 
         db_path = os.path.join(cfg.root, ss_cfg.sqlite_path)
-        docs = SqliteDocStore(db_path)
-        return DocSessionStore(docs, prefix="session-")
-
+        return SQLiteSessionStore(path=db_path)
     raise ValueError(f"Unknown session storage backend: {ss_cfg.backend!r}")
 
 

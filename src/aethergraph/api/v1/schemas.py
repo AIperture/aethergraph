@@ -93,6 +93,10 @@ class RunSummary(BaseModel):
     visibility: RunVisibility | None = None
     importance: RunImportance | None = None
 
+    # artifact stats for UI
+    artifact_count: int | None = None
+    last_artifact_at: datetime | None = None
+
     class Config:
         populate_by_name = True  # allows setting via app_id/app_name in Python
 
@@ -454,6 +458,10 @@ class Session(BaseModel):
 
     created_at: datetime
     updated_at: datetime
+
+    # artifact stats for UI
+    artifact_count: int = 0
+    last_artifact_at: datetime | None = None
 
 
 class SessionCreateRequest(BaseModel):

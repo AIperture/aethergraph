@@ -66,6 +66,20 @@ class RunRecord:
     agent_id: str | None = None
     app_id: str | None = None
 
+    # Artifact statistics
+    artifact_count: int = 0
+    first_artifact_at: datetime | None = None
+    last_artifact_at: datetime | None = None
+
+    # Optional: keep a small rolling window of recent artifact IDs
+    recent_artifact_ids: list[str] = field(default_factory=list)
+
+    def __item__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
 
 # Session-related run types
 class SessionKind(str, Enum):

@@ -39,6 +39,8 @@ class EventLogMeteringStore(MeteringStore):
         until: datetime | None = None,
         kinds: list[str] | None = None,
         limit: int | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
     ) -> list[dict[str, Any]]:
         # Always filter by meter tag
         return await self.event_log.query(
@@ -48,4 +50,6 @@ class EventLogMeteringStore(MeteringStore):
             kinds=kinds,
             tags=[METER_TAG],
             limit=limit,
+            user_id=user_id,
+            org_id=org_id,
         )

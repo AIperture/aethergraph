@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -12,6 +13,7 @@ from urllib.parse import urlparse
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.core.runtime.runtime_metering import current_metering
+from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.artifacts.paths import _from_uri_or_path
 from aethergraph.services.scope.scope import Scope
 
@@ -108,22 +110,19 @@ class ArtifactFacade:
 
     # Metering-enhanced record
     async def _record(self, a: Artifact) -> None:
-        """Record artifact in index and occurrence log."""
-
+        """Record artifact in index, occurrence log, and update run/session stats."""
         # 1) Sync canonical tenant fields from labels/scope into artifact
         if self.scope is not None:
-            # Ensure labels contain scope info (tenant + session/run/graph/node)
             scope_labels = self.scope.artifact_scope_labels()
             a.labels = {**scope_labels, **(a.labels or {})}
 
-            # Fill canonical fields if missing, using metering_dimensions
             dims = self.scope.metering_dimensions()
             a.org_id = a.org_id or dims.get("org_id")
             a.user_id = a.user_id or dims.get("user_id")
             a.client_id = a.client_id or dims.get("client_id")
             a.app_id = a.app_id or dims.get("app_id")
             a.session_id = a.session_id or dims.get("session_id")
-            # run_id / graph_id / node_id are already set at creation
+            # run_id / graph_id / node_id are already set
 
         # 2) Record in index + occurrence log
         await self.index.upsert(a)
@@ -152,6 +151,46 @@ class ArtifactFacade:
             import logging
 
             logging.getLogger("aethergraph.metering").exception("record_artifact_failed")
+
+        # 4) Update run/session stores (best-effort; don't break on failure)
+        try:
+            services = current_services()
+        except Exception:
+            return  # outside runtime context, nothing to do
+
+        # Normalize timestamp
+        ts: datetime | None
+        if isinstance(a.created_at, datetime):
+            ts = a.created_at
+        elif isinstance(a.created_at, str):
+            try:
+                ts = datetime.fromisoformat(a.created_at)
+            except Exception:
+                ts = None
+        else:
+            ts = None
+
+        # Update run metadata
+        run_store = getattr(services, "run_store", None)
+        if run_store is not None and a.run_id:
+            record_artifact = getattr(run_store, "record_artifact", None)
+            if callable(record_artifact):
+                await record_artifact(
+                    a.run_id,
+                    artifact_id=a.artifact_id,
+                    created_at=ts,
+                )
+
+        # Update session metadata
+        session_store = getattr(services, "session_store", None)
+        session_id = a.session_id or getattr(self.scope, "session_id", None)
+        if session_store is not None and session_id:
+            sess_record_artifact = getattr(session_store, "record_artifact", None)
+            if callable(sess_record_artifact):
+                await sess_record_artifact(
+                    session_id,
+                    created_at=ts,
+                )
 
     # ---------- core staging/ingest ----------
     async def stage_path(self, ext: str = "") -> str:
@@ -215,54 +254,6 @@ class ArtifactFacade:
         return a
 
     # ---------- core save APIs ----------
-
-    # Metering-enhanced record
-    async def _record(self, a: Artifact) -> None:
-        """Record artifact in index and occurrence log."""
-
-        # 1) Sync canonical tenant fields from labels/scope into artifact
-        if self.scope is not None:
-            # Ensure labels contain scope info (tenant + session/run/graph/node)
-            scope_labels = self.scope.artifact_scope_labels()
-            a.labels = {**scope_labels, **(a.labels or {})}
-
-            # Fill canonical fields if missing, using metering_dimensions
-            dims = self.scope.metering_dimensions()
-            a.org_id = a.org_id or dims.get("org_id")
-            a.user_id = a.user_id or dims.get("user_id")
-            a.client_id = a.client_id or dims.get("client_id")
-            a.app_id = a.app_id or dims.get("app_id")
-            a.session_id = a.session_id or dims.get("session_id")
-            # run_id / graph_id / node_id are already set at creation
-
-        # 2) Record in index + occurrence log
-        await self.index.upsert(a)
-        await self.index.record_occurrence(a)
-        self.last_artifact = a
-
-        # 3) Metering hook for artifact writes
-        try:
-            meter = current_metering()
-
-            # Try a few common size fields, fallback to 0
-            size = (
-                getattr(a, "bytes", None)
-                or getattr(a, "size_bytes", None)
-                or getattr(a, "size", None)
-                or 0
-            )
-
-            await meter.record_artifact(
-                scope=self.scope,  # Scope carries user/org/run/graph/app/session
-                kind=getattr(a, "kind", "unknown"),
-                bytes=int(size),
-                pinned=bool(getattr(a, "pinned", False)),
-            )
-        except Exception:
-            import logging
-
-            logging.getLogger("aethergraph.metering").exception("record_artifact_failed")
-
     async def save_file(
         self,
         path: str,

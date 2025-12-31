@@ -639,21 +639,25 @@ class RunManager:
         *,
         graph_id: str | None = None,
         status: RunStatus | None = None,
+        flow_id: str | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
         session_id: str | None = None,
-        flow_id: str | None = None,  # NEW
         limit: int = 100,
         offset: int = 0,
     ) -> list[RunRecord]:
-        if self._store is None:
-            return []
-
-        # First filter by graph_id/status in the store (TODO: implement self._store.list with flow_id for efficiency)
         records = await self._store.list(
-            graph_id=graph_id, status=status, session_id=session_id, limit=limit, offset=offset
+            graph_id=graph_id,
+            status=status,
+            user_id=user_id,
+            org_id=org_id,
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
         )
-
+        # Optional: still filter flow_id in Python for now since it's in meta/tags
         if flow_id is not None:
-            records = [r for r in records if r.meta.get("flow_id") == flow_id]
+            records = [rec for rec in records if (rec.meta or {}).get("flow_id") == flow_id]
 
         return records
 

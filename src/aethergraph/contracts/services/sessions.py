@@ -69,3 +69,19 @@ class SessionStore(Protocol):
         Delete a session by its ID.
         No-op if session doesn't exist.
         """
+
+    async def record_artifact(
+        self,
+        session_id: str,
+        *,
+        created_at: datetime | None = None,
+    ) -> None:
+        """
+        Update artifact-related stats for a session:
+
+          - increment artifact_count
+          - update last_artifact_at
+
+        No-op if session_id does not exist.
+        """
+        ...

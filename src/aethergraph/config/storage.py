@@ -13,7 +13,7 @@ class DocStoreSettings(BaseModel):
 
 
 class EventLogSettings(BaseModel):
-    backend: Literal["sqlite", "fs", "none"] = "fs"
+    backend: Literal["sqlite", "fs", "none"] = "sqlite"
     sqlite_path: str = "events/events.db"
     fs_dir: str = "events"
 
@@ -175,7 +175,7 @@ class MemorySettings(BaseModel):
 
 
 class RunStorageSettings(BaseModel):
-    backend: Literal["memory", "fs", "sqlite"] = "fs"
+    backend: Literal["memory", "fs", "sqlite"] = "sqlite"
 
     # FS backend: relative to AppSettings.root
     fs_root: str = "runs"  # will become <root>/runs
@@ -185,7 +185,7 @@ class RunStorageSettings(BaseModel):
 
 
 class SessionStorageSettings(BaseModel):
-    backend: Literal["memory", "fs", "sqlite"] = "fs"
+    backend: Literal["memory", "fs", "sqlite"] = "sqlite"
 
     # FS backend: relative to AppSettings.root
     fs_root: str = "sessions"  # will become <root>/sessions

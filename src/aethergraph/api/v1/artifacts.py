@@ -24,6 +24,26 @@ router = APIRouter(tags=["artifacts"])
 
 
 # -------- Helpers  -------- #
+
+
+def _tenant_label_filters(identity: RequestIdentity) -> dict[str, str]:
+    """
+    Convert RequestIdentity into artifact label filters.
+
+    All modes (cloud/demo/local) get org_id + user_id set, so we just use that.
+    """
+    org_id, user_id = identity.tenant_key
+    filters: dict[str, str] = {}
+
+    # If you *ever* want to allow cross-tenant system views, add flags here.
+    if org_id is not None:
+        filters["org_id"] = org_id
+    if user_id is not None:
+        filters["user_id"] = user_id
+
+    return filters
+
+
 def _extract_tags(labels: dict[str, Any]) -> list[str]:
     """
     Conventions:
@@ -106,79 +126,41 @@ def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
 async def list_artifacts(
     scope_id: Annotated[str | None, Query()] = None,
     kind: Annotated[str | None, Query()] = None,
-    tags: Annotated[str | None, Query(description="Comma-separated list of tags to filter")] = None,
+    tags: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
-    identity: Annotated[RequestIdentity, Depends(get_identity)] = None,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
-    """
-    List artifacts (metadata only).
-
-    Currently backed by the artifact index's `search` API:
-      - `kind` -> search(kind=...)
-      - `scope_id` -> labels["scope_id"]
-      - `tags` -> labels["tags"] (list of tags)
-
-    NOTE:
-      - Cursor is implemented as an offset passed into AsyncArtifactIndex.search.
-      - JsonlArtifactIndex and SqliteArtifactIndex currently load matching rows
-        into Python and then apply metric-based sorting + offset/limit in memory.
-      - This is fine for small/medium artifact volumes; for large-scale use,
-        AsyncArtifactIndex should be backed by an index that can handle filtering,
-        ordering, and pagination directly (e.g. SQL with indexes or a dedicated
-        search/metadata store).
-    """
     container = current_services()
     index = getattr(container, "artifact_index", None)
-    rm = getattr(container, "run_manager", None)
-    if index is None or rm is None:
-        # safeguard: no index configured
+    if index is None:
         return ArtifactListResponse(artifacts=[], next_cursor=None)
-    if identity.mode == "demo" and rm is None:
-        # Can't enforce client scoping without RunManager
-        raise HTTPException(status_code=503, detail="Run manager not configured")
 
-    scope_id = scope_id.strip() if scope_id and scope_id.strip() else None
-    kind = kind.strip() if kind and kind.strip() else None
-    tags = tags.strip() if tags and tags.strip() else None
-    cursor = cursor.strip() if cursor and cursor.strip() else None
+    offset = decode_cursor(cursor.strip() if cursor else None)
 
-    # Build label filters
     label_filters: dict[str, Any] = {}
-    if scope_id is not None:
-        label_filters["scope_id"] = scope_id
 
-    tag_list = []
-    if tags:
+    if scope_id and scope_id.strip():
+        label_filters["scope_id"] = scope_id.strip()
+
+    if tags and tags.strip():
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         if tag_list:
             label_filters["tags"] = tag_list
 
-    # cursor -> offset
-    offset = decode_cursor(cursor)
+    # 🔹 Tenant scoping: org_id + user_id
+    label_filters.update(_tenant_label_filters(identity))
 
+    print("label_filters:", label_filters)
     artifacts = await index.search(
-        kind=kind,
+        kind=kind.strip() if kind and kind.strip() else None,
         labels=label_filters or None,
         metric=None,
         mode=None,
         limit=limit,
         offset=offset,
     )
-
-    if identity.mode in ("cloud", "demo"):
-        filtered: list[Artifact] = []
-        for a in artifacts:
-            if not a.run_id:
-                continue
-            rec = await rm.get_record(a.run_id)
-            if rec and rec.user_id == identity.user_id:
-                filtered.append(a)
-        artifacts = filtered
-
     metas = [_artifact_to_meta(a) for a in artifacts]
-
-    # compute next cursor
     next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
     return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
 
@@ -276,20 +258,57 @@ async def pin_artifact(
 @router.get("/runs/{run_id}/artifacts", response_model=ArtifactListResponse)
 async def list_run_artifacts(
     run_id: str,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
-    """
-    List artifacts produced by a specific run.
-    """
     container = current_services()
     index = getattr(container, "artifact_index", None)
-    rm = getattr(container, "run_manager", None)
-    if index is None or rm is None:
+    if index is None:
         raise HTTPException(status_code=503, detail="Artifact index not configured")
 
-    artifacts = await index.list_for_run(run_id)
+    offset = decode_cursor(cursor.strip() if cursor else None)
+
+    label_filters: dict[str, Any] = {"run_id": run_id}
+    label_filters.update(_tenant_label_filters(identity))
+
+    artifacts = await index.search(
+        labels=label_filters,
+        limit=limit,
+        offset=offset,
+    )
+
     metas = [_artifact_to_meta(a) for a in artifacts]
-    return ArtifactListResponse(artifacts=metas, next_cursor=None)
+    next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
+    return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
+
+
+@router.get("/sessions/{session_id}/artifacts", response_model=ArtifactListResponse)
+async def list_session_artifacts(
+    session_id: str,
+    cursor: Annotated[str | None, Query()] = None,  # noqa: B008
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> ArtifactListResponse:
+    container = current_services()
+    index = getattr(container, "artifact_index", None)
+    if index is None:
+        raise HTTPException(status_code=503, detail="Artifact index not configured")
+
+    offset = decode_cursor(cursor.strip() if cursor else None)
+
+    label_filters: dict[str, Any] = {"session_id": session_id}
+    label_filters.update(_tenant_label_filters(identity))
+
+    artifacts = await index.search(
+        labels=label_filters,
+        limit=limit,
+        offset=offset,
+    )
+
+    metas = [_artifact_to_meta(a) for a in artifacts]
+    next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
+    return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
 
 
 @router.post("/artifacts/search", response_model=ArtifactSearchResponse)
@@ -308,14 +327,14 @@ async def search_artifacts(
       - metric + mode: if provided, used for ranking (and required for best-only)
       - limit: max results
       - best_only: if True, use index.best(...) and return a single hit
+
+    Tenant scoping is enforced via org_id/user_id/client_id/app_id from RequestIdentity.
     """
     container = current_services()
     index = getattr(container, "artifact_index", None)
     if index is None:
-        # safeguard: no index configured
         return ArtifactSearchResponse(results=[])
 
-    # Use getattr to be toleant to schema changes
     kind = getattr(req, "kind", None)
     scope_id = getattr(req, "scope_id", None)
     tags = getattr(req, "tags", None)
@@ -326,6 +345,7 @@ async def search_artifacts(
     best_only = getattr(req, "best_only", False)
 
     label_filter: dict[str, Any] = {}
+
     if scope_id:
         label_filter["scope_id"] = scope_id
 
@@ -335,15 +355,21 @@ async def search_artifacts(
             tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         elif isinstance(tags, list):
             tag_list = [str(t) for t in tags]
-        label_filter["tags"] = tag_list
+        else:
+            tag_list = []
+        if tag_list:
+            label_filter["tags"] = tag_list
 
     if extra_labels:
         label_filter.update(extra_labels)
 
+    # 🔹 Tenant scoping
+    tenant_filters = _tenant_label_filters(identity)
+    label_filter.update(tenant_filters)
+
     hits: list[ArtifactSearchHit] = []
 
     if best_only and metric and mode:
-        # Single best artifact according to metric
         best = await index.best(
             kind=kind or "",
             metric=metric,
@@ -358,9 +384,8 @@ async def search_artifacts(
                     score=score,
                 )
             )
-        return ArtifactSearchResponse(hits=hits)
+        return ArtifactSearchResponse(results=hits)
 
-    # General search
     artifacts = await index.search(
         kind=kind,
         labels=label_filter or None,
@@ -380,4 +405,4 @@ async def search_artifacts(
             )
         )
 
-    return ArtifactSearchResponse(hits=hits)
+    return ArtifactSearchResponse(results=hits)

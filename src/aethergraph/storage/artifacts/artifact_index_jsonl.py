@@ -57,14 +57,29 @@ class JsonlArtifactIndexSync:
         # NOTE: JSONL index keeps all artifacts in memory (_by_id.values()) and
         # performs filtering / sorting in Python, then applies offset + limit.
         # This is intended for small/medium local installs and tests only.
-        # For anything larger, use SqliteArtifactIndex or a dedicated DB-backed index.
         rows = list(self._by_id.values())
 
         if kind:
             rows = [r for r in rows if r.get("kind") == kind]
 
+        # Treat tenant keys as top-level fields, not labels
+        TENANT_KEYS = {
+            "org_id",
+            "user_id",
+            "client_id",
+            "app_id",
+            "session_id",
+            "run_id",
+        }
+
         if labels:
             for k, v in labels.items():
+                if k in TENANT_KEYS:
+                    # Match against top-level JSON fields
+                    rows = [r for r in rows if r.get(k) == v]
+                    continue
+
+                # Normal label filters
                 if isinstance(v, list):
                     rows = [
                         r
@@ -77,7 +92,10 @@ class JsonlArtifactIndexSync:
 
         if metric and mode:
             rows = [r for r in rows if metric in r.get("metrics", {})]
-            rows.sort(key=lambda r: r["metrics"][metric], reverse=(mode == "max"))
+            rows.sort(
+                key=lambda r: r["metrics"][metric],
+                reverse=(mode == "max"),
+            )
 
         if offset > 0:
             rows = rows[offset:]

@@ -31,3 +31,20 @@ class RunStore(Protocol):
         limit: int = 100,
         offset: int = 0,
     ) -> list[RunRecord]: ...
+
+    async def record_artifact(
+        self,
+        run_id: str,
+        *,
+        artifact_id: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        """
+        Update artifact-related metadata for a run:
+
+          - increment artifact_count
+          - update first_artifact_at / last_artifact_at
+          - optionally maintain recent_artifact_ids (bounded list)
+
+        No-op if run_id does not exist.
+        """

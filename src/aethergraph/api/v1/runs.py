@@ -102,9 +102,9 @@ async def list_runs(
     """
     List recent runs, optionally filterable by graph_id, status, flow_id.
 
-    NOTE: `client_id` is a demo-only soft filter:
-    runs are filtered to those tagged with `client:<client_id>`.
-    In a real multi-tenant setup, prefer identity.user_id/org_id instead.
+    Tenant scoping:
+    - cloud/demo: filtered by identity.user_id/org_id at the RunStore level.
+    - local: currently returns all runs.
     """
     container = current_services()
     rm = getattr(container, "run_manager", None)
@@ -113,38 +113,32 @@ async def list_runs(
 
     offset = decode_cursor(cursor)
 
+    # Enforce identity for cloud/demo (guest demo etc.)
+    if identity.mode in ("cloud", "demo") and identity.user_id is None:
+        raise HTTPException(status_code=403, detail="User identity required")
+
     records = await rm.list_records(
         graph_id=graph_id,
         status=status,
         flow_id=flow_id,
+        user_id=identity.user_id if identity.mode in ("cloud", "demo") else None,
+        org_id=identity.org_id if identity.mode in ("cloud", "demo") else None,
         limit=limit,
         offset=offset,
     )
 
-    # 🔹 Global Runs page policy (for now):
-    # - Only show runs with visibility == normal AND importance == normal.
-    #   (inline/hidden/ephemeral are filtered out; UI toggles can be added later.)
+    # Still apply UI visibility policy in Python (this is cheap)
     records = [
         rec
         for rec in records
         if rec.visibility == RunVisibility.normal and rec.importance == RunImportance.normal
     ]
 
-    # --- TEMP: client_id-based soft filtering for the demo ---
-    # In real multi-tenant setup, prefer identity.user_id/org_id instead.
-    # And use a proper database-backed RunStore with query filtering.
-    if identity.mode in ("cloud", "demo"):
-        user, _ = identity.user_id, identity.org_id
-        if user is not None:
-            records = [rec for rec in records if rec.user_id == user]
-        else:
-            raise HTTPException(status_code=403, detail="User identity required")
-
     reg = getattr(container, "registry", None) or current_registry()
     summaries: list[RunSummary] = []
 
     for rec in records:
-        # Same graph metadata logic as in get_run
+        # Graph metadata logic as before
         flow_meta_id: str | None = None
         entrypoint = False
         if reg is not None:
@@ -159,9 +153,8 @@ async def list_runs(
 
         effective_flow_id = rec.meta.get("flow_id") or flow_meta_id
 
-        # derive app_id / app_name from record meta / tags
-        app_id = rec.app_id  # or _extract_app_id_from_tags(rec.tags)
-        app_name = rec.meta.get("app_name")  # optional, you can set later
+        app_id = rec.app_id
+        app_name = rec.meta.get("app_name")
 
         summaries.append(
             RunSummary(
@@ -173,6 +166,7 @@ async def list_runs(
                 tags=rec.tags,
                 user_id=rec.user_id,
                 org_id=rec.org_id,
+                session_id=rec.session_id or None,
                 graph_kind=rec.kind,
                 flow_id=effective_flow_id,
                 entrypoint=entrypoint,
@@ -180,16 +174,15 @@ async def list_runs(
                 app_id=app_id,
                 app_name=app_name,
                 agent_id=rec.meta.get("agent_id") or None,
-                session_id=rec.session_id or None,
                 origin=rec.origin,
                 visibility=rec.visibility,
                 importance=rec.importance,
+                artifact_count=rec.get("artifact_count"),
+                last_artifact_at=rec.get("last_artifact_at"),
             )
         )
 
-    # Update next_cursor for pagination
     next_cursor = encode_cursor(offset + limit) if len(records) == limit else None
-
     return RunListResponse(runs=summaries, next_cursor=next_cursor)
 
 
@@ -260,6 +253,8 @@ async def get_run(
         origin=rec.origin,
         visibility=rec.visibility,
         importance=rec.importance,
+        artifact_count=rec.get("artifact_count"),
+        last_artifact_at=rec.get("last_artifact_at"),
     )
 
 
