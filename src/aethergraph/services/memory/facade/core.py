@@ -9,7 +9,6 @@ from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persis
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.core.runtime.runtime_metering import current_metering
-from aethergraph.services.memory.utils import _summary_prefix
 from aethergraph.services.rag.facade import RAGFacade
 from aethergraph.services.scope.scope import Scope
 
@@ -76,6 +75,43 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         text: str | None = None,
         metrics: dict[str, float] | None = None,
     ) -> Event:
+        """
+        Record an unstructured event with optional preview text and metrics.
+
+        This method generates a stable event ID, populates standard fields
+        (e.g., `run_id`, `scope_id`, `severity`, `signal`), and appends the
+        event to both the HotLog and Persistence layers. Additionally, it
+        records a metering event for tracking purposes.
+
+        Examples:
+            Basic usage with minimal fields:
+            ```python
+            await context.memory().record_raw(
+                base={"kind": "user_action", "severity": 2},
+                text="User clicked a button."
+            )
+            ```
+
+            Including metrics and additional fields:
+            ```python
+            await context.memory().record_raw(
+                base={"kind": "tool_call", "stage": "execution", "severity": 3},
+                text="Tool executed successfully.",
+                metrics={"latency": 0.123, "tokens_used": 45}
+            )
+            ```
+
+        Args:
+            base: A dictionary containing event fields such as `kind`, `stage`,
+                `data`, `tags`, `severity`, etc.
+            text: Optional preview text for the event. If None, it is derived
+                from the `data` field in `base`.
+            metrics: Optional dictionary of numeric metrics (e.g., latency,
+                token usage) to include in the event.
+
+        Returns:
+            Event: The fully constructed and persisted `Event` object.
+        """
         ts = now_iso()
 
         # Merge Scope dimensions
@@ -155,17 +191,48 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         text: str | None = None,  # optional override
     ) -> Event:
         """
-        Convenience wrapper around record_raw() with common fields.
+        Record an event with common fields.
 
-        - kind     : logical kind (e.g. "user_msg", "tool_call", "chat_turn")
-        - data     : JSON-serializable content, or string
-        - tags     : optional list of labels
-        - severity : 1=low, 2=medium, 3=high
-        - stage    : optional stage (user/assistant/system/etc.)
-        - inputs_ref / outputs_ref : optional Value[] references
-        - metrics  : numeric map (latency, tokens, etc.)
-        - signal   : optional override for signal strength
-        - text     : optional preview text override (if None, derived from data)
+        This method standardizes event creation by populating fields such as
+        `kind`, `severity`, `tags`, and `metrics`. It also supports optional
+        references for inputs and outputs, and allows for signal strength
+        overrides.
+
+        Examples:
+            Basic usage for a user action:
+            ```python
+            await context.memory().record(
+                kind="user_action",
+                data={"action": "clicked_button"},
+                tags=["ui", "interaction"]
+            )
+            ```
+
+            Recording a tool execution with metrics:
+            ```python
+            await context.memory().record(
+                kind="tool_call",
+                data={"tool": "search", "query": "weather"},
+                metrics={"latency": 0.123, "tokens_used": 45},
+                severity=3
+            )
+            ```
+
+        Args:
+            kind: Logical kind of event (e.g., `"user_msg"`, `"tool_call"`, `"chat_turn"`).
+            data: JSON-serializable content or string providing event details.
+            tags: A list of string labels for categorization. Defaults to None.
+            severity: An integer (1-3) indicating importance. Defaults to 2.
+            stage: Optional stage of the event (e.g., `"user"`, `"assistant"`, `"system"`). Defaults to None.
+            inputs_ref: Optional references for input values. Defaults to None.
+            outputs_ref: Optional references for output values. Defaults to None.
+            metrics: A dictionary of numeric metrics (e.g., latency, token usage). Defaults to None.
+            signal: Manual override for the signal strength (0.0 to 1.0). If None, it is calculated heuristically.
+            text: Optional preview text override. If None, it is derived from `data`.
+
+        Returns:
+            Event: The fully constructed and persisted `Event` object.
+
         """
 
         # 1) derive short preview text
@@ -221,170 +288,6 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
             score += 0.2
         return max(0.0, min(1.0, score))
 
-    async def load_last_summary(
-        self,
-        scope_id: str | None = None,
-        *,
-        summary_tag: str = "session",
-    ) -> dict[str, Any] | None:
-        """
-        Load the most recent JSON summary for this memory scope and tag.
-
-        Uses DocStore IDs:
-        mem/{scope_id}/summaries/{summary_tag}/{ts}
-        so it works regardless of persistence backend.
-        """
-        scope_id = scope_id or self.memory_scope_id
-        prefix = _summary_prefix(scope_id, summary_tag)
-
-        try:
-            ids = await self.docs.list()
-        except Exception as e:
-            self.logger and self.logger.warning("load_last_summary: doc_store.list() failed: %s", e)
-            return None
-
-        # Filter and take the latest
-        candidates = [d for d in ids if d.startswith(prefix)]
-        if not candidates:
-            return None
-
-        latest_id = sorted(candidates)[-1]
-        try:
-            return await self.docs.get(latest_id)  # type: ignore[return-value]
-        except Exception as e:
-            self.logger and self.logger.warning(
-                "load_last_summary: failed to load %s: %s", latest_id, e
-            )
-            return None
-
-    async def load_recent_summaries(
-        self,
-        scope_id: str | None = None,
-        *,
-        summary_tag: str = "session",
-        limit: int = 3,
-    ) -> list[dict[str, Any]]:
-        """
-        Load up to `limit` most recent JSON summaries for this scope+tag.
-
-        Ordered oldest→newest (so the last item is the most recent).
-        """
-        scope_id = scope_id or self.memory_scope_id
-        prefix = _summary_prefix(scope_id, summary_tag)
-
-        try:
-            ids = await self.docs.list()
-        except Exception as e:
-            self.logger and self.logger.warning(
-                "load_recent_summaries: doc_store.list() failed: %s", e
-            )
-            return []
-
-        candidates = sorted(d for d in ids if d.startswith(prefix))
-        if not candidates:
-            return []
-
-        chosen = candidates[-limit:]
-        out: list[dict[str, Any]] = []
-        for doc_id in chosen:
-            try:
-                doc = await self.docs.get(doc_id)
-                if doc is not None:
-                    out.append(doc)  # type: ignore[arg-type]
-            except Exception:
-                continue
-        return out
-
-    async def soft_hydrate_last_summary(
-        self,
-        scope_id: str | None = None,
-        *,
-        summary_tag: str = "session",
-        summary_kind: str = "long_term_summary",
-    ) -> dict[str, Any] | None:
-        """
-        Load the last summary JSON for this tag (if any) and log a small hydrate Event
-        into the current run's HotLog. Returns the loaded summary dict, or None.
-        """
-        scope_id = scope_id or self.memory_scope_id
-        summary = await self.load_last_summary(scope_id=scope_id, summary_tag=summary_tag)
-        if not summary:
-            return None
-
-        text = summary.get("text") or ""
-        preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
-
-        evt = Event(
-            scope_id=self.memory_scope_id or self.run_id,
-            event_id=stable_event_id(
-                {
-                    "ts": now_iso(),
-                    "run_id": self.run_id,
-                    "kind": f"{summary_kind}_hydrate",
-                    "summary_tag": summary_tag,
-                    "preview": preview[:200],
-                }
-            ),
-            ts=now_iso(),
-            run_id=self.run_id,
-            kind=f"{summary_kind}_hydrate",
-            stage="hydrate",
-            text=preview,
-            tags=["summary", "hydrate", summary_tag],
-            data={"summary": summary},
-            metrics={"num_events": summary.get("num_events", 0)},
-            severity=1,
-            signal=0.4,
-        )
-
-        await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
-        await self.persistence.append_event(self.timeline_id, evt)
-        return summary
-
-    # ----- Stubs for future memory facade features -----
-    async def mark_event_important(
-        self,
-        event_id: str,
-        *,
-        reason: str | None = None,
-        topic: str | None = None,
-    ) -> None:
-        """
-        Stub / placeholder:
-
-        Mark a given event as "important" / "core_fact" for future policies.
-
-        Intended future behavior (not implemented yet):
-          - Look up the Event by event_id (via Persistence).
-          - Re-emit an updated Event with an added tag (e.g. "core_fact" or "pinned").
-          - Optionally promote to a fact artifact or RAG doc.
-
-        For now, this is a no-op / NotImplementedError to avoid surprise behavior.
-        """
-        raise NotImplementedError("mark_event_important is reserved for future memory policy")
-
-    async def save_core_fact_artifact(
-        self,
-        *,
-        scope_id: str,
-        topic: str,
-        fact_id: str,
-        content: dict[str, Any],
-    ):
-        """
-        Stub / placeholder:
-
-        Save a canonical, long-lived fact as a pinned artifact.
-        Intended future behavior:
-          - Use artifacts.save_json(...) to write the fact payload under a
-            stable path like file://mem/<scope_id>/facts/<topic>/<fact_id>.json
-          - Mark the artifact pinned in the index.
-          - Optionally write a tool_result Event referencing this artifact.
-
-        Not implemented yet; provided as an explicit extension hook.
-        """
-        raise NotImplementedError("save_core_fact_artifact is reserved for future memory policy")
-
     async def build_prompt_segments(
         self,
         *,
@@ -397,14 +300,61 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         tool_limit: int = 10,
     ) -> dict[str, Any]:
         """
-        High-level helper to assemble memory context for prompts.
+        Assemble memory context for prompts, including long-term summaries,
+        recent chat history, and recent tool usage.
+
+        Examples:
+            Build prompt segments with default settings:
+            ```python
+            segments = await context.memory().build_prompt_segments()
+            ```
+
+            Include recent tool usage and filter by a specific tool:
+            ```python
+            segments = await context.memory().build_prompt_segments(
+                include_recent_tools=True,
+                tool="search",
+                tool_limit=5
+            )
+            ```
+
+        Args:
+            recent_chat_limit: The maximum number of recent chat messages to include.
+                Defaults to 12.
+            include_long_term: Whether to include long-term memory summaries.
+                Defaults to True.
+            summary_tag: The tag used to filter long-term summaries.
+                Defaults to "session".
+            max_summaries: The maximum number of long-term summaries to include.
+                Defaults to 3.
+            include_recent_tools: Whether to include recent tool usage.
+                Defaults to False.
+            tool: The specific tool to filter recent tool usage.
+                Defaults to None.
+            tool_limit: The maximum number of recent tool events to include.
+                Defaults to 10.
 
         Returns:
-          {
-            "long_term": "<combined summary text or ''>",
-            "recent_chat": [ {ts, role, text, tags}, ... ],
-            "recent_tools": [ {ts, tool, message, inputs, outputs, tags}, ... ]
-          }
+            dict[str, Any]: A dictionary containing the following keys:
+
+                - "long_term" (str): Combined long-term summary text or an empty
+                  string if not included.
+
+                - "recent_chat" (list[dict[str, Any]]): A list of recent chat
+                  messages, each represented as a dictionary with the following keys:
+                    - "ts" (str): Timestamp of the message.
+                    - "role" (str): Role of the sender (e.g., "user", "assistant").
+                    - "text" (str): The content of the message.
+                    - "tags" (list[str]): Tags associated with the message.
+
+                - "recent_tools" (list[dict[str, Any]]): A list of recent tool
+                  usage events, each represented as a dictionary with the following keys:
+                    - "ts" (str): Timestamp of the tool event.
+                    - "tool" (str): Name of the tool used.
+                    - "message" (str): Message or description of the tool event.
+                    - "inputs" (Any): Inputs provided to the tool.
+                    - "outputs" (Any): Outputs generated by the tool.
+                    - "tags" (list[str]): Tags associated with the tool event.
         """
         long_term_text = ""
         if include_long_term:
@@ -451,3 +401,47 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
             "recent_chat": recent_chat,
             "recent_tools": recent_tools,
         }
+
+    # ----- Stubs for future memory facade features -----
+    async def mark_event_important(
+        self,
+        event_id: str,
+        *,
+        reason: str | None = None,
+        topic: str | None = None,
+    ) -> None:
+        """
+        Stub / placeholder:
+
+        Mark a given event as "important" / "core_fact" for future policies.
+
+        Intended future behavior (not implemented yet):
+          - Look up the Event by event_id (via Persistence).
+          - Re-emit an updated Event with an added tag (e.g. "core_fact" or "pinned").
+          - Optionally promote to a fact artifact or RAG doc.
+
+        For now, this is a no-op / NotImplementedError to avoid surprise behavior.
+        """
+        raise NotImplementedError("mark_event_important is reserved for future memory policy")
+
+    async def save_core_fact_artifact(
+        self,
+        *,
+        scope_id: str,
+        topic: str,
+        fact_id: str,
+        content: dict[str, Any],
+    ):
+        """
+        Stub / placeholder:
+
+        Save a canonical, long-lived fact as a pinned artifact.
+        Intended future behavior:
+          - Use artifacts.save_json(...) to write the fact payload under a
+            stable path like file://mem/<scope_id>/facts/<topic>/<fact_id>.json
+          - Mark the artifact pinned in the index.
+          - Optionally write a tool_result Event referencing this artifact.
+
+        Not implemented yet; provided as an explicit extension hook.
+        """
+        raise NotImplementedError("save_core_fact_artifact is reserved for future memory policy")

@@ -247,6 +247,9 @@ class ArtifactMeta(BaseModel):
     node_id: str | None = None
     session_id: str | None = None
 
+    # human-facing
+    filename: str | None = None
+
 
 class ArtifactListResponse(BaseModel):
     artifacts: list[ArtifactMeta]

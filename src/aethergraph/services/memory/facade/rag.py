@@ -24,14 +24,28 @@ class RAGMixin:
         policy: dict | None = None,
     ) -> dict:
         """
-        High-level: bind a RAG corpus by logical key and promote events into it.
+        Bind a RAG corpus by logical key and promote events into it.
 
-        Example:
-          await mem.rag_remember_events(
-              key="session",
-              where={"kinds": ["tool_result"], "limit": 200},
-              policy={"min_signal": 0.25},
-          )
+        This method allows you to associate a logical key with a RAG corpus and
+        promote events into it based on filtering criteria.
+
+        Examples:
+            Promote events into a session corpus:
+            ```python
+            await context.memory().rag_remember_events(
+                key="session",
+                where={"kinds": ["tool_result"], "limit": 200},
+                policy={"min_signal": 0.25},
+            )
+            ```
+
+        Args:
+            key: Logical key for the RAG corpus. Defaults to `"default"`.
+            where: Filtering criteria for selecting events.
+            policy: Promotion policy, such as minimum signal threshold.
+
+        Returns:
+            dict: A dictionary containing the promotion results.
         """
         corpus_id = await self.rag_bind(key=key, create_if_missing=True)
         return await self.rag_promote_events(
@@ -49,7 +63,28 @@ class RAGMixin:
         labels: dict | None = None,
     ) -> dict[str, Any]:
         """
-        High-level: bind a RAG corpus by key and upsert docs into it.
+        Bind a RAG corpus by key and upsert documents into it.
+
+        This method allows you to associate a logical key with a RAG corpus and
+        upsert a sequence of documents into it.
+
+        Examples:
+            Upsert documents into a corpus:
+            ```python
+            await context.memory().rag_remember_docs(
+                docs=[{"text": "Document 1"}, {"text": "Document 2"}],
+                key="knowledge_base",
+                labels={"category": "reference"},
+            )
+            ```
+
+        Args:
+            docs: A sequence of documents to upsert.
+            key: Logical key for the RAG corpus. Defaults to `"default"`.
+            labels: Metadata labels to associate with the corpus.
+
+        Returns:
+            dict: A dictionary containing the upsert results.
         """
         corpus_id = await self.rag_bind(key=key, create_if_missing=True, labels=labels)
         return await self.rag_upsert(corpus_id=corpus_id, docs=list(docs))
@@ -64,7 +99,30 @@ class RAGMixin:
         mode: Literal["hybrid", "dense"] = "hybrid",
     ) -> list[dict]:
         """
-        High-level: resolve corpus by logical key and run rag_search() on it.
+        Resolve a corpus by logical key and perform a search query.
+
+        This method allows you to search within a RAG corpus identified by a
+        logical key.
+
+        Examples:
+            Perform a search query:
+            ```python
+            results = await context.memory().rag_search_by_key(
+                key="knowledge_base",
+                query="What is the capital of France?",
+                k=5,
+            )
+            ```
+
+        Args:
+            key: Logical key for the RAG corpus. Defaults to `"default"`.
+            query: The search query string.
+            k: Number of top results to return. Defaults to 8.
+            filters: Additional filters for the search.
+            mode: Search mode, either `"hybrid"` or `"dense"`. Defaults to `"hybrid"`.
+
+        Returns:
+            list[dict]: A list of search results.
         """
         corpus_id = await self.rag_bind(key=key, create_if_missing=False)
         return await self.rag_search(
@@ -85,9 +143,30 @@ class RAGMixin:
         k: int = 6,
     ) -> dict:
         """
-        High-level: RAG QA over a corpus referenced by logical key.
+        Perform RAG QA over a corpus referenced by a logical key.
 
-        Internally calls rag_bind(..., create_if_missing=False) and rag_answer().
+        This method allows you to ask a question and retrieve an answer from a
+        RAG corpus identified by a logical key.
+
+        Examples:
+            Ask a question:
+            ```python
+            answer = await context.memory().rag_answer_by_key(
+                key="knowledge_base",
+                question="What is the capital of France?",
+                style="detailed",
+            )
+            ```
+
+        Args:
+            key: Logical key for the RAG corpus. Defaults to `"default"`.
+            question: The question to ask.
+            style: Answer style, either `"concise"` or `"detailed"`. Defaults to `"concise"`.
+            with_citations: Whether to include citations in the answer. Defaults to `True`.
+            k: Number of top results to consider. Defaults to 6.
+
+        Returns:
+            dict: A dictionary containing the answer and related metadata.
         """
         corpus_id = await self.rag_bind(key=key, create_if_missing=False)
         return await self.rag_answer(
@@ -105,6 +184,19 @@ class RAGMixin:
         docs: Sequence[dict[str, Any]],
         topic: str | None = None,
     ) -> dict[str, Any]:
+        """
+        Upsert documents into a RAG corpus.
+
+        This method allows you to add or update documents in a RAG corpus.
+
+        Args:
+            corpus_id: The ID of the RAG corpus.
+            docs: A sequence of documents to upsert.
+            topic: Optional topic for the documents.
+
+        Returns:
+            dict: A dictionary containing the upsert results.
+        """
         if not self.rag:
             raise RuntimeError("RAG facade not configured")
         return await self.rag.upsert_docs(corpus_id=corpus_id, docs=list(docs))
@@ -117,6 +209,20 @@ class RAGMixin:
         create_if_missing: bool = True,
         labels: dict | None = None,
     ) -> str:
+        """
+        Bind a logical key to a RAG corpus.
+
+        This method resolves or creates a RAG corpus based on a logical key.
+
+        Args:
+            corpus_id: Optional explicit corpus ID.
+            key: Logical key for the RAG corpus.
+            create_if_missing: Whether to create the corpus if it doesn't exist.
+            labels: Metadata labels to associate with the corpus.
+
+        Returns:
+            str: The resolved or created corpus ID.
+        """
         if not self.rag:
             raise RuntimeError("RAG facade not configured")
 
@@ -145,6 +251,21 @@ class RAGMixin:
         where: dict | None = None,
         policy: dict | None = None,
     ) -> dict:
+        """
+        Promote events into a RAG corpus.
+
+        This method selects and promotes events into a RAG corpus based on
+        filtering criteria and policies.
+
+        Args:
+            corpus_id: The ID of the RAG corpus.
+            events: Optional list of events to promote.
+            where: Filtering criteria for selecting events.
+            policy: Promotion policy, such as minimum signal threshold.
+
+        Returns:
+            dict: A dictionary containing the promotion results.
+        """
         if not self.rag:
             raise RuntimeError("RAG facade not configured")
         policy = policy or {}
@@ -203,6 +324,21 @@ class RAGMixin:
         with_citations: bool = True,
         k: int = 6,
     ) -> dict:
+        """
+        Answer a question using a RAG corpus.
+
+        This method performs question answering over a specified RAG corpus.
+
+        Args:
+            corpus_id: The ID of the RAG corpus.
+            question: The question to ask.
+            style: Answer style, either `"concise"` or `"detailed"`. Defaults to `"concise"`.
+            with_citations: Whether to include citations in the answer. Defaults to `True`.
+            k: Number of top results to consider. Defaults to 6.
+
+        Returns:
+            dict: A dictionary containing the answer and related metadata.
+        """
         if not self.rag:
             raise RuntimeError("RAG facade not configured")
 
@@ -228,3 +364,47 @@ class RAGMixin:
             severity=2,
         )
         return ans
+
+    async def rag_search(
+        self,
+        *,
+        corpus_id: str,
+        query: str,
+        k: int = 8,
+        filters: dict | None = None,
+        mode: Literal["hybrid", "dense"] = "hybrid",
+    ) -> list[dict]:
+        """
+        Perform a search query over a RAG corpus.
+
+        This method allows you to search within a specified RAG corpus.
+
+        Args:
+            corpus_id: The ID of the RAG corpus.
+            query: The search query string.
+            k: Number of top results to return. Defaults to 8.
+            filters: Additional filters for the search.
+            mode: Search mode, either `"hybrid"` or `"dense"`. Defaults to `"hybrid"`.
+
+        Returns:
+            list[dict]: A list of search results.
+        """
+        if not self.rag:
+            raise RuntimeError("RAG facade not configured in MemoryFacade")
+
+        scope = self.scope
+        s_filters = scope.rag_filter(scope_id=self.memory_scope_id) if scope else {}
+        if filters:
+            s_filters.update(filters)
+        hits = await self.rag.search(corpus_id, query, k=k, filters=s_filters, mode=mode)
+        return [
+            dict(
+                chunk_id=h.chunk_id,
+                doc_id=h.doc_id,
+                corpus_id=h.corpus_id,
+                score=h.score,
+                text=h.text,
+                meta=h.meta,
+            )
+            for h in hits
+        ]

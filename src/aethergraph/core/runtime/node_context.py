@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from aethergraph.services.artifacts.facade import ArtifactFacade
+
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
 
@@ -191,7 +193,7 @@ class NodeContext:
         return self.bound_memory
 
     # Artifacts / index
-    def artifacts(self):
+    def artifacts(self) -> ArtifactFacade:
         return self.services.artifact_store
 
     def kv(self):

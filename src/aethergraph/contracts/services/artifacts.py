@@ -6,7 +6,6 @@ from typing import Any, Protocol
 
 
 @dataclass
-@dataclass
 class Artifact:
     artifact_id: str
     run_id: str | None = None

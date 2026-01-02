@@ -81,7 +81,6 @@ async def _build_env(
         or (getattr(owner, "spec", None) or {}).get("app_id")
     )
 
-    print(f"identity in _build_env: {identity}")
     env = RuntimeEnv(
         run_id=run_id,
         graph_id=graph_id,

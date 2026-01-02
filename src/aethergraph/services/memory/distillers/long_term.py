@@ -9,7 +9,7 @@ from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indi
 # re-use stable_event_id from the MemoryFacade module
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
-from aethergraph.services.memory.facade import stable_event_id
+from aethergraph.services.memory.facade.utils import stable_event_id
 from aethergraph.services.memory.utils import _summary_doc_id
 
 

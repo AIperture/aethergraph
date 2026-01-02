@@ -103,20 +103,24 @@ def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
     """
     Convert Artifact to ArtifactMeta schema.
     """
+    labels = a.labels or {}
+
     out = ArtifactMeta(
         artifact_id=a.artifact_id,
         kind=a.kind,
         mime_type=_guess_mime(a),
         size=a.bytes,
         scope_id=_extract_scope_id(a) or "unknown_scope",
-        tags=_extract_tags(a.labels or {}),
-        created_at=a.created_at,
+        tags=_extract_tags(labels),
+        created_at=a.created_at,  # pydantic will parse ISO str -> datetime
         uri=a.uri,
-        pinned=a.pinned,  # keep pin state
-        preview_uri=a.preview_uri,  # optional but useful for later
+        pinned=a.pinned,
+        preview_uri=a.preview_uri,
         run_id=a.run_id,
         graph_id=a.graph_id,
         node_id=a.node_id if getattr(a, "node_id", None) else None,
+        session_id=a.session_id if getattr(a, "session_id", None) else None,
+        filename=labels.get("filename"),
     )
     return out
 
@@ -212,7 +216,13 @@ async def get_artifact_content(
     data = await store.load_artifact_bytes(artifact.uri)
 
     # Derive a filename that's at least somewhat meaningful
-    filename = os.path.basename(artifact.uri) if artifact.uri else artifact.artifact_id
+    labels = artifact.labels or {}
+    filename = (
+        labels.get("filename")
+        or (os.path.basename(artifact.uri) if artifact.uri else None)
+        or artifact.artifact_id
+    )
+
     media_type = artifact.mime or "application/octet-stream"
 
     return Response(

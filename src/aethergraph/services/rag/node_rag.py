@@ -68,6 +68,7 @@ class NodeRAG:
         scope_id: str | None = None,
     ) -> dict[str, Any]:
         sid = self._scope_id(scope_id)
+        print(f"🍏 NodeRAG.upsert_docs: scope_id={sid}")
         return await self.rag.upsert_docs(
             corpus_id=corpus_id,
             docs=docs,
@@ -86,6 +87,7 @@ class NodeRAG:
         mode: str = "hybrid",
     ) -> list[SearchHit]:
         sid = self._scope_id(scope_id)
+        print(f"🍏 NodeRAG.search: scope_id={sid}")
         scoped_filters = self.scope.rag_filter(scope_id=sid)
         if filters:
             scoped_filters.update(filters)

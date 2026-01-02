@@ -439,6 +439,9 @@ class RAGFacade:
             k: Number of top results to return.
             rerank: Whether to rerank results using hybrid scoring.
         """
+        print(
+            f"🍏 RAGFacade.retrieve: corpus_id={corpus_id}, query={query}, k={k}, rerank={rerank}"
+        )
         # For now, rerank flag is ignored; fused hybrid already sorts reasonably.
         return await self.search(corpus_id, query, k=k, mode="hybrid")
 

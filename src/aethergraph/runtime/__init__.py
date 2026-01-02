@@ -1,6 +1,14 @@
 # redirect runtime service imports for clean imports
 
 from aethergraph.core.runtime.ad_hoc_context import open_session
+from aethergraph.core.runtime.run_manager import RunManager
+from aethergraph.core.runtime.run_types import (
+    RunImportance,
+    RunOrigin,
+    RunRecord,
+    RunStatus,
+    RunVisibility,
+)
 from aethergraph.core.runtime.runtime_services import (
     # logger service helpers
     current_logger_factory,
@@ -59,4 +67,11 @@ __all__ = [
     "list_mcp_clients",
     # ad-hoc context
     "open_session",
+    # run manager and types
+    "RunManager",
+    "RunRecord",
+    "RunStatus",
+    "RunOrigin",
+    "RunImportance",
+    "RunVisibility",
 ]
