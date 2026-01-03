@@ -22,20 +22,82 @@ def graphify(
     as_app: dict[str, Any] | None = None,
 ):
     """
-    Decorator that builds a TaskGraph from a function body using the builder context.
-    The function author writes sequential code with tool calls returning NodeHandles.
+    Decorator to define a `TaskGraph` and optionally register it as an agent or app.
 
-    Usage:
-    @graphify(name="my_graph", inputs=["input1", "input2"], outputs=["output"])
-    def my_graph(input1, input2):
-        # function body using graph builder API
-        pass
-        return {"output": some_node_handle}
+    This decorator wraps a Python function as a `TaskGraph`, enabling it to be executed
+    as a node-based graph with runtime context, retry policy, and concurrency controls.
+    It also supports rich metadata registration for agent and app discovery.
 
-    The decorated function returns a builder function that constructs the TaskGraph.
+    Examples:
+        Basic usage:
+        ```python
+        @graphify(
+            name="add_numbers",
+            inputs=["a", "b"],
+            outputs=["sum"],
+        )
+        async def add_numbers(a: int, b: int):
+            return {"sum": a + b}
+        ```
 
-    To build the graph, call the returned function:
-    graph_instance = my_graph.build()
+        Registering as an agent with metadata:
+        ```python
+        @graphify(
+            name="chat_agent",
+            inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+            outputs=["response"],
+            as_agent={
+                "id": "chatbot",
+                "title": "Chat Agent",
+                "description": "Conversational AI agent.",
+                "mode": "chat_v1",
+                "icon": "chat",
+                "tags": ["chat", "nlp"],
+            },
+        )
+        async def chat_agent(...):
+            ...
+        ```
+
+        Registering as an app:
+        ```python
+        @graphify(
+            name="summarizer",
+            inputs=[],
+            outputs=["summary"],
+            as_app={
+                "id": "summarizer-app",
+                "name": "Text Summarizer",
+                "description": "Summarizes input text.",
+                "category": "Productivity",
+                "tags": ["nlp", "summary"],
+            },
+        )
+        async def summarizer():
+            ...
+        ```
+
+    Args:
+        name: Unique name for the graph function.
+        inputs: List of input parameter names. If `as_agent` is provided with `mode="chat_v1"`,
+            this must match `["message", "files", "context_refs", "session_id", "user_meta"]`.
+        outputs: List of output keys returned by the function.
+        version: Version string for the graph function (default: "0.1.0").
+        entrypoint: If True, marks this graph as the main entrypoint for a flow.  [Currently unused]
+        flow_id: Optional flow identifier for grouping related graphs.
+        tags: List of string tags for discovery and categorization.
+        as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
+        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+
+    Returns:
+        TaskGraph: A decorator that transforms a function into a TaskGraph with the specified configuration.
+
+    Notes:
+        - as_agent and as_app are not needed to define a graph; they are only for registration purposes for use in Aethergraph UI.
+        - When registering as an agent, the `as_agent` dictionary should include at least an "id" key.
+        - When registering as an app, the `as_app` dictionary should include at least an "id" key.
+        - The decorated function is a sync function (generate the TaskGraph), despite the underlying `@tool` can be async.
+        - Fields `inputs` and `outputs` are can be inferred from the function signature if not explicitly provided, but it's recommended to declare them for clarity.
     """
 
     def _wrap(fn):

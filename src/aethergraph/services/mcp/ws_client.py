@@ -15,6 +15,45 @@ from aethergraph.contracts.services.mcp import MCPClientProtocol, MCPResource, M
 
 
 class WsMCPClient(MCPClientProtocol):
+    """
+    Initialize the WebSocket MCP client with URL, headers, and connection parameters.
+    This class manages a WebSocket connection to an MCP (Modular Control Protocol) server,
+    handling connection lifecycle, pinging for keepalive, and concurrency for sending JSON-RPC
+    requests. It provides methods to list tools, call tools, list resources, and read resources
+    via the MCP protocol.
+
+    Examples:
+        Basic usage with default headers:
+        ```python
+        from aethergraph.services.mcp import WsMCPClient
+        client = WsMCPClient("wss://mcp.example.com/ws")
+        await client.open()
+        tools = await client.list_tools()
+        await client.close()
+        ```
+
+        Custom headers and ping interval:
+        ```python
+        from aethergraph.services.mcp import WsMCPClient
+        client = WsMCPClient(
+            "wss://mcp.example.com/ws",
+            headers={"Authorization": "Bearer <token>"},
+            ping_interval=10.0,
+            timeout=30.0
+        await client.open()
+        ```
+
+    Args:
+        url: The WebSocket URL of the MCP server (e.g., "wss://mcp.example.com/ws").
+        headers: Optional dictionary of additional HTTP headers to include in the WebSocket handshake.
+        timeout: Maximum time (in seconds) to wait for connection and responses.
+        ping_interval: Interval (in seconds) between WebSocket ping frames for keepalive.
+        ping_timeout: Maximum time (in seconds) to wait for a ping response before considering the connection dead.
+
+    Returns:
+        None: Initializes the WsMCPClient instance and prepares internal state.
+    """
+
     def __init__(
         self,
         url: str,

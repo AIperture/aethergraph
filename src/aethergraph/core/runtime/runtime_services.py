@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.core.runtime.base_service import Service
 from aethergraph.services.llm.generic_client import GenericLLMClient
 
 _current = ContextVar("aeg_services", default=None)
@@ -192,13 +193,31 @@ def current_logger_factory() -> Any:
 
 
 # --------- External context services ---------
-def register_context_service(name: str, service: Any) -> None:
+def register_context_service(name: str, service: Service) -> None:
     """
-    Register an external service that NodeContext can access.
+    Register an external service for NodeContext access.
 
-    If a services container is already installed, attach it immediately.
-    Otherwise, stash it in a global pending registry and attach it the
-    next time install_services() is called.
+    This function attaches an external service to the current service container
+    under the specified name. If no container is installed yet, the service is
+    stashed in a pending registry and will be attached automatically when
+    install_services() is called.
+
+    Examples:
+        Register a custom database service:
+        ```python
+        register_context_service("mydb", MyDatabaseService())
+        ```
+
+    Args:
+        name: The unique string identifier for the external service.
+        service: The service instance to register.
+
+    Returns:
+        None
+
+    Notes:
+        - If called before install_services(), the service will be attached later.
+        - Services are accessible via NodeContext.ext_services[name].
     """
     global _pending_ext_services
 
@@ -213,28 +232,143 @@ def register_context_service(name: str, service: Any) -> None:
     svc.ext_services[name] = service
 
 
-def get_ext_context_service(name: str) -> Any:
+def get_ext_context_service(name: str) -> Service:
+    """
+    Retrieve an external context service by name.
+
+    This function returns the external service registered under the given name
+    from the current service container's ext_services registry.
+
+    Examples:
+        Access a registered service:
+        ```python
+        mydb = get_ext_context_service("mydb")
+        ```
+
+    Args:
+        name: The string name of the external service to retrieve.
+
+    Returns:
+        The service instance registered under the given name, or None if not found.
+
+    Raises:
+        RuntimeError: If no services container is installed.
+    """
     svc = current_services()
     return svc.ext_services.get(name)
 
 
 def list_ext_context_services() -> list[str]:
+    """
+    List all registered external context service names.
+
+    This function returns a list of all names for services currently registered
+    in the ext_services registry of the current service container.
+
+    Examples:
+        List all available external services:
+        ```python
+        services = list_ext_context_services()
+        print(services)
+        ```
+
+    Args:
+        None
+
+    Returns:
+        A list of strings representing the names of all registered external services.
+        Returns an empty list if no services are registered.
+
+    Raises:
+        RuntimeError: If no services container is installed.
+    """
     svc = current_services()
     return list(svc.ext_services.keys())
 
 
 # --------- MCP service helpers ---------
 def set_mcp_service(mcp_service: Any) -> None:
+    """
+    Set the MCP service in the current service container.
+
+    This function assigns the provided MCP service instance to the current application's
+    service container, making it available for subsequent MCP client registrations and lookups.
+
+    Examples:
+        ```python
+        from aethergraph.runtime import set_mcp_service
+        set_mcp_service(MyMCPService())
+        ```
+
+    Args:
+        mcp_service: An instance implementing the MCP service interface.
+
+    Returns:
+        None
+
+    Notes:
+        - This should be called once during application startup before registering MCP clients.
+        - This is an internal function; users typically interact with MCP services via higher-level APIs.
+    """
     svc = current_services()
     svc.mcp = mcp_service
 
 
 def get_mcp_service() -> Any:
+    """
+    Retrieve the currently configured MCP service.
+
+    This function returns the MCP service instance from the current application's
+    service container. It is used to access MCP-related functionality throughout the app.
+
+    Examples:
+        ```python
+        mcp = get_mcp_service()
+        ```
+
+    Args:
+        None
+
+    Returns:
+        The MCP service instance currently set in the service container.
+
+    Raises:
+        RuntimeError: If no MCP service has been set.
+
+    Notes:
+        - Ensure that set_mcp_service() has been called during application initialization.
+        - This is an internal function; users typically interact with MCP services via higher-level APIs.
+    """
     svc = current_services()
     return svc.mcp
 
 
 def register_mcp_client(name: str, client: Any) -> None:
+    """
+    Register a new MCP client with the current MCP service.
+
+    This function adds a client instance to the MCP service under the specified name,
+    allowing it to be accessed and managed by the MCP infrastructure.
+
+    Examples:
+        ```python
+        from aethergraph.runtime import register_mcp_client
+        from aethergraph.services.mcp import HttpMCPClient
+        my_client = HttpMCPClient("https://mcp.example.com", ...)
+        register_mcp_client("myclient", my_client)
+        ```
+
+    Args:
+        name: The unique name to associate with the MCP client.
+        client: The client instance to register.
+
+    Returns:
+        None
+
+    Raises:
+        RuntimeError: If no MCP service has been installed via set_mcp_service().
+
+    """
     svc = current_services()
     if svc.mcp is None:
         raise RuntimeError("No MCP service installed. Call set_mcp_service() first.")
@@ -242,6 +376,26 @@ def register_mcp_client(name: str, client: Any) -> None:
 
 
 def list_mcp_clients() -> list[str]:
+    """
+    List all registered MCP client names in the current MCP service.
+
+    This function returns a list of all client names that have been registered
+    with the MCP service, allowing for discovery and management of available clients.
+
+    Examples:
+        ```python
+        from aethergraph.runtime import list_mcp_clients
+        clients = list_mcp_clients()
+        print(clients)
+        ```
+
+    Args:
+        None
+
+    Returns:
+        A list of strings representing the names of registered MCP clients.
+        Returns an empty list if no MCP service is installed or no clients are registered.
+    """
     svc = current_services()
     if svc.mcp:
         return svc.mcp.list_clients()

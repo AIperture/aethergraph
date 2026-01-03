@@ -264,6 +264,53 @@ class GenericLLMClient(LLMClientProtocol):
         fail_on_unsupported: bool = True,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
+        """
+        Send a chat request to the LLM provider and return the response in a normalized format.
+        This method handles provider-specific dispatch, output postprocessing,
+        rate limiting, and usage metering. It supports structured output via JSON schema
+        validation and flexible output formats.
+
+        Examples:
+            Basic usage with a list of messages:
+            ```python
+            response, usage = await context.llm().chat([
+                {"role": "user", "content": "Hello, assistant!"}
+            ])
+            ```
+
+            Requesting structured output with a JSON schema:
+            ```python
+            response, usage = await context.llm().chat(
+                messages=[{"role": "user", "content": "Summarize this text."}],
+                output_format="json",
+                json_schema={"type": "object", "properties": {"summary": {"type": "string"}}}
+            ```
+
+        Args:
+            messages: List of message dicts, each with "role" and "content" keys.
+            reasoning_effort: Optional string to control model reasoning depth.
+            max_output_tokens: Optional maximum number of output tokens.
+            output_format: Output format, e.g., "text" or "json".
+            json_schema: Optional JSON schema for validating structured output.
+            schema_name: Name for the root schema object (default: "output").
+            strict_schema: If True, enforce strict schema validation.
+            validate_json: If True, validate JSON output against schema.
+            fail_on_unsupported: If True, raise error for unsupported features.
+            **kw: Additional provider-specific keyword arguments.
+
+        Returns:
+            tuple[str, dict[str, int]]: The model response (text or structured output) and usage statistics.
+
+        Raises:
+            NotImplementedError: If the provider is not supported.
+            RuntimeError: For various errors including invalid JSON output or rate limit violations.
+            LLMUnsupportedFeatureError: If a requested feature is unsupported by the provider.
+
+        Notes:
+            - This method centralizes handling of different LLM providers, ensuring consistent behavior.
+            - Structured output support allows for robust integration with downstream systems.
+            - Rate limiting and metering help manage resource usage effectively.
+        """
         await self._ensure_client()
         model = kw.get("model", self.model)
 
@@ -799,6 +846,62 @@ class GenericLLMClient(LLMClientProtocol):
         azure_api_version: str | None = None,
         **kw: Any,
     ) -> ImageGenerationResult:
+        """
+        Generate images from a text prompt using the configured LLM provider.
+
+        This method supports provider-agnostic image generation, including OpenAI, Azure, and Google Gemini.
+        It automatically handles rate limiting, usage metering, and provider-specific options.
+
+        Examples:
+            Basic usage with a prompt:
+            ```python
+            result = await context.llm().generate_image("A cat riding a bicycle")
+            ```
+
+            Requesting multiple images with custom size and style:
+            ```python
+            result = await context.llm().generate_image(
+                "A futuristic cityscape",
+                n=3,
+                size="1024x1024",
+                style="vivid"
+            )
+            ```
+
+            Supplying input images for edit-style generation (Gemini):
+            ```python
+            result = await context.llm().generate_image(
+                "Make this image brighter",
+                input_images=[my_data_url]
+            )
+            ```
+
+        Args:
+            prompt: The text prompt describing the desired image(s).
+            model: Optional model name to override the default.
+            n: Number of images to generate (default: 1).
+            size: Image size, e.g., "1024x1024".
+            quality: Image quality setting (provider-specific).
+            style: Artistic style (provider-specific).
+            output_format: Desired image format, e.g., "png", "jpeg".
+            response_format: Response format, e.g., "url" or "b64_json".
+            background: Background setting, e.g., "transparent".
+            input_images: List of input images (as data URLs) for edit-style generation.
+            azure_api_version: Azure-specific API version override.
+            **kw: Additional provider-specific keyword arguments.
+
+        Returns:
+            ImageGenerationResult: An object containing generated images, usage statistics, and raw response data.
+
+        Raises:
+            LLMUnsupportedFeatureError: If the provider does not support image generation.
+            RuntimeError: For provider-specific errors or invalid configuration.
+
+        Notes:
+            - This method is accessed via `context.llm().generate_image(...)`.
+            - Usage metering and rate limits are enforced automatically. However, token usage is typically not reported for image generation.
+            - The returned `ImageGenerationResult` includes both images and metadata.
+        """
         await self._ensure_client()
         model = model or self.model
 
@@ -1176,16 +1279,48 @@ class GenericLLMClient(LLMClientProtocol):
 
     async def embed(self, texts: list[str], **kw) -> list[list[float]]:
         """
-        Provider-agnostic embeddings.
+        Generate vector embeddings for a batch of texts using the configured LLM provider.
 
-        Contract:
-        - Input: list[str]
-        - Output: list[list[float]] of same length as texts
-        - Raises: RuntimeError with informative message for provider/model/config issues
+        This method provides a provider-agnostic interface for embedding text, automatically
+        handling model selection, batching, and provider-specific API quirks. It ensures the
+        output shape matches the input and raises informative errors for configuration issues.
+
+        Examples:
+            Basic usage with a list of texts:
+            ```python
+            embeddings = await context.llm().embed([
+                "The quick brown fox.",
+                "Jumped over the lazy dog."
+            ])
+            ```
+
+            Specifying a custom embedding model:
+            ```python
+            embeddings = await context.llm().embed(
+                ["Hello world!"],
+                model="text-embedding-3-large"
+            )
+            ```
+
+        Args:
+            texts: List of input strings to embed.
+            model: Optional model name to override the default embedding model.
+            azure_api_version: Optional Azure API version override.
+            extra_body: Optional dict of extra fields to pass to the provider.
+            **kw: Additional provider-specific keyword arguments.
+
+        Returns:
+            list[list[float]]: List of embedding vectors, one per input text.
+
+        Raises:
+            TypeError: If `texts` is not a list of strings.
+            RuntimeError: For provider/model/configuration errors or shape mismatches.
+            NotImplementedError: If embeddings are not supported for the provider.
 
         Notes:
-        - For google, uses batchEmbedContents if available; otherwise falls back to per-item embedContent.
-        - For azure, requires azure_deployment.
+            - For Google Gemini, uses batch embedding if available, otherwise falls back to per-item embedding.
+            - For Azure, requires `azure_deployment` to be set.
+            - The returned list always matches the length of `texts`.
         """
         await self._ensure_client()
         assert self._client is not None
@@ -1412,18 +1547,63 @@ class GenericLLMClient(LLMClientProtocol):
         return_response: bool = False,
     ) -> Any:
         """
-        Low-level escape hatch: send a raw HTTP request using this client’s
-        base_url, auth, and retry logic.
+        Send a low-level HTTP request using the configured LLM provider’s client.
 
-        - If `url` is provided, it is used as-is.
-        - Otherwise, `path` is joined to `self.base_url`.
-        - `json` and `params` are forwarded to httpx.
-        - Provider-specific default headers (auth, version, etc.) are applied,
-          then overridden by `headers` if provided.
+        This method provides direct access to the underlying HTTP transport, automatically
+        applying provider-specific authentication, base URL resolution, and retry logic.
+        It is intended for advanced use cases where you need to call custom endpoints
+        or experiment with provider APIs not covered by higher-level methods.
+
+        Examples:
+            Basic usage with a relative path:
+            ```python
+            result = await context.llm().raw(
+                method="POST",
+                path="/custom/endpoint",
+                json={"foo": "bar"}
+            )
+            ```
+
+            Sending a GET request to an absolute URL:
+            ```python
+            response = await context.llm().raw(
+                method="GET",
+                url="https://api.openai.com/v1/models",
+                return_response=True
+            )
+            ```
+
+            Overriding headers and query parameters:
+            ```python
+            result = await context.llm().raw(
+                path="/v1/special",
+                headers={"X-Custom": "123"},
+                params={"q": "search"}
+            )
+            ```
+
+        Args:
+            method: HTTP method to use (e.g., "POST", "GET").
+            path: Relative path to append to the provider’s base URL.
+            url: Absolute URL to call (overrides `path` and `base_url`).
+            json: JSON-serializable body to send with the request.
+            params: Dictionary of query parameters.
+            headers: Dictionary of HTTP headers to override defaults.
+            return_response: If True, return the raw `httpx.Response` object;
+                otherwise, return the parsed JSON response.
 
         Returns:
-          - r.json() by default
-          - or the raw `httpx.Response` if `return_response=True`
+            Any: The parsed JSON response by default, or the raw `httpx.Response`
+            if `return_response=True`.
+
+        Raises:
+            ValueError: If neither `url` nor `path` is provided.
+            RuntimeError: For HTTP errors or provider-specific failures.
+
+        Notes:
+            - This method is accessed via `context.llm().raw(...)`.
+            - Provider authentication and retry logic are handled automatically.
+            - Use with caution; malformed requests may result in provider errors.
         """
         await self._ensure_client()
 

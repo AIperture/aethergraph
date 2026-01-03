@@ -23,10 +23,34 @@ __all__ = [
 
 class _ServiceHandle:
     """
-    A callable, transparent handle around a bound service.
-    - Attribute access delegates to the underlying service.
-    - Calling with no args returns the service (ergonomic parity with built-ins).
-    - Calling with args forwards to service.__call__ if present.
+    This class provides ergonomic access to a service instance, allowing attribute access,
+    direct retrieval, and forwarding of calls if the underlying service is callable.
+    Examples:
+        Accessing service attributes:
+        ```python
+        handle = _ServiceHandle("my_service", service_instance)
+        value = handle.some_attribute
+        ```
+        Retrieving the service instance:
+        ```python
+        svc = handle()
+        ```
+        Forwarding calls to a callable service:
+        ```python
+        result = handle(arg1, arg2)
+        ```
+    Args:
+        name: The name of the service for identification and error reporting.
+        bound_service: The actual service instance to be wrapped.
+    Attribute Access:
+        All attribute lookups are delegated to the underlying service instance.
+    Calling:
+        - If called with no arguments, returns the underlying service instance.
+        - If called with arguments and the service is callable, forwards the call.
+        - Raises TypeError if the service is not callable and called with arguments.
+    Returns:
+        The result of the underlying service's __call__ method, or the service instance itself
+        if called with no arguments.
     """
 
     __slots__ = ("_name", "_svc")

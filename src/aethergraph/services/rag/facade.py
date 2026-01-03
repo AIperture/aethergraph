@@ -542,6 +542,26 @@ class RAGFacade:
         return out
 
     async def list_corpora(self) -> list[dict]:
+        """
+        List all available corpora managed by this RAGFacade.
+
+        This method scans the corpus root directory, loads metadata for each corpus,
+        and returns a list of corpus records with their logical IDs and metadata.
+
+        Examples:
+            Basic usage to enumerate corpora:
+            ```python
+            corpora = await context.rag().list_corpora()
+            for c in corpora:
+                print(c["corpus_id"], c["meta"].get("created_at"))
+            ```
+
+        Returns:
+            list[dict]: A list of dictionaries, each containing:
+
+                - "corpus_id": The logical identifier for the corpus.
+                - "meta": The metadata dictionary loaded from corpus.json (may be empty).
+        """
         out = []
         for d in sorted(os.listdir(self.root)):
             # cdir = self._cdir(d)
@@ -564,6 +584,32 @@ class RAGFacade:
     async def list_docs(
         self, corpus_id: str, limit: int = 200, after: str | None = None
     ) -> list[dict]:
+        """
+        List documents from a corpus in a paginated fashion.
+
+        This method reads documents from the `docs.jsonl` file associated with the given `corpus_id`,
+        returning up to `limit` documents after the specified `after` document ID.
+        It is typically accessed via `context.rag().list_docs(...)`.
+
+        Examples:
+            Basic usage to list the first 100 documents:
+            ```python
+            docs = await context.rag().list_docs("my-corpus", limit=100)
+            ```
+
+            Paginating after a specific document:
+            ```python
+            docs = await context.rag().list_docs("my-corpus", after="doc_123")
+            ```
+
+        Args:
+            corpus_id: The unique identifier for the corpus whose documents are to be listed.
+            limit: The maximum number of documents to return (default: 200).
+            after: If provided, only documents after this document ID will be returned.
+
+        Returns:
+            list[dict]: A list of document objects, each represented as a dictionary.
+        """
         cdir = self._cdir(corpus_id)
         docs_jl = os.path.join(cdir, "docs.jsonl")
         if not os.path.exists(docs_jl):
@@ -586,7 +632,32 @@ class RAGFacade:
 
     async def delete_docs(self, corpus_id: str, doc_ids: list[str]) -> dict:
         """
-        Removes docs from docs.jsonl and any chunks in chunks.jsonl; asks the index to drop vectors if supported.
+        Remove one or more documents and their associated chunks from a corpus.
+
+        This method deletes all records for the specified `doc_ids` from both the `docs.jsonl`
+        and `chunks.jsonl` files within the given corpus. It also instructs the vector index
+        backend to remove any vectors associated with the deleted chunks, if supported.
+
+        Examples:
+            Basic usage to delete a single document:
+            ```python
+            await context.rag().delete_docs("my-corpus", ["doc_123"])
+            ```
+
+            Deleting multiple documents at once:
+            ```python
+            await context.rag().delete_docs("my-corpus", ["doc_1", "doc_2", "doc_3"])
+            ```
+
+        Args:
+            corpus_id: The unique identifier for the corpus from which documents will be removed.
+            doc_ids: A list of document IDs to delete. All chunks belonging to these documents
+                will also be removed.
+
+        Returns:
+            dict: A dictionary containing:
+                - "removed_docs": The number of documents removed.
+                - "removed_chunks": The number of chunks removed from the index and storage.
         """
         cdir = self._cdir(corpus_id)
         docs_jl = os.path.join(cdir, "docs.jsonl")
@@ -631,7 +702,32 @@ class RAGFacade:
         self, corpus_id: str, *, doc_ids: list[str] | None = None, batch: int = 64
     ) -> dict:
         """
-        Re-embeds selected docs (or all) and re-adds vectors. Uses the configured embed client or a model override if your client supports it.
+        Re-embed vectors for selected documents (or all) in a corpus.
+
+        This method re-computes embeddings for all chunks belonging to the specified `doc_ids`
+        (or for all documents if `doc_ids` is None) and updates the vector index accordingly.
+        It uses the currently configured embedding client and can be accessed via `context.rag().reembed(...)`.
+
+        Examples:
+            Re-embed all documents in a corpus:
+            ```python
+            await context.rag().reembed("my-corpus")
+            ```
+
+            Re-embed only specific documents:
+            ```python
+            await context.rag().reembed("my-corpus", doc_ids=["doc_123", "doc_456"])
+            ```
+
+        Args:
+            corpus_id: The unique identifier for the corpus whose vectors will be re-embedded.
+            doc_ids: Optional list of document IDs to re-embed. If None, all documents are processed.
+            batch: The number of chunks to embed per batch (default: 64).
+
+        Returns:
+            dict: A dictionary containing:
+                - "reembedded": The number of chunks re-embedded.
+                - "model": The embedding model used (if available).
         """
         cdir = self._cdir(corpus_id)
         chunks_jl = os.path.join(cdir, "chunks.jsonl")
@@ -662,6 +758,30 @@ class RAGFacade:
         return {"reembedded": added, "model": getattr(embed, "embed_model", None)}
 
     async def stats(self, corpus_id: str) -> dict:
+        """
+        Retrieve summary statistics for a given corpus.
+
+        This method counts the number of documents and chunks in the specified corpus,
+        and loads the associated corpus metadata. It is typically accessed via
+        `context.rag().stats(...)`.
+
+        Examples:
+            Basic usage to get corpus statistics:
+            ```python
+            stats = await context.rag().stats("my-corpus")
+            print(stats["docs"], stats["chunks"])
+            ```
+
+        Args:
+            corpus_id: The unique identifier for the corpus whose statistics are to be retrieved.
+
+        Returns:
+            dict: A dictionary containing:
+                - "corpus_id": The logical identifier for the corpus.
+                - "docs": The number of documents in the corpus.
+                - "chunks": The number of text chunks in the corpus.
+                - "meta": The metadata dictionary loaded from corpus.json (may be empty).
+        """
         cdir = self._cdir(corpus_id)
         docs_jl = os.path.join(cdir, "docs.jsonl")
         chunks_jl = os.path.join(cdir, "chunks.jsonl")

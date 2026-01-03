@@ -208,7 +208,85 @@ def graph_fn(
     as_agent: dict[str, Any] | None = None,
     as_app: dict[str, Any] | None = None,
 ) -> Callable[[Callable], GraphFunction]:
-    """Decorator to define a graph function."""
+    """
+    Decorator to define a graph function and optionally register it as an agent or app.
+
+    This decorator wraps a Python function as a `GraphFunction`, enabling it to be executed
+    as a node-based graph with runtime context, retry policy, and concurrency controls.
+    It also supports rich metadata registration for agent and app discovery.
+
+    Examples:
+        Basic usage:
+        ```python
+        @graph_fn(
+            name="add_numbers",
+            inputs=["a", "b"],
+            outputs=["sum"],
+        )
+        async def add_numbers(a: int, b: int):
+            return {"sum": a + b}
+        ```
+
+        Registering as an agent with metadata:
+        ```python
+        @graph_fn(
+            name="chat_agent",
+            inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+            outputs=["response"],
+            as_agent={
+                "id": "chatbot",
+                "title": "Chat Agent",
+                "description": "Conversational AI agent.",
+                "mode": "chat_v1",
+                "icon": "chat",
+                "tags": ["chat", "nlp"],
+            },
+        )
+        async def chat_agent(...):
+            ...
+        ```
+
+        Registering as an app:
+        ```python
+        @graph_fn(
+            name="summarizer",
+            inputs=[],
+            outputs=["summary"],
+            as_app={
+                "id": "summarizer-app",
+                "name": "Text Summarizer",
+                "description": "Summarizes input text.",
+                "category": "Productivity",
+                "tags": ["nlp", "summary"],
+            },
+        )
+        async def summarizer():
+            ...
+        ```
+
+    Args:
+        name: Unique name for the graph function.
+        inputs: List of input parameter names. If `as_agent` is provided with `mode="chat_v1"`,
+            this must match `["message", "files", "context_refs", "session_id", "user_meta"]`.
+        outputs: List of output keys returned by the function.
+        version: Version string for the graph function (default: "0.1.0").
+        entrypoint: If True, marks this graph as the main entrypoint for a flow.  [Currently unused]
+        flow_id: Optional flow identifier for grouping related graphs.
+        tags: List of string tags for discovery and categorization.
+        as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
+        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+
+    Returns:
+        Callable: A decorator that wraps the function as a `GraphFunction` and registers it
+        in the runtime registry, with agent/app metadata if provided.
+
+    Notes:
+        - as_agent and as_app are not needed to define a graph; they are only for registration purposes for use in Aethergraph UI.
+        - When registering as an agent, the `as_agent` dictionary should include at least an "id" key.
+        - When registering as an app, the `as_app` dictionary should include at least an "id" key.
+        - The decorated function can be either synchronous or asynchronous.
+        - Fields `inputs` and `outputs` are can be inferred from the function signature if not explicitly provided, but it's recommended to declare them for clarity.
+    """
 
     def decorator(fn: Callable) -> GraphFunction:
         agent_id = as_agent.get("id") if as_agent else None
@@ -276,8 +354,6 @@ def graph_fn(
                 obj=gf,
                 meta=app_meta,
             )
-
-        return gf
 
         return gf
 

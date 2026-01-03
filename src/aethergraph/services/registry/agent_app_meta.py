@@ -13,6 +13,30 @@ from aethergraph.core.runtime.run_types import RunImportance, RunVisibility
 
 
 class AgentConfig(TypedDict, total=False):
+    """
+    Configuration metadata for an agent. Register an app with `as_app` parameter in `@graphify` or `@graph_fn`.
+
+    Attributes:
+        id (str): Unique identifier for the agent. Required.
+        title (str): Display name of the agent. Optional, shown in the UI.
+        description (str): Brief description of the agent's purpose or functionality. Optional, shown in the UI.
+        icon (str): Icon key in representing the agent in the UI. Optional, shown in the UI.
+        color (str): Color theme associated with the agent. Optional, shown in the UI.
+        badge (str): Badge or label for the agent. Optional, shown in the UI.
+        category (str): Category or grouping for the agent. Optional, E.g., "Core", "R&D Lab", "Infra", "Productivity", etc.
+        status (str): Availability status of the agent. Possible values include "available", "coming-soon", "hidden", etc.
+        mode (str): Operational mode of the agent, e.g., "chat_v1". Currently only "chat_v1" is supported.
+        session_kind (str): Type of session supported, e.g., "chat", "batch". Currently only "chat" is supported.
+        flow_id (str): Identifier for the flow or process associated with the agent. Optional. Not shown in the UI.
+        tags (list[str]): List of tags for search or categorization. Optional, shown in the UI.
+        tool_graphs (list[str]): List of tool graph identifiers used by the agent. Optional. Not shown in the UI.
+        run_visibility (RunVisibility): Visibility setting for agent runs. Optional. Default is "normal". When set to "inline", runs are not shown in the UI for clarity.
+        run_importance (RunImportance): Importance level for agent runs. Optional. Default is "normal".
+        memory_level (Literal["user", "session", "run"]): Level at which memory is scoped. Defaults is "session"
+        memory_scope (str): Scope or context for memory management. Optional. E.g. "session.global", "user.all", etc.
+        github_url (str): Optional URL to the agent's GitHub repository. Optional, shown in the UI.
+    """
+
     # Identity & basic UI
     id: str
     title: str
@@ -45,6 +69,26 @@ class AgentConfig(TypedDict, total=False):
 
 
 class AppConfig(TypedDict, total=False):
+    """
+    Configuration metadata for an application. Register an app with `as_app` parameter in `@graphify` or `@graph_fn`.
+
+    Attributes:
+        id (str): Unique identifier for the app. Required.
+        name (str): Human-readable name of the app. Required.
+        badge (str): Short badge or label for the app. Optional, shown in the UI.
+        short_description (str): Brief summary of the app's purpose. Optional, shown in the UI.
+        description (str): Detailed description of the app. Optional, shown in the UI.
+        category (str): Category of the app, e.g., "Core", "R&D Lab", "Infra", "Productivity", etc.
+        status (str): Current status of the app, such as "available", "coming-soon", or "hidden".
+        icon_key (str): Key or identifier for the app's icon. Optional, shown in the UI.
+        tags (list[str]): List of tags associated with the app for search and filtering.
+        features (list[str]): List of notable features or capabilities of the app.
+        run_visibility (RunVisibility): Visibility setting for app runtime behavior. Optional. Default is "normal". When set to "inline", runs are not shown in the UI for clarity.
+        run_importance (RunImportance): Importance level for app runtime behavior. Optional. Default is "normal".
+        flow_id (str): Identifier for the flow associated with the app. Optional. Not shown in the UI.
+        github_url (str): Optional URL to the app's GitHub repository. Optional, shown in the UI.
+    """
+
     # Identity & UI
     id: str
     name: str
