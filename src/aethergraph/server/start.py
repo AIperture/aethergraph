@@ -77,77 +77,77 @@ def start_server(
     strict_load: bool = False,
 ) -> str | tuple[str, Any] | tuple[str, ServerHandle] | tuple[str, Any, ServerHandle]:
     """
-    Start (or reuse) the AetherGraph sidecar server.
+    Start (or reuse) the AetherGraph sidecar server in a normalized and flexible way.
 
-    Core idea:
-      - The sidecar is the long-lived backend process that hosts the API + services
-        (runs/artifacts/memory/sessions/apps/agents).
-      - A "workspace" is the persistent storage root. Data survives restarts because
-        stores live under `workspace/`.
-      - Graphs/apps/agents are discovered by IMPORTING user code that defines decorated
-        graphs (@graph_fn/@graphify/as_app/as_agent). Import triggers registration.
+    This method manages server lifecycle, workspace locking, and dynamic loading of user code.
+    It supports both in-process and cross-process server reuse, and can return handles for
+    advanced control or integration.
 
-    Server discovery / reuse:
-      - We keep one server per workspace by using:
-          * workspace_lock(workspace)
-          * workspace/.aethergraph/server.json
-      - If an existing server for this workspace is already running, we reuse it and
-        return its URL (so the UI/Electron can reconnect without caring about ports).
+    Examples:
+      Basic usage to start a server and get its URL:
+      ```python
+      url = start_server(workspace="./aethergraph_data", port=0)
+      ```
 
-    Parameters:
-      workspace:
-        Persistent storage directory (runs/artifacts/memory/logs/etc). Use a stable path
-        so the UI can show historical runs after restart.
-      host:
-        Bind host, usually 127.0.0.1 for local desktop.
-      port:
-        If 0, we auto-pick a free port (recommended for desktop/Electron).
-        If non-zero, uses that fixed port (useful for dev).
-      log_level / unvicorn_log_level:
-        App logging vs uvicorn logging verbosity.
+      Loading user graphs before starting:
+      ```python
+      url = start_server(
+        workspace="./aethergraph_data",
+        port=0,
+        load_paths=["./my_graphs.py"],
+        project_root=".",
+      )
+      ```
 
-      load_modules:
-        Optional list of Python modules to import BEFORE the server starts, e.g.
-          ["my_project.graphs"]
-        Importing them registers decorated graphs/apps/agents so the UI sees them immediately.
-      load_paths:
-        Optional list of Python file paths to import BEFORE the server starts, e.g.
-          ["./graphs.py", "./more_graphs.py"]
-        Use this for single-file "quick start" scripts.
-      project_root:
-        Optional path temporarily added to sys.path while loading modules/paths.
-        Use this if the loaded files import local helpers/packages.
-      strict_load:
-        If True, raise immediately on import/load errors. If False, record errors in
-        loader report (recommended for interactive use).
+      Starting and blocking until server exit (notebook/script mode):
+      ```python
+      url, handle = start_server(workspace="./aethergraph_data", port=0, return_handle=True)
+      print("Server running at", url)
+      try:
+        handle.block()
+      except KeyboardInterrupt:
+        print("Stopping server...")
+        handle.stop()
+      ```
 
-      return_container:
-        If True (and we started in-process), also return the service container
-        (app.state.container). NOTE: not available if we reused a server from another process.
-      return_handle:
-        If True (and we started in-process), return a ServerHandle with .block() and .stop().
+      Returning the dependency injection container for advanced use:
+      ```python
+      url, container = start_server(workspace="./aethergraph_data", return_container=True)
+      ```
 
-    Typical usage patterns:
+      Returning both container and handle:
+      ```python
+      url, container, handle = start_server(
+        workspace="./aethergraph_data",
+        return_container=True,
+        return_handle=True,
+      )
+      ```
 
-      A) "Make graphs visible to frontend" (recommended: load BEFORE start)
-        url = start_server(
-          workspace="./aethergraph_data",
-          port=0,
-          load_paths=["./_local/0_quick_start/1_local_registry.py"],
-          project_root=".",   # so local imports resolve if needed
-        )
-
-      B) Notebook/script mode (keep server alive by blocking)
-        url, handle = start_server(workspace="./aethergraph_data", port=0, return_handle=True)
-        print("Server:", url)
-        handle.block()  # keeps process alive; UI can connect repeatedly
-
-      C) Reuse already-running server
-        url = start_server(workspace="./aethergraph_data")  # returns existing URL if running
+    Args:
+      workspace: Persistent storage directory for server state and data.
+      host: Host address to bind the server (default "127.0.0.1").
+      port: Port to bind the server (0 for auto-pick, or specify a fixed port).
+      log_level: Logging level for the application.
+      unvicorn_log_level: Logging level for the Uvicorn server.
+      return_container: If True, also return the app's dependency injection container.
+      return_handle: If True, return a ServerHandle for programmatic control (block/stop).
+      load_modules: List of Python modules to import before server start.
+      load_paths: List of Python file paths to import before server start.
+      project_root: Path to add to sys.path for module resolution during loading.
+      strict_load: If True, raise on import/load errors; otherwise, record errors in loader report.
 
     Returns:
-      - URL string in most cases, e.g. "http://127.0.0.1:53421"
-      - Optionally (url, container) and/or (url, handle) if requested and started in-process.
+      str: The server URL (e.g., "http://127.0.0.1:53421").
+      tuple: Optionally, (url, container), (url, handle), or (url, container, handle)
+        depending on the flags set and whether the server was started in-process.
+
+    Notes:
+      - Workspace is a dedicated directory for server data, including logs, caches, and runtime state; multiple processes using the same
+        workspace will coordinate to reuse a single server instance. Delete the workspace to reset state.
+      - Use handle.block() to wait for server exit when you need to keep the server running in a script or notebook. This is typically not needed
+        when using the server in client mode.
+      - When you are using Aethergraph UI, use handle.block() to keep the server running so that the UI can connect to it and discover agents/apps.
     """
     global _started, _server_thread, _url, _uvicorn_server
 
@@ -180,6 +180,8 @@ def start_server(
             project_root=project_root,
             strict=strict_load,
         )
+
+        print(" Loading user graphs with spec:", spec)
         if spec.modules or spec.paths:
             report = _loader.load(spec)
             # Optional: stash report for debugging. We'll attach it to app below.
@@ -235,6 +237,14 @@ def start_server(
             return url, app.state.container
         if return_handle:
             return url, handle
+
+        print("\n" + "=" * 50)
+        print(f"[AetherGraph] 🚀 Server started at: {url}")
+        print(f"[AetherGraph] 🖥️  UI:        {url}/ui (if built)")
+        print(f"[AetherGraph] 📡 API:       {url}/api/v1/")
+        print(f"[AetherGraph] 📂 Workspace:  {workspace}")
+        print("=" * 50 + "\n")
+
         return url
 
 

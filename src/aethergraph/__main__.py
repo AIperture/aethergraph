@@ -63,6 +63,59 @@ Recommended desktop/Electron workflow:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """
+    Start the AetherGraph server via CLI.
+
+    This entrypoint launches the persistent sidecar server for your workspace,
+    enabling API access for frontend/UI clients. It supports automatic
+    port selection, workspace isolation, and dynamic loading of user graphs/apps.
+
+    Examples:
+        Basic usage with default workspace and port:
+        ```bash
+        python -m aethergraph serve --workspace ./aethergraph_data
+        ```
+
+        Auto-pick a free port and load user graphs from a file:
+        ```bash
+        python -m aethergraph serve --workspace ./aethergraph_data --port 0 --load-path ./graphs.py
+        ```
+
+        Load multiple modules and set a custom project root:
+        ```bash
+        python -m aethergraph serve --workspace ./aethergraph_data --load-module mygraphs --project-root .
+        ```
+
+        Reuse detection (print URL if already running):
+        ```bash
+        python -m aethergraph serve --workspace ./aethergraph_data --reuse
+        ```
+
+    Args:
+        argv: Optional list of CLI arguments. If None, uses sys.argv[1:].
+
+    Required keywords:
+        - `workspace`: Path to the workspace folder (default: ./aethergraph_data).
+
+    Optional keywords:
+        - `host`: Host address to bind (default: 127.0.0.1).
+        - `port`: Port to bind (default: 8000; use 0 for auto-pick).
+        - `log-level`: App log level (default: warning).
+        - `uvicorn-log-level`: Uvicorn log level (default: warning).
+        - `project-root`: Temporarily added to sys.path for local imports.
+        - `load-module`: Python module(s) to import before server starts (repeatable).
+        - `load-path`: Python file(s) to load before server starts (repeatable).
+        - `strict-load`: Raise error if graph loading fails.
+        - `reuse`: If server already running for workspace, print URL and exit.
+
+    Returns:
+        int: Exit code (0 for success, 2 for unknown command).
+
+    Notes:
+        - Launching the server via CLI keeps it running persistently for API clients to connect like AetherGraph UI.
+        - In local mode, the server port need to be consistent with the app/client connection.
+        - Use the --reuse flag to avoid starting multiple servers for the same workspace.
+    """
     argv = argv if argv is not None else sys.argv[1:]
 
     parser = argparse.ArgumentParser(prog="aethergraph")
@@ -73,10 +126,12 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000, help="0 = auto free port")
     serve.add_argument("--log-level", default="warning")
-    serve.add_argument("--uvicorn-log-level", default="warning")
+    serve.add_argument("--uvicorn-log-level", default="info")
 
     serve.add_argument(
-        "--project-root", default=None, help="Added to sys.path while loading user graphs."
+        "--project-root",
+        default=".",
+        help="Root directory for the project. Added to sys.path while loading user graphs.",
     )
     serve.add_argument(
         "--load-module", action="append", default=[], help="Module to import (repeatable)."
@@ -90,6 +145,11 @@ def main(argv: list[str] | None = None) -> int:
         "--reuse",
         action="store_true",
         help="If server already running for workspace, print URL and exit 0.",
+    )
+    serve.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable auto-reload on code changes (dev only).",
     )
 
     args = parser.parse_args(argv)
@@ -108,18 +168,42 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
 
             # Load graphs BEFORE app starts
+            project_root = args.project_root
+            modules = list(args.load_module or [])
+            paths = list(args.load_path or [])
             spec = LoadSpec(
                 modules=list(args.load_module or []),
                 paths=list(args.load_path or []),
                 project_root=args.project_root,
                 strict=bool(args.strict_load),
             )
+
+            # Export them to environment so the worker factory can read them
+            os.environ["AETHERGRAPH_WORKSPACE"] = args.workspace
+            os.environ["AETHERGRAPH_PROJECT_ROOT"] = str(project_root)
+            os.environ["AETHERGRAPH_LOAD_MODULES"] = ",".join(modules)
+            os.environ["AETHERGRAPH_LOAD_PATHS"] = os.pathsep.join(paths)
+            os.environ["AETHERGRAPH_STRICT_LOAD"] = "1" if args.strict_load else "0"
+            os.environ["AETHERGRAPH_LOG_LEVEL"] = args.log_level
+
+            print("=" * 50)
+            print("🔄 Loading graphs and agents...")
             if spec.modules or spec.paths:
+                print(
+                    "➕ Importing modules:",
+                    spec.modules,
+                    "and paths:",
+                    spec.paths,
+                    "at project root:",
+                    spec.project_root,
+                )
                 report = loader.load(spec)
                 # Optional: print load errors but still continue if not strict
                 if report.errors and not args.strict_load:
                     for e in report.errors:
-                        print(f"[load error] {e.source}: {e.error}")
+                        print(f"⚠️ [load error]  {e.source}: {e.error}")
+            print("✅ Graph/agents loading complete.")
+            print("=" * 50)
 
             cfg = load_settings()
             set_current_settings(cfg)
@@ -143,10 +227,47 @@ def main(argv: list[str] | None = None) -> int:
                 },
             )
 
-        # Run blocking server (lock released so others can read server.json)
-        print(url)
-        uvicorn.run(app, host=args.host, port=port, log_level=args.uvicorn_log_level)
-        return 0
+        if not args.reload:
+            # Run blocking server (lock released so others can read server.json)
+            print("\n" + "=" * 50)
+            print(f"[AetherGraph] 🚀 Server started at: {url}")
+            print(f"[AetherGraph] 🖥️  UI:        {url}/ui (if built)")
+            print(f"[AetherGraph] 📡 API:       {url}/api/v1/")
+            print(f"[AetherGraph] 📂 Workspace:  {args.workspace}")
+            print("=" * 50 + "\n")
+            uvicorn.run(
+                app,
+                host=args.host,
+                port=port,
+                log_level=args.uvicorn_log_level,
+            )
+            return 0
+
+        # When --reload is on:
+        if args.reload:
+            print("\n" + "=" * 50)
+            print(f"[AetherGraph] 🚀 Server started at: {url}")
+            print(f"[AetherGraph] 🖥️  UI:        {url}/ui (if built)")
+            print(f"[AetherGraph] 📡 API:       {url}/api/v1/")
+            print(f"[AetherGraph] 📂 Workspace:  {args.workspace}")
+            print("[AetherGraph] ♻️  Auto-reload: enabled (uvicorn)")
+            print("=" * 50 + "\n")
+
+            reload_dirs: list[str] = [str(project_root)]
+            for p in paths:
+                reload_dirs.append(str(Path(p).parent))
+
+            # Use import string + factory=True here
+            uvicorn.run(
+                "aethergraph.server.app_factory:create_app_from_env",
+                host=args.host,
+                port=port,
+                log_level=args.uvicorn_log_level,
+                reload=True,
+                reload_dirs=reload_dirs,
+                factory=True,
+            )
+            return 0
 
     return 2
 

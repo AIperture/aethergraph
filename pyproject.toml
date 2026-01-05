@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aethergraph"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Python-first agentic DAG execution framework"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -50,7 +50,7 @@ Documentation = "https://aiperture.github.io/aethergraph-docs/"
 Issues = "https://github.com/AIperture/aethergraph/issues"
 
 [project.scripts]
-aethergraph = "aethergraph.cli.main:main"
+aethergraph = "aethergraph.__main__:main"
 aethergraph-server = "aethergraph.server.server:main"
 
 
@@ -89,13 +89,20 @@ test = [
 
 [tool.setuptools]
 package-dir = { "" = "src" }
-include-package-data = true
+include-package-data = false  # specify in later
 license-files = ["LICENSE*", "NOTICE*", "COPYING*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-# If you want to exclude experimental dirs, uncomment and adjust:
-# exclude = ["tests*", "examples*"]
+exclude = [
+  "tests*", 
+  "examples*",
+  "aethergraph.demos*",
+  "aethergraph.demos.*"
+]
+
+[tool.setuptools.exclude-package-data]
+aethergraph = ["demos/**"]
 
 [tool.setuptools.package-data]
 # Ship non-Python assets bundled with the package (adjust as needed)
@@ -105,6 +112,7 @@ aethergraph = [
   "**/*.yml",
   "**/*.txt",
   "v*/**/templates/**/*",
+  "server/ui_static/**",
 ]
 
 # -------------------------

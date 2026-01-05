@@ -1,9 +1,14 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
+import logging
+import os
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 from aethergraph.api.v1.agents import router as agents_router
 from aethergraph.api.v1.apps import router as apps_router
@@ -25,8 +30,11 @@ from aethergraph.core.runtime.runtime_services import install_services
 from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
 
 # channel routes
+from aethergraph.server.loading import GraphLoader, LoadSpec
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.utils.optdeps import require
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -99,6 +107,47 @@ def create_app(
         lifespan=lifespan,
     )
 
+    frontend_dir = Path(__file__).parent / "ui_static"
+    if frontend_dir.exists():
+        logger.info(f"Serving built frontend UI from {frontend_dir}")
+        logger.info("UI will be available at: http://<host>:<port>/ui")
+
+        # 1) Serve built assets under /ui/assets
+        assets_dir = frontend_dir / "assets"
+        if assets_dir.exists():
+            app.mount(
+                "/ui/assets",
+                StaticFiles(directory=str(assets_dir)),
+                name="ui_assets",
+            )
+
+        index_path = frontend_dir / "index.html"
+
+        # 2) SPA catch-all: /ui and ANY /ui/... path -> index.html
+        @app.get("/ui", include_in_schema=False)
+        @app.get("/ui/{full_path:path}", include_in_schema=False)
+        async def serve_ui(full_path: str = ""):
+            if index_path.exists():
+                return FileResponse(index_path)
+            return PlainTextResponse(
+                "UI bundle not found. Please build the frontend and copy it to ui_static.",
+                status_code=501,
+            )
+
+    else:
+        logger.warning(
+            "AetherGraph UI bundle NOT found at %s. "
+            "The /ui endpoint will return a 501 until you build and copy it.",
+            frontend_dir,
+        )
+
+        @app.get("/ui", include_in_schema=False)
+        async def ui_not_built():
+            return PlainTextResponse(
+                "UI bundle not found. Please build the frontend and copy it to ui_static.",
+                status_code=501,
+            )
+
     # CORS
     app.add_middleware(
         CORSMiddleware,
@@ -133,4 +182,59 @@ def create_app(
     app.state.settings = settings
     app.state.container = container
 
+    return app
+
+
+def _load_user_graphs_from_env() -> None:
+    """
+    Called inside each uvicorn worker to import user graphs based
+    on environment variables set by the CLI.
+    """
+    modules_str = os.environ.get("AETHERGRAPH_LOAD_MODULES", "")
+    paths_str = os.environ.get("AETHERGRAPH_LOAD_PATHS", "")
+    project_root_str = os.environ.get("AETHERGRAPH_PROJECT_ROOT", ".")
+    strict_str = os.environ.get("AETHERGRAPH_STRICT_LOAD", "0")
+
+    modules = [m for m in modules_str.split(",") if m]
+    paths = [Path(p) for p in paths_str.split(os.pathsep) if p]
+
+    project_root = Path(project_root_str).resolve()
+    strict = strict_str.lower() in ("1", "true", "yes")
+
+    spec = LoadSpec(
+        modules=modules,
+        paths=paths,
+        project_root=project_root,
+        strict=strict,
+    )
+
+    loader = GraphLoader()
+    report = loader.load(spec)
+
+    # Optional: log report.loaded / report.errors here if you like
+    print("🚀 [worker] Loaded user graphs:", report.loaded)
+    if report.errors:
+        for e in report.errors:
+            print(f"⚠️ [worker load error] {e.source}: {e.error}")
+
+
+def create_app_from_env() -> FastAPI:
+    """
+    Factory for uvicorn --reload / workers mode.
+    Reads workspace + graph load config from env, imports user graphs,
+    then builds the FastAPI app.
+    """
+    workspace = os.environ.get("AETHERGRAPH_WORKSPACE", "./aethergraph_data")
+    log_level = os.environ.get("AETHERGRAPH_LOG_LEVEL", "warning")
+
+    # 1) Load user graphs in *this* process
+    _load_user_graphs_from_env()
+
+    # 2) Build the app (your existing factory)
+    # If you have a config system, wire it here
+    app = create_app(
+        workspace=workspace,
+        cfg=None,  # or AppSettings.from_env(), etc.
+        log_level=log_level,
+    )
     return app

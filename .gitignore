@@ -18,6 +18,7 @@ __pycache__/
 .vscode/
 .env
 .venv
+.venv*/
 .env.*
 *.env
 /test
@@ -200,3 +201,7 @@ temp/
 
 # local test and env files
 _local*
+
+
+# Built frontend bundle
+src/aethergraph/server/ui_static/

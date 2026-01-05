@@ -1,0 +1,5 @@
+prune tests
+prune examples
+prune src/aethergraph/demos
+
+global-exclude *.py[cod] __pycache__ .DS_Store
