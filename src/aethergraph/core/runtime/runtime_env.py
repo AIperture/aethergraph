@@ -278,7 +278,7 @@ class RuntimeEnv:
                 kind = meta.get("kind")
                 level = "session" if kind == "agent" else "run"
 
-            custom_scope_id = meta.get("memory_scope_id")
+            custom_scope_id = meta.get("memory_scope")
         else:
             # If we have an agent_id but no meta, still bias to session-level
             level = "session" if self.agent_id else "run"

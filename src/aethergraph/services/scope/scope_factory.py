@@ -70,7 +70,7 @@ class ScopeFactory:
         s.flow_id = flow_id
         return s
 
-    def for_memory(
+    def for_memory_custom_override(
         self,
         *,
         identity: RequestIdentity | None = None,
@@ -111,5 +111,54 @@ class ScopeFactory:
                 mem_id = f"org:{o}"
             else:  # pragma: no cover
                 mem_id = f"run:{run_id}"
+
+        return s.with_memory_scope(mem_id)
+
+    def for_memory(
+        self,
+        *,
+        identity: RequestIdentity | None = None,
+        run_id: str,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        session_id: str | None = None,
+        level: Literal["session", "user", "run", "org"] = "session",
+        custom_scope_id: str | None = None,
+    ):
+        """
+        Rule of thumb for memory scope IDs:
+        - session-level:   "session:{session_id}" or "session:{run_id}" if no session
+        - user-level:      "user:{user_id}" or "user:{client_id}"
+        - run-level:       "run:{run_id}"
+        - org-level:       "org:{org_id}"
+        1) Compute the base ID from the level
+        2) If a custom scope is provided, treat it as a suffix under the root
+            e.g. "session:{base}:{custom_scope_id}"
+        """
+        s = self.for_node(
+            identity=identity,
+            run_id=run_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            session_id=session_id,
+        )
+
+        # 1) Compute the base ID from the level
+        if level == "session":
+            base = session_id or run_id
+            root = f"session:{base}"
+        elif level == "user":
+            u = s.user_id or s.client_id or "anon"
+            root = f"user:{u}"
+        elif level == "run":
+            root = f"run:{run_id}"
+        elif level == "org":
+            o = s.org_id or "orgless"
+            root = f"org:{o}"
+        else:  # pragma: no cover
+            root = f"run:{run_id}"
+
+        # 2) If a custom scope is provided, treat it as a suffix under the root
+        mem_id = f"{root}:{custom_scope_id}" if custom_scope_id else root
 
         return s.with_memory_scope(mem_id)

@@ -13,6 +13,13 @@ STATE_FILE_NAME = "server.json"
 LOCK_FILE_NAME = "server.lock"
 
 
+class PortInUseError(RuntimeError):
+    def __init__(self, host: str, port: int):
+        super().__init__(f"Port {host}:{port} is already in use by another process.")
+        self.host = host
+        self.port = port
+
+
 def _state_dir(workspace: str | Path) -> Path:
     return Path(workspace).resolve() / STATE_DIR_NAME
 
@@ -90,14 +97,48 @@ def _tcp_ping(host: str, port: int, timeout_s: float = 0.25) -> bool:
 
 
 def _pid_alive(pid: int) -> bool:
+    """
+    Cross-platform check if a PID is alive.
+
+    On Unix: uses os.kill(pid, 0).
+    On Windows: uses OpenProcess + GetExitCodeProcess.
+    """
     if pid <= 0:
         return False
+
+    if os.name == "nt":
+        # Windows: use Win32 API instead of os.kill(pid, 0),
+        # which can give WinError 87 / SystemError behavior.
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            False,
+            wintypes.DWORD(pid),
+        )
+        if not handle:
+            return False
+
+        try:
+            exit_code = wintypes.DWORD()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                # Failed to query exit code -> assume not alive
+                return False
+            return exit_code.value == STILL_ACTIVE
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+    # POSIX: classic trick
     try:
-        # On Windows, os.kill(pid, 0) is supported in Python and checks existence.
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    else:
+        return True
 
 
 def read_server_state(workspace: str | Path) -> dict[str, Any] | None:
@@ -127,11 +168,15 @@ def clear_server_state(workspace: str | Path) -> None:
 
 def get_running_url_if_any(workspace: str | Path) -> str | None:
     """
-    Returns URL if server.json exists AND the process/port looks alive.
+    Returns URL if server.json exists AND it looks like *our* server is alive.
+
+    If the port is in use by another process (PID dead but TCP ping works),
+    raises PortInUseError so the caller can show a clearer message.
     """
     st = read_server_state(workspace)
     if not st:
         return None
+
     host = st.get("host")
     port = st.get("port")
     url = st.get("url")
@@ -142,19 +187,54 @@ def get_running_url_if_any(workspace: str | Path) -> str | None:
     if not isinstance(pid, int):
         pid = -1
 
-    # Strong check: port is responding
-    if _tcp_ping(host, port):
+    pid_alive = pid > 0 and _pid_alive(pid)
+    port_alive = _tcp_ping(host, port)
+
+    # Case 1: PID + port both alive -> this really looks like our server
+    if pid_alive and port_alive:
         return url
 
-    # If port dead, also consider pid dead -> clear stale file
-    if pid != -1 and not _pid_alive(pid):
+    # Case 2: PID dead but port alive -> someone else is using that port
+    if (not pid_alive) and port_alive:
+        # our server isn't there anymore, but the port is taken
+        clear_server_state(workspace)  # stale state; don't reuse
+        raise PortInUseError(host, port)
+
+    # Case 3: both dead -> stale file
+    if (not pid_alive) and (not port_alive):
         clear_server_state(workspace)
+        return None
+
+    # Case 4: PID alive but port not responding.
+    # This can happen briefly if the process is starting up or shutting down.
+    # For CLI UX, it's usually fine to treat it as "running" and let the user retry if needed.
+    if pid_alive and not port_alive:
+        return url
+
+    # Fallback: be conservative and say "no running server"
     return None
 
 
 def pick_free_port(requested: int) -> int:
+    """
+    Port selection strategy:
+
+    - If requested != 0: respect the user's choice exactly.
+    - If requested == 0: try our preferred dev ports first (8745–8748),
+      and if all are taken, fall back to an OS-assigned ephemeral port.
+    """
     if requested != 0:
         return requested
+
+    # Preferred AetherGraph dev ports – unlikely to collide with Jupyter, mkdocs, etc.
+    preferred_ports = (8745, 8746, 8747, 8748)
+
+    for port in preferred_ports:
+        # Only 127.0.0.1 is relevant here; the server binding uses the real host later.
+        if not _tcp_ping("127.0.0.1", port):
+            return port
+
+    # All preferred ports taken – fall back to OS-assigned free port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])

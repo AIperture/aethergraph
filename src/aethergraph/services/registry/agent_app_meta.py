@@ -10,39 +10,46 @@ from aethergraph.core.runtime.run_types import RunImportance, RunVisibility
 # ---------------------------------------------------------------------
 # Config schemas used by decorators
 # ---------------------------------------------------------------------
+SUPPORTED_AGENT_MODES = {"chat_v1"}
 
 
 class AgentConfig(TypedDict, total=False):
     """
-    Configuration metadata for an agent. Register an app with `as_app` parameter in `@graphify` or `@graph_fn`.
+    Configuration metadata for an agent. Register an agent with `as_agent`
+    parameter in `@graphify` or `@graph_fn`.
+
+    All fields are optional except `id` in practice; anything omitted gets
+    reasonable defaults in build_agent_meta.
 
     Attributes:
-        id (str): Unique identifier for the agent. Required.
+        id (str): Unique identifier for the agent. Defaults to graph name.
         title (str): Display name of the agent. Optional, shown in the UI.
-        description (str): Brief description of the agent's purpose or functionality. Optional, shown in the UI.
-        icon (str): Icon key in representing the agent in the UI. Optional, shown in the UI.
-        color (str): Color theme associated with the agent. Optional, shown in the UI.
-        badge (str): Badge or label for the agent. Optional, shown in the UI.
-        category (str): Category or grouping for the agent. Optional, E.g., "Core", "R&D Lab", "Infra", "Productivity", etc.
-        status (str): Availability status of the agent. Possible values include "available", "coming-soon", "hidden", etc.
-        mode (str): Operational mode of the agent, e.g., "chat_v1". Currently only "chat_v1" is supported.
-        session_kind (str): Type of session supported, e.g., "chat", "batch". Currently only "chat" is supported.
-        flow_id (str): Identifier for the flow or process associated with the agent. Optional. Not shown in the UI.
-        tags (list[str]): List of tags for search or categorization. Optional, shown in the UI.
-        tool_graphs (list[str]): List of tool graph identifiers used by the agent. Optional. Not shown in the UI.
-        run_visibility (RunVisibility): Visibility setting for agent runs. Optional. Default is "normal". When set to "inline", runs are not shown in the UI for clarity.
-        run_importance (RunImportance): Importance level for agent runs. Optional. Default is "normal".
-        memory_level (Literal["user", "session", "run"]): Level at which memory is scoped. Defaults is "session"
-        memory_scope (str): Scope or context for memory management. Optional. E.g. "session.global", "user.all", etc.
-        github_url (str): Optional URL to the agent's GitHub repository. Optional, shown in the UI.
+        description (str): Brief description of the agent. Optional, shown in the UI.
+        short_description (str): Shorter summary (used in cards). Optional.
+        icon_key (str): Icon key used in the UI (e.g. "message-circle").
+        color (str): Accent color token (e.g. "emerald").
+        badge (str): Badge label, e.g. "Chat Agent".
+        category (str): Category, e.g. "Core", "R&D Lab", "Infra", "Productivity".
+        status (str): "available" | "coming-soon" | "hidden" | "error" | ...
+        mode (str): Operational mode. Defaults to "chat_v1" for chat agents.
+        session_kind (str): Session type, e.g. "chat". Defaults to "chat".
+        flow_id (str): Flow identifier for wiring. Defaults to graph name.
+        tags (list[str]): Tags used for search / grouping.
+        tool_graphs (list[str]): Related tool graph identifiers.
+        features (list[str]): Optional feature bullets for UI.
+        run_visibility (RunVisibility): "normal" | "inline" | ...
+        run_importance (RunImportance): "normal" | "high" | ...
+        memory_level (Literal["user","session","run"]): Memory scope level.
+        memory_scope (str): Logical scope, e.g. "session.global", "user.all".
+        github_url (str): Optional GitHub link.
     """
 
     # Identity & basic UI
     id: str
     title: str
     description: str
-
-    icon: str
+    short_description: str
+    icon_key: str
     color: str
     badge: str
     category: str
@@ -55,6 +62,7 @@ class AgentConfig(TypedDict, total=False):
     flow_id: str
     tags: list[str]
     tool_graphs: list[str]
+    features: list[str]
 
     # Runtime behavior
     run_visibility: RunVisibility
@@ -70,23 +78,26 @@ class AgentConfig(TypedDict, total=False):
 
 class AppConfig(TypedDict, total=False):
     """
-    Configuration metadata for an application. Register an app with `as_app` parameter in `@graphify` or `@graph_fn`.
+    Configuration metadata for an application. Register an app with `as_app`
+    parameter in `@graphify` or `@graph_fn`.
 
     Attributes:
-        id (str): Unique identifier for the app. Required.
-        name (str): Human-readable name of the app. Required.
+        id (str): Unique identifier for the app. Defaults to graph name.
+        name (str): Human-readable name of the app. Defaults to "App for <graph>".
         badge (str): Short badge or label for the app. Optional, shown in the UI.
-        short_description (str): Brief summary of the app's purpose. Optional, shown in the UI.
-        description (str): Detailed description of the app. Optional, shown in the UI.
-        category (str): Category of the app, e.g., "Core", "R&D Lab", "Infra", "Productivity", etc.
-        status (str): Current status of the app, such as "available", "coming-soon", or "hidden".
-        icon_key (str): Key or identifier for the app's icon. Optional, shown in the UI.
-        tags (list[str]): List of tags associated with the app for search and filtering.
-        features (list[str]): List of notable features or capabilities of the app.
-        run_visibility (RunVisibility): Visibility setting for app runtime behavior. Optional. Default is "normal". When set to "inline", runs are not shown in the UI for clarity.
-        run_importance (RunImportance): Importance level for app runtime behavior. Optional. Default is "normal".
-        flow_id (str): Identifier for the flow associated with the app. Optional. Not shown in the UI.
-        github_url (str): Optional URL to the app's GitHub repository. Optional, shown in the UI.
+        short_description (str): Brief summary of the app's purpose. Optional.
+        description (str): Detailed description of the app. Optional.
+        category (str): Category, e.g. "Core", "R&D Lab", "Infra", "Productivity".
+        status (str): "available" | "coming-soon" | "hidden" | "error" | ...
+        icon_key (str): Icon key for the app.
+        color (str): Accent color token.
+        mode (str): App mode, e.g. "no_input_v1". Defaults to "no_input_v1".
+        tags (list[str]): Tags for search / grouping.
+        features (list[str]): Notable features for the app.
+        run_visibility (RunVisibility): "normal" | "inline" | ...
+        run_importance (RunImportance): "normal" | "high" | ...
+        flow_id (str): Flow identifier. Defaults to graph name.
+        github_url (str): Optional GitHub link.
     """
 
     # Identity & UI
@@ -95,9 +106,11 @@ class AppConfig(TypedDict, total=False):
     badge: str
     short_description: str
     description: str
-    category: str  # "Core" | "R&D Lab" | "Infra" | "Productivity" | ...
-    status: str  # "available" | "coming-soon" | "hidden" | ...
+    category: str
+    status: str
     icon_key: str
+    color: str
+    mode: str
     tags: list[str]
 
     # UX hints
@@ -116,7 +129,8 @@ AGENT_CORE_KEYS = {
     "id",
     "title",
     "description",
-    "icon",
+    "short_description",
+    "icon_key",
     "color",
     "badge",
     "category",
@@ -126,6 +140,7 @@ AGENT_CORE_KEYS = {
     "flow_id",
     "tags",
     "tool_graphs",
+    "features",
     "run_visibility",
     "run_importance",
     "memory_level",
@@ -142,6 +157,8 @@ APP_CORE_KEYS = {
     "category",
     "status",
     "icon_key",
+    "color",
+    "mode",
     "tags",
     "features",
     "run_visibility",
@@ -163,52 +180,59 @@ CHAT_V1_REQUIRED_INPUTS = [
 ]
 
 
-def validate_agent_signature(
-    *,
-    graph_name: str,
-    fn: Callable[..., Any],
-    inputs: list[str] | None,
-    agent_cfg: AgentConfig | None,
-) -> list[str] | None:
-    """
-    Small validator to enforce contracts for specific agent modes.
+def normalize_agent_mode(agent_cfg: AgentConfig) -> str:
+    # Default behavior: if user doesn't specify, it's chat_v1
+    mode = (agent_cfg.mode or "chat_v1").strip()
 
-    For now:
-      - If mode == "chat_v1", we enforce that:
-        1) `inputs` exactly matches CHAT_V1_REQUIRED_INPUTS
-           (if inputs is None, we auto-fill with this list).
-        2) The function signature has parameters with these names.
-    """
-    if not agent_cfg:
-        return inputs
-
-    mode = agent_cfg.get("mode")
-    if mode != "chat_v1":
-        return inputs
-
-    expected = CHAT_V1_REQUIRED_INPUTS
-
-    # 1) Validate / fill the .inputs list
-    if inputs is None:
-        # auto-fill if user forgot; this keeps ergonomics nice
-        inputs = expected.copy()
-    else:
-        if list(inputs) != expected:
-            raise ValueError(
-                f"Agent '{graph_name}' is mode='chat_v1' but inputs={inputs!r}; "
-                f"expected exactly {expected!r}."
-            )
-
-    # 2) Validate function signature has params with these names
-    sig = inspect.signature(fn)
-    missing = [name for name in expected if name not in sig.parameters]
-    if missing:
+    if mode not in SUPPORTED_AGENT_MODES:
+        # this will be caught and turned into status="error" for now
         raise ValueError(
-            f"Agent '{graph_name}' (mode='chat_v1') is missing parameters {missing!r} "
-            f"in function signature. Required parameters are {expected!r}."
+            f"Unsupported agent mode '{mode}'. "
+            "Currently only 'chat_v1' is supported. "
+            "Omit 'mode' or set mode='chat_v1'."
         )
+    return mode
 
-    return inputs
+
+SUPPORTED_APP_MODES = {"no_input_v1"}
+
+
+def normalize_app_mode(app_cfg: AppConfig) -> str:
+    mode = (app_cfg.mode or "no_input_v1").strip()
+    if mode not in SUPPORTED_APP_MODES:
+        raise ValueError(
+            f"Unsupported app mode '{mode}'. "
+            "Currently only 'no_input_v1' is supported for gallery apps. "
+            "Omit 'mode' or set mode='no_input_v1'."
+        )
+    return mode
+
+
+def validate_agent_signature(
+    graph_name: str, fn: Callable, agent_cfg: AgentConfig
+) -> tuple[str, list[str]]:
+    mode = normalize_agent_mode(agent_cfg)
+
+    sig = inspect.signature(fn)
+    param_names = list(sig.parameters.keys())
+
+    if mode == "chat_v1":
+        missing = [p for p in CHAT_V1_REQUIRED_INPUTS if p not in param_names]
+        if missing:
+            raise ValueError(
+                f"chat_v1 agent '{graph_name}' is missing parameters: {missing}. "
+                f"Expected parameters: {CHAT_V1_REQUIRED_INPUTS}"
+            )
+        # TODO future: could be more flexible here:
+        #  - use CHAT_V1_REQUIRED_INPUTS as canonical inputs, or
+        #  - accept superset but keep these first.
+        inputs = CHAT_V1_REQUIRED_INPUTS
+    else:
+        # Currently unreachable because normalize_agent_mode rejects unknowns,
+        # but future-proof if add more modes.
+        inputs = param_names
+
+    return mode, inputs
 
 
 # ---------------------------------------------------------------------
@@ -231,7 +255,7 @@ def build_agent_meta(
     if agent_cfg is None:
         return None
 
-    cfg = dict(agent_cfg)
+    cfg: dict[str, Any] = dict(agent_cfg)
     base_tags = graph_meta.get("tags") or []
 
     agent_id = cfg.get("id", graph_name)
@@ -239,33 +263,42 @@ def build_agent_meta(
     agent_flow_id = cfg.get("flow_id", graph_meta.get("flow_id", graph_name))
     agent_tags = cfg.get("tags", base_tags)
 
+    # Anything not in core keys becomes "extra" for future use
     extra = {k: v for k, v in cfg.items() if k not in AGENT_CORE_KEYS}
 
-    memory_level = cfg.get("memory_level", "none")
+    # Memory policy
+    memory_level = cfg.get("memory_level", "session")
     memory_scope = cfg.get("memory_scope")
 
+    # Text fields
     description = cfg.get("description")
+    short_description = cfg.get("short_description") or description
 
-    # unified icon key + accent color (optional)
-    icon_key = cfg.get("icon_key") or cfg.get("icon")  # allow both
+    # Visuals
+    icon_key = cfg.get("icon_key")
     accent_color = cfg.get("color")
+
+    # Behavior
+    agent_mode = cfg.get("mode") or "chat_v1"
+    session_kind = cfg.get("session_kind", "chat")
 
     meta: dict[str, Any] = {
         "kind": "agent",
         "id": agent_id,
         "title": agent_title,
         "description": description,
-        "icon": cfg.get("icon"),
-        "icon_key": icon_key,  # to match apps, preferred
+        "short_description": short_description,
+        "icon_key": icon_key,
         "color": accent_color,
         "badge": cfg.get("badge"),
         "category": cfg.get("category"),
         "status": cfg.get("status", "available"),
-        "mode": cfg.get("mode"),
-        "session_kind": cfg.get("session_kind", "chat"),
+        "mode": agent_mode,
+        "session_kind": session_kind,
         "flow_id": agent_flow_id,
         "tags": agent_tags,
         "tool_graphs": cfg.get("tool_graphs", []),
+        "features": cfg.get("features", []),
         "run_visibility": cfg.get("run_visibility", "inline"),
         "run_importance": cfg.get("run_importance", "normal"),
         "memory": {
@@ -286,11 +319,11 @@ def build_agent_meta(
         "kind": "agent",
         "id": agent_id,
         "title": agent_title,
-        "subtitle": cfg.get("session_kind") or cfg.get("mode"),
+        "subtitle": session_kind or agent_mode,
         "badge": cfg.get("badge"),
         "category": cfg.get("category"),
         "status": meta["status"],
-        "short_description": description,
+        "short_description": short_description,
         "description": description,
         "icon_key": icon_key,
         "accent_color": accent_color,
@@ -319,7 +352,7 @@ def build_app_meta(
     if app_cfg is None:
         return None
 
-    cfg = dict(app_cfg)
+    cfg: dict[str, Any] = dict(app_cfg)
     base_tags = graph_meta.get("tags") or []
 
     app_id = cfg.get("id", graph_name)
@@ -334,6 +367,7 @@ def build_app_meta(
 
     icon_key = cfg.get("icon_key")
     accent_color = cfg.get("color")
+    app_mode = cfg.get("mode") or "no_input_v1"
 
     meta: dict[str, Any] = {
         "kind": "app",
@@ -348,6 +382,7 @@ def build_app_meta(
         "status": cfg.get("status", "available"),
         "icon_key": icon_key,
         "color": accent_color,
+        "mode": app_mode,
         "tags": app_tags,
         "features": cfg.get("features", []),
         "run_visibility": cfg.get("run_visibility", "normal"),

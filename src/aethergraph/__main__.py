@@ -73,33 +73,39 @@ def main(argv: list[str] | None = None) -> int:
     Examples:
         Basic usage with default workspace and port:
         ```bash
-        python -m aethergraph serve --workspace ./aethergraph_data
+        python -m aethergraph serve --workspace # only default agents/apps show up
         ```
 
-        Auto-pick a free port and load user graphs from a file:
+        load user graphs from a file and autoreload on changes:
         ```bash
-        python -m aethergraph serve --workspace ./aethergraph_data --port 0 --load-path ./graphs.py
+        python -m aethergraph serve --load-path ./graphs.py --reload
         ```
 
         Load multiple modules and set a custom project root:
         ```bash
-        python -m aethergraph serve --workspace ./aethergraph_data --load-module mygraphs --project-root .
+        python -m aethergraph serve --load-module mygraphs --project-root .
         ```
 
         Reuse detection (print URL if already running):
         ```bash
-        python -m aethergraph serve --workspace ./aethergraph_data --reuse
+        python -m aethergraph serve --reuse
+        ```
+
+        Customize workspace and port:
+        ```bash
+        python -m aethergraph serve --workspace ./my_workspace --port 8000  # this will not show previous runs/artifacts unless reused
         ```
 
     Args:
         argv: Optional list of CLI arguments. If None, uses sys.argv[1:].
 
     Required keywords:
-        - `workspace`: Path to the workspace folder (default: ./aethergraph_data).
+        - `serve`: Command to start the AetherGraph server. If no other command is given, the server will only load default built-in agents/apps.
 
     Optional keywords:
+        - `workspace`: Path to the workspace folder (default: ./aethergraph_data).
         - `host`: Host address to bind (default: 127.0.0.1).
-        - `port`: Port to bind (default: 8000; use 0 for auto-pick).
+        - `port`: Port to bind (default: 8745; use 0 for auto-pick).
         - `log-level`: App log level (default: warning).
         - `uvicorn-log-level`: Uvicorn log level (default: warning).
         - `project-root`: Temporarily added to sys.path for local imports.
@@ -107,14 +113,18 @@ def main(argv: list[str] | None = None) -> int:
         - `load-path`: Python file(s) to load before server starts (repeatable).
         - `strict-load`: Raise error if graph loading fails.
         - `reuse`: If server already running for workspace, print URL and exit.
+        - `reload`: Enable auto-reload (dev mode).
 
     Returns:
         int: Exit code (0 for success, 2 for unknown command).
 
     Notes:
         - Launching the server via CLI keeps it running persistently for API clients to connect like AetherGraph UI.
-        - In local mode, the server port need to be consistent with the app/client connection.
-        - Use the --reuse flag to avoid starting multiple servers for the same workspace.
+        - In local mode, the server port will automatically be consistent with UI connections.
+        - use `--reload` for development to auto-restart on code changes. This will use uvicorn's reload feature.
+        - When switching ports, the UI will not show previous runs/artifacts unless the server is reused. This is
+            because the server URL is tied to the frontend hash. Keep the server in a same port (default 8745) for local dev.
+            Later the UI can support dynamic port discovery via server.json.
     """
     argv = argv if argv is not None else sys.argv[1:]
 
@@ -124,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="Run the AetherGraph sidecar (blocking).")
     serve.add_argument("--workspace", default="./aethergraph_data")
     serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8000, help="0 = auto free port")
+    serve.add_argument("--port", type=int, default=8745, help="0 = auto free port")
     serve.add_argument("--log-level", default="warning")
     serve.add_argument("--uvicorn-log-level", default="info")
 
@@ -153,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    print(args)
 
     if args.cmd == "serve":
         loader = GraphLoader()
@@ -202,6 +213,9 @@ def main(argv: list[str] | None = None) -> int:
                 if report.errors and not args.strict_load:
                     for e in report.errors:
                         print(f"⚠️ [load error]  {e.source}: {e.error}")
+                        print("   (continuing despite load error; use --strict-load to fail)")
+                        if e.traceback:
+                            print(e.traceback)
             print("✅ Graph/agents loading complete.")
             print("=" * 50)
 
@@ -230,10 +244,13 @@ def main(argv: list[str] | None = None) -> int:
         if not args.reload:
             # Run blocking server (lock released so others can read server.json)
             print("\n" + "=" * 50)
-            print(f"[AetherGraph] 🚀 Server started at: {url}")
-            print(f"[AetherGraph] 🖥️  UI:        {url}/ui (if built)")
-            print(f"[AetherGraph] 📡 API:       {url}/api/v1/")
-            print(f"[AetherGraph] 📂 Workspace:  {args.workspace}")
+            # We align the labels to 18 characters (the length of the longest label)
+            print(f"[AetherGraph] 🚀 {'Server started at:':<18} {url}")
+            print(
+                f"[AetherGraph] 🖥️  {'UI:':<18} {url}/ui   (if built)"
+            )  # strangly, this needs two spaces unlike the rest
+            print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
+            print(f"[AetherGraph] 📂 {'Workspace:':<18} {args.workspace}")
             print("=" * 50 + "\n")
             uvicorn.run(
                 app,
@@ -246,11 +263,11 @@ def main(argv: list[str] | None = None) -> int:
         # When --reload is on:
         if args.reload:
             print("\n" + "=" * 50)
-            print(f"[AetherGraph] 🚀 Server started at: {url}")
-            print(f"[AetherGraph] 🖥️  UI:        {url}/ui (if built)")
-            print(f"[AetherGraph] 📡 API:       {url}/api/v1/")
-            print(f"[AetherGraph] 📂 Workspace:  {args.workspace}")
-            print("[AetherGraph] ♻️  Auto-reload: enabled (uvicorn)")
+            print(f"[AetherGraph] 🚀 {'Server started at:':<18} {url}")
+            print(f"[AetherGraph] 🖥️  {'UI:':<18} {url}/ui   (if built)")
+            print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
+            print(f"[AetherGraph] 📂 {'Workspace:':<18} {args.workspace}")
+            print(f"[AetherGraph] ♻️  {'Auto-reload:':<18} enabled (uvicorn)")
             print("=" * 50 + "\n")
 
             reload_dirs: list[str] = [str(project_root)]

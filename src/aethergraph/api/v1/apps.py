@@ -22,7 +22,6 @@ async def list_apps(
     """
     reg = current_registry()
     if reg is None:
-        # You can also return [] silently; up to you
         raise HTTPException(status_code=500, detail="Registry not available")
 
     # {'app:metalens': '0.1.0', ...}

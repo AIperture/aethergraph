@@ -44,7 +44,6 @@ async def _get_run_ids_for_client(
     if rm is None:
         return set()
 
-    # list_records wrapper; adapt to your actual RunManager API
     records = await rm.list_records(
         graph_id=None,
         status=None,

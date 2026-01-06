@@ -17,7 +17,6 @@ def _utcnow() -> datetime:
 
 
 def _is_task_graph(obj: Any) -> bool:
-    # Replace with proper isinstance check in your codebase
     return hasattr(obj, "spec") and hasattr(obj, "io_signature")
 
 

@@ -304,7 +304,6 @@ def _coerce_ts_to_dt(value: Any) -> datetime | None:
     # ISO string
     if isinstance(value, str):
         try:
-            # If you have dateutil, you can use that; otherwise fromisoformat
             dt = datetime.fromisoformat(value)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)

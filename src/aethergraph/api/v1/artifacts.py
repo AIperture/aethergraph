@@ -35,7 +35,6 @@ def _tenant_label_filters(identity: RequestIdentity) -> dict[str, str]:
     org_id, user_id = identity.tenant_key
     filters: dict[str, str] = {}
 
-    # If you *ever* want to allow cross-tenant system views, add flags here.
     if org_id is not None:
         filters["org_id"] = org_id
     if user_id is not None:
@@ -155,7 +154,6 @@ async def list_artifacts(
     # 🔹 Tenant scoping: org_id + user_id
     label_filters.update(_tenant_label_filters(identity))
 
-    print("label_filters:", label_filters)
     artifacts = await index.search(
         kind=kind.strip() if kind and kind.strip() else None,
         labels=label_filters or None,
@@ -207,8 +205,7 @@ async def get_artifact_content(
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
 
-    # If user provided a fully qualified preview URI (e.g. S3 signed URL), you
-    # can just redirect there instead of proxying bytes:
+    # If user provided a fully qualified preview URI (e.g. S3 signed URL)
     if artifact.preview_uri and str(artifact.preview_uri).startswith(("http://", "https://")):
         return RedirectResponse(artifact.preview_uri)
 

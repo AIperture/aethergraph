@@ -11,7 +11,7 @@ license = { file = "LICENSE" }
 authors = [{ name = "Zhaocheng Liu", email = "zhaocheng@aiperture.io" }]
 requires-python = ">=3.10"
 
-# Conservative lower bounds; you can tighten as you stabilize.
+# Conservative lower bounds; tighten as stabilize.
 dependencies = [
   "fastapi>=0.110,<1.0",
   "uvicorn[standard]>=0.31",

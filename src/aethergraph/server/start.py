@@ -41,7 +41,9 @@ class ServerHandle:
         self.thread.join(timeout=timeout_s)
 
     def block(self) -> None:
-        self.thread.join()
+        # Loop with a timeout allows Python to process signals (like Ctrl+C)
+        while self.thread.is_alive():
+            self.thread.join(timeout=1.0)
 
 
 def _make_uvicorn_server(app: FastAPI, host: str, port: int, log_level: str) -> uvicorn.Server:
@@ -66,7 +68,7 @@ def start_server(
     *,
     workspace: str = "./aethergraph_data",
     host: str = "127.0.0.1",
-    port: int = 8000,  # 0 = auto free port
+    port: int = 8745,  # 0 = auto free port
     log_level: str = "warning",
     unvicorn_log_level: str = "warning",
     return_container: bool = False,
@@ -229,6 +231,16 @@ def start_server(
             },
         )
 
+        print("\n" + "=" * 50)
+        # We align the labels to 18 characters (the length of the longest label)
+        print(f"[AetherGraph] 🚀 {'Server started at:':<18} {url}")
+        print(
+            f"[AetherGraph] 🖥️  {'UI:':<18} {url}/ui   (if built)"
+        )  # strangly, this needs two spaces unlike the rest
+        print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
+        print(f"[AetherGraph] 📂 {'Workspace:':<18} {workspace}")
+        print("=" * 50 + "\n")
+
         handle = ServerHandle(url=url, server=server, thread=t)
 
         if return_container and return_handle:
@@ -237,13 +249,6 @@ def start_server(
             return url, app.state.container
         if return_handle:
             return url, handle
-
-        print("\n" + "=" * 50)
-        print(f"[AetherGraph] 🚀 Server started at: {url}")
-        print(f"[AetherGraph] 🖥️  UI:        {url}/ui (if built)")
-        print(f"[AetherGraph] 📡 API:       {url}/api/v1/")
-        print(f"[AetherGraph] 📂 Workspace:  {workspace}")
-        print("=" * 50 + "\n")
 
         return url
 
