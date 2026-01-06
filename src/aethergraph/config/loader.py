@@ -37,7 +37,7 @@ def load_settings() -> AppSettings:
     repo_env = (
         (repo_root / ".env").resolve() if (repo_root and (repo_root / ".env").exists()) else None
     )
-    print("🔍 Repo root for .env fallback:", repo_env)
+    print("Repo root for .env fallback:", repo_env)
     candidates = _existing(
         [
             explicit_path or Path(),  # explicit if set
@@ -48,7 +48,7 @@ def load_settings() -> AppSettings:
             # repo_env if repo_env else Path(),  # dev fallback only if exists
         ]
     )
-    print("🔍 Loading .env files from:", candidates)
+    print("Loading .env files from:", candidates)
 
     if explicit and not explicit_path.exists():
         raise FileNotFoundError(f"AETHERGRAPH_ENV_FILE not found: {explicit_path}")

@@ -87,10 +87,8 @@ class UnifiedRegistry:
     def get(self, ref: str | Key) -> Any:
         key = parse_ref(ref) if isinstance(ref, str) else ref
         k = (key.nspace, key.name)
-        print(f"Getting from registry: nspace={key.nspace}, name={key.name}, version={key.version}")
         with self._lock:
             versions = self._store.get(k)
-            print(f"Available versions: {list(versions.keys()) if versions else 'None'}")
             if not versions:
                 raise KeyError(f"Not found: {key.canonical()}")
 
@@ -187,7 +185,6 @@ class UnifiedRegistry:
 
     def get_meta(
         self,
-        *,
         nspace: str,
         name: str,
         version: str | None = None,

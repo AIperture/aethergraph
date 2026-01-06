@@ -212,6 +212,24 @@ class ChannelBus:
             "resume_key": resume_key,
         }
 
+        # Enrich continuation meta with the same context fields we attach
+        # on normal channel events (if present on the continuation object).
+        session_id = getattr(continuation, "session_id", None)
+        if session_id is not None:
+            meta.setdefault("session_id", session_id)
+
+        agent_id = getattr(continuation, "agent_id", None)
+        if agent_id is not None:
+            meta.setdefault("agent_id", agent_id)
+
+        app_id = getattr(continuation, "app_id", None)
+        if app_id is not None:
+            meta.setdefault("app_id", app_id)
+
+        graph_id = getattr(continuation, "graph_id", None)
+        if graph_id is not None:
+            meta.setdefault("graph_id", graph_id)
+
         # Shape event
         if kind == "user_input":
             silent = False

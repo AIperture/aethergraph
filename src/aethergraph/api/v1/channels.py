@@ -25,7 +25,7 @@ async def channel_ingress(
     Ingest a message into a channel (HTTP).
 
     TODO:
-      - Forward to your Channel service / Correlator.
+      - Forward to Channel service / Correlator.
       - Likely emit a memory event + trigger continuations.
     """
     # Stub: just echo
@@ -75,7 +75,7 @@ async def channel_websocket(
 
     TODO:
       - Authenticate if needed (e.g., via query param token or headers).
-      - Subscribe this socket to your channel event stream.
+      - Subscribe this socket to channel event stream.
       - Push events as they arrive; accept client messages as ingress.
     """
     await websocket.accept()
@@ -85,5 +85,5 @@ async def channel_websocket(
             data = await websocket.receive_text()
             await websocket.send_text(f"[stub] Channel {channel_id} received: {data}")
     except WebSocketDisconnect:
-        # TODO: clean up subscriptions if you add them.
+        # TODO: clean up subscriptions if add them.
         pass

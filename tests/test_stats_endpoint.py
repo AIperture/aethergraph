@@ -248,7 +248,6 @@ def test_graphs_stats_all(client: TestClient):
     assert resp.status_code == 200
 
     data = resp.json()
-    print("🍏", data)
     # GraphStats is a root-map: { graph_id: {runs, succeeded, failed, total_duration_s}, ... }
     assert "graph.optimize_lens" in data
     assert "graph.etl" in data

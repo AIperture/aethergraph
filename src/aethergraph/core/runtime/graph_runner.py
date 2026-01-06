@@ -65,6 +65,22 @@ async def _build_env(
     run_id = rt_overrides.get("run_id") or f"run-{uuid.uuid4().hex[:8]}"
     session_id = rt_overrides.get("session_id")
     graph_id = getattr(owner, "graph_id", None) or getattr(owner, "name", None)
+
+    # Prefer runtime overrides (from RunRecord) over static graph metadata -- UI provenance
+    agent_id = (
+        rt_overrides.get("agent_id")
+        or getattr(owner, "agent_id", None)
+        or getattr(getattr(owner, "spec", None) or {}, "agent_id", None)
+        or (getattr(owner, "spec", None) or {}).get("agent_id")  # for dict-like spec
+    )
+
+    app_id = (
+        rt_overrides.get("app_id")
+        or getattr(owner, "app_id", None)
+        or getattr(getattr(owner, "spec", None) or {}, "app_id", None)
+        or (getattr(owner, "spec", None) or {}).get("app_id")
+    )
+
     env = RuntimeEnv(
         run_id=run_id,
         graph_id=graph_id,
@@ -73,7 +89,10 @@ async def _build_env(
         graph_inputs=inputs,
         outputs_by_node={},
         container=container,
+        agent_id=agent_id,
+        app_id=app_id,
     )
+
     retry = rt_overrides.get("retry") or RetryPolicy()
     max_conc = rt_overrides.get("max_concurrency", getattr(owner, "max_concurrency", 4))
     return env, retry, max_conc
@@ -147,7 +166,7 @@ def _resolve_graph_outputs(
             continuations=continuations,
         ) from e
 
-    return next(iter(result.values())) if len(result) == 1 else result
+    return result
 
 
 def _resolve_graph_outputs_or_waits(graph, inputs, env, *, raise_on_waits: bool = True):
@@ -218,8 +237,8 @@ def _register_metering_context(
     )
 
     # user id etc through auth context if available
-    user_id = getattr(getattr(env, "auth", None), "user_id", None)
-    org_id = getattr(getattr(env, "auth", None), "org_id", None)
+    user_id = getattr(getattr(env, "identity", None), "user_id", None)
+    org_id = getattr(getattr(env, "identity", None), "org_id", None)
 
     token = current_meter_context.set(
         {
@@ -240,9 +259,74 @@ async def run_async(
     **rt_overrides,
 ):
     """
-    Generic async runner for TaskGraph or GraphFunction.
-    - GraphFunction → delegates to gf.run(env=..., **inputs)
-    - TaskGraph/builder → schedules and resolves graph-level outputs
+    Execute a TaskGraph or GraphFunction asynchronously with optional persistence and resumability.
+
+    This method handles environment setup, cold-resume from persisted state (if available),
+    input validation, scheduling, and output resolution. It supports both fresh runs and
+    resuming incomplete runs, automatically wiring up persistence observers and enforcing
+    snapshot policies.
+
+    Examples:
+        Running a graph function:
+        ```python
+        result = await run_async(my_graph_fn, {"x": 1, "y": 2})
+        ```
+
+        Running a TaskGraph with custom run ID and identity:
+        ```python
+        result = await run_async(
+            my_task_graph,
+            {"input": 42},
+            run_id="custom-run-123",
+            identity=my_identity,     # Only used with API requests. Ignored when running locally.
+            max_concurrency=8
+        )
+        ```
+
+    Args:
+        target: The TaskGraph, GraphFunction, or builder to execute.
+        inputs: Dictionary of input values for the graph.
+        identity: Optional RequestIdentity for user/session context.
+        **rt_overrides: Optional runtime overrides for environment and execution. Recognized runtime overrides include:
+
+            - run_id (str): Custom run identifier.
+            - session_id (str): Session identifier for grouping runs.
+            - agent_id (str): Agent identifier for provenance.
+            - app_id (str): Application identifier for provenance.
+            - retry (RetryPolicy): Custom retry policy.
+            - max_concurrency (int): Maximum number of concurrent tasks.
+            - Any additional container attributes supported by your environment.
+
+    Returns:
+        dict: The resolved outputs of the graph, or a status dict if waiting on continuations.
+
+    Raises:
+        GraphHasPendingWaits: If the graph is waiting on external events and outputs are not ready.
+        TypeError: If the target is not a valid TaskGraph or GraphFunction.
+
+    Notes:
+        - Speficially for GraphFunctions, you can directly use `await graph_fn(**inputs)` without needing `run_async`.
+        - `graph_fn` is not resumable; use TaskGraphs for persistence and recovery features.
+        - when using `graph` for persistence/resumability, ensure your outputs are JSON-serializable, for examples:
+            - primitive types (str, int, float, bool, None)
+            - lists/dicts of primitive types
+
+            - graph that can be resumed with JSON-serializable outputs:
+            ```python
+            @graphify(...)
+            def my_graph(...):
+                ...
+                return {"result": 42, "data": [1, 2, 3], "info": None} # valid JSON-serializable output
+            ```
+            - graph that cannot be resumed due to non-JSON-serializable outputs:
+            ```python
+            @graphify(...)
+            def my_graph(...):
+                ...
+                return {"chekpoint": torch.pt, "file": open("data.bin", "rb")} # invalid outputs for resuming (but valid for fresh runs)
+            ```
+            - Despite this, you can still use `graph` without persistence features; just avoid resuming such graphs.
+
     """
     inputs = inputs or {}
     # GraphFunction path
@@ -403,6 +487,48 @@ class _LoopThread:
 _LOOP = _LoopThread()
 
 
-def run(target, inputs: dict[str, Any] | None = None, **rt_overrides):
+def run(
+    target,
+    inputs: dict[str, Any] | None = None,
+    identity: RequestIdentity | None = None,
+    **rt_overrides,
+):
+    """
+    Execute a target graph node synchronously with the provided inputs.
+
+    This function submits the execution of a target node (or graph) to the event loop,
+    allowing for asynchronous execution while providing a synchronous interface.
+    Runtime configuration overrides can be supplied as keyword arguments.
+
+    Examples:
+        Running a graph node with default inputs:
+        ```python
+        future = run(my_node)
+        result = future.result()
+        ```
+
+        Running with custom inputs and runtime overrides:
+        ```python
+        future = run(my_node, inputs={"x": 42}, timeout=10)
+        output = future.result()
+        ```
+
+    Args:
+        target: The graph node or callable to execute.
+        inputs: Optional dictionary of input values to pass to the node.
+        identity: Optional RequestIdentity for user/session context.
+        **rt_overrides: Additional keyword arguments to override runtime configuration.
+
+    Returns:
+        concurrent.futures.Future: A future representing the asynchronous execution of the node.
+
+    Notes:
+        - This function is suitable for use in synchronous contexts where asynchronous execution is desired.
+        - It is recommended to use asynchronous execution directly when possible for better performance and responsiveness.
+
+    Warnings:
+        - KeyboardInterrupt handling may not be perfect; consider using an async main function when possible.
+        - This function blocks the calling thread until the execution is complete.
+    """
     inputs = inputs or {}
-    return _LOOP.submit(run_async(target, inputs, **rt_overrides))
+    return _LOOP.submit(run_async(target, inputs, identity=identity, **rt_overrides))

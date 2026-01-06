@@ -1,10 +1,5 @@
-__version__ = "0.1.0a1"
+__version__ = "0.1.0a2"
 
-
-# Server
-# Channel buttons
-# Setup a default null logger to avoid "No handler found" warnings
-from contextlib import suppress
 import logging
 
 from .contracts.services.channel import Button
@@ -29,10 +24,6 @@ from .server.start import (
 )
 
 logging.getLogger("aethergraph").addHandler(logging.NullHandler())
-
-# import all demos if available
-with suppress(ImportError):
-    from .demos import *  # noqa: F403
 
 __all__ = [
     # Server

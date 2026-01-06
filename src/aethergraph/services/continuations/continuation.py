@@ -37,6 +37,12 @@ class Continuation:
     closed: bool = False  # ← NEW
     payload: dict[str, Any] | None = None  # set at creation time
 
+    # new session, etc.
+    session_id: str | None = None
+    agent_id: str | None = None
+    app_id: str | None = None
+    graph_id: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,

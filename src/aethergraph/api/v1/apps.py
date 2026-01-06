@@ -22,7 +22,6 @@ async def list_apps(
     """
     reg = current_registry()
     if reg is None:
-        # You can also return [] silently; up to you
         raise HTTPException(status_code=500, detail="Registry not available")
 
     # {'app:metalens': '0.1.0', ...}
@@ -50,3 +49,22 @@ async def list_apps(
         )
 
     return out
+
+
+@router.get("/apps/{app_id}", response_model=AppDescriptor)
+async def get_app(
+    app_id: str,
+    identity: Annotated[RequestIdentity, Depends(get_identity)] = None,
+) -> AppDescriptor:
+    reg = current_registry()
+    if reg is None:
+        raise HTTPException(status_code=500, detail="Registry not available")
+
+    # Resolve by app id (we store app_id as the registry `name`)
+    meta = reg.get_meta(nspace="app", name=app_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
+
+    graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", app_id))
+
+    return AppDescriptor(id=meta.get("id", app_id), graph_id=graph_id, meta=meta)

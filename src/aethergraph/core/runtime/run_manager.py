@@ -122,6 +122,10 @@ class RunManager:
         self._max_concurrent_runs = max_concurrent_runs
         self._running = 0
         self._lock = asyncio.Lock()
+        self._run_waiters: dict[str, asyncio.Future] = {}
+        self._run_waiters_lock = (
+            asyncio.Lock()
+        )  # no need for thread lock because run_manager is used within event loop
 
     # -------- concurrency helpers --------
     async def _acquire_run_slot(self) -> None:
@@ -202,8 +206,9 @@ class RunManager:
                 run_id=record.run_id,
                 session_id=record.meta.get("session_id"),
                 identity=identity,
+                agent_id=record.agent_id,
+                app_id=record.app_id,
             )
-
             # If we get here without GraphHasPendingWaits, run is completed
             outputs = result if isinstance(result, dict) else {"result": result}
             record.status = RunStatus.succeeded
@@ -274,6 +279,16 @@ class RunManager:
                 "Error recording run metering for run_id=%s", record.run_id
             )
 
+        try:
+            if record.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+                await self._resolve_run_future(record.run_id, record)
+        except Exception:  # noqa: BLE001
+            import logging
+
+            logging.getLogger("aethergraph.runtime.run_manager").exception(
+                "Error resolving run future for run_id=%s", record.run_id
+            )
+
         return record, outputs, has_waits, continuations
 
     # -------- new: non-blocking submit_run --------
@@ -301,9 +316,11 @@ class RunManager:
         - Schedules background execution via asyncio.create_task.
         - Returns immediately with the record (for run_id, status, etc).
         """
-        if identity is not None:
-            user_id = identity.user_id
-            org_id = identity.org_id
+        if identity is None:
+            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+
+        user_id = identity.user_id
+        org_id = identity.org_id
 
         # Acquire run slot (rate limiting)
         await self._acquire_run_slot()
@@ -407,6 +424,111 @@ class RunManager:
                 await self._release_run_slot()
             raise
 
+    async def run_and_wait(
+        self,
+        graph_id: str,
+        *,
+        inputs: dict[str, Any],
+        run_id: str | None = None,
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+        identity: RequestIdentity | None = None,
+        origin: RunOrigin | None = None,
+        visibility: RunVisibility | None = None,
+        importance: RunImportance | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        count_slot: bool = False,  # important for nested orchestration
+    ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+        """
+        Blocking run that still goes through RunStore so UI can visualize it.
+
+        - Creates + persists RunRecord (status=running)
+        - Runs inline (awaits completion)
+        - Updates RunStore status + metering (via _run_and_finalize)
+        - Returns (record, outputs, has_waits, continuations)
+
+        count_slot=False is recommended for "parent run awaiting child run" orchestration
+        to avoid deadlocks when max_concurrent_runs is small.
+        """
+        if identity is None:
+            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+
+        if count_slot:
+            await self._acquire_run_slot()
+
+        try:
+            tags = tags or []
+            target = await self._resolve_target(
+                graph_id
+            )  # same resolver as submit_run :contentReference[oaicite:1]{index=1}
+            rid = run_id or f"run-{uuid4().hex[:8]}"
+            started_at = _utcnow()
+
+            if _is_task_graph(target):
+                kind = "taskgraph"
+            elif _is_graphfn(target):
+                kind = "graphfn"
+            else:
+                kind = "other"
+
+            # flow_id extraction same pattern as submit_run :contentReference[oaicite:2]{index=2}
+            flow_id: str | None = None
+            reg = self.registry()
+            if reg is not None:
+                if kind == "taskgraph":
+                    meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+                elif kind == "graphfn":
+                    meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+                else:
+                    meta = {}
+                flow_id = meta.get("flow_id") or graph_id
+
+            if session_id is None:
+                session_id = rid
+
+            record = RunRecord(
+                run_id=rid,
+                graph_id=graph_id,
+                kind=kind,
+                status=RunStatus.running,
+                started_at=started_at,
+                tags=list(tags),
+                user_id=identity.user_id,
+                org_id=identity.org_id,
+                meta={},
+                session_id=session_id,
+                origin=origin or RunOrigin.app,
+                visibility=visibility or RunVisibility.normal,
+                importance=importance or RunImportance.normal,
+                agent_id=agent_id,
+                app_id=app_id,
+            )
+
+            if flow_id:
+                record.meta["flow_id"] = flow_id
+                if f"flow:{flow_id}" not in record.tags:
+                    record.tags.append(f"flow:{flow_id}")
+            if session_id:
+                record.meta["session_id"] = session_id
+                if f"session:{session_id}" not in record.tags:
+                    record.tags.append(f"session:{session_id}")
+
+            if self._store is not None:
+                await self._store.create(record)
+
+            # Inline execution; still uses run_or_resume_async under the hood :contentReference[oaicite:3]{index=3}
+            return await self._run_and_finalize(
+                record=record,
+                target=target,
+                graph_id=graph_id,
+                inputs=inputs,
+                identity=identity,
+            )
+        finally:
+            if count_slot:
+                await self._release_run_slot()
+
     # -------- old: blocking start_run (CLI/tests) --------
     async def start_run(
         self,
@@ -417,6 +539,8 @@ class RunManager:
         session_id: str | None = None,
         tags: list[str] | None = None,
         identity: RequestIdentity | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
         """
         Blocking helper (original behaviour).
@@ -428,6 +552,10 @@ class RunManager:
         - Returns (record, outputs, has_waits, continuations).
 
         Still useful for tests/CLI, but the HTTP route should prefer submit_run().
+
+        NOTE:
+        agent_id and app_id will override any value pulled from original graphs. Use it
+        only when you want to explicitly set these fields for tracking purpose.
         """
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
@@ -474,6 +602,8 @@ class RunManager:
             origin=RunOrigin.app,  # app is a typical default for graph runs
             visibility=RunVisibility.normal,
             importance=RunImportance.normal,
+            agent_id=agent_id,
+            app_id=app_id,
         )
 
         if flow_id:
@@ -494,6 +624,8 @@ class RunManager:
             graph_id=graph_id,
             inputs=inputs,
             identity=identity,
+            # agent_id=agent_id,
+            # app_id=app_id,
         )
 
     async def get_record(self, run_id: str) -> RunRecord | None:
@@ -507,21 +639,25 @@ class RunManager:
         *,
         graph_id: str | None = None,
         status: RunStatus | None = None,
+        flow_id: str | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
         session_id: str | None = None,
-        flow_id: str | None = None,  # NEW
         limit: int = 100,
         offset: int = 0,
     ) -> list[RunRecord]:
-        if self._store is None:
-            return []
-
-        # First filter by graph_id/status in the store (TODO: implement self._store.list with flow_id for efficiency)
         records = await self._store.list(
-            graph_id=graph_id, status=status, session_id=session_id, limit=limit, offset=offset
+            graph_id=graph_id,
+            status=status,
+            user_id=user_id,
+            org_id=org_id,
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
         )
-
+        # Optional: still filter flow_id in Python for now since it's in meta/tags
         if flow_id is not None:
-            records = [r for r in records if r.meta.get("flow_id") == flow_id]
+            records = [rec for rec in records if (rec.meta or {}).get("flow_id") == flow_id]
 
         return records
 
@@ -605,3 +741,43 @@ class RunManager:
         await _terminate_scheduler()
 
         return record
+
+    # ------- run waiters for orchestration --------
+    async def wait_run(
+        self,
+        run_id: str,
+        *,
+        timeout_s: float | None = None,
+    ) -> RunRecord:
+        # Fast path: already terminal in store
+        rec = await self.get_record(run_id)
+        if rec and rec.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+            return rec
+
+        fut = await self._get_or_create_run_future(run_id)
+        if timeout_s is not None:
+            return await asyncio.wait_for(fut, timeout=timeout_s)
+        return await fut
+
+    async def _get_or_create_run_future(self, run_id: str) -> asyncio.Future:
+        async with self._run_waiters_lock:
+            fut = self._run_waiters.get(run_id)
+            if fut is None or fut.done():
+                fut = asyncio.get_running_loop().create_future()
+                self._run_waiters[run_id] = fut
+            return fut
+
+    async def _resolve_run_future(self, run_id: str, value: Any) -> None:
+        async with self._run_waiters_lock:
+            fut = self._run_waiters.get(run_id)
+            if fut and not fut.done():
+                fut.set_result(value)
+            # optional cleanup
+            self._run_waiters.pop(run_id, None)
+
+    async def _reject_run_future(self, run_id: str, err: Exception) -> None:
+        async with self._run_waiters_lock:
+            fut = self._run_waiters.get(run_id)
+            if fut and not fut.done():
+                fut.set_exception(err)
+            self._run_waiters.pop(run_id, None)

@@ -49,7 +49,7 @@ class FSEventLog(EventLog):
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             row = evt.copy()
 
-            # 🔹 Normalize ts to a float UNIX timestamp
+            # Normalize ts to a float UNIX timestamp
             ts = _to_ts_float(row.get("ts"))
             if ts is None:
                 ts = time.time()
@@ -70,21 +70,29 @@ class FSEventLog(EventLog):
         limit: int | None = None,
         tags: list[str] | None = None,
         offset: int = 0,
+        user_id: str | None = None,
+        org_id: str | None = None,
     ) -> list[dict]:
-        # NOTE: FSEventLog reads the single events.jsonl file linearly, applies
-        # all filters (scope_id, time window, kinds, tags) in Python, and then
-        # slices via offset + limit.
-        #
-        # This is fine for dev/demo / low event volumes, but if event volume grows
-        # we should move to SQLiteEventLog or another DB-backed implementation
-        # and use indexed queries + keyset/offset pagination.
+        """
+        FSEventLog reads the single events.jsonl file linearly, applies
+        all filters (scope_id, time window, kinds, tags, tenant) in Python,
+        and then slices via offset + limit.
+
+        This is fine for dev/demo / low event volumes. For production,
+        prefer SQLiteEventLog or a DB-backed implementation.
+        """
         if not self._log_path.exists():
             return []
 
-        def _read():
+        def _read() -> list[dict]:
             out: list[dict] = []
             t_min = since.timestamp() if since else None
             t_max = until.timestamp() if until else None
+
+            # If we want to early-break, we need enough rows to cover offset+limit.
+            needed = None
+            if limit is not None:
+                needed = (offset or 0) + limit
 
             with self._lock, self._log_path.open("r", encoding="utf-8") as f:
                 for line in f:
@@ -106,11 +114,18 @@ class FSEventLog(EventLog):
                         row_tags = set(row.get("tags", []))
                         if not row_tags.issuperset(tags):
                             continue
+                    if user_id is not None and row.get("user_id") != user_id:
+                        continue
+                    if org_id is not None and row.get("org_id") != org_id:
+                        continue
 
                     out.append(row)
-                    if limit is not None and len(out) >= limit:
+
+                    # Only break early when we've collected enough to satisfy offset+limit
+                    if needed is not None and len(out) >= needed:
                         break
 
+            # Apply offset/limit on the filtered rows
             if offset > 0:
                 out = out[offset:]
             if limit is not None:

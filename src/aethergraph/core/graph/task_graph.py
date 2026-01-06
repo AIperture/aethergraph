@@ -428,7 +428,6 @@ class TaskGraph:
     async def set_node_status(self, node_id: str, status: NodeStatus) -> None:
         state = self.state.nodes.get(node_id)
         if state is None:
-            # or however you want to handle missing nodes
             raise KeyError(f"Unknown node_id: {node_id}")
 
         # no-op if unchanged

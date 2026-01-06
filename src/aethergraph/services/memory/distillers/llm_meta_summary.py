@@ -9,7 +9,7 @@ from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indi
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.services.memory.distillers.long_term import ar_summary_uri
-from aethergraph.services.memory.facade import now_iso, stable_event_id
+from aethergraph.services.memory.facade.utils import now_iso, stable_event_id
 from aethergraph.services.memory.utils import _summary_doc_id, _summary_prefix
 
 """
@@ -207,6 +207,7 @@ class LLMMetaSummaryDistiller(Distiller):
     async def distill(
         self,
         run_id: str,
+        timeline_id: str,
         scope_id: str = None,
         *,
         hotlog: HotLog,
@@ -365,8 +366,8 @@ class LLMMetaSummaryDistiller(Distiller):
             }
         )
 
-        await hotlog.append(run_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
-        await persistence.append_event(run_id, evt)
+        await hotlog.append(timeline_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
+        await persistence.append_event(timeline_id, evt)
 
         # Metering: record summary event
         try:

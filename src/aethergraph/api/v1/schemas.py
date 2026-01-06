@@ -93,6 +93,10 @@ class RunSummary(BaseModel):
     visibility: RunVisibility | None = None
     importance: RunImportance | None = None
 
+    # artifact stats for UI
+    artifact_count: int | None = None
+    last_artifact_at: datetime | None = None
+
     class Config:
         populate_by_name = True  # allows setting via app_id/app_name in Python
 
@@ -241,6 +245,10 @@ class ArtifactMeta(BaseModel):
     run_id: str | None = None
     graph_id: str | None = None
     node_id: str | None = None
+    session_id: str | None = None
+
+    # human-facing
+    filename: str | None = None
 
 
 class ArtifactListResponse(BaseModel):
@@ -454,6 +462,10 @@ class Session(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # artifact stats for UI
+    artifact_count: int = 0
+    last_artifact_at: datetime | None = None
+
 
 class SessionCreateRequest(BaseModel):
     kind: SessionKind
@@ -470,15 +482,31 @@ class SessionRunsResponse(BaseModel):
     items: list[RunSummary]
 
 
+class SessionChatFile(BaseModel):
+    url: str | None = None
+    name: str | None = None
+    mimetype: str | None = None
+    size: int | None = None
+    uri: str | None = None  # optional, useful for artifact URIs
+
+
 class SessionChatEvent(BaseModel):
     id: str
     session_id: str
     type: str
     text: str | None
     buttons: list[dict[str, Any]]
-    file: dict[str, Any] | None
+    file: SessionChatFile | None = None  # legacy/single
+    files: list[SessionChatFile] | None = None  # NEW: multi
     meta: dict[str, Any]
     ts: float
+    agent_id: str | None = None
+    upsert_key: str | None = None  # for idempotent updates
+
+
+class SessionUpdateRequest(BaseModel):
+    title: str | None = None
+    external_ref: str | None = None
 
 
 # ------ Agent and App Schemas ------

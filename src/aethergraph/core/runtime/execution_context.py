@@ -28,6 +28,8 @@ class ExecutionContext:
     run_id: str
     graph_id: str | None
     session_id: str | None
+    agent_id: str | None
+    app_id: str | None
     identity: RequestIdentity | None
     graph_inputs: dict[str, Any]
     outputs_by_node: dict[str, dict[str, Any]]
@@ -51,6 +53,8 @@ class ExecutionContext:
             identity=self.identity,
             resume_payload=self.resume_payload,
             scope=self.scope,
+            agent_id=self.agent_id,
+            app_id=self.app_id,
             # back-compat for old ctx.mem()
             bound_memory=self.bound_memory,
         )

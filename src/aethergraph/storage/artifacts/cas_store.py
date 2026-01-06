@@ -44,6 +44,37 @@ class CASArtifactStore(AsyncArtifactStore):
     def base_uri(self) -> str:
         return self._blob.base_uri
 
+    def _augment_labels_with_filename(
+        self,
+        labels: dict | None,
+        *,
+        suggested_uri: str | None = None,
+        path: str | None = None,
+    ) -> dict:
+        """
+        Ensure labels contains a stable 'filename' key when we can infer one.
+
+        - Prefer an explicit suggested_uri basename.
+        - Fallback to the local path basename.
+        - Do NOT override an existing 'filename' or 'name' key.
+        """
+        out: dict[str, Any] = dict(labels or {})
+
+        # Don't stomp on explicit naming
+        if "filename" in out or "name" in out:
+            return out
+
+        candidate: str | None = None
+        if suggested_uri:
+            candidate = os.path.basename(suggested_uri.rstrip("/"))
+        elif path:
+            candidate = os.path.basename(path.rstrip(os.sep))
+
+        if candidate:
+            out["filename"] = candidate
+
+        return out
+
     # ---------- staging utils ----------
     async def plan_staging_path(self, planned_ext: str = "") -> str:
         def _mk():
@@ -83,6 +114,12 @@ class CASArtifactStore(AsyncArtifactStore):
 
         blob_uri = await self._blob.put_file(path, key=key, mime=None, keep_source=not cleanup)
 
+        eff_labels = self._augment_labels_with_filename(
+            labels,
+            suggested_uri=suggested_uri,
+            path=path,
+        )
+
         a = Artifact(
             artifact_id=sha,
             uri=blob_uri,
@@ -96,7 +133,7 @@ class CASArtifactStore(AsyncArtifactStore):
             tool_name=tool_name,
             tool_version=tool_version,
             created_at=_now_iso(),
-            labels=labels or {},
+            labels=eff_labels,
             metrics=metrics or {},
             preview_uri=preview_uri,
             pinned=pin,
@@ -301,6 +338,13 @@ class CASArtifactStore(AsyncArtifactStore):
         dir_uri = self.base_uri.rstrip("/") + "/" + dir_prefix.replace(os.sep, "/")
 
         total_bytes = sum(e["bytes"] for e in manifest_entries)
+
+        eff_labels = self._augment_labels_with_filename(
+            labels,
+            suggested_uri=suggested_uri or archive_name,
+            path=staged_dir,
+        )
+
         a = Artifact(
             artifact_id=tree_sha,
             uri=dir_uri,
@@ -314,7 +358,7 @@ class CASArtifactStore(AsyncArtifactStore):
             tool_name=tool_name,
             tool_version=tool_version,
             created_at=_now_iso(),
-            labels=labels or {},
+            labels=eff_labels,
             metrics=metrics or {},
             preview_uri=archive_uri,
             pinned=pin,

@@ -7,13 +7,48 @@ from aethergraph.contracts.services.mcp import MCPClientProtocol, MCPResource, M
 
 
 class StdioMCPClient(MCPClientProtocol):
+    """
+    Initialize the MCP client service to communicate with a subprocess over stdio using JSON-RPC 2.0.
+
+    This class launches a subprocess (typically an MCP server), manages its lifecycle, and provides
+    asynchronous methods to interact with it using JSON-RPC 2.0 over standard input/output streams.
+    It handles command execution, environment setup, request/response serialization, and concurrency
+    control for safe multi-call usage.
+
+    Examples:
+        Basic usage with default environment:
+        ```python
+        from aethergraph.services.mcp import StdioMCPClient
+        client = StdioMCPClient(["python", "mcp_server.py"])
+        await client.open()
+        tools = await client.list_tools()
+        await client.close()
+        ```
+
+        Custom environment and timeout:
+        ```python
+        from aethergraph.services.mcp import StdioMCPClient
+        client = StdioMCPClient(
+            ["python", "mcp_server.py"],
+            env={"MY_ENV_VAR": "value"},
+            timeout=30.0
+        )
+        ```
+
+    Args:
+        cmd: Command to start the MCP server subprocess (list of str).
+        env: Optional dictionary of environment variables for the subprocess.
+        timeout: Timeout in seconds for each RPC call.
+
+    Returns:
+        None: Initializes the StdioMCPClient instance.
+
+    Notes:
+        - The subprocess should adhere to the JSON-RPC 2.0 specification over stdio.
+        - Ensure proper error handling in the subprocess to avoid deadlocks.
+    """
+
     def __init__(self, cmd: list[str], env: dict[str, str] | None = None, timeout: float = 60.0):
-        """MCP client that talks to a subprocess over stdio using JSON-RPC 2.0.
-        Args:
-            cmd: Command to start the MCP server subprocess (list of str).
-            env: Optional environment variables to set for the subprocess.
-            timeout: Timeout in seconds for each RPC call.
-        """
         self.cmd, self.env, self.timeout = cmd, env or {}, timeout
         self.proc = None
         self._id = 0

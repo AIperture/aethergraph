@@ -30,6 +30,8 @@ class SqliteEventLog(EventLog):
         limit: int | None = None,
         tags: list[str] | None = None,
         offset: int = 0,
+        user_id: str | None = None,
+        org_id: str | None = None,
     ) -> list[dict]:
         return await asyncio.to_thread(
             self._sync.query,
@@ -40,4 +42,6 @@ class SqliteEventLog(EventLog):
             limit=limit,
             tags=tags,
             offset=offset,
+            user_id=user_id,
+            org_id=org_id,
         )

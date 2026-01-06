@@ -67,6 +67,42 @@ class VizFacade:
         meta: dict[str, Any] | None = None,
         tags: list[str] | None = None,
     ) -> None:
+        """
+        Record a single scalar value for visualization in the Aethergraph UI.
+
+        This method standardizes the event format, auto-fills provenance fields,
+        and dispatches the scalar data to the configured storage backend.
+
+        Examples:
+            Basic usage to log a loss metric:
+            ```python
+            await context.viz().scalar("loss", step=iteration, value=loss)
+            ```
+
+            Logging a scalar with extra metadata and custom tags:
+            ```python
+            await context.viz().scalar(
+                "accuracy",
+                step=42,
+                value=0.98,
+                figure_id="metrics",
+                meta={"model": "resnet"},
+                tags=["experiment:baseline"]
+            )
+            ```
+
+        Args:
+            track_id: Unique identifier for the scalar track (e.g., "loss").
+            step: Integer step or iteration number for the data point.
+            value: The scalar value to record (float).
+            figure_id: Optional figure grouping for UI display.
+            mode: Storage mode, typically "append".
+            meta: Optional dictionary of extra metadata.
+            tags: Optional list of string labels. The tag "type:scalar" is automatically appended.
+
+        Returns:
+            None. The event is persisted for later visualization.
+        """
         evt = VizEvent(
             run_id=self.run_id,
             graph_id=self.graph_id,
@@ -96,6 +132,42 @@ class VizFacade:
         meta: dict[str, Any] | None = None,
         tags: list[str] | None = None,
     ) -> None:
+        """
+        Record a single vector (1D array) for visualization in the Aethergraph UI.
+
+        This method standardizes the event format, auto-fills provenance fields,
+        and dispatches the vector data to the configured storage backend.
+
+        Examples:
+            Basic usage to log a vector:
+            ```python
+            await context.viz().vector("embedding", step=iteration, values=[0.1, 0.2, 0.3])
+            ```
+
+            Logging a vector with extra metadata and custom tags:
+            ```python
+            await context.viz().vector(
+                "features",
+                step=42,
+                values=[1.0, 2.5, 3.7],
+                figure_id="feature_tracks",
+                meta={"source": "encoder"},
+                tags=["experiment:baseline"]
+            )
+            ```
+
+        Args:
+            track_id: Unique identifier for the vector track (e.g., "embedding").
+            step: Integer step or iteration number for the data point.
+            values: Sequence of float values representing the vector.
+            figure_id: Optional figure grouping for UI display.
+            mode: Storage mode, typically "append".
+            meta: Optional dictionary of extra metadata.
+            tags: Optional list of string labels. The tag "type:vector" is automatically appended.
+
+        Returns:
+            None. The event is persisted for later visualization.
+        """
         evt = VizEvent(
             run_id=self.run_id,
             graph_id=self.graph_id,
@@ -125,6 +197,42 @@ class VizFacade:
         meta: dict[str, Any] | None = None,
         tags: list[str] | None = None,
     ) -> None:
+        """
+        Record a single matrix (2D array) for visualization in the Aethergraph UI.
+
+        This method standardizes the event format, auto-fills provenance fields,
+        and dispatches the matrix data to the configured storage backend.
+
+        Examples:
+            Basic usage to log a matrix:
+            ```python
+            await context.viz().matrix("confusion", step=iteration, matrix=[[1, 2], [3, 4]])
+            ```
+
+            Logging a matrix with extra metadata and custom tags:
+            ```python
+            await context.viz().matrix(
+                "heatmap",
+                step=42,
+                matrix=[[0.1, 0.2], [0.3, 0.4]],
+                figure_id="metrics",
+                meta={"source": "model"},
+                tags=["experiment:baseline"]
+            )
+            ```
+
+        Args:
+            track_id: Unique identifier for the matrix track (e.g., "confusion").
+            step: Integer step or iteration number for the data point.
+            matrix: Sequence of sequences of float values representing the 2D matrix.
+            figure_id: Optional figure grouping for UI display.
+            mode: Storage mode, typically "append".
+            meta: Optional dictionary of extra metadata.
+            tags: Optional list of string labels. The tag "matrix" is automatically appended.
+
+        Returns:
+            None. The event is persisted for later visualization.
+        """
         # Convert to plain list[list[float]]
         m = [[float(x) for x in row] for row in matrix]
         evt = VizEvent(
@@ -157,9 +265,45 @@ class VizFacade:
         tags: list[str] | None = None,
     ) -> None:
         """
-        Log a reference to an existing Artifact as an image track.
+        Record a reference to an existing image Artifact for visualization in the Aethergraph UI.
 
-        Caller is responsible for creating the artifact via ctx.artifacts().
+        This method standardizes the event format, auto-fills provenance fields,
+        and dispatches the image reference to the configured storage backend.
+
+        Examples:
+            Basic usage to log an image artifact:
+            ```python
+            await context.viz().image_from_artifact(
+                "design_shape",
+                step=17,
+                artifact=artifact,
+                figure_id="design"
+            )
+            ```
+
+            Logging an image with extra metadata and custom tags:
+            ```python
+            await context.viz().image_from_artifact(
+                "output_frame",
+                step=42,
+                artifact=artifact,
+                figure_id="frames",
+                meta={"source": "simulation"},
+                tags=["experiment:baseline"]
+            )
+            ```
+
+        Args:
+            track_id: Unique identifier for the image track (e.g., "design_shape").
+            step: Integer step or iteration number for the data point.
+            artifact: The Artifact object referencing the stored image.
+            figure_id: Optional figure grouping for UI display.
+            mode: Storage mode, typically "append".
+            meta: Optional dictionary of extra metadata.
+            tags: Optional list of string labels. The tag "image" is automatically appended.
+
+        Returns:
+            None. The event is persisted for later visualization.
         """
         evt = VizEvent(
             run_id=self.run_id,
@@ -194,8 +338,54 @@ class VizFacade:
         tags: list[str] | None = None,
     ) -> Artifact:
         """
-        Convenience helper: save image bytes as an Artifact then log a viz event.
-        Requires artifacts facade to be configured.
+        Save image bytes as an Artifact and log a visualization event.
+
+        This convenience method is accessed via `context.viz().image_from_bytes(...)` and is used by the Aethergraph UI to persist image data to storage. It stores the image as an Artifact using the configured ArtifactFacade, then logs a visualization event referencing the saved artifact.
+
+        Examples:
+            Saving a PNG image to the current visualization track:
+            ```python
+            await context.viz().image_from_bytes(
+                track_id="experiment-123",
+                step=42,
+                data=image_bytes,
+                mime="image/png",
+                labels={"type": "output", "stage": "inference"},
+                tags=["result", "png"]
+            )
+            ```
+
+            Saving an image with custom metadata and figure association:
+            ```python
+            await context.viz().image_from_bytes(
+                track_id="demo-track",
+                step=7,
+                data=img_bytes,
+                figure_id="fig-1",
+                meta={"caption": "Sample output"},
+                mode="replace"
+            )
+            ```
+
+        Args:
+            track_id: The identifier for the visualization track to associate with the image.
+            step: The step or index within the track for this image.
+            data: Raw image bytes to be saved.
+            mime: The MIME type of the image (default: "image/png").
+            kind: The artifact kind (default: "image").
+            figure_id: Optional identifier for the figure this image belongs to.
+            mode: Visualization mode, e.g., "append" or "replace".
+            labels: Optional dictionary of labels to attach to the artifact.
+            meta: Optional dictionary of metadata for the visualization event.
+            tags: Optional list of string tags for categorization.
+
+        Returns:
+            Artifact: The persisted `Artifact` object representing the saved image.
+
+        Notes:
+            - This method requires that `self.artifacts` is set to an `ArtifactFacade` instance.
+            - The saved artifact is automatically linked to the visualization event.
+            - To change the name of the saved artifact in UI, use `labels` to set a "filename" label.
         """
         if not self.artifacts:
             raise RuntimeError("VizFacade.image_from_bytes requires an ArtifactFacade")

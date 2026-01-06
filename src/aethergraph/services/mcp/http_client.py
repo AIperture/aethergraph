@@ -10,6 +10,44 @@ from aethergraph.contracts.services.mcp import MCPClientProtocol, MCPResource, M
 
 
 class HttpMCPClient(MCPClientProtocol):
+    """
+    Initialize the HTTP client service with base URL, headers, and timeout.
+
+    This constructor sets up the base URL for all requests, applies default and custom headers,
+    and configures the request timeout. It also initializes internal state for the asynchronous
+    HTTP client and concurrency control.
+
+    Examples:
+        Basic usage with default headers:
+        ```python
+        from aethergraph.services.mcp import HttpMCPClient
+        client = HttpMCPClient("https://api.example.com")
+        ```
+
+        Custom headers and timeout:
+        ```python
+        from aethergraph.services.mcp import HttpMCPClient
+        client = HttpMCPClient(
+            "https://api.example.com",
+            headers={"Authorization": "Bearer <token>"},
+            timeout=30.0
+        )
+        ```
+
+    Args:
+        base_url: The root URL for all HTTP requests (e.g., "https://api.example.com").
+        headers: Optional dictionary of additional HTTP headers to include with each request.
+        The "Content-Type: application/json" header is always set by default.
+        timeout: The maximum time (in seconds) to wait for a response before timing out.
+
+    Returns:
+        None: Initializes the HttpMCPClient instance.
+
+    Notes:
+        - Ensure that the base_url does not have a trailing slash; it will be added automatically.
+        - The client uses asynchronous HTTP requests for non-blocking operations.
+    """
+
     def __init__(
         self,
         base_url: str,

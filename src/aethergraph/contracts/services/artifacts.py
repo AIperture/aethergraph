@@ -7,38 +7,28 @@ from typing import Any, Protocol
 
 @dataclass
 class Artifact:
-    # Basic artifact metadata
     artifact_id: str
-    uri: str
-    kind: str
-    bytes: int
-    sha256: str
-    mime: str | None
-
-    # Provenance
-    run_id: str
-    graph_id: str
-    node_id: str
-    tool_name: str
-    tool_version: str
-    created_at: str
-
-    # Optional metadata
+    run_id: str | None = None
+    graph_id: str | None = None
+    node_id: str | None = None
+    tool_name: str | None = None
+    tool_version: str | None = None
+    kind: str | None = None
+    sha256: str | None = None
+    bytes: int | None = None
+    mime: str | None = None
+    created_at: str | None = None
+    labels: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
+    pinned: bool = False
+    uri: str | None = None
+    preview_uri: str | None = None
+    # tenant fields
     org_id: str | None = None
     user_id: str | None = None
     client_id: str | None = None
     app_id: str | None = None
     session_id: str | None = None
-
-    # Labels and metrics
-    labels: dict[str, Any] | None = (
-        None  # this will also include provenance and metadata labels for indexing
-    )
-    metrics: dict[str, Any] | None = None
-
-    # Preview
-    preview_uri: str | None = None  # for rendering previews in UI, not tied to storage
-    pinned: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +48,11 @@ class Artifact:
             "metrics": self.metrics,
             "preview_uri": self.preview_uri,
             "pinned": self.pinned,
+            "org_id": self.org_id,
+            "user_id": self.user_id,
+            "client_id": self.client_id,
+            "app_id": self.app_id,
+            "session_id": self.session_id,
         }
 
 

@@ -94,41 +94,36 @@ class EventLogMeteringService(MeteringService):
         kinds: list[str],
         user_id: str | None,
         org_id: str | None,
-        run_ids: set[str] | None = None,  # optional filter by run_ids
+        run_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         cutoff = self._parse_window(window)
+
+        # Dev/local: don't restrict by user/org at the store level
+        store_user = None if user_id == "local" or org_id == "local" else user_id
+        store_org = None if user_id == "local" or org_id == "local" else org_id
+
         rows = await self._store.query(
             since=cutoff,
             until=None,
             kinds=kinds,
             limit=None,
+            user_id=store_user,
+            org_id=store_org,
         )
-        # In-store filter by user/org if present
+
         out: list[dict[str, Any]] = []
 
         for e in rows:
-            # 1) If we have an explicit run_ids scope, use that as the primary filter
             if run_ids is not None:
                 rid = e.get("run_id")
                 if not rid or rid not in run_ids:
                     continue
-
-                # When scoping by run_ids, *skip* user/org filtering.
-                # This is our demo isolation based on client-tagged runs.
                 out.append(e)
                 continue
 
-            # 2) Local/dev special case: include everything
-            if user_id == "local" or org_id == "local":
-                out.append(e)
-                continue
-
-            # 3) Normal cloud / multi-tenant: filter by user/org, if set
-            if user_id is not None and e.get("user_id") != user_id:
-                continue
-            if org_id is not None and e.get("org_id") != org_id:
-                continue
-
+            # For non-run_ids code paths, we've *already* filtered by user/org in SQL.
+            # Keep the local special case (store_user=None/store_org=None) which
+            # means "no tenant filter" for dev.
             out.append(e)
 
         return out
@@ -167,7 +162,6 @@ class EventLogMeteringService(MeteringService):
             app_id=app_id,
             session_id=session_id,
         )
-
         await self._append(
             {
                 "kind": "meter.llm",
@@ -253,7 +247,6 @@ class EventLogMeteringService(MeteringService):
             app_id=app_id,
             session_id=session_id,
         )
-
         await self._append(
             {
                 "kind": "meter.artifact",

@@ -35,6 +35,41 @@ class ChannelSession:
     def _node_id(self):
         return self.ctx.node_id
 
+    @property
+    def _session_id(self):
+        return self.ctx.session_id
+
+    def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        """
+        Merge caller-provided meta with context-derived metadata
+        (run_id, session_id, agent_id, app_id, graph_id, node_id).
+
+        Caller-supplied keys win; we only fill in defaults.
+        """
+        base: dict[str, Any] = dict(meta or {})
+        ctx = self.ctx
+
+        # Use setdefault so explicit meta wins.
+        if getattr(ctx, "run_id", None) is not None:
+            base.setdefault("run_id", ctx.run_id)
+
+        if getattr(ctx, "graph_id", None) is not None:
+            base.setdefault("graph_id", ctx.graph_id)
+
+        if getattr(ctx, "node_id", None) is not None:
+            base.setdefault("node_id", ctx.node_id)
+
+        if getattr(ctx, "session_id", None) is not None:
+            base.setdefault("session_id", ctx.session_id)
+
+        if getattr(ctx, "agent_id", None) is not None:
+            base.setdefault("agent_id", ctx.agent_id)
+
+        if getattr(ctx, "app_id", None) is not None:
+            base.setdefault("app_id", ctx.app_id)
+
+        return base
+
     def _resolve_default_key(self) -> str:
         """Unified default resolver (bus default → console)."""
         return self._bus.get_default_channel_key() or "console:stdin"
@@ -71,14 +106,98 @@ class ChannelSession:
 
     # -------- send --------
     async def send(self, event: OutEvent, *, channel: str | None = None):
+        """
+        Send a single outbound event to the configured channel.
+
+        This method ensures the event is associated with the correct channel,
+        merges context-derived metadata, and publishes the event via the channel bus.
+        This is the core low-level send method; higher-level convenience methods
+        (e.g., `send_text`, `send_rich`, etc.) build on top of this and are recommended
+        for common use cases.
+
+        Examples:
+            Basic usage to send a pre-constructed event:
+            ```python
+
+            event = OutEvent(type="agent.message", text="Hello!", channel=None)
+            await context.channel().send(event)
+            ```
+
+            Sending to a specific channel:
+            ```python
+            await context.channel().send(event, channel="web:chat")
+            ```
+
+        Args:
+            event: The `OutEvent` instance to send. If `event.channel` is not set,
+                it will be resolved automatically.
+            channel: Optional explicit channel key to override the default or event's channel.
+
+        Returns:
+            None
+
+        Notes:
+        for AG WebUI, you can set meta with
+        ```python
+            {
+                "agent_id": "agent-123",
+                "name": "Analyst",
+            }
+        ```
+        to override the sender's display name and avatar in the chat.
+        """
         event = self._ensure_channel(event, channel=channel)
+
+        # merge context meta
+        event.meta = self._inject_context_meta(event.meta)
         await self._bus.publish(event)
 
     async def send_text(
         self, text: str, *, meta: dict[str, Any] | None = None, channel: str | None = None
     ):
+        """
+        Send a plain text message to the configured channel.
+
+        This method constructs a normalized outbound event, merges context-derived metadata,
+        and dispatches the message via the channel bus.
+
+        Examples:
+            Basic usage to send a text message:
+            ```python
+            await context.channel().send_text("Hello, world!")
+            ```
+
+            Sending with additional metadata and to a specific channel:
+            ```python
+            await context.channel().send_text(
+                "Status update.",
+                meta={"priority": "high"},
+                channel="web:chat"
+            )
+            ```
+
+        Args:
+            text: The primary text content to send.
+            meta: Optional dictionary of metadata to include with the event.
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            None
+
+        Notes:
+        for AG WebUI, you can set meta with
+        ```python
+            {
+                "agent_id": "agent-123",
+                "name": "Analyst",
+            }
+        ```
+        """
         event = OutEvent(
-            type="agent.message", channel=self._resolve_key(channel), text=text, meta=meta or {}
+            type="agent.message",
+            channel=self._resolve_key(channel),
+            text=text,
+            meta=self._inject_context_meta(meta),
         )
         await self._bus.publish(event)
 
@@ -90,13 +209,57 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
     ):
+        """
+        Send a rich message to the configured channel.
+
+        This method constructs and dispatches an outbound event that can include both plain text and
+        structured rich content (such as cards, tables, or custom payloads). Context-derived metadata
+        is automatically merged, and the event is published via the channel bus.
+
+        Examples:
+            Basic usage to send a rich message:
+            ```python
+            await context.channel().send_rich(
+                text="Here are your results:",
+                rich={"table": {"rows": [["A", 1], ["B", 2]]}}
+            )
+            ```
+
+            Sending with additional metadata and to a specific channel:
+            ```python
+            await context.channel().send_rich(
+                text="Task completed.",
+                rich={"status": "success"},
+                meta={"priority": "high"},
+                channel="web:chat"
+            )
+            ```
+
+        Args:
+            text: The primary text content to send (optional).
+            rich: A dictionary containing structured rich content to include with the message.
+            meta: Optional dictionary of metadata to include with the event.
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            None
+
+        Notes:
+        for AG WebUI, you can set meta with
+        ```python
+            {
+                "agent_id": "agent-123",
+                "name": "Analyst",
+            }
+        ```
+        """
         await self._bus.publish(
             OutEvent(
                 type="agent.message",
                 channel=self._resolve_key(channel),
                 text=text,
                 rich=rich,
-                meta=meta or {},
+                meta=self._inject_context_meta(meta),
             )
         )
 
@@ -108,12 +271,51 @@ class ChannelSession:
         title: str | None = None,
         channel: str | None = None,
     ):
+        """
+        Send an image message to the configured channel.
+
+        This method constructs and dispatches an outbound event containing image metadata,
+        including the image URL, alternative text, and an optional title. Context-derived
+        metadata is automatically merged, and the event is published via the channel bus.
+
+        Examples:
+            Basic usage to send an image:
+            ```python
+            await context.channel().send_image(
+                url="https://example.com/image.png",
+                alt="Sample image"
+            )
+            ```
+
+            Sending with a custom title and to a specific channel:
+            ```python
+            await context.channel().send_image(
+                url="https://example.com/photo.jpg",
+                alt="User profile photo",
+                title="Profile",
+                channel="web:chat"
+            )
+            ```
+
+        Args:
+            url: The URL of the image to send. If None, an empty string is used.
+            alt: Alternative text describing the image (for accessibility).
+            title: Optional title to display with the image.
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            None
+
+        Notes:
+            The capability to render images depends on the client adapter.
+        """
         await self._bus.publish(
             OutEvent(
                 type="agent.message",
                 channel=self._resolve_key(channel),
                 text=title or alt,
                 image={"url": url or "", "alt": alt, "title": title or ""},
+                meta=self._inject_context_meta(None),
             )
         )
 
@@ -126,13 +328,59 @@ class ChannelSession:
         title: str | None = None,
         channel: str | None = None,
     ):
+        """
+        Send a file to the configured channel in a normalized format.
+
+        This method constructs and dispatches an outbound event containing file metadata,
+        including the file URL, raw bytes, filename, and an optional title. Context-derived
+        metadata is automatically merged, and the event is published via the channel bus.
+
+        Examples:
+            Basic usage to send a file by URL:
+            ```python
+            await context.channel().send_file(
+                url="https://example.com/report.pdf",
+                filename="report.pdf",
+                title="Monthly Report"
+            )
+            ```
+
+            Sending a file from bytes:
+            ```python
+            await context.channel().send_file(
+                file_bytes=b"binarydata...",
+                filename="data.bin",
+                title="Raw Data"
+            )
+            ```
+
+        Args:
+            url: The URL of the file to send. If None, only file_bytes will be used.
+            file_bytes: Optional raw bytes of the file to send.
+            filename: The display name of the file (defaults to "file.bin").
+            title: Optional title to display with the file.
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            None
+
+        Notes:
+            The capability to handle file uploads depends on the client adapter.
+            If both `url` and `file_bytes` are provided, both will be included in the event.
+        """
         file = {"filename": filename}
         if url:
             file["url"] = url
         if file_bytes is not None:
             file["bytes"] = file_bytes
         await self._bus.publish(
-            OutEvent(type="file.upload", channel=self._resolve_key(channel), text=title, file=file)
+            OutEvent(
+                type="file.upload",
+                channel=self._resolve_key(channel),
+                text=title,
+                file=file,
+                meta=self._inject_context_meta(None),
+            )
         )
 
     async def send_buttons(
@@ -143,13 +391,47 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
     ):
+        """
+        Send a message with interactive buttons to the configured channel.
+
+        This method constructs and dispatches an outbound event containing a text prompt and a list of interactive buttons. Context-derived metadata is automatically merged, and the event is published via the channel bus.
+
+        Examples:
+            Basic usage to send a button prompt:
+            ```python
+            from aethergraph import Button
+            await context.channel().send_buttons(
+                "Choose an option:",
+                [Button(label="Yes", value="yes"), Button(label="No", value="no")]
+            )
+            ```
+
+            Sending with additional metadata and to a specific channel:
+            ```python
+            await context.channel().send_buttons(
+                "Select your role:",
+                [Button(label="Admin", value="admin"), Button(label="User", value="user")],
+                meta={"priority": "high"},
+                channel="web:chat"
+            )
+            ```
+
+        Args:
+            text: The primary text content to display above the buttons.
+            buttons: A list of `Button` objects representing the interactive options.
+            meta: Optional dictionary of metadata to include with the event.
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            None
+        """
         await self._bus.publish(
             OutEvent(
                 type="link.buttons",
                 channel=self._resolve_key(channel),
                 text=text,
                 buttons=buttons,
-                meta=meta or {},
+                meta=self._inject_context_meta(meta),
             )
         )
 
@@ -223,6 +505,36 @@ class ChannelSession:
         silent: bool = False,  # kept for back-compat; same behavior as before
         channel: str | None = None,
     ) -> str:
+        """
+        Prompt the user for a text response in a normalized format.
+
+        This method sends a prompt to the configured channel, waits for a user reply, and returns the text input.
+        It automatically handles context metadata, timeout, and channel resolution.
+
+        Examples:
+            Basic usage to prompt for user input:
+            ```python
+            reply = await context.channel().ask_text("What is your name?")
+            ```
+
+            Prompting with a custom timeout and silent mode:
+            ```python
+            reply = await context.channel().ask_text(
+                "Enter your feedback.",
+                timeout_s=120,
+                silent=True
+            )
+            ```
+
+        Args:
+            prompt: The text prompt to display to the user. If None, a generic prompt may be shown.
+            timeout_s: Maximum time in seconds to wait for a response (default: 3600).
+            silent: If True, suppresses prompt display in some adapters (back-compat; default: False).
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            str: The user's text response, or an empty string if no input was received.
+        """
         payload = await self._ask_core(
             kind="user_input",
             payload={"prompt": prompt, "_silent": silent},
@@ -232,6 +544,33 @@ class ChannelSession:
         return str(payload.get("text", ""))
 
     async def wait_text(self, *, timeout_s: int = 3600, channel: str | None = None) -> str:
+        """
+        Wait for a single text response from the user in a normalized format.
+
+        This method prompts the user for input (with no explicit prompt), waits for a reply,
+        and returns the text. It automatically handles context metadata, timeout, and channel resolution.
+
+        Examples:
+            Basic usage to wait for user input:
+            ```python
+            reply = await context.channel().wait_text()
+            ```
+
+            Waiting with a custom timeout and specific channel:
+            ```python
+            reply = await context.channel().wait_text(
+                timeout_s=120,
+                channel="web:chat"
+            )
+            ```
+
+        Args:
+            timeout_s: Maximum time in seconds to wait for a response (default: 3600).
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            str: The user's text response, or an empty string if no input was received.
+        """
         # Alias for ask_text(prompt=None) but keeps existing signature
         return await self.ask_text(prompt=None, timeout_s=timeout_s, silent=True, channel=channel)
 
@@ -243,6 +582,44 @@ class ChannelSession:
         timeout_s: int = 3600,
         channel: str | None = None,
     ) -> dict[str, Any]:
+        """
+        Prompt the user for approval or rejection in a normalized format.
+
+        This method sends an approval prompt with customizable options (buttons) to the configured channel,
+        waits for the user's selection, and returns a normalized result indicating approval status and choice.
+        Context metadata, timeout, and channel resolution are handled automatically.
+
+        Examples:
+            Basic usage to prompt for approval:
+            ```python
+            result = await context.channel().ask_approval("Do you approve this action?")
+            # result: { "approved": True/False, "choice": "Approve"/"Reject" }
+            ```
+
+            Prompting with custom options and timeout:
+            ```python
+            result = await context.channel().ask_approval(
+                "Proceed with deployment?",
+                options=["Yes", "No", "Defer"],
+                timeout_s=120
+            )
+            ```
+
+        Args:
+            prompt: The text prompt to display to the user.
+            options: Iterable of button labels for user choices (defaults to "Approve" and "Reject").
+            timeout_s: Maximum time in seconds to wait for a response (default: 3600).
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            dict: A dictionary containing:
+                - "approved": bool indicating if the __first__ option was selected (True if approved, False otherwise).
+                - "choice": The label of the button selected by the user (str or None).
+
+        Warning:
+            The returned "choices" are determined by the external adapter and may vary. To be robust, make sure
+            to use `choices.lower()` and strip whitespace when comparing.
+        """
         payload = await self._ask_core(
             kind="approval",
             payload={"prompt": {"title": prompt, "buttons": list(options)}},
@@ -252,7 +629,7 @@ class ChannelSession:
         choice = payload.get("choice")
         # Normalize return
         # 1) If adapter explicitly sets approved, trust it
-        buttons = list(options)  # just plan list, not Button objects
+        buttons = list(options)  # just plain list, not Button objects
         # 2) Fallback: derive from choice + options
         if choice is None or not buttons:
             approved = False
@@ -268,20 +645,54 @@ class ChannelSession:
 
     async def ask_files(
         self,
-        *,
         prompt: str,
+        *,
         accept: list[str] | None = None,
         multiple: bool = True,
         timeout_s: int = 3600,
         channel: str | None = None,
     ) -> dict:
         """
-        Ask for file upload (plus optional text). Returns:
-        { "text": str, "files": List[FileRef] }
-        Note: console has no uploads; you’ll get only text there.
+        Prompt the user to upload one or more files, optionally with a text comment.
 
-        The `accept` list can contain MIME types (e.g., "image/png") or file extensions (e.g., ".png"). This
-        is a hint to the client UI about what file types to accept. Aethergraph does not enforce file type restrictions.
+        This method sends a file upload request to the configured channel, allowing the user to select files
+        and optionally enter accompanying text. The `accept` parameter provides hints to the client UI about
+        which file types are preferred, but is not enforced server-side. The method waits for the user's response
+        and returns a normalized result containing both text and file references.
+
+        Examples:
+            Basic usage to prompt for file upload:
+            ```python
+            result = await context.channel().ask_files(
+                prompt="Please upload your report."
+            )
+            # result: { "text": "...", "files": [FileRef(...), ...] }
+            ```
+
+            Restricting to images and allowing multiple files:
+            ```python
+            result = await context.channel().ask_files(
+                prompt="Upload images for review.",
+                accept=["image/png", ".jpg"],
+                multiple=True
+            )
+            ```
+
+        Args:
+            prompt: The text prompt to display to the user above the file picker.
+            accept: Optional list of MIME types or file extensions to suggest allowed file types (e.g., "image/png", ".pdf", ".jpg").
+            multiple: If True, allows the user to select multiple files (default: True).
+            timeout_s: Maximum time in seconds to wait for a response (default: 3600).
+            channel: Optional explicit channel key to override the default or session-bound channel.
+
+        Returns:
+            dict: A dictionary containing:
+                - "text": str, the user's comment or description (may be empty).
+                - "files": List[FileRef], references to the uploaded files (empty if none).
+
+        Notes:
+            On console adapters, file upload is not supported; only text will be returned.
+            The `accept` parameter is a UI hint and does not guarantee file type enforcement.
         """
         payload = await self._ask_core(
             kind="user_files",
@@ -314,7 +725,36 @@ class ChannelSession:
 
     # ---------- inbox helpers (platform-agnostic) ----------
     async def get_latest_uploads(self, *, clear: bool = True) -> list[FileRef]:
-        """Get latest uploaded files in this channel's inbox, optionally clearing them."""
+        """
+        Retrieve the latest uploaded files from this channel's inbox in a normalized format.
+
+        This method accesses the ephemeral KV store to fetch file uploads associated with the current channel.
+        By default, it clears the inbox after retrieval to prevent duplicate processing. If the KV service
+        is unavailable in the context, a RuntimeError is raised. This method allows the fetch the files user
+        uploaded __not__ from an ask_files prompt, but from any prior upload event.
+
+        Examples:
+            Basic usage to fetch and clear uploaded files:
+            ```python
+            files = await context.channel().get_latest_uploads()
+            ```
+
+            Fetching files without clearing the inbox:
+            ```python
+            files = await context.channel().get_latest_uploads(clear=False)
+            ```
+
+        Args:
+            clear: If True (default), removes files from the inbox after retrieval.
+                If False, files are returned but remain in the inbox.
+
+        Returns:
+            List[FileRef]: A list of `FileRef` objects representing the uploaded files.
+                Returns an empty list if no files are present.
+
+        Raises:
+            RuntimeError: If the ephemeral KV service is not available in the current context.
+        """
         kv = getattr(self.ctx.services, "kv", None)
         if kv:
             if clear:
@@ -336,6 +776,9 @@ class ChannelSession:
             self._channel_key = outer._resolve_key(channel_key)
             self._upsert_key = f"{outer._run_id}:{outer._node_id}:stream"
 
+        def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+            return self._outer._inject_context_meta(meta)
+
         def _buf(self):
             return getattr(self, "__buf", None)
 
@@ -352,6 +795,7 @@ class ChannelSession:
                         type="agent.stream.start",
                         channel=self._channel_key,
                         upsert_key=self._upsert_key,
+                        meta=self._inject_context_meta(None),
                     )
                 )
 
@@ -366,6 +810,7 @@ class ChannelSession:
                     channel=self._channel_key,
                     text="".join(buf),
                     upsert_key=self._upsert_key,
+                    meta=self._inject_context_meta(None),
                 )
             )
 
@@ -377,19 +822,54 @@ class ChannelSession:
                         channel=self._channel_key,
                         text=full_text,
                         upsert_key=self._upsert_key,
+                        meta=self._inject_context_meta(None),
                     )
                 )
             await self._outer._bus.publish(
                 OutEvent(
-                    type="agent.stream.end", channel=self._channel_key, upsert_key=self._upsert_key
+                    type="agent.stream.end",
+                    channel=self._channel_key,
+                    upsert_key=self._upsert_key,
+                    meta=self._inject_context_meta(None),
                 )
             )
 
     @asynccontextmanager
     async def stream(self, channel: str | None = None) -> AsyncIterator["_StreamSender"]:
         """
-        Back-compat: no arg uses session/default/console.
-        New: pass a channel key to target a specific channel for this stream.
+        Stream a sequence of text deltas to the configured channel in a normalized format.
+
+        This method provides a context manager for streaming incremental message updates (such as LLM generation)
+        to the target channel. It automatically handles context metadata, upsert keys, and dispatches start, update,
+        and end events to the channel bus. The caller is responsible for sending deltas and ending the stream.
+
+        Examples:
+            Basic usage to stream LLM output:
+            ```python
+            async with context.channel().stream() as s:
+                await s.delta("Hello, ")
+                await s.delta("world!")
+                await s.end()
+            ```
+
+            Streaming to a specific channel:
+            ```python
+            async with context.channel().stream(channel="web:chat") as s:
+                await s.delta("Generating results...")
+                await s.end(full_text="Results complete.")
+            ```
+
+        Args:
+            channel: Optional explicit channel key to target a specific channel for this stream.
+                If None, uses the session-bound or default channel.
+
+        Returns:
+            AsyncIterator[_StreamSender]: An async context manager yielding a `_StreamSender` object
+                for sending deltas and ending the stream.
+
+        Notes:
+            The caller must explicitly call `end()` to finalize the stream. No auto-end is performed.
+            The adapter may have specific behaviors for rendering streamed content (update vs. append).
         """
         s = ChannelSession._StreamSender(self, channel_key=channel)
         try:
@@ -418,6 +898,9 @@ class ChannelSession:
             self._channel_key = outer._resolve_key(channel_key)
             self._upsert_key = f"{outer._run_id}:{outer._node_id}:{key_suffix}"
 
+        def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+            return self._outer._inject_context_meta(meta)
+
         async def start(self, *, subtitle: str | None = None):
             if not self._started:
                 self._started = True
@@ -432,6 +915,7 @@ class ChannelSession:
                             "total": self._total,
                             "current": self._current,
                         },
+                        meta=self._inject_context_meta(None),
                     )
                 )
 
@@ -465,6 +949,7 @@ class ChannelSession:
                     channel=self._channel_key,
                     upsert_key=self._upsert_key,
                     rich=payload,
+                    meta=self._inject_context_meta(None),
                 )
             )
 
@@ -481,6 +966,7 @@ class ChannelSession:
                         "total": self._total,
                         "current": self._total if self._total is not None else None,
                     },
+                    meta=self._inject_context_meta(None),
                 )
             )
 

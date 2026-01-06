@@ -5,6 +5,10 @@ import inspect
 from typing import Any
 
 from aethergraph.core.runtime.run_registration import RunRegistrationGuard
+from aethergraph.services.registry.agent_app_meta import (
+    build_agent_meta,
+    build_app_meta,
+)
 
 from ..execution.retry_policy import RetryPolicy
 from ..runtime.runtime_env import RuntimeEnv
@@ -23,6 +27,8 @@ class GraphFunction:
         inputs: list[str] | None = None,
         outputs: list[str] | None = None,
         version: str = "0.1.0",
+        agent_id: str | None = None,
+        app_id: str | None = None,
     ):
         self.graph_id = name
         self.name = name
@@ -34,6 +40,8 @@ class GraphFunction:
         self.last_graph = None
         self.last_context = None
         self.last_memory_snapshot = None
+        self.agent_id = agent_id
+        self.app_id = app_id
 
     async def run(
         self,
@@ -63,7 +71,7 @@ class GraphFunction:
         )
         node_ctx = runtime_ctx.create_node_context(node=node_spec)
 
-        with graph(name=self.graph_id) as G:
+        with graph(name=self.graph_id, agent_id=self.agent_id, app_id=self.app_id) as G:
             interp = Interpreter(G, env, retry=retry, max_concurrency=max_concurrency)
             run_id = env.run_id
 
@@ -200,10 +208,98 @@ def graph_fn(
     as_agent: dict[str, Any] | None = None,
     as_app: dict[str, Any] | None = None,
 ) -> Callable[[Callable], GraphFunction]:
-    """Decorator to define a graph function."""
+    """
+    Decorator to define a graph function and optionally register it as an agent or app.
+
+    This decorator wraps a Python function as a `GraphFunction`, enabling it to be executed
+    as a node-based graph with runtime context, retry policy, and concurrency controls.
+    It also supports rich metadata registration for agent and app discovery.
+
+    Examples:
+        Basic usage:
+        ```python
+        @graph_fn(
+            name="add_numbers",
+            inputs=["a", "b"],
+            outputs=["sum"],
+        )
+        async def add_numbers(a: int, b: int):
+            return {"sum": a + b}
+        ```
+
+        Registering as an agent with metadata:
+        ```python
+        @graph_fn(
+            name="chat_agent",
+            inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+            outputs=["response"],
+            as_agent={
+                "id": "chatbot",
+                "title": "Chat Agent",
+                "description": "Conversational AI agent.",
+                "mode": "chat_v1",
+                "icon": "chat",
+                "tags": ["chat", "nlp"],
+            },
+        )
+        async def chat_agent(...):
+            ...
+        ```
+
+        Registering as an app:
+        ```python
+        @graph_fn(
+            name="summarizer",
+            inputs=[],
+            outputs=["summary"],
+            as_app={
+                "id": "summarizer-app",
+                "name": "Text Summarizer",
+                "description": "Summarizes input text.",
+                "category": "Productivity",
+                "tags": ["nlp", "summary"],
+            },
+        )
+        async def summarizer():
+            ...
+        ```
+
+    Args:
+        name: Unique name for the graph function.
+        inputs: List of input parameter names. If `as_agent` is provided with `mode="chat_v1"`,
+            this must match `["message", "files", "context_refs", "session_id", "user_meta"]`.
+        outputs: List of output keys returned by the function.
+        version: Version string for the graph function (default: "0.1.0").
+        entrypoint: If True, marks this graph as the main entrypoint for a flow.  [Currently unused]
+        flow_id: Optional flow identifier for grouping related graphs.
+        tags: List of string tags for discovery and categorization.
+        as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
+        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+
+    Returns:
+        Callable: A decorator that wraps the function as a `GraphFunction` and registers it
+        in the runtime registry, with agent/app metadata if provided.
+
+    Notes:
+        - as_agent and as_app are not needed to define a graph; they are only for registration purposes for use in Aethergraph UI.
+        - When registering as an agent, the `as_agent` dictionary should include at least an "id" key.
+        - When registering as an app, the `as_app` dictionary should include at least an "id" key.
+        - The decorated function can be either synchronous or asynchronous.
+        - Fields `inputs` and `outputs` are can be inferred from the function signature if not explicitly provided, but it's recommended to declare them for clarity.
+    """
 
     def decorator(fn: Callable) -> GraphFunction:
-        gf = GraphFunction(name=name, fn=fn, inputs=inputs, outputs=outputs, version=version)
+        agent_id = as_agent.get("id") if as_agent else None
+        app_id = as_app.get("id") if as_app else None
+        gf = GraphFunction(
+            name=name,
+            fn=fn,
+            inputs=inputs,
+            outputs=outputs,
+            version=version,
+            agent_id=agent_id,
+            app_id=app_id,
+        )
         registry = current_registry()
 
         if registry is None:
@@ -227,66 +323,36 @@ def graph_fn(
         )
 
         # Register as agent if requested
-        if as_agent is not None:
-            agent_meta = dict(as_agent)
-
-            agent_id = agent_meta.get("id", name)
-            agent_title = agent_meta.get("title", f"Agent for {name}")
-            agent_flow_id = agent_meta.get("flow_id", graph_meta["flow_id"])
-            agent_tags = agent_meta.get("tags", base_tags)
-
-            extra = {
-                k: v for k, v in agent_meta.items() if k not in {"id", "title", "flow_id", "tags"}
-            }
-
-            full_agent_meta: dict[str, Any] = {
-                "kind": "agent",
-                "id": agent_id,
-                "title": agent_title,
-                "flow_id": agent_flow_id,
-                "tags": agent_tags,
-                "backing": {"type": "graphfn", "name": name, "version": version},
-                **extra,
-            }
-
+        # 4Agent meta (if any)
+        agent_meta = build_agent_meta(
+            graph_name=name,
+            version=version,
+            graph_meta=graph_meta,
+            agent_cfg=as_agent,
+        )
+        if agent_meta is not None:
             registry.register(
                 nspace="agent",
-                name=agent_id,
+                name=agent_meta["id"],
                 version=version,
                 obj=gf,
-                meta=full_agent_meta,
+                meta=agent_meta,
             )
 
-        # Register as app if requested
-        if as_app is not None:
-            app_meta = dict(as_app)
-
-            app_id = app_meta.get("id", name)
-            app_flow_id = app_meta.get("flow_id", graph_meta["flow_id"])
-            app_name = app_meta.get("name", f"App for {name}")
-            app_tags = app_meta.get("tags", base_tags)
-
-            extra = {
-                k: v for k, v in app_meta.items() if k not in {"id", "name", "flow_id", "tags"}
-            }
-
-            full_app_meta: dict[str, Any] = {
-                "kind": "app",
-                "id": app_id,
-                "name": app_name,
-                "graph_id": name,
-                "flow_id": app_flow_id,
-                "tags": app_tags,
-                "backing": {"type": "graphfn", "name": name, "version": version},
-                **extra,
-            }
-
+        # 5) App meta (if any)
+        app_meta = build_app_meta(
+            graph_name=name,
+            version=version,
+            graph_meta=graph_meta,
+            app_cfg=as_app,
+        )
+        if app_meta is not None:
             registry.register(
                 nspace="app",
-                name=app_id,
+                name=app_meta["id"],
                 version=version,
                 obj=gf,
-                meta=full_app_meta,
+                meta=app_meta,
             )
 
         return gf

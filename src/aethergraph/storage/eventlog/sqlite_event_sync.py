@@ -14,18 +14,6 @@ This is not used in the main codebase; only used by async wrapper SqliteEventLog
 
 
 class SQLiteEventLogSync:
-    """
-    Append-only event log on SQLite.
-
-    Each row:
-      - id        INTEGER PRIMARY KEY AUTOINCREMENT
-      - ts        REAL (seconds since epoch)
-      - scope_id  TEXT
-      - kind      TEXT
-      - tags_json TEXT (JSON list[str])
-      - payload   TEXT (JSON dict, full event)
-    """
-
     def __init__(self, path: str):
         path_obj = Path(path)
         path_obj.parent.mkdir(parents=True, exist_ok=True)
@@ -35,8 +23,10 @@ class SQLiteEventLogSync:
             check_same_thread=False,
             isolation_level=None,
         )
-        self._db.execute("PRAGMA journal_mode=WAL;")
-        self._db.execute("PRAGMA synchronous=NORMAL;")
+        self._lock = threading.RLock()
+        self._initialize_db()
+
+    def _initialize_db(self) -> None:
         self._db.execute(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -45,14 +35,35 @@ class SQLiteEventLogSync:
                 scope_id  TEXT,
                 kind      TEXT,
                 tags_json TEXT,
-                payload   TEXT NOT NULL
+                payload   TEXT NOT NULL,
+                -- new tenant / dimension columns
+                user_id   TEXT,
+                org_id    TEXT,
+                run_id    TEXT,
+                session_id TEXT
             )
             """
         )
+        # Migration for existing DBs
+        cols = {row[1] for row in self._db.execute("PRAGMA table_info(events)").fetchall()}
+        if "user_id" not in cols:
+            self._db.execute("ALTER TABLE events ADD COLUMN user_id TEXT")
+        if "org_id" not in cols:
+            self._db.execute("ALTER TABLE events ADD COLUMN org_id TEXT")
+        if "run_id" not in cols:
+            self._db.execute("ALTER TABLE events ADD COLUMN run_id TEXT")
+        if "session_id" not in cols:
+            self._db.execute("ALTER TABLE events ADD COLUMN session_id TEXT")
+
+        # Existing indexes
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_scope ON events(scope_id)")
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_kind  ON events(kind)")
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_ts    ON events(ts)")
-        self._lock = threading.RLock()
+
+        # tenant-aware indexes
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_user_ts ON events(user_id, ts)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_org_ts ON events(org_id, ts)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_run_ts ON events(run_id, ts)")
 
     def append(self, evt: dict) -> None:
         row = dict(evt)
@@ -82,6 +93,12 @@ class SQLiteEventLogSync:
         tags = row.get("tags") or []
         tags_json = json.dumps(tags, ensure_ascii=False)
 
+        # tenant & run dims (not all events will have these fields. Chat events can just use session_id to retrieve info after optional authentication)
+        user_id = row.get("user_id")
+        org_id = row.get("org_id")
+        run_id = row.get("run_id")
+        session_id = row.get("session_id")
+
         # Optionally overwrite the ts in the payload to the normalized float
         row["ts"] = ts
         payload = json.dumps(row, ensure_ascii=False)
@@ -89,10 +106,10 @@ class SQLiteEventLogSync:
         with self._lock:
             self._db.execute(
                 """
-                INSERT INTO events (ts, scope_id, kind, tags_json, payload)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO events (ts, scope_id, kind, tags_json, payload, user_id, org_id, run_id, session_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (ts, scope_id, kind, tags_json, payload),
+                (ts, scope_id, kind, tags_json, payload, user_id, org_id, run_id, session_id),
             )
 
     def query(
@@ -104,17 +121,10 @@ class SQLiteEventLogSync:
         kinds: list[str] | None = None,
         limit: int | None = None,
         tags: list[str] | None = None,
-        offset: int = 0,  # 🔹 NEW
+        offset: int = 0,
+        user_id: str | None = None,
+        org_id: str | None = None,
     ) -> list[dict]:
-        # NOTE: This pushes scope/time/kind filters and ts ordering into SQL,
-        # then:
-        #   - Loads all matching rows into Python
-        #   - Applies tag filtering
-        #   - Applies offset + limit on the filtered list
-        #
-        # For large event volumes, we'd want to:
-        #   - Normalize tags into a separate table or use better JSON indexing, and
-        #   - Do tag filtering + LIMIT/OFFSET (or keyset) in SQL instead of Python.
         where: list[str] = []
         params: list[Any] = []
 
@@ -130,9 +140,17 @@ class SQLiteEventLogSync:
             where.append("ts <= ?")
             params.append(until.timestamp())
 
-        if kinds is not None and len(kinds) > 0:
+        if kinds:
             where.append(f"kind IN ({', '.join('?' for _ in kinds)})")
             params.extend(kinds)
+
+        # Tenant-level filters for metering
+        if user_id is not None:
+            where.append("user_id = ?")
+            params.append(user_id)
+        if org_id is not None:
+            where.append("org_id = ?")
+            params.append(org_id)
 
         sql = "SELECT payload, tags_json FROM events"
         if where:
@@ -152,7 +170,6 @@ class SQLiteEventLogSync:
                     continue
             filtered.append(evt)
 
-        # Apply offset + limit AFTER all filters
         if offset:
             filtered = filtered[offset:]
         if limit is not None:

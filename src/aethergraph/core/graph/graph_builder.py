@@ -22,8 +22,12 @@ def current_builder() -> GraphBuilder | None:
 class GraphBuilder:
     _auto_counter = itertools.count(1)
 
-    def __init__(self, *, name: str = "default_graph"):
-        self.spec = TaskGraphSpec(graph_id=name, nodes={}, meta={})
+    def __init__(
+        self, *, name: str = "default_graph", agent_id: str | None = None, app_id: str | None = None
+    ):
+        self.spec = TaskGraphSpec(
+            graph_id=name, nodes={}, meta={}, agent_id=agent_id, app_id=app_id
+        )
         self.graph = TaskGraph(spec=self.spec)
         self.graph.ensure_inputs_node()
 
@@ -181,9 +185,9 @@ class GraphBuilder:
 
 
 @contextmanager
-def graph(*, name: str = "default_graph"):
+def graph(*, name: str = "default_graph", agent_id: str | None = None, app_id: str | None = None):
     """Context manager that yields a GraphBuilder to build a TaskGraph."""
-    builder = GraphBuilder(name=name)
+    builder = GraphBuilder(name=name, agent_id=agent_id, app_id=app_id)
     token = _GRAPH_CTX.set(builder)
     try:
         yield builder.graph

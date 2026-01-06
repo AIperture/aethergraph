@@ -132,7 +132,7 @@ async def enforce_run_rate_limits(
     if not settings or not settings.rate_limit.enabled:
         return
 
-    # In local/dev mode, don't annoy you with limits
+    # In local/dev mode, don't annoy with limits
     if identity.mode == "local":
         return
 

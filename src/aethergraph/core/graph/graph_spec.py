@@ -14,6 +14,8 @@ class TaskGraphSpec:
     io: IOSpec = field(default_factory=IOSpec)  # inputs/outputs
     bindings: IOBindings | None = None  # input/output bindings
     meta: dict[str, Any] = field(default_factory=dict)  # additional metadata
+    agent_id: str | None = None  # for agent-invoked runs
+    app_id: str | None = None  # for app-invoked runs
 
     def canonical(self) -> str:
         return f"graph:{self.graph_id}@{self.version}"
@@ -36,6 +38,12 @@ class TaskGraphSpec:
             f"optional: {_fmt_opt_map(self.inputs_optional, show_values=False)}",
             f"outputs:  {_fmt_outputs_map(self.outputs)}",
         ]
+
+    def __items__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
 
 
 @dataclass

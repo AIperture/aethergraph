@@ -19,6 +19,8 @@ def hash_spec(spec: TaskGraphSpec) -> str:
     raw = json.dumps(
         {
             "graph_id": spec.graph_id,
+            "agent_id": spec.agent_id or "",
+            "app_id": spec.app_id or "",
             "version": spec.version,
             "nodes": {
                 nid: {

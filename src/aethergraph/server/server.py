@@ -26,8 +26,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
-        help="Port to bind (default: 8000).",
+        default=8745,
+        help="Port to bind (default: 8745).",
     )
     parser.add_argument(
         "--workspace",
@@ -100,7 +100,7 @@ def main_old(argv: Sequence[str] | None = None) -> None:
     Entry point for running AetherGraph as a long-lived server.
 
     Example:
-        python -m aethergraph.server --host 0.0.0.0 --port 8000
+        python -m aethergraph.server --host 0.0.0.0 --port 8745
     """
     parser = build_arg_parser()
     args = parser.parse_args(argv)

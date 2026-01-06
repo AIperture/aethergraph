@@ -3,6 +3,8 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from aethergraph.services.registry.agent_app_meta import build_agent_meta, build_app_meta
+
 from ..runtime.runtime_registry import current_registry
 from .task_graph import TaskGraph
 
@@ -20,20 +22,82 @@ def graphify(
     as_app: dict[str, Any] | None = None,
 ):
     """
-    Decorator that builds a TaskGraph from a function body using the builder context.
-    The function author writes sequential code with tool calls returning NodeHandles.
+    Decorator to define a `TaskGraph` and optionally register it as an agent or app.
 
-    Usage:
-    @graphify(name="my_graph", inputs=["input1", "input2"], outputs=["output"])
-    def my_graph(input1, input2):
-        # function body using graph builder API
-        pass
-        return {"output": some_node_handle}
+    This decorator wraps a Python function as a `TaskGraph`, enabling it to be executed
+    as a node-based graph with runtime context, retry policy, and concurrency controls.
+    It also supports rich metadata registration for agent and app discovery.
 
-    The decorated function returns a builder function that constructs the TaskGraph.
+    Examples:
+        Basic usage:
+        ```python
+        @graphify(
+            name="add_numbers",
+            inputs=["a", "b"],
+            outputs=["sum"],
+        )
+        async def add_numbers(a: int, b: int):
+            return {"sum": a + b}
+        ```
 
-    To build the graph, call the returned function:
-    graph_instance = my_graph.build()
+        Registering as an agent with metadata:
+        ```python
+        @graphify(
+            name="chat_agent",
+            inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+            outputs=["response"],
+            as_agent={
+                "id": "chatbot",
+                "title": "Chat Agent",
+                "description": "Conversational AI agent.",
+                "mode": "chat_v1",
+                "icon": "chat",
+                "tags": ["chat", "nlp"],
+            },
+        )
+        async def chat_agent(...):
+            ...
+        ```
+
+        Registering as an app:
+        ```python
+        @graphify(
+            name="summarizer",
+            inputs=[],
+            outputs=["summary"],
+            as_app={
+                "id": "summarizer-app",
+                "name": "Text Summarizer",
+                "description": "Summarizes input text.",
+                "category": "Productivity",
+                "tags": ["nlp", "summary"],
+            },
+        )
+        async def summarizer():
+            ...
+        ```
+
+    Args:
+        name: Unique name for the graph function.
+        inputs: List of input parameter names. If `as_agent` is provided with `mode="chat_v1"`,
+            this must match `["message", "files", "context_refs", "session_id", "user_meta"]`.
+        outputs: List of output keys returned by the function.
+        version: Version string for the graph function (default: "0.1.0").
+        entrypoint: If True, marks this graph as the main entrypoint for a flow.  [Currently unused]
+        flow_id: Optional flow identifier for grouping related graphs.
+        tags: List of string tags for discovery and categorization.
+        as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
+        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+
+    Returns:
+        TaskGraph: A decorator that transforms a function into a TaskGraph with the specified configuration.
+
+    Notes:
+        - as_agent and as_app are not needed to define a graph; they are only for registration purposes for use in Aethergraph UI.
+        - When registering as an agent, the `as_agent` dictionary should include at least an "id" key.
+        - When registering as an app, the `as_app` dictionary should include at least an "id" key.
+        - The decorated function is a sync function (generate the TaskGraph), despite the underlying `@tool` can be async.
+        - Fields `inputs` and `outputs` are can be inferred from the function signature if not explicitly provided, but it's recommended to declare them for clarity.
     """
 
     def _wrap(fn):
@@ -51,7 +115,10 @@ def graphify(
             from .graph_builder import graph
             from .graph_refs import arg
 
-            with graph(name=name) as g:
+            agent_id = as_agent.get("id") if as_agent else None
+            app_id = as_app.get("id") if as_app else None
+
+            with graph(name=name, agent_id=agent_id, app_id=app_id) as g:
                 # declarations unchanged...
                 if isinstance(inputs, dict):
                     g.declare_inputs(required=[], optional=inputs)
@@ -143,67 +210,36 @@ def graphify(
             meta=graph_meta,
         )
 
-        # Register as agent if requested
-        if as_agent is not None:
-            agent_meta = dict(as_agent)
-
-            agent_id = agent_meta.get("id", name)
-            agent_title = agent_meta.get("title", f"Agent for {name}")
-            agent_flow_id = agent_meta.get("flow_id", graph_meta["flow_id"])
-            agent_tags = agent_meta.get("tags", base_tags)
-
-            extra = {
-                k: v for k, v in agent_meta.items() if k not in {"id", "title", "flow_id", "tags"}
-            }
-
-            full_agent_meta: dict[str, Any] = {
-                "kind": "agent",
-                "id": agent_id,
-                "title": agent_title,
-                "flow_id": agent_flow_id,
-                "tags": agent_tags,
-                "backing": {"type": "graphfn", "name": name, "version": version},
-                **extra,
-            }
-
+        # Agent meta (if any)
+        agent_meta = build_agent_meta(
+            graph_name=name,
+            version=version,
+            graph_meta=graph_meta,
+            agent_cfg=as_agent,
+        )
+        if agent_meta is not None:
             registry.register(
                 nspace="agent",
-                name=agent_id,
+                name=agent_meta["id"],
                 version=version,
                 obj=_build(),
-                meta=full_agent_meta,
+                meta=agent_meta,
             )
 
-        # Register as app if requested
-        if as_app is not None:
-            app_meta = dict(as_app)
-
-            app_id = app_meta.get("id", name)
-            app_flow_id = app_meta.get("flow_id", graph_meta["flow_id"])
-            app_name = app_meta.get("name", f"App for {name}")
-            app_tags = app_meta.get("tags", base_tags)
-
-            extra = {
-                k: v for k, v in app_meta.items() if k not in {"id", "name", "flow_id", "tags"}
-            }
-
-            full_app_meta: dict[str, Any] = {
-                "kind": "app",
-                "id": app_id,
-                "name": app_name,
-                "graph_id": name,
-                "flow_id": app_flow_id,
-                "tags": app_tags,
-                "backing": {"type": "graphfn", "name": name, "version": version},
-                **extra,
-            }
-
+        # App meta (if any)
+        app_meta = build_app_meta(
+            graph_name=name,
+            version=version,
+            graph_meta=graph_meta,
+            app_cfg=as_app,
+        )
+        if app_meta is not None:
             registry.register(
                 nspace="app",
-                name=app_id,
+                name=app_meta["id"],
                 version=version,
                 obj=_build(),
-                meta=full_app_meta,
+                meta=app_meta,
             )
 
         return _build

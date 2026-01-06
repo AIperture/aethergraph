@@ -19,6 +19,8 @@ EventKind = Literal[
 
 @dataclass
 class Event:
+    """A structured event log entry in memory."""
+
     # --------- Core fields ---------
     event_id: str
     ts: str
