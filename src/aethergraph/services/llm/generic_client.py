@@ -119,6 +119,7 @@ class GenericLLMClient(LLMClientProtocol):
                 "openrouter": "https://openrouter.ai/api/v1",
                 "lmstudio": os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
                 "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+                "dummy": "http://localhost:8745",  # for testing with a dummy server
             }[self.provider]
         )
         self.azure_deployment = azure_deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT")
