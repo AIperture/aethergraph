@@ -36,8 +36,12 @@ from aethergraph.services.continuations.stores.fs_store import (
 )
 from aethergraph.services.eventbus.inmem import InMemoryEventBus
 
+# ---- Global Indices ----
+from aethergraph.services.indices.global_indices import GlobalIndices
+
 # ---- kv services ----
 from aethergraph.services.llm.factory import build_llm_clients
+from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -49,7 +53,7 @@ from aethergraph.services.prompts.file_store import FilePromptStore
 from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
 
-# ---- RAG components ----
+# ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
 from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
@@ -62,6 +66,8 @@ from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
+
+# ---- storage builders ----
 from aethergraph.storage.factory import (
     build_artifact_index,
     build_artifact_store,
@@ -144,6 +150,7 @@ class DefaultContainer:
     artifacts: AsyncArtifactStore
     artifact_index: AsyncArtifactIndex
     eventlog: EventLog
+    global_indices: GlobalIndices
 
     # memory
     memory_factory: MemoryFactory
@@ -278,6 +285,7 @@ def build_default_container(
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     llm_clients = build_llm_clients(cfg.llm, secrets)  # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
+    embed_client = GenericEmbeddingClient(provider="openai", model="text-embedding-3-small")
 
     # RAG facade
     vec_index = build_vector_index(cfg)
@@ -295,12 +303,12 @@ def build_default_container(
     # memory factory
     persistence = build_memory_persistence(cfg)
     hotlog = build_memory_hotlog(cfg)
-    indices = build_memory_indices(cfg)
+    memory_indices = build_memory_indices(cfg)
     docs = build_doc_store(cfg)
     memory_factory = MemoryFactory(
         hotlog=hotlog,
         persistence=persistence,
-        indices=indices,
+        indices=memory_indices,
         artifacts=artifacts,
         docs=docs,
         hot_limit=int(cfg.memory.hot_limit),
@@ -337,6 +345,15 @@ def build_default_container(
     authn = DevTokenAuthn()
     authz = AllowAllAuthz()
 
+    # global scoped indices
+    from aethergraph.storage.search_backend.sqlite_vector_backend import SQLiteVectorSearchBackend
+
+    search_backend = SQLiteVectorSearchBackend(
+        index=vec_index,
+        embedder=embed_client,
+    )
+    global_indices = GlobalIndices(backend=search_backend)  # to be set up later as needed
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -355,6 +372,7 @@ def build_default_container(
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,
+        global_indices=global_indices,
         viz_service=viz_service,
         eventlog=eventlog,
         memory_factory=memory_factory,

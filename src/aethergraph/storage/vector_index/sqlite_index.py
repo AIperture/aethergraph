@@ -17,24 +17,50 @@ CREATE TABLE IF NOT EXISTS chunks (
     meta_json TEXT,
     PRIMARY KEY (corpus_id, chunk_id)
 );
+
 CREATE TABLE IF NOT EXISTS embeddings (
-    corpus_id TEXT,
-    chunk_id  TEXT,
-    vec       BLOB,    -- np.float32 array bytes
-    norm      REAL,
+    corpus_id     TEXT,
+    chunk_id      TEXT,
+    vec           BLOB,    -- np.float32 array bytes
+    norm          REAL,
+    -- promoted / hot fields
+    scope_id      TEXT,
+    user_id       TEXT,
+    org_id        TEXT,
+    client_id     TEXT,
+    session_id    TEXT,
+    run_id        TEXT,
+    graph_id      TEXT,
+    node_id       TEXT,
+    kind          TEXT,
+    source        TEXT,
+    created_at_ts REAL,
     PRIMARY KEY (corpus_id, chunk_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_emb_corpus_scope_time
+    ON embeddings(corpus_id, scope_id, created_at_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_emb_corpus_user_time
+    ON embeddings(corpus_id, user_id, created_at_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_emb_corpus_org_time
+    ON embeddings(corpus_id, org_id, created_at_ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_emb_corpus_kind_time
+    ON embeddings(corpus_id, kind, created_at_ts DESC);
 """
 
 
 def _ensure_db(path: str) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, check_same_thread=False)
     try:
-        for stmt in SCHEMA.strip().split(";\n"):
+        cur = conn.cursor()
+        for stmt in SCHEMA.strip().split(";\n\n"):
             s = stmt.strip()
             if s:
-                conn.execute(s)
+                cur.execute(s)
         conn.commit()
     finally:
         conn.close()
@@ -43,7 +69,14 @@ def _ensure_db(path: str) -> None:
 class SQLiteVectorIndex(VectorIndex):
     """
     Simple SQLite-backed vector index.
+
     Uses brute-force cosine similarity per corpus.
+
+    Promoted fields you *may* pass in meta:
+      - scope_id, user_id, org_id, client_id, session_id
+      - run_id, graph_id, node_id
+      - kind, source
+      - created_at_ts (float UNIX timestamp)
     """
 
     def __init__(self, root: str):
@@ -53,9 +86,7 @@ class SQLiteVectorIndex(VectorIndex):
         _ensure_db(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        # Each call gets its own connection: thread-safe with to_thread.
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        return conn
+        return sqlite3.connect(self.db_path, check_same_thread=False)
 
     async def add(
         self,
@@ -74,13 +105,64 @@ class SQLiteVectorIndex(VectorIndex):
                 for cid, vec, meta in zip(chunk_ids, vectors, metas, strict=True):
                     v = np.asarray(vec, dtype=np.float32)
                     norm = float(np.linalg.norm(v) + 1e-9)
+
+                    meta_json = json.dumps(meta, ensure_ascii=False)
+
+                    # promoted, optional
+                    scope_id = meta.get("scope_id")
+                    user_id = meta.get("user_id")
+                    org_id = meta.get("org_id")
+                    client_id = meta.get("client_id")
+                    session_id = meta.get("session_id")
+                    run_id = meta.get("run_id")
+                    graph_id = meta.get("graph_id")
+                    node_id = meta.get("node_id")
+                    kind = meta.get("kind")
+                    source = meta.get("source")
+                    created_at_ts = meta.get("created_at_ts")
+
                     cur.execute(
                         "REPLACE INTO chunks(corpus_id,chunk_id,meta_json) VALUES(?,?,?)",
-                        (corpus_id, cid, json.dumps(meta, ensure_ascii=False)),
+                        (corpus_id, cid, meta_json),
                     )
                     cur.execute(
-                        "REPLACE INTO embeddings(corpus_id,chunk_id,vec,norm) VALUES(?,?,?,?)",
-                        (corpus_id, cid, v.tobytes(), norm),
+                        """
+                        REPLACE INTO embeddings(
+                            corpus_id,
+                            chunk_id,
+                            vec,
+                            norm,
+                            scope_id,
+                            user_id,
+                            org_id,
+                            client_id,
+                            session_id,
+                            run_id,
+                            graph_id,
+                            node_id,
+                            kind,
+                            source,
+                            created_at_ts
+                        )
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        (
+                            corpus_id,
+                            cid,
+                            v.tobytes(),
+                            norm,
+                            scope_id,
+                            user_id,
+                            org_id,
+                            client_id,
+                            session_id,
+                            run_id,
+                            graph_id,
+                            node_id,
+                            kind,
+                            source,
+                            created_at_ts,
+                        ),
                     )
                 conn.commit()
             finally:
@@ -166,7 +248,7 @@ class SQLiteVectorIndex(VectorIndex):
             scored: list[tuple[float, str, dict[str, Any]]] = []
             for chunk_id, vec_bytes, norm, meta_json in rows:
                 v = np.frombuffer(vec_bytes, dtype=np.float32)
-                score = float(np.dot(q, v) / (qn * norm))
+                score = float(np.dot(q, v) / (qn * (norm or 1e-9)))
                 meta = json.loads(meta_json)
                 scored.append((score, chunk_id, meta))
 

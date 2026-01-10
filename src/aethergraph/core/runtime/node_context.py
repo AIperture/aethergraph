@@ -3,6 +3,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.services.artifacts.facade import ArtifactFacade
+from aethergraph.services.indices.scoped_indices import ScopedIndices
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -83,7 +84,7 @@ class NodeContext:
                 inputs={"foo": "bar"},
                 tags=["experiment", "priority"],
                 agent_id="agent-123",    # associate with an agent if applicable
-                visibility=RunVisibility.ineline, # not shown in UI
+                visibility=RunVisibility.inline, # not shown in UI
             )
             ```
 
@@ -520,6 +521,16 @@ class NodeContext:
         if not self.services.mcp:
             raise RuntimeError("MCPService not available")
         return self.services.mcp.get(name)
+
+    def indices(self) -> ScopedIndices:
+        if not self.services.indices:
+            raise RuntimeError("ScopedIndices not available")
+        return self.services.indices
+
+    # def run_manager(self) -> RunManager:
+    #     if not self.services.run_manager:
+    #         raise RuntimeError("RunManager not available")
+    #     return self.services.run_manager
 
     def continuations(self):
         return self.services.continuation_store

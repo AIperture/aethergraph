@@ -15,7 +15,9 @@ from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.artifacts.paths import _from_uri_or_path
+from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.scope.scope import Scope
+from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 ArtifactView = Literal["node", "graph", "run", "all"]
 
@@ -37,8 +39,9 @@ class ArtifactFacade:
         node_id: str,
         tool_name: str,
         tool_version: str,
-        store: AsyncArtifactStore,
-        index: AsyncArtifactIndex,
+        art_store: AsyncArtifactStore,
+        art_index: AsyncArtifactIndex,
+        scoped_indices: ScopedIndices | None = None,
         scope: Scope | None = None,
     ) -> None:
         self.run_id = run_id
@@ -46,8 +49,9 @@ class ArtifactFacade:
         self.node_id = node_id
         self.tool_name = tool_name
         self.tool_version = tool_version
-        self.store = store
-        self.index = index
+        self.store = art_store
+        self.index = art_index
+        self.scoped_indices = scoped_indices
 
         # set scope -- this should be done outside in NodeContext and passed in, but here is a fallback
         self.scope = scope
@@ -128,6 +132,65 @@ class ArtifactFacade:
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
         self.last_artifact = a
+
+        # 2.1) Wire artifact text into ScopedIndices for searchability
+        if self.scoped_indices is not None and self.scoped_indices.backend is not None:
+            try:
+                print("⚠️ Indexing artifact in ScopedIndices:", a.artifact_id)
+                # Build a simple text blob from labels, metrics, and kind
+                # Build text blob
+                parts: list[str] = []
+                if a.kind:
+                    parts.append(str(a.kind))
+                if a.labels:
+                    parts.append("; ".join(f"{k}: {v}" for k, v in a.labels.items()))
+                if a.metrics:
+                    parts.append("; ".join(f"{k}: {v}" for k, v in a.metrics.items()))
+                text = " ".join(parts).strip()
+
+                # Determine timestamps
+                if isinstance(a.created_at, datetime):
+                    ts = a.created_at.isoformat()
+                    created_at_ts = a.created_at.timestamp()
+                else:
+                    ts = str(a.created_at) if a.created_at is not None else None
+                    created_at_ts = None  # fine, optional
+
+                extra_meta: dict[str, Any] = {
+                    "run_id": a.run_id,
+                    "graph_id": a.graph_id,
+                    "node_id": a.node_id,
+                    "tool_name": a.tool_name,
+                    "tool_version": a.tool_version,
+                    "pinned": a.pinned,
+                }
+
+                # Flatten labels last so they can override if needed
+                if a.labels:
+                    extra_meta.update(a.labels)
+
+                meta = build_index_meta_from_scope(
+                    scope=self.scope,
+                    kind="artifact",
+                    source="artifact_index",
+                    ts=ts,
+                    created_at_ts=created_at_ts,
+                    extra=extra_meta,
+                )
+
+                await self.scoped_indices.upsert(
+                    corpus="artifact",
+                    item_id=a.artifact_id,
+                    text=text,
+                    metadata=meta,
+                )
+                print("✅ Indexed artifact in ScopedIndices:", a.artifact_id)
+            except Exception:
+                import logging
+
+                logging.getLogger("aethergraph.indices").exception(
+                    "scoped_indices_artifact_upsert_failed"
+                )
 
         # 3) Metering hook for artifact writes
         try:

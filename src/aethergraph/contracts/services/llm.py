@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 
@@ -15,3 +16,28 @@ class LLMClientProtocol(Protocol):
         headers: dict[str, str] | None = None,
         return_response: bool = False,
     ) -> Any: ...
+
+
+class EmbeddingClientProtocol(Protocol):
+    async def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        model: str | None = None,
+        **kwargs,
+    ) -> list[list[float]]:
+        """
+        Batch-embed texts. Returns one vector per text.
+        """
+
+    async def embed_one(
+        self,
+        text: str,
+        *,
+        model: str | None = None,
+        **kwargs,
+    ) -> list[float]:
+        """
+        Convenience method: embed a single string.
+        Default implementation can call embed([text])[0].
+        """

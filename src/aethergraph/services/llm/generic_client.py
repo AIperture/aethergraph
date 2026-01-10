@@ -235,20 +235,33 @@ class GenericLLMClient(LLMClientProtocol):
             logger = logging.getLogger("aethergraph.services.llm.generic_client")
             logger.warning(f"llm_metering_failed: {e}")
 
+    # async def _ensure_client(self):
+    #     """Ensure the httpx client is bound to the current event loop.
+    #     This allows safe usage across multiple async contexts.
+    #     """
+    #     loop = asyncio.get_running_loop()
+    #     if self._client is None or self._bound_loop != loop:
+    #         # close old client if any
+    #         if self._client is not None:
+    #             try:
+    #                 await self._client.aclose()
+    #             except Exception:
+    #                 logger = logging.getLogger("aethergraph.services.llm.generic_client")
+    #                 logger.warning("llm_client_close_failed")
+    #         self._client = httpx.AsyncClient(timeout=self._client.timeout)
+    #         self._bound_loop = loop
+
     async def _ensure_client(self):
-        """Ensure the httpx client is bound to the current event loop.
-        This allows safe usage across multiple async contexts.
-        """
         loop = asyncio.get_running_loop()
-        if self._client is None or self._bound_loop != loop:
-            # close old client if any
-            if self._client is not None:
-                try:
-                    await self._client.aclose()
-                except Exception:
-                    logger = logging.getLogger("aethergraph.services.llm.generic_client")
-                    logger.warning("llm_client_close_failed")
-            self._client = httpx.AsyncClient(timeout=self._client.timeout)
+
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._bound_loop = loop
+            return
+
+        if self._bound_loop is not loop:
+            # Don't attempt to close the old client here; it belongs to the old loop.
+            self._client = httpx.AsyncClient(timeout=self.timeout)
             self._bound_loop = loop
 
     async def chat(
@@ -298,6 +311,10 @@ class GenericLLMClient(LLMClientProtocol):
             validate_json: If True, validate JSON output against schema.
             fail_on_unsupported: If True, raise error for unsupported features.
             **kw: Additional provider-specific keyword arguments.
+                Common cross-provider options include:
+                - model: override default model name.
+                - tools: OpenAI-style tools / functions description.
+                - tool_choice: tool selection strategy (e.g., "auto", "none", or provider-specific dict).
 
         Returns:
             tuple[str, dict[str, int]]: The model response (text or structured output) and usage statistics.
@@ -313,7 +330,7 @@ class GenericLLMClient(LLMClientProtocol):
             - Rate limiting and metering help manage resource usage effectively.
         """
         await self._ensure_client()
-        model = kw.get("model", self.model)
+        model = kw.pop("model", self.model)
 
         start = time.perf_counter()
 
@@ -370,6 +387,10 @@ class GenericLLMClient(LLMClientProtocol):
         fail_on_unsupported: bool,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
+        # Extract cross-provider extras if any
+        tools = kw.pop("tools", None)
+        tool_choice = kw.pop("tool_choice", None)
+
         # OpenAI is now symmetric too
         if self.provider == "openai":
             return await self._chat_openai_responses(
@@ -381,6 +402,9 @@ class GenericLLMClient(LLMClientProtocol):
                 json_schema=json_schema,
                 schema_name=schema_name,
                 strict_schema=strict_schema,
+                tools=tools,
+                tool_choice=tool_choice,
+                **kw,
             )
 
         # Everyone else
@@ -391,6 +415,8 @@ class GenericLLMClient(LLMClientProtocol):
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
+                tools=tools,
+                tool_choice=tool_choice,
                 **kw,
             )
 
@@ -401,6 +427,8 @@ class GenericLLMClient(LLMClientProtocol):
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
+                tools=tools,
+                tool_choice=tool_choice,
                 **kw,
             )
 
@@ -410,6 +438,8 @@ class GenericLLMClient(LLMClientProtocol):
                 model=model,
                 output_format=output_format,
                 json_schema=json_schema,
+                fail_on_unsupported=fail_on_unsupported,
+                tools=tools,
                 **kw,
             )
 
@@ -420,6 +450,7 @@ class GenericLLMClient(LLMClientProtocol):
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
+                tools=tools,
                 **kw,
             )
 
@@ -463,6 +494,9 @@ class GenericLLMClient(LLMClientProtocol):
         json_schema: dict[str, Any] | None,
         schema_name: str,
         strict_schema: bool,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: Any = None,
+        **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         await self._ensure_client()
         assert self._client is not None
@@ -470,16 +504,16 @@ class GenericLLMClient(LLMClientProtocol):
         url = f"{self.base_url}/responses"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
-        # Normalize input so vision works if caller used image_url parts
         input_messages = _normalize_openai_responses_input(messages)
 
         body: dict[str, Any] = {"model": model, "input": input_messages}
+
         if reasoning_effort is not None:
             body["reasoning"] = {"effort": reasoning_effort}
         if max_output_tokens is not None:
             body["max_output_tokens"] = max_output_tokens
 
-        # Structured output (Responses API style)
+        # Structured output
         if output_format == "json_object":
             body["text"] = {"format": {"type": "json_object"}}
         elif output_format == "json_schema":
@@ -494,6 +528,12 @@ class GenericLLMClient(LLMClientProtocol):
                 }
             }
 
+        # Tools (Responses API style)
+        if tools is not None:
+            body["tools"] = tools
+        if tool_choice is not None:
+            body["tool_choice"] = tool_choice
+
         async def _call():
             r = await self._client.post(url, headers=headers, json=body)
             try:
@@ -502,12 +542,18 @@ class GenericLLMClient(LLMClientProtocol):
                 raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
 
             data = r.json()
+            usage = data.get("usage", {}) or {}
+
+            # If caller asked for raw provider payload, just return it as a JSON string
+            if output_format == "raw":
+                txt = json.dumps(data, ensure_ascii=False)
+                return txt, usage
+
+            # Existing parsing logic for message-only flows
             output = data.get("output")
             txt = ""
 
-            # Your existing parsing logic, but robust for list shape
             if isinstance(output, list) and output:
-                # concat all message outputs if multiple
                 chunks: list[str] = []
                 for item in output:
                     if isinstance(item, dict) and item.get("type") == "message":
@@ -531,7 +577,6 @@ class GenericLLMClient(LLMClientProtocol):
             else:
                 txt = ""
 
-            usage = data.get("usage", {}) or {}
             return txt, usage
 
         return await self._retry.run(_call)
@@ -544,29 +589,10 @@ class GenericLLMClient(LLMClientProtocol):
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
-        """
-        Docstring for _chat_openai_like_chat_completions
-
-        :param self: Description
-        :param messages: Description
-        :type messages: list[dict[str, Any]]
-        :param model: Description
-        :type model: str
-        :param output_format: Description
-        :type output_format: ChatOutputFormat
-        :param json_schema: Description
-        :type json_schema: dict[str, Any] | None
-        :param fail_on_unsupported: Description
-        :type fail_on_unsupported: bool
-        :param kw: Description
-        :type kw: Any
-        :return: Description
-        :rtype: tuple[str, dict[str, int]]
-
-        Call OpenAI-like /chat/completions endpoint.
-        """
         await self._ensure_client()
         assert self._client is not None
 
@@ -580,7 +606,6 @@ class GenericLLMClient(LLMClientProtocol):
             response_format = {"type": "json_object"}
             msg_for_provider = _ensure_system_json_directive(messages, schema=None)
         elif output_format == "json_schema":
-            # not truly native in most openai-like providers
             if fail_on_unsupported:
                 raise RuntimeError(f"provider {self.provider} does not support native json_schema")
             msg_for_provider = _ensure_system_json_directive(messages, schema=json_schema)
@@ -594,6 +619,10 @@ class GenericLLMClient(LLMClientProtocol):
             }
             if response_format is not None:
                 body["response_format"] = response_format
+            if tools is not None:
+                body["tools"] = tools
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice
 
             r = await self._client.post(
                 f"{self.base_url}/chat/completions",
@@ -606,8 +635,13 @@ class GenericLLMClient(LLMClientProtocol):
                 raise RuntimeError(f"OpenAI-like chat/completions error: {e.response.text}") from e
 
             data = r.json()
-            txt, _ = _first_text(data.get("choices", []))  # you already have _first_text in file
             usage = data.get("usage", {}) or {}
+
+            if output_format == "raw":
+                txt = json.dumps(data, ensure_ascii=False)
+                return txt, usage
+
+            txt, _ = _first_text(data.get("choices", []))
             return txt, usage
 
         return await self._retry.run(_call)
@@ -620,6 +654,8 @@ class GenericLLMClient(LLMClientProtocol):
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         await self._ensure_client()
@@ -650,6 +686,11 @@ class GenericLLMClient(LLMClientProtocol):
                 )
             payload["messages"] = _ensure_system_json_directive(messages, schema=json_schema)
 
+        if tools is not None:
+            payload["tools"] = tools
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+
         async def _call():
             r = await self._client.post(
                 f"{self.base_url}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2024-08-01-preview",
@@ -662,8 +703,13 @@ class GenericLLMClient(LLMClientProtocol):
                 raise RuntimeError(f"Azure chat/completions error: {e.response.text}") from e
 
             data = r.json()
-            txt, _ = _first_text(data.get("choices", []))
             usage = data.get("usage", {}) or {}
+
+            if output_format == "raw":
+                txt = json.dumps(data, ensure_ascii=False)
+                return txt, usage
+
+            txt, _ = _first_text(data.get("choices", []))
             return txt, usage
 
         return await self._retry.run(_call)
@@ -675,10 +721,15 @@ class GenericLLMClient(LLMClientProtocol):
         model: str,
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
+        fail_on_unsupported: bool,
+        tools: list[dict[str, Any]] | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         await self._ensure_client()
         assert self._client is not None
+
+        if tools is not None and fail_on_unsupported:
+            raise RuntimeError("Anthropic tools/function calling not wired yet in this client")
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
@@ -746,9 +797,14 @@ class GenericLLMClient(LLMClientProtocol):
                 raise RuntimeError(f"Anthropic API error ({e.response.status_code}): {body}") from e
 
             data = r.json()
+            usage = data.get("usage", {}) or {}
+
+            if output_format == "raw":
+                txt = json.dumps(data, ensure_ascii=False)
+                return txt, usage
+
             blocks = data.get("content") or []
             txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-            usage = data.get("usage", {}) or {}
             return txt, usage
 
         return await self._retry.run(_call)
@@ -761,6 +817,7 @@ class GenericLLMClient(LLMClientProtocol):
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
+        tools: list[dict[str, Any]] | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         await self._ensure_client()
@@ -768,6 +825,9 @@ class GenericLLMClient(LLMClientProtocol):
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
+
+        if tools is not None and fail_on_unsupported:
+            raise RuntimeError("Gemini tools/function calling not wired yet in this client")
 
         # Merge system messages into preamble
         system_parts: list[str] = []
@@ -815,14 +875,18 @@ class GenericLLMClient(LLMClientProtocol):
                 ) from e
 
             data = r.json()
-            cand = (data.get("candidates") or [{}])[0]
-            txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
-
             um = data.get("usageMetadata") or {}
             usage = {
                 "input_tokens": int(um.get("promptTokenCount", 0) or 0),
                 "output_tokens": int(um.get("candidatesTokenCount", 0) or 0),
             }
+
+            if output_format == "raw":
+                txt = json.dumps(data, ensure_ascii=False)
+                return txt, usage
+
+            cand = (data.get("candidates") or [{}])[0]
+            txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
             return txt, usage
 
         return await self._retry.run(_call)

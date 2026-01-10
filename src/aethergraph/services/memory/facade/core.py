@@ -9,8 +9,10 @@ from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persis
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.core.runtime.runtime_metering import current_metering
+from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.rag.facade import RAGFacade
 from aethergraph.services.scope.scope import Scope
+from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 from .chat import ChatMixin
 from .distillation import DistillationMixin
@@ -36,7 +38,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         scope: Scope | None = None,
         hotlog: HotLog,
         persistence: Persistence,
-        indices: Indices,
+        mem_indices: Indices,
+        scoped_indices: ScopedIndices | None = None,
         docs: DocStore,
         artifact_store: AsyncArtifactStore,
         hot_limit: int = 1000,
@@ -53,7 +56,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         self.scope = scope
         self.hotlog = hotlog
         self.persistence = persistence
-        self.indices = indices
+        self.indices = mem_indices
+        self.scoped_indices = scoped_indices
         self.docs = docs
         self.artifacts = artifact_store
         self.hot_limit = hot_limit
@@ -166,6 +170,44 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
 
         await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
         await self.persistence.append_event(self.timeline_id, evt)
+
+        # wire memory event text into ScopedIndices for searchability
+        if self.scoped_indices is not None and self.scoped_indices.backend is not None:
+            try:
+                kind_val = getattr(evt.kind, "value", str(evt.kind))
+                extra_meta = {
+                    "run_id": evt.run_id,
+                    "scope_id": self.memory_scope_id,
+                    "session_id": evt.session_id,
+                    "graph_id": evt.graph_id,
+                    "node_id": evt.node_id,
+                    "stage": evt.stage,
+                    "tags": evt.tags or [],
+                    "severity": evt.severity,
+                    "signal": evt.signal,
+                    "tool": evt.tool,
+                    "topic": evt.topic,
+                }
+
+                meta = build_index_meta_from_scope(
+                    scope=self.scope,
+                    kind=kind_val,
+                    source="memory",
+                    ts=evt.ts,
+                    created_at_ts=None,  # or parse to timestamp if you want ordering
+                    extra=extra_meta,
+                )
+
+                await self.scoped_indices.upsert(
+                    corpus="event",
+                    item_id=evt.event_id,
+                    text=evt.text or "",
+                    metadata=meta,
+                )
+
+            except Exception:
+                if self.logger:
+                    self.logger.exception("Error indexing memory event %s", evt.event_id)
 
         # Metering hook
         try:

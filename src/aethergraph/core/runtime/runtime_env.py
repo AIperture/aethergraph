@@ -17,6 +17,7 @@ from aethergraph.services.continuations.stores.fs_store import (
 )
 
 # ---- memory services ----
+from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.rag.node_rag import NodeRAG
 from aethergraph.services.resume.router import ResumeRouter
@@ -118,6 +119,18 @@ class RuntimeEnv:
             "entities": [],
         }
 
+        node_scope = (
+            self.container.scope_factory.for_node(
+                identity=self.identity,
+                run_id=self.run_id,
+                graph_id=self.graph_id,
+                node_id=node.node_id,
+                session_id=self.session_id,
+            )
+            if self.container.scope_factory
+            else None
+        )
+
         level, custom_scope_id = self._resolve_memory_config()
         mem_scope = (
             self.container.scope_factory.for_memory(
@@ -133,24 +146,25 @@ class RuntimeEnv:
             else None
         )
 
+        indices: ScopedIndices | None = None  # scoped indices for this node
+        if self.container.global_indices is not None and node_scope is not None:
+            # Attach scoped indices to container for this node's scope
+            # Prefer memory scope id if available for memory-tied corpora
+            base_scope = mem_scope or node_scope
+            if base_scope:
+                scope_id = mem_scope.memory_scope_id() if mem_scope else None
+                indices = self.container.global_indices.for_scope(
+                    scope=base_scope,
+                    scope_id=scope_id,
+                )
+
         mem: MemoryFacade = self.memory_factory.for_session(
             run_id=self.run_id,
             graph_id=self.graph_id,
             node_id=node.node_id,
             session_id=self.session_id,
             scope=mem_scope,
-        )
-
-        node_scope = (
-            self.container.scope_factory.for_node(
-                identity=self.identity,
-                run_id=self.run_id,
-                graph_id=self.graph_id,
-                node_id=node.node_id,
-                session_id=self.session_id,
-            )
-            if self.container.scope_factory
-            else None
+            scoped_indices=indices,
         )
 
         from aethergraph.services.artifacts.facade import ArtifactFacade
@@ -161,8 +175,9 @@ class RuntimeEnv:
             node_id=node.node_id,
             tool_name=node.tool_name,
             tool_version=node.tool_version,  # to be filled from node if available
-            store=self.artifacts,
-            index=self.artifact_index,
+            art_store=self.artifacts,
+            art_index=self.artifact_index,
+            scoped_indices=indices,
             scope=node_scope,
         )
 
@@ -202,6 +217,7 @@ class RuntimeEnv:
             rag=rag_for_node,  # RAGService
             mcp=self.mcp_service,  # MCPService
             run_manager=self.container.run_manager,  # RunManager
+            indices=indices,  # ScopedIndices for this node
         )
         return ExecutionContext(
             run_id=self.run_id,
