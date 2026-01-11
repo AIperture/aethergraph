@@ -6,7 +6,7 @@ from typing import Any
 
 from aethergraph.contracts.services.llm import EmbeddingClientProtocol
 from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBackend
-from aethergraph.contracts.storage.vector_index import VectorIndex
+from aethergraph.contracts.storage.vector_index import PROMOTED_FIELDS, VectorIndex
 
 
 @dataclass
@@ -71,6 +71,71 @@ class SQLiteVectorSearchBackend(SearchBackend):
         )
 
     async def search(
+        self,
+        *,
+        corpus: str,
+        query: str,
+        top_k: int = 10,
+        filters: dict[str, Any] | None = None,
+    ) -> list[ScoredItem]:
+        filters = filters or {}
+        if not query.strip():
+            return []
+
+        q_vec = await self._embed(query)
+
+        # 1) Split filters into index-level and Python-level
+        index_filters: dict[str, Any] = {}
+        post_filters: dict[str, Any] = {}
+
+        for key, val in filters.items():
+            if val is None:
+                # handled by ScopedIndices merging; by the time we get here,
+                # None means "no constraint on this key"
+                continue
+
+            # Only simple equality filters on promoted fields can be pushed down.
+            if key in PROMOTED_FIELDS and not isinstance(val, list | tuple | set):
+                index_filters[key] = val
+            else:
+                post_filters[key] = val
+
+        # 2) Ask the index for more candidates than top_k
+        raw_k = max(top_k * 3, top_k)
+        max_candidates = max(top_k * 50, raw_k)  # tunable: bound cost per query
+
+        rows = await self.index.search(
+            corpus_id=corpus,
+            query_vec=q_vec,
+            k=raw_k,
+            where=index_filters,  # <-- scoped by org/user/scope here
+            max_candidates=max_candidates,
+        )
+
+        # 3) Apply remaining Python-level filters
+        results: list[ScoredItem] = []
+        for row in rows:
+            chunk_id = row["chunk_id"]
+            score = float(row["score"])
+            meta = dict(row.get("meta") or {})
+
+            if post_filters and not self._matches_filters(meta, post_filters):
+                continue
+
+            results.append(
+                ScoredItem(
+                    item_id=chunk_id,
+                    corpus=corpus,
+                    score=score,
+                    metadata=meta,
+                )
+            )
+            if len(results) >= top_k:
+                break
+
+        return results
+
+    async def search_old(
         self,
         *,
         corpus: str,

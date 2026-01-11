@@ -39,7 +39,14 @@ class VectorIndex(Protocol):
         corpus_id: str,
         query_vec: list[float],
         k: int,
+        where: dict[str, Any] | None = None,
+        max_candidates: int | None = None,
     ) -> list[dict[str, Any]]: ...
+
+    """
+    where: equality filters on *promoted* fields (org_id, user_id, scope_id, etc.)
+    max_candidates: limit number of candidate rows to score (after SQL WHERE, before cosine).
+    """
 
     # Each dict MUST look like:
     # {"chunk_id": str, "score": float, "meta": dict[str, Any]}
@@ -47,6 +54,20 @@ class VectorIndex(Protocol):
     # Optional
     async def list_corpora(self) -> list[str]: ...
     async def list_chunks(self, corpus_id: str) -> list[str]: ...
+
+
+PROMOTED_FIELDS = {
+    "scope_id",
+    "user_id",
+    "org_id",
+    "client_id",
+    "session_id",
+    "run_id",
+    "graph_id",
+    "node_id",
+    "kind",
+    "source",
+}
 
 
 @dataclass

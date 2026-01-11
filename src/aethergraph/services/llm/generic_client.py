@@ -99,6 +99,7 @@ class GenericLLMClient(LLMClientProtocol):
         self._retry = _Retry()
         self._client = httpx.AsyncClient(timeout=timeout)
         self._bound_loop = None
+        self._timeout = timeout
 
         # Resolve creds/base
         self.api_key = (
@@ -261,7 +262,7 @@ class GenericLLMClient(LLMClientProtocol):
 
         if self._bound_loop is not loop:
             # Don't attempt to close the old client here; it belongs to the old loop.
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = httpx.AsyncClient(timeout=self._timeout)
             self._bound_loop = loop
 
     async def chat(

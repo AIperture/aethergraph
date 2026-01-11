@@ -74,7 +74,7 @@ class ScopedIndices:
         top_k: int = 10,
         filters: Mapping[str, Any] | None = None,
     ) -> list[ScoredItem]:
-        base = self._base_filters()
+        base = self._base_filters()  # org_id, user_id, scope_id
         merged: dict[str, Any] = {**base, **(filters or {})}
         merged = {k: v for k, v in merged.items() if v is not None}
 

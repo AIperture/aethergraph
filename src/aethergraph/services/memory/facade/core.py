@@ -22,6 +22,37 @@ from .retrieval import RetrievalMixin
 from .utils import now_iso, stable_event_id
 
 
+def derive_timeline_id(
+    *,
+    memory_scope_id: str | None,
+    run_id: str,
+    org_id: str | None = None,
+    sep: str = "|",
+) -> str:
+    """
+    Derive the storage partition key for timeline events.
+
+    - If org_id is present, prefix with `org:{org_id}|...` to prevent cross-org mixing.
+    - Keep fallback behavior: if memory_scope_id is missing, fall back to run_id.
+    - Avoid redundant `org:{org_id}|org:{org_id}` when the bucket is already org-scoped.
+    """
+    bucket = (memory_scope_id or "").strip()
+    if not bucket:
+        bucket = run_id
+
+    if org_id:
+        org_prefix = f"org:{org_id}"
+
+        # If the bucket is already exactly org-scoped, don't double-prefix
+        if bucket == org_prefix:
+            return org_prefix
+
+        return f"{org_prefix}{sep}{bucket}"
+
+    # No org context -> behave like current local mode
+    return bucket
+
+
 class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RAGMixin):
     """
     MemoryFacade coordinates core memory services for a specific run/session.
@@ -70,7 +101,11 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         self.memory_scope_id = (
             self.scope.memory_scope_id() if self.scope else self.session_id or self.run_id
         )
-        self.timeline_id = self.memory_scope_id or self.run_id
+        self.timeline_id = derive_timeline_id(
+            memory_scope_id=self.memory_scope_id,
+            run_id=self.run_id,
+            org_id=self.scope.org_id if self.scope else None,
+        )
 
     async def record_raw(
         self,
@@ -127,12 +162,25 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         session_id = base.get("session_id") or dims.get("session_id") or self.session_id
         scope_id = base.get("scope_id") or self.memory_scope_id or session_id or run_id
 
+        user_id = base.get("user_id") or dims.get("user_id")
+        org_id = base.get("org_id") or dims.get("org_id")
+        client_id = base.get("client_id") or dims.get("client_id")
+        graph_id = base.get("graph_id") or dims.get("graph_id") or self.graph_id
+        node_id = base.get("node_id") or dims.get("node_id") or self.node_id
+
         base.setdefault("run_id", run_id)
         base.setdefault("scope_id", scope_id)
         base.setdefault("session_id", session_id)
-        # ... (populate other fields from dims if needed) ...
-
+        base.setdefault("run_id", run_id)
+        base.setdefault("graph_id", graph_id)
+        base.setdefault("node_id", node_id)
+        base.setdefault("scope_id", scope_id)
+        base.setdefault("user_id", user_id)
+        base.setdefault("org_id", org_id)
+        base.setdefault("client_id", client_id)
+        base.setdefault("session_id", session_id)
         severity = int(base.get("severity", 2))
+
         signal = base.get("signal")
         if signal is None:
             signal = self._estimate_signal(text=text, metrics=metrics, severity=severity)
@@ -154,17 +202,26 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
             ts=ts,
             run_id=run_id,
             scope_id=scope_id,
+            user_id=user_id,
+            org_id=org_id,
+            client_id=client_id,
+            session_id=session_id,
             kind=kind,
+            stage=base.get("stage"),
             text=text,
-            data=base.get("data"),
             tags=base.get("tags"),
+            data=base.get("data"),
             metrics=metrics,
+            graph_id=graph_id,
+            node_id=node_id,
             tool=base.get("tool"),
+            topic=base.get("topic"),
             severity=severity,
             signal=signal,
             inputs=base.get("inputs"),
             outputs=base.get("outputs"),
-            # ... pass other fields ...
+            embedding=base.get("embedding"),
+            pii_flags=base.get("pii_flags"),
             version=2,
         )
 

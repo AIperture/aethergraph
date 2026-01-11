@@ -223,6 +223,91 @@ class SQLiteVectorIndex(VectorIndex):
         corpus_id: str,
         query_vec: list[float],
         k: int,
+        where: dict[str, Any] | None = None,
+        max_candidates: int | None = None,
+    ) -> list[dict[str, Any]]:
+        q = np.asarray(query_vec, dtype=np.float32)
+        qn = float(np.linalg.norm(q) + 1e-9)
+
+        where = where or {}
+
+        def _search_sync() -> list[dict[str, Any]]:
+            conn = self._connect()
+            try:
+                cur = conn.cursor()
+
+                sql = """
+                    SELECT e.chunk_id, e.vec, e.norm, c.meta_json
+                    FROM embeddings e
+                    JOIN chunks c
+                      ON e.corpus_id = c.corpus_id AND e.chunk_id = c.chunk_id
+                    WHERE e.corpus_id=?
+                """
+                params: list[Any] = [corpus_id]
+
+                # Promoted columns we can filter on
+                promoted_cols = {
+                    "scope_id",
+                    "user_id",
+                    "org_id",
+                    "client_id",
+                    "session_id",
+                    "run_id",
+                    "graph_id",
+                    "node_id",
+                    "kind",
+                    "source",
+                }
+
+                # Add equality predicates for known promoted columns
+                for key, val in where.items():
+                    if val is None:
+                        continue
+                    if key in promoted_cols:
+                        sql += f" AND e.{key} = ?"
+                        params.append(val)
+
+                # Bound candidate count and use time ordering to hit recent stuff first.
+                # This plays nicely with your idx_emb_corpus_*_time indexes.
+                # Fallback: if no max_candidates, use some sane upper bound.
+                candidate_limit = max_candidates or 5000
+                sql += " ORDER BY e.created_at_ts DESC"
+                sql += " LIMIT ?"
+                params.append(candidate_limit)
+
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+            finally:
+                conn.close()
+
+            scored: list[tuple[float, str, dict[str, Any]]] = []
+            for chunk_id, vec_bytes, norm, meta_json in rows:
+                v = np.frombuffer(vec_bytes, dtype=np.float32)
+                score = float(np.dot(q, v) / (qn * (norm or 1e-9)))
+                meta = json.loads(meta_json)
+                scored.append((score, chunk_id, meta))
+
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top = scored[:k]
+
+            out: list[dict[str, Any]] = []
+            for score, chunk_id, meta in top:
+                out.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "score": score,
+                        "meta": meta,
+                    }
+                )
+            return out
+
+        return await asyncio.to_thread(_search_sync)
+
+    async def search_old(
+        self,
+        corpus_id: str,
+        query_vec: list[float],
+        k: int,
     ) -> list[dict[str, Any]]:
         q = np.asarray(query_vec, dtype=np.float32)
         qn = float(np.linalg.norm(q) + 1e-9)

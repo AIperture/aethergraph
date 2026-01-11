@@ -31,7 +31,7 @@ class Event:
     user_id: str | None = None
     org_id: str | None = None
     client_id: str | None = None
-    app_id: str | None = None
+    # app_id: str | None = None
     session_id: str | None = None
 
     # --------- Core semantics ---------

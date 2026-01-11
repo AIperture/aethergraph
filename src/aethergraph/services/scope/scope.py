@@ -146,14 +146,18 @@ class Scope:
     def rag_filter(self, *, scope_id: str | None = None) -> dict[str, Any]:
         """
         Default filter for RAG search based on identity.
-        You can adjust strictness (e.g., ignore run_id for per-user corpora).
+
+        By default we isolate on:
+        - org_id (tenant)
+        - user_id (actor within tenant)
+        - scope_id (memory bucket, usually memory_scope_id)
         """
         out: dict[str, Any] = {}
         if self.user_id:
             out["user_id"] = self.user_id
         if self.org_id:
             out["org_id"] = self.org_id
+        # scope_id is usually memory_scope_id() (e.g. session:, user:, run:, org:, app:)
         if scope_id:
             out["scope_id"] = scope_id
-        # you can choose to include session_id / run_id only for very strict isolation
         return out
