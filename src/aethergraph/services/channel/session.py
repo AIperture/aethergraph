@@ -1,7 +1,7 @@
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from aethergraph.contracts.services.channel import Button, FileRef, OutEvent
 from aethergraph.services.continuations.continuation import Correlator
@@ -16,6 +16,18 @@ class ChannelSession:
     def __init__(self, context, channel_key: str | None = None):
         self.ctx = context
         self._override_key = channel_key  # optional strong binding
+
+    @property
+    def _memory_facade(self):
+        """
+        Best-effort resolver for MemoryFacade.
+
+        We intentionally go via ctx.services.memory_facade instead of ctx.memory()
+        so that:
+        - we reuse the same scoped facade NodeContext exposes, and
+        - we do NOT raise if memory is not bound (auto logging should be optional).
+        """
+        return getattr(self.ctx.services, "memory_facade", None)
 
     # Channel bus
     @property
@@ -69,6 +81,72 @@ class ChannelSession:
             base.setdefault("app_id", ctx.app_id)
 
         return base
+
+    def _default_chat_tags(
+        self,
+        extra: list[str] | None = None,
+        *,
+        channel: str | None = None,
+    ) -> list[str]:
+        """
+        Derive some lightweight, structured tags from context
+        and merge with caller-provided tags.
+        """
+        tags: list[str] = []
+
+        # Channel name is very useful when debugging
+        try:
+            ch = self._resolve_key(channel)
+            tags.append(f"channel:{ch}")
+        except Exception:
+            pass
+
+        if self._run_id:
+            tags.append(f"run:{self._run_id}")
+        if self._session_id:
+            tags.append(f"session:{self._session_id}")
+        if self._node_id:
+            tags.append(f"node:{self._node_id}")
+
+        if extra:
+            tags.extend(extra)
+
+        return tags
+
+    async def _log_chat(
+        self,
+        role: Literal["user", "assistant", "system", "tool"],
+        text: str,
+        *,
+        tags: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        severity: int = 2,
+        signal: float | None = None,
+        enabled: bool = True,
+        channel: str | None = None,
+    ) -> None:
+        """
+        Internal helper: best-effort chat logging.
+        Respects `enabled` and silently no-ops if memory is missing.
+        """
+        if not enabled or not text:
+            return
+
+        mem = self._memory_facade
+        if not mem:
+            return
+
+        print(
+            f"📝 ChannelSession: logging chat message to memory (role={role}) with message (text={text})"
+        )
+        await mem.record_chat(
+            role,
+            text,
+            tags=self._default_chat_tags(tags, channel=channel),
+            data=data,
+            severity=severity,
+            signal=signal,
+        )
 
     def _resolve_default_key(self) -> str:
         """Unified default resolver (bus default → console)."""
@@ -153,7 +231,18 @@ class ChannelSession:
         await self._bus.publish(event)
 
     async def send_text(
-        self, text: str, *, meta: dict[str, Any] | None = None, channel: str | None = None
+        self,
+        text: str,
+        *,
+        meta: dict[str, Any] | None = None,
+        channel: str | None = None,
+        # memory logging handled separately
+        memory_log: bool = True,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
     ):
         """
         Send a plain text message to the configured channel.
@@ -180,6 +269,12 @@ class ChannelSession:
             text: The primary text content to send.
             meta: Optional dictionary of metadata to include with the event.
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_log: Whether to log this message to memory (default: True).
+            memory_role: The role to use when logging to memory (default: "assistant").
+            memory_tags: Optional list of tags to associate with the memory log entry.
+            memory_data: Optional structured data to include with the memory log entry.
+            memory_severity: Severity level for the memory log entry (default: 2).
+            memory_signal: Optional signal value for the memory log entry.
 
         Returns:
             None
@@ -193,6 +288,18 @@ class ChannelSession:
             }
         ```
         """
+
+        await self._log_chat(
+            memory_role,
+            text,
+            tags=memory_tags,
+            data=memory_data,
+            severity=memory_severity,
+            signal=memory_signal,
+            enabled=memory_log,
+            channel=channel,
+        )
+
         event = OutEvent(
             type="agent.message",
             channel=self._resolve_key(channel),
@@ -208,6 +315,13 @@ class ChannelSession:
         rich: dict[str, Any] | None = None,
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
+        # memory logging handled separately
+        memory_log: bool = True,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
     ):
         """
         Send a rich message to the configured channel.
@@ -240,6 +354,7 @@ class ChannelSession:
             rich: A dictionary containing structured rich content to include with the message.
             meta: Optional dictionary of metadata to include with the event.
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_*: Parameters controlling logging to memory (see `send_text` for details).
 
         Returns:
             None
@@ -253,6 +368,18 @@ class ChannelSession:
             }
         ```
         """
+
+        await self._log_chat(
+            memory_role,
+            text or "",
+            tags=memory_tags,
+            data=memory_data,
+            severity=memory_severity,
+            signal=memory_signal,
+            enabled=memory_log,
+            channel=channel,
+        )
+
         await self._bus.publish(
             OutEvent(
                 type="agent.message",
@@ -270,6 +397,13 @@ class ChannelSession:
         alt: str = "image",
         title: str | None = None,
         channel: str | None = None,
+        # memory logging handled separately
+        memory_log: bool = True,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
     ):
         """
         Send an image message to the configured channel.
@@ -302,6 +436,7 @@ class ChannelSession:
             alt: Alternative text describing the image (for accessibility).
             title: Optional title to display with the image.
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_*: Parameters controlling logging to memory (see `send_text` for details).
 
         Returns:
             None
@@ -309,6 +444,19 @@ class ChannelSession:
         Notes:
             The capability to render images depends on the client adapter.
         """
+
+        memory_tags = [*(memory_tags or []), "image"]
+        await self._log_chat(
+            memory_role,
+            f"Image: {url or ''} (alt: {alt})",
+            tags=memory_tags,
+            data=memory_data,
+            severity=memory_severity,
+            signal=memory_signal,
+            enabled=memory_log,
+            channel=channel,
+        )
+
         await self._bus.publish(
             OutEvent(
                 type="agent.message",
@@ -327,6 +475,13 @@ class ChannelSession:
         filename: str = "file.bin",
         title: str | None = None,
         channel: str | None = None,
+        # memory logging handled separately
+        memory_log: bool = True,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
     ):
         """
         Send a file to the configured channel in a normalized format.
@@ -360,6 +515,7 @@ class ChannelSession:
             filename: The display name of the file (defaults to "file.bin").
             title: Optional title to display with the file.
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_*: Parameters controlling logging to memory (see `send_text` for details).
 
         Returns:
             None
@@ -373,6 +529,19 @@ class ChannelSession:
             file["url"] = url
         if file_bytes is not None:
             file["bytes"] = file_bytes
+
+        memory_tags = [*(memory_tags or []), "file"]
+        await self._log_chat(
+            memory_role,
+            f"File: {filename} (url: {url or 'N/A'})",
+            tags=memory_tags,
+            data=memory_data,
+            severity=memory_severity,
+            signal=memory_signal,
+            enabled=memory_log,
+            channel=channel,
+        )
+
         await self._bus.publish(
             OutEvent(
                 type="file.upload",
@@ -390,6 +559,13 @@ class ChannelSession:
         *,
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
+        # memory logging handled separately
+        memory_log: bool = True,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
     ):
         """
         Send a message with interactive buttons to the configured channel.
@@ -421,10 +597,23 @@ class ChannelSession:
             buttons: A list of `Button` objects representing the interactive options.
             meta: Optional dictionary of metadata to include with the event.
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_*: Parameters controlling logging to memory (see `send_text` for details).
 
         Returns:
             None
         """
+        memory_tags = [*(memory_tags or []), "buttons"]
+        await self._log_chat(
+            memory_role,
+            text,
+            tags=memory_tags,
+            data=memory_data,
+            severity=memory_severity,
+            signal=memory_signal,
+            enabled=memory_log,
+            channel=channel,
+        )
+
         await self._bus.publish(
             OutEvent(
                 type="link.buttons",
@@ -504,6 +693,10 @@ class ChannelSession:
         timeout_s: int = 3600,
         silent: bool = False,  # kept for back-compat; same behavior as before
         channel: str | None = None,
+        # memory config
+        memory_log_prompt: bool = True,
+        memory_log_reply: bool = True,
+        memory_tags: list[str] | None = None,
     ) -> str:
         """
         Prompt the user for a text response in a normalized format.
@@ -531,19 +724,49 @@ class ChannelSession:
             timeout_s: Maximum time in seconds to wait for a response (default: 3600).
             silent: If True, suppresses prompt display in some adapters (back-compat; default: False).
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_log_prompt: Whether to log the prompt to memory (default: True).
+            memory_log_reply: Whether to log the user's reply to memory (default: True).
+            memory_tags: Optional list of tags to associate with the memory log entries.
 
         Returns:
             str: The user's text response, or an empty string if no input was received.
         """
+        if prompt:
+            await self._log_chat(
+                "assistant",
+                prompt,
+                tags=[*(memory_tags or []), "ask_text", "prompt"],
+                enabled=memory_log_prompt,
+                channel=channel,
+            )
+
         payload = await self._ask_core(
             kind="user_input",
             payload={"prompt": prompt, "_silent": silent},
             channel=channel,
             timeout_s=timeout_s,
         )
-        return str(payload.get("text", ""))
 
-    async def wait_text(self, *, timeout_s: int = 3600, channel: str | None = None) -> str:
+        text = str(payload.get("text", ""))
+
+        if text:
+            await self._log_chat(
+                "user",
+                text,
+                tags=[*(memory_tags or []), "ask_text", "reply"],
+                enabled=memory_log_reply,
+                channel=channel,
+            )
+        return text
+
+    async def wait_text(
+        self,
+        *,
+        timeout_s: int = 3600,
+        channel: str | None = None,
+        memory_log_reply: bool = True,
+        memory_tags: list[str] | None = None,
+    ) -> str:
         """
         Wait for a single text response from the user in a normalized format.
 
@@ -567,12 +790,22 @@ class ChannelSession:
         Args:
             timeout_s: Maximum time in seconds to wait for a response (default: 3600).
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_log_reply: Whether to log the user's reply to memory (default: True).
+            memory_tags: Optional list of tags to associate with the memory log entry.
 
         Returns:
             str: The user's text response, or an empty string if no input was received.
         """
         # Alias for ask_text(prompt=None) but keeps existing signature
-        return await self.ask_text(prompt=None, timeout_s=timeout_s, silent=True, channel=channel)
+        return await self.ask_text(
+            prompt=None,
+            timeout_s=timeout_s,
+            silent=True,
+            channel=channel,
+            memory_log_prompt=False,  # no prompt to log
+            memory_log_reply=memory_log_reply,
+            memory_tags=memory_tags,
+        )
 
     async def ask_approval(
         self,
@@ -581,6 +814,9 @@ class ChannelSession:
         *,
         timeout_s: int = 3600,
         channel: str | None = None,
+        memory_log_prompt: bool = True,
+        memory_log_reply: bool = True,
+        memory_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Prompt the user for approval or rejection in a normalized format.
@@ -610,6 +846,9 @@ class ChannelSession:
             options: Iterable of button labels for user choices (defaults to "Approve" and "Reject").
             timeout_s: Maximum time in seconds to wait for a response (default: 3600).
             channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_log_prompt: Whether to log the prompt to memory (default: True).
+            memory_log_reply: Whether to log the user's reply to memory (default: True).
+            memory_tags: Optional list of tags to associate with the memory log entries.
 
         Returns:
             dict: A dictionary containing:
@@ -620,6 +859,15 @@ class ChannelSession:
             The returned "choices" are determined by the external adapter and may vary. To be robust, make sure
             to use `choices.lower()` and strip whitespace when comparing.
         """
+        if prompt:
+            await self._log_chat(
+                "assistant",
+                prompt,
+                tags=[*(memory_tags or []), "ask_approval", "prompt"],
+                enabled=memory_log_prompt,
+                channel=channel,
+            )
+
         payload = await self._ask_core(
             kind="approval",
             payload={"prompt": {"title": prompt, "buttons": list(options)}},
@@ -627,6 +875,15 @@ class ChannelSession:
             timeout_s=timeout_s,
         )
         choice = payload.get("choice")
+        if choice is not None:
+            await self._log_chat(
+                "user",
+                f"Selected: {str(choice)}",
+                tags=[*(memory_tags or []), "ask_approval", "reply"],
+                enabled=memory_log_reply,
+                channel=channel,
+            )
+
         # Normalize return
         # 1) If adapter explicitly sets approved, trust it
         buttons = list(options)  # just plain list, not Button objects
@@ -651,6 +908,9 @@ class ChannelSession:
         multiple: bool = True,
         timeout_s: int = 3600,
         channel: str | None = None,
+        memory_log_prompt: bool = True,
+        memory_log_reply: bool = True,
+        memory_tags: list[str] | None = None,
     ) -> dict:
         """
         Prompt the user to upload one or more files, optionally with a text comment.
@@ -694,32 +954,83 @@ class ChannelSession:
             On console adapters, file upload is not supported; only text will be returned.
             The `accept` parameter is a UI hint and does not guarantee file type enforcement.
         """
+        if prompt:
+            await self._log_chat(
+                "assistant",
+                prompt,
+                tags=[*(memory_tags or []), "ask_files", "prompt"],
+                enabled=memory_log_prompt,
+                channel=channel,
+            )
+
         payload = await self._ask_core(
             kind="user_files",
             payload={"prompt": prompt, "accept": accept or [], "multiple": bool(multiple)},
             channel=channel,
             timeout_s=timeout_s,
         )
+
+        text = str(payload.get("text", ""))
+        if text:
+            await self._log_chat(
+                "user",
+                text,
+                tags=[*(memory_tags or []), "ask_files", "reply"],
+                enabled=memory_log_reply,
+                channel=channel,
+            )
+
         return {
-            "text": str(payload.get("text", "")),
+            "text": text,
             "files": payload.get("files", []) if isinstance(payload.get("files", []), list) else [],
         }
 
     async def ask_text_or_files(
-        self, *, prompt: str, timeout_s: int = 3600, channel: str | None = None
+        self,
+        *,
+        prompt: str,
+        timeout_s: int = 3600,
+        channel: str | None = None,
+        memory_log_prompt: bool = True,
+        memory_log_reply: bool = True,
+        memory_tags: list[str] | None = None,
     ) -> dict:
         """
-        Ask for either text or files. Returns:
-        { "text": str, "files": List[FileRef] }
+        Prompt the user for either text input or file uploads in a normalized format.
+        This method sends a prompt to the configured channel, allowing the user to respond with
+        text, files, or both. It waits for the user's response and returns a normalized result
+        containing the text and file references.
+
+        Not used very often; prefer ask_text + get_latest_uploads or ask_files.
         """
+        if prompt:
+            await self._log_chat(
+                "assistant",
+                prompt,
+                tags=[*(memory_tags or []), "ask_text_or_files", "prompt"],
+                enabled=memory_log_prompt,
+                channel=channel,
+            )
+
         payload = await self._ask_core(
             kind="user_input_or_files",
             payload={"prompt": prompt},
             channel=channel,
             timeout_s=timeout_s,
         )
+
+        text = str(payload.get("text", ""))
+        if text:
+            await self._log_chat(
+                "user",
+                text,
+                tags=[*(memory_tags or []), "ask_text_or_files", "reply"],
+                enabled=memory_log_reply,
+                channel=channel,
+            )
+
         return {
-            "text": str(payload.get("text", "")),
+            "text": text,
             "files": payload.get("files", []) if isinstance(payload.get("files", []), list) else [],
         }
 
@@ -814,7 +1125,24 @@ class ChannelSession:
                 )
             )
 
-        async def end(self, full_text: str | None = None):
+        async def end(
+            self,
+            full_text: str | None = None,
+            *,
+            # NEW: memory logging
+            memory_log: bool = True,
+            memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
+            memory_tags: list[str] | None = None,
+            memory_data: dict[str, Any] | None = None,
+            memory_severity: int = 2,
+            memory_signal: float | None = None,
+        ):
+            text_to_log = full_text
+            if text_to_log is None:
+                buf = self._buf()
+                text_to_log = "".join(buf) if buf else ""
+
+            # 1) Final UI update
             if full_text is not None:
                 await self._outer._bus.publish(
                     OutEvent(
@@ -825,6 +1153,20 @@ class ChannelSession:
                         meta=self._inject_context_meta(None),
                     )
                 )
+
+            # 2) Memory logging of the completed message
+            await self._outer._log_chat(
+                memory_role,
+                text_to_log,
+                tags=memory_tags,
+                data=memory_data,
+                severity=memory_severity,
+                signal=memory_signal,
+                enabled=memory_log,
+                channel=self._channel_key,
+            )
+
+            # 3) End-of-stream event
             await self._outer._bus.publish(
                 OutEvent(
                     type="agent.stream.end",
@@ -856,7 +1198,7 @@ class ChannelSession:
             ```python
             async with context.channel().stream(channel="web:chat") as s:
                 await s.delta("Generating results...")
-                await s.end(full_text="Results complete.")
+                await s.end(full_text="Results complete.", memory_tags=["llm"])
             ```
 
         Args:

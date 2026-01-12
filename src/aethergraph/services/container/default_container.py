@@ -84,6 +84,7 @@ from aethergraph.storage.factory import (
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
+from aethergraph.storage.search_factory import build_search_backend
 
 SERVICE_KEYS = [
     # core
@@ -346,12 +347,14 @@ def build_default_container(
     authz = AllowAllAuthz()
 
     # global scoped indices
-    from aethergraph.storage.search_backend.sqlite_vector_backend import SQLiteVectorSearchBackend
+    # from aethergraph.storage.search_backend.generic_vector_backend import SQLiteVectorSearchBackend
 
-    search_backend = SQLiteVectorSearchBackend(
-        index=vec_index,
-        embedder=embed_client,
-    )
+    # search_backend = SQLiteVectorSearchBackend(
+    #     index=vec_index,
+    #     embedder=embed_client,
+    # )
+
+    search_backend = build_search_backend(cfg=cfg, embedder=embed_client)
     global_indices = GlobalIndices(backend=search_backend)  # to be set up later as needed
 
     container = DefaultContainer(

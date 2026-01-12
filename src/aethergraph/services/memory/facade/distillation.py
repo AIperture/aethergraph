@@ -2,11 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from aethergraph.contracts.services.memory import Event
-
 # Assuming this external util exists based on original imports
 from ..utils import _summary_prefix
-from .utils import now_iso, stable_event_id
 
 if TYPE_CHECKING:
     from .types import MemoryFacadeInterface
@@ -115,15 +112,54 @@ class DistillationMixin:
                 min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
             )
 
-        return await d.distill(
+        result = await d.distill(
             run_id=self.run_id,
             timeline_id=self.timeline_id,
             scope_id=scope_id or self.memory_scope_id,
             hotlog=self.hotlog,
-            persistence=self.persistence,
-            indices=self.indices,
             docs=self.docs,
         )
+
+        # If nothing returned, return empty dict
+        if not result:
+            return {}
+
+        # Record the summary as a memory event via record_raw
+        preview = result.get("preview", "")
+        num_events = result.get("num_events", 0)
+        time_window = result.get("time_window", {})
+
+        # Use a different stage + tags depending on LLM or not
+        stage = "summary_llm" if use_llm else "summary"
+        tags = ["summary", summary_tag]
+        if use_llm:
+            tags.append("llm")
+
+        evt = await self.record_raw(
+            base={
+                "kind": summary_kind,  # e.g. "long_term_summary"
+                "stage": stage,  # "summary_llm" or "summary"
+                "tags": tags,
+                "data": {
+                    "summary_doc_id": result.get("summary_doc_id"),
+                    "summary_tag": summary_tag,
+                    "time_window": time_window,
+                    "num_events": num_events,
+                },
+                "scope_id": scope_id,
+                # run_id / graph_id / node_id / session_id / user/org/client
+                # etc. are filled in by record_raw from self.scope.
+                "severity": 2,
+                # optional: slight bias; record_raw will compute a default signal if None
+                "signal": 0.7 if use_llm else None,
+            },
+            text=preview,
+            metrics={"num_events": num_events},
+        )
+
+        # Optionally return the event_id with the result
+        result["event_id"] = evt.event_id
+        return result
 
     async def distill_meta_summary(
         self,
@@ -217,15 +253,43 @@ class DistillationMixin:
             max_summaries=max_summaries,
             min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
         )
-        return await d.distill(
+        result = await d.distill(
             run_id=self.run_id,
             timeline_id=self.timeline_id,
             scope_id=scope_id or self.memory_scope_id,
             hotlog=self.hotlog,
-            persistence=self.persistence,
-            indices=self.indices,
             docs=self.docs,
         )
+
+        # If nothing returned, return empty dict
+        if not result:
+            return {}
+        # Record the meta-summary as a memory event via record_raw
+        preview = result.get("preview", "")
+        num_summaries = result.get("num_source_summaries", 0)
+        time_window = result.get("time_window", {})
+        evt = await self.record_raw(
+            base={
+                "kind": summary_kind,  # e.g. "meta_summary"
+                "stage": "meta_summary_llm",
+                "tags": ["summary", "llm", summary_tag],
+                "data": {
+                    "summary_doc_id": result.get("summary_doc_id"),
+                    "summary_tag": summary_tag,
+                    "time_window": time_window,
+                    "num_source_summaries": num_summaries,
+                },
+                "scope_id": scope_id,
+                # run_id / graph_id / node_id / session_id / user/org/client
+                # etc. are filled in by record_raw from self.scope.
+                "severity": 2,
+                "signal": 0.8,
+            },
+            text=preview,
+            metrics={"num_source_summaries": num_summaries},
+        )
+        result["event_id"] = evt.event_id
+        return result
 
     async def load_last_summary(
         self,
@@ -393,32 +457,23 @@ class DistillationMixin:
         if not summary:
             return None
 
-        text = summary.get("text") or ""
+        text = summary.get("text") or summary.get("summary") or ""  # try both fields
         preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
 
-        evt = Event(
-            scope_id=self.memory_scope_id or self.run_id,
-            event_id=stable_event_id(
-                {
-                    "ts": now_iso(),
-                    "run_id": self.run_id,
-                    "kind": f"{summary_kind}_hydrate",
-                    "summary_tag": summary_tag,
-                    "preview": preview[:200],
-                }
-            ),
-            ts=now_iso(),
-            run_id=self.run_id,
-            kind=f"{summary_kind}_hydrate",
-            stage="hydrate",
+        await self.record_raw(
+            base={
+                "kind": f"{summary_kind}_hydrate",
+                "stage": "hydrate",
+                "tags": ["summary", "hydrate", summary_tag],
+                "data": {"summary": summary},
+                "scope_id": scope_id,
+                # run_id / graph_id / node_id / session_id / user/org/client
+                # etc. are filled in by record_raw from self.scope.
+                "severity": 1,
+                "signal": 0.4,
+            },
             text=preview,
-            tags=["summary", "hydrate", summary_tag],
-            data={"summary": summary},
             metrics={"num_events": summary.get("num_events", 0)},
-            severity=1,
-            signal=0.4,
         )
 
-        await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
-        await self.persistence.append_event(self.timeline_id, evt)
         return summary

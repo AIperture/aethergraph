@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -128,6 +128,37 @@ class ArtifactFacade:
             a.session_id = a.session_id or dims.get("session_id")
             # run_id / graph_id / node_id are already set
 
+        # 1.1) Normalize timestamp: ensure a.created_at is a UTC datetime
+        created_dt: datetime
+        if isinstance(a.created_at, datetime):
+            if a.created_at.tzinfo is None:
+                created_dt = a.created_at.replace(tzinfo=timezone.utc)
+            else:
+                created_dt = a.created_at.astimezone(timezone.utc)
+        elif isinstance(a.created_at, str):
+            # Best-effort parse; if it fails, fall back to "now"
+            try:
+                # Accept either Z-suffixed or offset ISO
+                if a.created_at.endswith("Z"):
+                    created_dt = datetime.fromisoformat(a.created_at.replace("Z", "+00:00"))
+                else:
+                    created_dt = datetime.fromisoformat(a.created_at)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                else:
+                    created_dt = created_dt.astimezone(timezone.utc)
+            except Exception:
+                created_dt = datetime.now(timezone.utc)
+        else:
+            # No timestamp provided → use now
+            created_dt = datetime.now(timezone.utc)
+
+        # Persist normalized timestamp back onto the artifact
+        a.created_at = created_dt
+        # Canonical forms:
+        ts_iso = created_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        created_at_ts = created_dt.timestamp()
+
         # 2) Record in index + occurrence log
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
@@ -136,7 +167,6 @@ class ArtifactFacade:
         # 2.1) Wire artifact text into ScopedIndices for searchability
         if self.scoped_indices is not None and self.scoped_indices.backend is not None:
             try:
-                print("⚠️ Indexing artifact in ScopedIndices:", a.artifact_id)
                 # Build a simple text blob from labels, metrics, and kind
                 # Build text blob
                 parts: list[str] = []
@@ -147,14 +177,6 @@ class ArtifactFacade:
                 if a.metrics:
                     parts.append("; ".join(f"{k}: {v}" for k, v in a.metrics.items()))
                 text = " ".join(parts).strip()
-
-                # Determine timestamps
-                if isinstance(a.created_at, datetime):
-                    ts = a.created_at.isoformat()
-                    created_at_ts = a.created_at.timestamp()
-                else:
-                    ts = str(a.created_at) if a.created_at is not None else None
-                    created_at_ts = None  # fine, optional
 
                 extra_meta: dict[str, Any] = {
                     "run_id": a.run_id,
@@ -173,8 +195,8 @@ class ArtifactFacade:
                     scope=self.scope,
                     kind="artifact",
                     source="artifact_index",
-                    ts=ts,
-                    created_at_ts=created_at_ts,
+                    ts=ts_iso,  # human-readable ISO
+                    created_at_ts=created_at_ts,  # numeric timestamp
                     extra=extra_meta,
                 )
 
@@ -184,7 +206,6 @@ class ArtifactFacade:
                     text=text,
                     metadata=meta,
                 )
-                print("✅ Indexed artifact in ScopedIndices:", a.artifact_id)
             except Exception:
                 import logging
 
@@ -221,18 +242,6 @@ class ArtifactFacade:
         except Exception:
             return  # outside runtime context, nothing to do
 
-        # Normalize timestamp
-        ts: datetime | None
-        if isinstance(a.created_at, datetime):
-            ts = a.created_at
-        elif isinstance(a.created_at, str):
-            try:
-                ts = datetime.fromisoformat(a.created_at)
-            except Exception:
-                ts = None
-        else:
-            ts = None
-
         # Update run metadata
         run_store = getattr(services, "run_store", None)
         if run_store is not None and a.run_id:
@@ -241,7 +250,7 @@ class ArtifactFacade:
                 await record_artifact(
                     a.run_id,
                     artifact_id=a.artifact_id,
-                    created_at=ts,
+                    created_at=created_dt,
                 )
 
         # Update session metadata
@@ -252,7 +261,7 @@ class ArtifactFacade:
             if callable(sess_record_artifact):
                 await sess_record_artifact(
                     session_id,
-                    created_at=ts,
+                    created_at=created_dt,
                 )
 
     # ---------- core staging/ingest ----------

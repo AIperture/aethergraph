@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
@@ -151,7 +152,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         Returns:
             Event: The fully constructed and persisted `Event` object.
         """
-        ts = now_iso()
+        ts_iso = now_iso()
+        ts_num = time.time()  # numeric timestamp for created_at_ts
 
         # Merge Scope dimensions
         dims: dict[str, str] = {}
@@ -189,7 +191,7 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
 
         eid = stable_event_id(
             {
-                "ts": ts,
+                "ts": ts_iso,
                 "run_id": base["run_id"],
                 "kind": kind,
                 "text": (text or "")[:6000],
@@ -199,7 +201,7 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
 
         evt = Event(
             event_id=eid,
-            ts=ts,
+            ts=ts_iso,
             run_id=run_id,
             scope_id=scope_id,
             user_id=user_id,
@@ -234,7 +236,7 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
                 kind_val = getattr(evt.kind, "value", str(evt.kind))
                 extra_meta = {
                     "run_id": evt.run_id,
-                    "scope_id": self.memory_scope_id,
+                    "scope_id": evt.scope_id,
                     "session_id": evt.session_id,
                     "graph_id": evt.graph_id,
                     "node_id": evt.node_id,
@@ -250,8 +252,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
                     scope=self.scope,
                     kind=kind_val,
                     source="memory",
-                    ts=evt.ts,
-                    created_at_ts=None,  # or parse to timestamp if you want ordering
+                    ts=ts_iso,
+                    created_at_ts=ts_num,
                     extra=extra_meta,
                 )
 

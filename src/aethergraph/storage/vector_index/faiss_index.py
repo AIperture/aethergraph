@@ -148,10 +148,29 @@ class FAISSVectorIndex(VectorIndex):
         corpus_id: str,
         query_vec: list[float],
         k: int,
+        where: dict[str, Any] | None = None,
+        max_candidates: int | None = None,
+        created_at_min: float | None = None,
+        created_at_max: float | None = None,
     ) -> list[dict[str, Any]]:
+        """
+        FAISS-backed search with compatibility to SQLiteVectorIndex:
+
+        - where: equality filters on metadata (e.g., org_id, user_id, scope_id, etc.)
+        - created_at_min / created_at_max: numeric UNIX timestamps for time-range filtering.
+        - max_candidates: how many FAISS hits to retrieve before filtering.
+
+        Since FAISS doesn't support filtering natively, we:
+          1) Search across all vectors (or up to max_candidates).
+          2) Manually filter results by `where` and time bounds.
+        """
+
         if faiss is None:
             raise RuntimeError("FAISS not installed")
 
+        where = where or {}
+
+        # Normalize query vector for cosine similarity
         q = np.asarray([query_vec], dtype=np.float32)
         q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-9)
 
@@ -159,21 +178,70 @@ class FAISSVectorIndex(VectorIndex):
             index, metas = self._load_sync(corpus_id)
             if index is None or not metas:
                 return []
-            D, I = index.search(q, k)  # noqa: E741
-            out: list[dict[str, Any]] = []
+
+            n = len(metas)
+            if n == 0:
+                return []
+
+            # How many neighbors to ask FAISS for:
+            # - k here is "raw_k" from SearchBackend (e.g., top_k * 3)
+            # - max_candidates is an outer cap (e.g., top_k * 50)
+            search_k = min(
+                n,
+                max_candidates or n,
+            )
+            if search_k <= 0:
+                return []
+
+            # Ask FAISS for the top search_k neighbors
+            D, I = index.search(q, search_k)  # noqa: E741
             scores = D[0].tolist()
             idxs = I[0].tolist()
+
+            out: list[dict[str, Any]] = []
+
             for score, idx in zip(scores, idxs, strict=True):
                 if idx < 0 or idx >= len(metas):
                     continue
-                m = metas[idx]
+
+                m = metas[idx]  # {"chunk_id": ..., "meta": {...}}
+                meta = dict(m.get("meta") or {})
+
+                # --- Apply `where` equality filters ----------------------
+                match = True
+                for key, val in where.items():
+                    if val is None:
+                        continue
+                    if meta.get(key) != val:
+                        match = False
+                        break
+                if not match:
+                    continue
+
+                # --- Apply time-window filters ---------------------------
+                cat = meta.get("created_at_ts")
+                # If we have a time bound but no created_at_ts, we treat as non-match
+                if created_at_min is not None and (
+                    cat is None or float(cat) < float(created_at_min)
+                ):
+                    continue
+                if created_at_max is not None and (
+                    cat is None or float(cat) > float(created_at_max)
+                ):
+                    continue
+
                 out.append(
                     {
                         "chunk_id": m["chunk_id"],
                         "score": float(score),
-                        "meta": m["meta"],
+                        "meta": meta,
                     }
                 )
+
+                # Stop once we've collected k matches
+                if len(out) >= k:
+                    break
+
             return out
 
         return await asyncio.to_thread(_search_sync)

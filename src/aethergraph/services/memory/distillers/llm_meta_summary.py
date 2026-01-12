@@ -5,11 +5,10 @@ import json
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indices, Persistence
+from aethergraph.contracts.services.memory import Distiller, Event, HotLog
 from aethergraph.contracts.storage.doc_store import DocStore
-from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.services.memory.distillers.long_term import ar_summary_uri
-from aethergraph.services.memory.facade.utils import now_iso, stable_event_id
+from aethergraph.services.memory.facade.utils import now_iso
 from aethergraph.services.memory.utils import _summary_doc_id, _summary_prefix
 
 """
@@ -211,8 +210,6 @@ class LLMMetaSummaryDistiller(Distiller):
         scope_id: str = None,
         *,
         hotlog: HotLog,
-        persistence: Persistence,
-        indices: Indices,
         docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
@@ -334,65 +331,12 @@ class LLMMetaSummaryDistiller(Distiller):
         text = summary_obj["summary"] or ""
         preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
 
-        evt = Event(
-            event_id="",
-            ts=ts,
-            run_id=run_id,
-            scope_id=scope,
-            kind=self.summary_kind,
-            stage="summary_llm_meta",
-            text=preview,
-            tags=["summary", "llm", self.summary_tag],
-            data={
-                "summary_doc_id": doc_id,
-                "summary_tag": self.summary_tag,
-                "time_window": summary_obj["time_window"],
-                "num_source_summaries": len(kept),
-                "source_summary_kind": self.source_kind,
-                "source_summary_tag": self.source_tag,
-            },
-            metrics={"num_source_summaries": len(kept)},
-            severity=2,
-            signal=0.8,
-        )
-
-        evt.event_id = stable_event_id(
-            {
-                "ts": ts,
-                "run_id": run_id,
-                "kind": self.summary_kind,
-                "summary_tag": self.summary_tag,
-                "preview": preview[:200],
-            }
-        )
-
-        await hotlog.append(timeline_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
-        await persistence.append_event(timeline_id, evt)
-
-        # Metering: record summary event
-        try:
-            meter = current_metering()
-            ctx = current_meter_context.get()
-            user_id = ctx.get("user_id")
-            org_id = ctx.get("org_id")
-
-            await meter.record_event(
-                user_id=user_id,
-                org_id=org_id,
-                run_id=run_id,
-                scope_id=scope,
-                kind=f"memory.{self.summary_kind}",  # e.g. "memory.long_term_summary"
-            )
-        except Exception:
-            import logging
-
-            logger = logging.getLogger("aethergraph.services.memory.distillers.llm_meta_summary")
-            logger.error("Failed to record metering event for llm_meta_summary")
-
         return {
             "summary_doc_id": doc_id,
             "summary_kind": self.summary_kind,
             "summary_tag": self.summary_tag,
             "time_window": summary_obj["time_window"],
-            "num_source_summaries": len(kept),
+            "num_source_summaries": summary_obj["num_source_summaries"],
+            "preview": preview,
+            "ts": ts,
         }

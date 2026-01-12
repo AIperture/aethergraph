@@ -73,8 +73,18 @@ class ScopedIndices:
         query: str,
         top_k: int = 10,
         filters: Mapping[str, Any] | None = None,
+        time_window: str | None = None,
+        created_at_min: float | None = None,
+        created_at_max: float | None = None,
     ) -> list[ScoredItem]:
-        base = self._base_filters()  # org_id, user_id, scope_id
+        """
+        time_window: human-friendly duration like "7d", "24h", "30m"
+            - interpreted as [now - window, now] in created_at_ts.
+            - ignored if created_at_min is explicitly given.
+
+        created_at_min / created_at_max: UNIX timestamps (float).
+        """
+        base = self._base_filters()
         merged: dict[str, Any] = {**base, **(filters or {})}
         merged = {k: v for k, v in merged.items() if v is not None}
 
@@ -83,6 +93,9 @@ class ScopedIndices:
             query=query,
             top_k=top_k,
             filters=merged,
+            time_window=time_window,
+            created_at_min=created_at_min,
+            created_at_max=created_at_max,
         )
 
     # ergonomic helpers (optional but nice)
@@ -93,12 +106,18 @@ class ScopedIndices:
         *,
         top_k: int = 20,
         filters: Mapping[str, Any] | None = None,
+        time_window: str | None = None,
+        created_at_min: float | None = None,
+        created_at_max: float | None = None,
     ) -> list[ScoredItem]:
         return await self.search(
             corpus="event",
             query=query,
             top_k=top_k,
             filters=filters,
+            time_window=time_window,
+            created_at_min=created_at_min,
+            created_at_max=created_at_max,
         )
 
     async def search_artifacts(
@@ -107,10 +126,16 @@ class ScopedIndices:
         *,
         top_k: int = 20,
         filters: Mapping[str, Any] | None = None,
+        time_window: str | None = None,
+        created_at_min: float | None = None,
+        created_at_max: float | None = None,
     ) -> list[ScoredItem]:
         return await self.search(
             corpus="artifact",
             query=query,
             top_k=top_k,
             filters=filters,
+            time_window=time_window,
+            created_at_min=created_at_min,
+            created_at_max=created_at_max,
         )

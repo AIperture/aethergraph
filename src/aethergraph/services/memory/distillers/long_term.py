@@ -4,12 +4,10 @@ from collections.abc import Iterable
 import time
 from typing import Any
 
-from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indices, Persistence
+from aethergraph.contracts.services.memory import Distiller, Event, HotLog
 
 # re-use stable_event_id from the MemoryFacade module
 from aethergraph.contracts.storage.doc_store import DocStore
-from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
-from aethergraph.services.memory.facade.utils import stable_event_id
 from aethergraph.services.memory.utils import _summary_doc_id
 
 
@@ -98,8 +96,6 @@ class LongTermSummarizer(Distiller):
         scope_id: str = None,
         *,
         hotlog: HotLog,
-        persistence: Persistence,
-        indices: Indices,
         docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
@@ -110,7 +106,7 @@ class LongTermSummarizer(Distiller):
           3) Build a digest:
              - simple text transcript (role: text)
              - metadata: ts range, num events
-          4) Save JSON summary via Persistence.save_json(file://...).
+          4) Save JSON summary via DocStore.put(...).
           5) Log a summary Event to hotlog + persistence, with data.summary_uri.
         """
         # 1) fetch more than we might keep to give filter some slack
@@ -163,63 +159,12 @@ class LongTermSummarizer(Distiller):
         # NOTE: we only store a preview in text and full summary in data["summary_uri"]
         preview = digest_text[:2000] + (" …[truncated]" if len(digest_text) > 2000 else "")
 
-        evt = Event(
-            event_id="",  # fill below
-            ts=ts,
-            run_id=run_id,
-            scope_id=scope,
-            kind=self.summary_kind,
-            stage="summary",
-            text=preview,
-            tags=["summary", self.summary_tag],
-            data={
-                "summary_doc_id": doc_id,
-                "summary_tag": self.summary_tag,
-                "time_window": summary["time_window"],
-                "num_events": len(kept),
-            },
-            metrics={"num_events": len(kept)},
-            severity=1,
-            signal=0.5,
-        )
-
-        evt.event_id = stable_event_id(
-            {
-                "ts": ts,
-                "run_id": run_id,
-                "kind": self.summary_kind,
-                "summary_tag": self.summary_tag,
-                "text": preview[:200],
-            }
-        )
-
-        await hotlog.append(timeline_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
-        await persistence.append_event(timeline_id, evt)
-
-        # Metering: record summary event
-        try:
-            meter = current_metering()
-            ctx = current_meter_context.get()
-            user_id = ctx.get("user_id")
-            org_id = ctx.get("org_id")
-
-            await meter.record_event(
-                user_id=user_id,
-                org_id=org_id,
-                run_id=run_id,
-                scope_id=scope,
-                kind=f"memory.{self.summary_kind}",  # e.g. "memory.long_term_summary"
-            )
-        except Exception:
-            import logging
-
-            logger = logging.getLogger("aethergraph.services.memory.distillers.long_term")
-            logger.error("Failed to record metering event for long_term_summary")
-
         return {
             "summary_doc_id": doc_id,
             "summary_kind": self.summary_kind,
             "summary_tag": self.summary_tag,
             "time_window": summary["time_window"],
             "num_events": len(kept),
+            "preview": preview,
+            "ts": ts,
         }
