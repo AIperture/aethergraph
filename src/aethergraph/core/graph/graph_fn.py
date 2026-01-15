@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import inspect
-from typing import Any
+from typing import Any, get_type_hints
 
+from aethergraph.core.graph.action_spec import IOSlot, _map_py_type_to_json_type
 from aethergraph.core.runtime.run_registration import RunRegistrationGuard
 from aethergraph.services.registry.agent_app_meta import (
     build_agent_meta,
@@ -113,6 +114,68 @@ class GraphFunction:
 
         return run(self, inputs)
 
+    def io_signature(self) -> dict[str, list[IOSlot]]:
+        """
+        Infer typed IO based on decorator inputs/outputs and Python annotations.
+
+        Rule of thumbs:
+        - Inputs: use decorator list; if missing, use all params except 'context'.
+        - Outputs: use decorator list; if missing, use return annotation if any.
+
+        """
+        sig = inspect.signature(self.fn)
+        hints = get_type_hints(self.fn)
+
+        # --- Inputs ---
+        if self.inputs is not None:
+            input_names = list(self.inputs)
+        else:
+            # fallback: all params except 'context'
+            input_names = [p for p in sig.parameters if p != "context"]
+
+        input_slots: list[IOSlot] = []
+        for name in input_names:
+            param = sig.parameters.get(name)
+            if param is None:
+                # decorator said it's a input but not in signature
+                # treat as unknown, required
+                input_slots.append(IOSlot(name=name, type=None, required=True))
+                continue
+
+            anno = hints.get(name)
+            j_type = _map_py_type_to_json_type(anno) if anno is not None else None
+            required = param.default is inspect._empty
+            default = None if required else param.default
+
+            input_slots.append(
+                IOSlot(
+                    name=name,
+                    type=j_type,
+                    required=required,
+                    default=default,
+                )
+            )
+
+        # --- Outputs ---
+        output_slots: list[IOSlot] = []
+        out_names = list(self.outputs or [])
+
+        ret_anno = hints.get("return")
+        if out_names:
+            if len(out_names) == 1 and ret_anno is not None:
+                j_type = _map_py_type_to_json_type(ret_anno)
+                output_slots.append(IOSlot(name=out_names[0], type=j_type, required=True))
+            else:
+                # Multi-output or no return type: names only
+                for name in out_names:
+                    output_slots.append(IOSlot(name=name, type=None, required=True))
+        elif ret_anno is not None:
+            # No explicit output names but we *do* know the type: create a single output
+            j_type = _map_py_type_to_json_type(ret_anno)
+            output_slots.append(IOSlot(name="result", type=j_type, required=True))
+
+        return {"inputs": input_slots, "outputs": output_slots}
+
 
 def _is_ref(x: object) -> bool:
     return isinstance(x, dict) and x.get("_type") == "ref" and "from" in x and "key" in x
@@ -207,6 +270,7 @@ def graph_fn(
     tags: list[str] | None = None,
     as_agent: dict[str, Any] | None = None,
     as_app: dict[str, Any] | None = None,
+    description: str | None = None,
 ) -> Callable[[Callable], GraphFunction]:
     """
     Decorator to define a graph function and optionally register it as an agent or app.
@@ -275,6 +339,7 @@ def graph_fn(
         tags: List of string tags for discovery and categorization.
         as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
         as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+        description: Optional human-readable description of the graph function.
 
     Returns:
         Callable: A decorator that wraps the function as a `GraphFunction` and registers it
@@ -307,11 +372,19 @@ def graph_fn(
             return gf
 
         base_tags = tags or []
+
+        # prefer explicit description; then docstring; else name
+        doc_desc = inspect.getdoc(fn) or None
+        eff_description = description or doc_desc or name
+
         graph_meta: dict[str, Any] = {
             "kind": "graphfn",
             "entrypoint": entrypoint,
-            "flow_id": flow_id or name,
+            "flow_id": flow_id,
             "tags": base_tags,
+            "description": eff_description,
+            "inputs": inputs,
+            "outputs": outputs,
         }
 
         registry.register(

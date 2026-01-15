@@ -20,6 +20,7 @@ def graphify(
     tags: list[str] | None = None,
     as_agent: dict[str, Any] | None = None,
     as_app: dict[str, Any] | None = None,
+    description: str | None = None,
 ):
     """
     Decorator to define a `TaskGraph` and optionally register it as an agent or app.
@@ -88,6 +89,7 @@ def graphify(
         tags: List of string tags for discovery and categorization.
         as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
         as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+        description: Optional human-readable description of the graph function.
 
     Returns:
         TaskGraph: A decorator that transforms a function into a TaskGraph with the specified configuration.
@@ -195,11 +197,18 @@ def graphify(
             return _build
 
         base_tags = tags or []
+
+        doc_desc = inspect.getdoc(fn) or None
+        eff_description = description or doc_desc or name
+
         graph_meta: dict[str, Any] = {
             "kind": "graph",
             "entrypoint": entrypoint,
-            "flow_id": flow_id or name,
+            "flow_id": flow_id,
             "tags": base_tags,
+            "description": eff_description,
+            "inputs": inputs,
+            "outputs": outputs,
         }
 
         registry.register(
