@@ -31,7 +31,8 @@ class Event:
     user_id: str | None = None
     org_id: str | None = None
     client_id: str | None = None
-    # app_id: str | None = None
+    app_id: str | None = None
+    agent_id: str | None = None
     session_id: str | None = None
 
     # --------- Core semantics ---------
@@ -63,16 +64,21 @@ class Event:
 
 
 class HotLog(Protocol):
-    async def append(self, run_id: str, evt: Event, *, ttl_s: int, limit: int) -> None: ...
+    async def append(self, scope_id: str, evt: Event, *, ttl_s: int, limit: int) -> None: ...
     async def recent(
-        self, run_id: str, *, kinds: list[str] | None = None, limit: int = 50
+        self, scope_id: str, *, kinds: list[str] | None = None, limit: int = 50
     ) -> list[Event]: ...
 
 
 class Persistence(Protocol):
-    async def append_event(self, run_id: str, evt: Event) -> None: ...
+    async def append_event(self, scope_id: str, evt: Event) -> None: ...
     async def save_json(self, uri: str, obj: dict[str, Any]) -> None: ...
     async def load_json(self, uri: str) -> dict[str, Any]: ...
+    async def get_events_by_ids(
+        self,
+        scope_id: str,
+        event_ids: list[str],
+    ) -> list[Event]: ...
 
 
 class Indices(Protocol):
@@ -87,7 +93,7 @@ class Indices(Protocol):
 class Distiller(Protocol):
     async def distill(
         self,
-        run_id: str,
+        scope_id: str,
         *,
         hotlog: HotLog,
         persistence: Persistence,

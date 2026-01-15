@@ -30,9 +30,9 @@ class FSPersistence(Persistence):
 
     # ---------- Event log (append-only JSONL) ----------
 
-    async def append_event(self, run_id: str, evt: Event) -> None:
+    async def append_event(self, scope_id: str, evt: Event) -> None:
         day = time.strftime("%Y-%m-%d", time.gmtime())
-        path = self.base_dir / "mem" / run_id / "events" / f"{day}.jsonl"
+        path = self.base_dir / "mem" / scope_id / "events" / f"{day}.jsonl"
 
         def _write() -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,3 +116,33 @@ class FSPersistence(Persistence):
                 return json.load(f)
 
         return await asyncio.to_thread(_read)
+
+    async def get_events_by_ids(
+        self,
+        scope_id: str,
+        event_ids: list[str],
+    ) -> list[Event]:
+        """
+        Fetch events for a given scope_id (timeline) by event_id.
+        """
+        id_set = set(event_ids)
+        found: list[Event] = []
+
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        path = self.base_dir / "mem" / scope_id / "events" / f"{day}.jsonl"
+
+        if not path.exists():
+            return found
+
+        def _read() -> list[Event]:
+            results: list[Event] = []
+            with self._lock, path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    data = json.loads(line)
+                    if data.get("event_id") in id_set:
+                        evt = Event(**data)
+                        results.append(evt)
+            return results
+
+        found = await asyncio.to_thread(_read)
+        return found

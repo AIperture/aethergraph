@@ -12,14 +12,15 @@ from urllib.parse import urlparse
 
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
+from aethergraph.contracts.storage.search_backend import ScoredItem
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.artifacts.paths import _from_uri_or_path
+from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearchResult, ArtifactView
+from aethergraph.services.artifacts.utils import _infer_content_mode
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.scope.scope import Scope
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
-
-ArtifactView = Literal["node", "graph", "run", "all"]
 
 
 class ArtifactFacade:
@@ -187,12 +188,15 @@ class ArtifactFacade:
                     "pinned": a.pinned,
                 }
 
+                # Add artifact kind as explicit metadata field
+                if a.kind:
+                    extra_meta["artifact_kind"] = a.kind
+
                 # Flatten labels last so they can override if needed
                 if a.labels:
                     extra_meta.update(a.labels)
 
                 meta = build_index_meta_from_scope(
-                    scope=self.scope,
                     kind="artifact",
                     source="artifact_index",
                     ts=ts_iso,  # human-readable ISO
@@ -895,6 +899,53 @@ class ArtifactFacade:
         text = await self.load_text_by_id(artifact_id, encoding=encoding, errors=errors)
         return json.loads(text)
 
+    async def load_content(
+        self,
+        artifact_id: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+        max_bytes: int | None = None,
+    ) -> ArtifactContent:
+        """
+        Docstring for load_content
+
+        :param self: Description
+        :param artifact_id: Description
+        :type artifact_id: str
+        :param encoding: Description
+        :type encoding: str
+        :param errors: Description
+        :type errors: str
+        :param max_bytes: Description
+        :type max_bytes: int | None
+        :return: Description
+        :rtype: ArtifactContent
+        """
+        art = await self.get_by_id(artifact_id=artifact_id)
+        if art is None:
+            raise FileNotFoundError(f"Artifact {artifact_id} not found")
+
+        mode = _infer_content_mode(art)
+
+        def maybe_truncate(data: bytes) -> bytes:
+            if max_bytes is not None and len(data) > max_bytes:
+                return data[:max_bytes]
+            return data
+
+        if mode == "json":
+            data = await self.load_json_by_id(artifact_id, encoding=encoding, errors=errors)
+            return ArtifactContent(artifact=art, mode=mode, json=data)
+
+        if mode == "text":
+            text = await self.load_text_by_id(artifact_id, encoding=encoding, errors=errors)
+            return ArtifactContent(artifact=art, mode=mode, text=text)
+
+        # raw bytes
+        raw = await self.load_bytes_by_id(artifact_id)
+        raw = maybe_truncate(raw)
+        return ArtifactContent(artifact=art, mode="bytes", data=raw)
+
     async def as_local_file_by_id(
         self,
         artifact_id: str,
@@ -1350,6 +1401,19 @@ class ArtifactFacade:
             None
         """
         await self.index.pin(artifact_id, pinned=pinned)
+
+    # ---------- search result hydration ----------
+    async def fetch_artifacts_for_search_results(
+        self,
+        scored_items: list[ScoredItem],
+        corpus: str = "artifact",
+    ) -> list[ArtifactSearchResult]:
+        artifact_items = [it for it in scored_items if it.corpus == corpus]
+        results: list[ArtifactSearchResult] = []
+        for it in artifact_items:
+            art = await self.get_by_id(it.item_id)
+            results.append(ArtifactSearchResult(item=it, artifact=art))
+        return results
 
     # ---------- internal helpers ----------
     async def _record_simple(self, a: Artifact) -> None:

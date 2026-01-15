@@ -234,6 +234,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         if self.scoped_indices is not None and self.scoped_indices.backend is not None:
             try:
                 kind_val = getattr(evt.kind, "value", str(evt.kind))
+                preview = (text or "")[:500] if text else ""
+
                 extra_meta = {
                     "run_id": evt.run_id,
                     "scope_id": evt.scope_id,
@@ -246,10 +248,11 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
                     "signal": evt.signal,
                     "tool": evt.tool,
                     "topic": evt.topic,
+                    "preview": preview,  # short text preview
+                    "timeline_id": self.timeline_id,
                 }
 
                 meta = build_index_meta_from_scope(
-                    scope=self.scope,
                     kind=kind_val,
                     source="memory",
                     ts=ts_iso,

@@ -136,9 +136,6 @@ class ChannelSession:
         if not mem:
             return
 
-        print(
-            f"📝 ChannelSession: logging chat message to memory (role={role}) with message (text={text})"
-        )
         await mem.record_chat(
             role,
             text,

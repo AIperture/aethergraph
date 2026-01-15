@@ -110,7 +110,8 @@ class ScopedIndices:
         created_at_min: float | None = None,
         created_at_max: float | None = None,
     ) -> list[ScoredItem]:
-        return await self.search(
+        print("🍏 Searching events with filters:", filters)
+        items = await self.search(
             corpus="event",
             query=query,
             top_k=top_k,
@@ -119,6 +120,8 @@ class ScopedIndices:
             created_at_min=created_at_min,
             created_at_max=created_at_max,
         )
+        print("🍏 Found", len(items), "event results")
+        return items
 
     async def search_artifacts(
         self,

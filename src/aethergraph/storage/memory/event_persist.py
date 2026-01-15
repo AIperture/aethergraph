@@ -47,9 +47,9 @@ class EventLogPersistence(Persistence):
         return f"{self._prefix}{doc_id}"
 
     # --------- API ---------
-    async def append_event(self, run_id: str, evt: Event) -> None:
+    async def append_event(self, scope_id: str, evt: Event) -> None:
         payload = asdict(evt)
-        payload.setdefault("scope_id", run_id)
+        payload.setdefault("scope_id", scope_id)
         payload.setdefault("kind", "memory")
         # you can add tags like ["mem"] if useful
         await self._log.append(payload)
@@ -66,3 +66,43 @@ class EventLogPersistence(Persistence):
         if doc is None:
             raise FileNotFoundError(f"Memory JSON not found for URI: {uri}")
         return doc
+
+    async def get_events_by_ids(
+        self,
+        scope_id: str,
+        event_ids: list[str],
+    ) -> list[Event]:
+        """
+        Fetch events for a given scope_id (timeline) by event_id.
+
+        Implementation v0: use EventLog.query and filter in Python.
+        For moderate timeline sizes and small event_ids lists, this is fine.
+        Later, you can optimize by adding a direct get_many API on EventLog
+        or indexing by (scope_id, event_id).
+        """
+        if not event_ids:
+            return []
+
+        # Fetch all events for the scope_id; TODO: add reasonable limits / paging
+        rows = await self._log.query(
+            scope_id=scope_id,
+            since=None,
+            until=None,
+            kinds=None,
+            tags=None,
+            limit=None,
+            offset=0,
+        )
+
+        by_id: dict[str, Event] = {}
+        for row in rows:
+            eid = row.get("event_id")
+            if eid:
+                by_id[eid] = row
+
+        result: list[Event] = []
+        for eid in event_ids:
+            row = by_id.get(eid)
+            if row is not None:
+                result.append(Event(**row))
+        return result

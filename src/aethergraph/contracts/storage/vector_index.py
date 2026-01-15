@@ -72,6 +72,12 @@ PROMOTED_FIELDS = {
 
 @dataclass
 class IndexMeta:
+    """
+    NOTE: When used with ScopedIndices, identity fields (scope_id, user_id, org_id, etc.)
+    are usually left as None here and provided instead by scope.rag_labels(). In that
+    common path, this struct is primarily for type-specific metadata (kind, source, ts, ...).
+    """
+
     # tenant / scope
     scope_id: str | None = None
     user_id: str | None = None

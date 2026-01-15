@@ -63,12 +63,19 @@ class ScopeFactory:
         session_id: str | None = None,
         flow_id: str | None = None,
     ) -> Scope:
-        s = self.base_from_identity(identity)
-        s.run_id = run_id
-        s.graph_id = graph_id
-        s.session_id = session_id
-        s.flow_id = flow_id
-        return s
+        base = self.base_from_identity(identity)
+        return Scope(
+            org_id=base.org_id,
+            user_id=base.user_id,
+            client_id=base.client_id,
+            mode=base.mode,
+            app_id=base.app_id,
+            session_id=session_id,
+            run_id=run_id,
+            graph_id=graph_id,
+            node_id=None,
+            flow_id=flow_id,
+        )
 
     def for_memory_custom_override(
         self,

@@ -29,3 +29,11 @@ class EventLog(Protocol):
         tags: list[str] | None = None,  # filter by tags
         offset: int = 0,  # pagination offset
     ) -> list[dict]: ...
+
+    async def get_many(
+        self,
+        scope_id: str,
+        event_ids: list[str],
+    ) -> list[dict]: ...
+
+    """Fetch events for a given scope_id (timeline) by event_id."""

@@ -6,6 +6,9 @@ import json
 import os
 from pathlib import Path
 
+from aethergraph.contracts.services.artifacts import Artifact
+from aethergraph.services.artifacts.types import ContentMode
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -122,3 +125,42 @@ def _maybe_cleanup_tmp_parent(tmp_root: str, path: str):
             parent = os.path.dirname(parent)
     except Exception:
         pass
+
+
+def _infer_content_mode(artifact: Artifact) -> ContentMode:
+    """
+    Decide how to load this artifact: as JSON, text, or raw bytes.
+
+    Priority:
+    1) artifact.kind
+    2) filename extension
+    3) default to bytes
+    """
+    k = (getattr(artifact, "kind", None) or "").lower()
+
+    # 1) Use explicit kind when we know what to do
+    if k == "json":
+        return "json"
+    if k in {"text", "log", "note"}:
+        return "text"
+    if k in {"image", "plot", "figure"}:
+        return "bytes"  # bytes → caller decides what to do with an image
+
+    # 2) Fall back to filename extension
+    filename = None
+    if getattr(artifact, "labels", None):
+        filename = artifact.labels.get("filename")
+    if not filename:
+        filename = getattr(artifact, "name", None)
+
+    if filename:
+        ext = Path(filename).suffix.lower()
+        if ext == ".json":
+            return "json"
+        if ext in {".txt", ".md", ".log", ".csv"}:
+            return "text"
+        if ext in {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}:
+            return "bytes"
+
+    # 3) Unknown → safest is bytes
+    return "bytes"

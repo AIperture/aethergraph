@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+from aethergraph.contracts.storage.search_backend import ScoredItem
 
 if TYPE_CHECKING:
     from aethergraph.contracts.services.memory import Event
@@ -9,8 +11,51 @@ if TYPE_CHECKING:
     from .types import MemoryFacadeInterface
 
 
+class EventSearchResult(NamedTuple):
+    item: ScoredItem
+    event: Event | None
+
+    @property
+    def score(self) -> float:
+        return self.item.score
+
+
 class RetrievalMixin:
     """Methods for retrieving events and values."""
+
+    async def get_event(self, event_id: str) -> Event | None:
+        """
+        Retrieve a specific event by its ID.
+
+        This method fetches an event corresponding to the provided event ID.
+
+        Args:
+            event_id: The unique identifier of the event to retrieve.
+
+        Returns:
+            Event | None: The event object if found; otherwise, None.
+
+        Notes:
+            This method interacts with the underlying Persistence service to fetch
+            the event associated with the current timeline. If no event is found
+            with the given ID, it returns None.
+        """
+        # 1) Try hotlog
+        recent = await self.hotlog.recent(
+            self.timeline_id,
+            kinds=None,
+            limit=self.hot_limit,
+        )
+        for e in recent:
+            if e.event_id == event_id:
+                return e
+
+        # 2) Fallback to persistence
+        if hasattr(self.persistence, "get_events_by_ids"):
+            events = await self.persistence.get_events_by_ids(self.timeline_id, [event_id])
+            return events[0] if events else None
+
+        return None
 
     async def recent(
         self: MemoryFacadeInterface, *, kinds: list[str] | None = None, limit: int = 50
@@ -137,3 +182,42 @@ class RetrievalMixin:
         # if not (self.llm and any(e.embedding for e in events)): return lexical_hits or events
         # ... logic ...
         return lexical_hits or events
+
+    async def fetch_events_for_search_results(
+        self,
+        scored_items: list[ScoredItem],
+        corpus: str = "event",
+    ) -> list[EventSearchResult]:
+        """
+        Given a list of ScoredItems from a search, fetch the corresponding Event objects.
+        """
+
+        # Filter to event corpus
+        event_items = [item for item in scored_items if item.corpus == corpus]
+        if not event_items:
+            return []
+
+        ids = [it.item_id for it in event_items]
+
+        # 1) Try hotlog first
+        recent = await self.hotlog.recent(
+            self.timeline_id,
+            kinds=None,
+            limit=1,
+            # limit=self.hot_limit,
+        )
+        by_id: dict[str, Event] = {e.event_id: e for e in recent if e.event_id in ids}
+
+        # 2) Fallback to persistence for misses
+        missing_ids = [eid for eid in ids if eid not in by_id]
+        if missing_ids and hasattr(self.persistence, "get_events_by_ids"):
+            persisted = await self.persistence.get_events_by_ids(self.timeline_id, missing_ids)
+            for e in persisted:
+                by_id[e.event_id] = e
+
+        # 3) Build results
+        results: list[EventSearchResult] = []
+        for item in event_items:
+            evt = by_id.get(item.item_id)
+            results.append(EventSearchResult(item=item, event=evt))
+        return results

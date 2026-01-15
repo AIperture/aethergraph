@@ -14,6 +14,7 @@ class Scope:
 
     # App / execution context
     app_id: str | None = None
+    agent_id: str | None = None
     session_id: str | None = None
     run_id: str | None = None
     graph_id: str | None = None
@@ -36,10 +37,13 @@ class Scope:
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
 
-    def artifact_scope_labels(self) -> dict[str, str]:
+    def _base_identity_labels(self) -> dict[str, str]:
         """
-        Labels to attach to every artifact for this scope.
-        These will be mirrored both into Artifact.labels and the index.
+        Docstring for _base_identity_labels
+
+        :param self: Description
+        :return: Description
+        :rtype: dict[str, str]
         """
         out: dict[str, str] = {}
         if self.org_id:
@@ -50,6 +54,8 @@ class Scope:
             out["client_id"] = self.client_id
         if self.app_id:
             out["app_id"] = self.app_id
+        if self.agent_id:
+            out["agent_id"] = self.agent_id
         if self.session_id:
             out["session_id"] = self.session_id
         if self.run_id:
@@ -58,16 +64,21 @@ class Scope:
             out["graph_id"] = self.graph_id
         if self.node_id:
             out["node_id"] = self.node_id
+        if self.flow_id:
+            out["flow_id"] = self.flow_id
+        return out
 
-        # canonicial scope ids
-        if self.session_id:
-            out["scope_id"] = f"session:{self.session_id}"  # session-centric
-        elif self.run_id:
-            out["scope_id"] = f"run:{self.run_id}"  # run-centric for non-session runs
-        elif self.graph_id:
-            out["scope_id"] = f"graph:{self.graph_id}"  # graph-centric for non-run artifacts
-        elif self.node_id:
-            out["scope_id"] = f"node:{self.node_id}"  # node-centric for non-graph artifacts
+    def artifact_scope_labels(self) -> dict[str, str]:
+        """
+        Labels to attach to every artifact for this scope.
+        These will be mirrored both into Artifact.labels and the index.
+        """
+        out: dict[str, str] = {}
+        out.update(self._base_identity_labels())
+
+        # Cononical scope id for artifacts == memory scope id
+        # So filter the memory + artifacts by the same value
+        out["scope_id"] = self.memory_scope_id()
         return out
 
     def metering_dimensions(self) -> dict[str, Any]:
@@ -123,22 +134,7 @@ class Scope:
         but can be any logical scope key.
         """
         out: dict[str, Any] = {}
-        if self.user_id:
-            out["user_id"] = self.user_id
-        if self.org_id:
-            out["org_id"] = self.org_id
-        if self.client_id:
-            out["client_id"] = self.client_id
-        if self.app_id:
-            out["app_id"] = self.app_id
-        if self.session_id:
-            out["session_id"] = self.session_id
-        if self.run_id:
-            out["run_id"] = self.run_id
-        if self.graph_id:
-            out["graph_id"] = self.graph_id
-        if self.node_id:
-            out["node_id"] = self.node_id
+        out.update(self._base_identity_labels())
         if scope_id:
             out["scope_id"] = scope_id
         return out
