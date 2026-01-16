@@ -1,12 +1,43 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any
+from typing import Any, get_origin, get_type_hints
 
+from aethergraph.core.graph.action_spec import _map_py_type_to_json_type
 from aethergraph.services.registry.agent_app_meta import build_agent_meta, build_app_meta
 
 from ..runtime.runtime_registry import current_registry
 from .task_graph import TaskGraph
+
+
+def _normalize_type_hint(ann: Any) -> str:
+    """Convert a Python annotation into a simple string for IO types."""
+    if ann is inspect._empty:
+        return "any"
+
+    origin = get_origin(ann)
+    # args = get_args(ann)
+
+    # Builtins
+    if ann is str:
+        return "string"
+    if ann is int:
+        return "int"
+    if ann is float:
+        return "float"
+    if ann is bool:
+        return "bool"
+    if ann is dict or origin is dict:
+        # e.g. dict[str, float]
+        return "object"
+    if ann in (list, tuple) or origin in (list, tuple):
+        # e.g. list[int] / list[dict[str, float]]
+        return "array"
+    if ann is Any:
+        return "any"
+
+    # Fallback: stringified type name
+    return getattr(ann, "__name__", str(ann))
 
 
 def graphify(
@@ -198,8 +229,36 @@ def graphify(
 
         base_tags = tags or []
 
+        # Effective description
         doc_desc = inspect.getdoc(fn) or None
         eff_description = description or doc_desc or name
+
+        # Infer IO types from annotations if possible
+        try:
+            resolved_hints = get_type_hints(fn)
+        except Exception:
+            # Fallback: use raw __annotations__ if get_type_hints blows up
+            resolved_hints = getattr(fn, "__annotations__", {}) or {}
+
+        # Infer IO types from annotations in a JSON-ish schema
+        input_type_map: dict[str, str] = {}
+        for pname in required_inputs:
+            param = fn_sig.parameters.get(pname)
+            if param is None:
+                continue
+
+            # Prefer resolved type hint; fall back to the raw annotation
+            ann = resolved_hints.get(pname, param.annotation)
+            if ann is inspect._empty:
+                continue
+
+            j = _map_py_type_to_json_type(ann)
+            if j is not None:
+                input_type_map[pname] = j
+
+        # for outputs, we only have the return annotation as a whole
+        output_names = list(outputs or [])
+        output_type_map: dict[str, str] = {n: "any" for n in output_names}
 
         graph_meta: dict[str, Any] = {
             "kind": "graph",
@@ -209,6 +268,10 @@ def graphify(
             "description": eff_description,
             "inputs": inputs,
             "outputs": outputs,
+            "io_types": {
+                "inputs": input_type_map,
+                "outputs": output_type_map,
+            },
         }
 
         registry.register(

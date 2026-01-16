@@ -1,18 +1,23 @@
 # aethergraph/services/planning/graph_io_adapter.py
-
 from __future__ import annotations
+
+from typing import Any
 
 from aethergraph.core.graph.action_spec import IOSlot, _map_py_type_to_json_type
 from aethergraph.core.graph.task_graph import TaskGraph
 
 
-def graph_io_to_slots(graph: TaskGraph) -> dict[str, list[IOSlot]]:
+def graph_io_to_slots(
+    graph: TaskGraph,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, list[IOSlot]]:
     """
-    Adapter: TaskGraph.io_signature() + IOSpec -> {inputs: [...], outputs: [...]}
-    for planner / ActionSpec usage.
+    Adapter: TaskGraph.io_signature() + IOSpec + optional registry meta -> IOSlot lists.
 
-    - This does NOT change TaskGraph.
-    - It is deliberately defensive against multiple shapes.
+    Priority for types:
+      1) registry meta["io_types"]["inputs"/"outputs"]  (set by @graphify)
+      2) ParamSpec.annotation from IOSpec
+      3) None (treated as "any" by planner)
     """
     sig = graph.io_signature(include_values=False)
     io_spec = getattr(graph.spec, "io", None)  # IOSpec if present
@@ -20,9 +25,13 @@ def graph_io_to_slots(graph: TaskGraph) -> dict[str, list[IOSlot]]:
     inputs_info = sig.get("inputs", {}) or {}
     outputs_info = sig.get("outputs", {}) or {}
 
+    # ---- io_types from registry meta (preferred) ----
+    io_types = (meta or {}).get("io_types") or {}
+    input_type_map: dict[str, str] = io_types.get("inputs", {}) or {}
+    output_type_map: dict[str, str] = io_types.get("outputs", {}) or {}
+
     # --- INPUTS ---
 
-    # required can be list[str] *or* dict name->ParamSpec depending on future changes
     req_raw = inputs_info.get("required") or []
     opt_raw = inputs_info.get("optional") or {}
 
@@ -34,56 +43,77 @@ def graph_io_to_slots(graph: TaskGraph) -> dict[str, list[IOSlot]]:
     def _param_for(name: str):
         if io_spec is None:
             return None
-        # io_spec.required & io_spec.optional are dict[str, ParamSpec]
         if hasattr(io_spec, "required") and name in io_spec.required:
             return io_spec.required[name]
         if hasattr(io_spec, "optional") and name in io_spec.optional:
             return io_spec.optional[name]
         return None
 
+    # required inputs
     for name in required_names:
         ps = _param_for(name)
+
+        # 1) type from meta.io_types if present
+        t_from_meta = input_type_map.get(name)
+
+        # 2) else type from ParamSpec.annotation
+        j_type = None
+        default = None
+        description = None
+        required_flag = True
+
         if ps is not None:
             anno = getattr(ps, "annotation", None)
             default = getattr(ps, "default", None)
-            # If ParamSpec has a "required" flag use that, else default to True
             required_flag = getattr(ps, "required", True)
-            j_type = _map_py_type_to_json_type(anno) if anno is not None else None
-            input_slots.append(
-                IOSlot(
-                    name=name,
-                    type=j_type,
-                    required=required_flag,
-                    default=None if required_flag else default,
-                    description=getattr(ps, "description", None),
-                )
-            )
-        else:
-            # No ParamSpec info: just name + required=True
-            input_slots.append(IOSlot(name=name, type=None, required=True))
+            description = getattr(ps, "description", None)
+            if t_from_meta is None and anno is not None:
+                j_type = _map_py_type_to_json_type(anno)
 
+        # final type choice
+        final_type = t_from_meta or j_type
+
+        input_slots.append(
+            IOSlot(
+                name=name,
+                type=final_type,
+                required=required_flag,
+                default=None if required_flag else default,
+                description=description,
+            )
+        )
+
+    # optional inputs
     for name in optional_names:
         ps = _param_for(name)
+
+        t_from_meta = input_type_map.get(name)
+
+        j_type = None
+        default = None
+        description = None
+
         if ps is not None:
             anno = getattr(ps, "annotation", None)
             default = getattr(ps, "default", None)
-            j_type = _map_py_type_to_json_type(anno) if anno is not None else None
-            input_slots.append(
-                IOSlot(
-                    name=name,
-                    type=j_type,
-                    required=False,
-                    default=default,
-                    description=getattr(ps, "description", None),
-                )
+            description = getattr(ps, "description", None)
+            if t_from_meta is None and anno is not None:
+                j_type = _map_py_type_to_json_type(anno)
+
+        final_type = t_from_meta or j_type
+
+        input_slots.append(
+            IOSlot(
+                name=name,
+                type=final_type,
+                required=False,
+                default=default,
+                description=description,
             )
-        else:
-            input_slots.append(IOSlot(name=name, type=None, required=False))
+        )
 
     # --- OUTPUTS ---
 
-    # We expose outputs via IOSpec.expose/expose_bindings, but io_signature
-    # already gave us "keys".
     output_keys = outputs_info.get("keys") or []
     output_slots: list[IOSlot] = []
 
@@ -94,18 +124,27 @@ def graph_io_to_slots(graph: TaskGraph) -> dict[str, list[IOSlot]]:
 
     for name in output_keys:
         ps = _output_param_for(name)
+
+        t_from_meta = output_type_map.get(name)
+
+        j_type = None
+        description = None
+
         if ps is not None:
             anno = getattr(ps, "annotation", None)
-            j_type = _map_py_type_to_json_type(anno) if anno is not None else None
-            output_slots.append(
-                IOSlot(
-                    name=name,
-                    type=j_type,
-                    required=True,  # outputs are logically always “present”
-                    description=getattr(ps, "description", None),
-                )
+            description = getattr(ps, "description", None)
+            if t_from_meta is None and anno is not None:
+                j_type = _map_py_type_to_json_type(anno)
+
+        final_type = t_from_meta or j_type
+
+        output_slots.append(
+            IOSlot(
+                name=name,
+                type=final_type,
+                required=True,  # outputs are logically “present”
+                description=description,
             )
-        else:
-            output_slots.append(IOSlot(name=name, type=None, required=True))
+        )
 
     return {"inputs": input_slots, "outputs": output_slots}
