@@ -71,7 +71,7 @@ class FlowValidator:
                     ValidationIssue(
                         kind="unknown_action",
                         step_id=step.id,
-                        field="",
+                        field=None,
                         message=f"Action '{step.action_ref}' is not recognized.",
                     )
                 )
@@ -115,7 +115,7 @@ class FlowValidator:
                 ValidationIssue(
                     kind="cycle",
                     step_id="",
-                    field="",
+                    field=None,
                     message="The plan contains cyclic dependencies among steps.",
                 )
             )
@@ -139,7 +139,7 @@ class FlowValidator:
                         ready.append(consumer)
 
         # 5) walk in topo order, checking inputs
-        # avaliable values: mapping "step_id.output_name" -> IOSlot
+        # available values: mapping "step_id.output_name" -> IOSlot
         available_outputs: dict[str, IOSlot] = {}
 
         for step_id in topo_order:
