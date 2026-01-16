@@ -51,6 +51,31 @@ class FlowValidator:
             idx[spec.ref] = spec
         return idx
 
+    @staticmethod
+    def _is_strict_type_mismatch(
+        expected: str | None,
+        actual: str | None,
+    ) -> bool:
+        """
+        Return True only when we are confident the types are incompatible.
+
+        - If either side is None, 'any', or 'object', treat as compatible.
+        - Otherwise, require exact match.
+
+        NOTE: currently we don't have a rich type system, so this is simple. In planning
+        future we may want to enhance this with subtyping, coercions, etc from the graph_io side.
+        """
+        if not expected or not actual:
+            return False
+
+        # Wildcard-ish types
+        wildcard = {"any", "object"}
+        if expected in wildcard or actual in wildcard:
+            return False
+
+        # You can later special-case things like number vs integer here
+        return expected != actual
+
     def validate(
         self,
         plan: CandidatePlan,
@@ -194,13 +219,16 @@ class FlowValidator:
                             )
                         )
                     else:
-                        if slot.type and ext_slot.type and slot.type != ext_slot.type:
+                        if self._is_strict_type_mismatch(slot.type, ext_slot.type):
                             issues.append(
                                 ValidationIssue(
                                     kind="type_mismatch",
                                     step_id=step_id,
                                     field=name,
-                                    message=f"Type mismatch for external input '{key}': expected '{slot.type}', got '{ext_slot.type}'.",
+                                    message=(
+                                        f"Type mismatch for external input '{key}': "
+                                        f"expected '{slot.type}', got '{ext_slot.type}'."
+                                    ),
                                 )
                             )
 
@@ -222,7 +250,7 @@ class FlowValidator:
                             )
                         )
                     else:
-                        if slot.type and out_slot.type and slot.type != out_slot.type:
+                        if self._is_strict_type_mismatch(slot.type, out_slot.type):
                             issues.append(
                                 ValidationIssue(
                                     kind="type_mismatch",

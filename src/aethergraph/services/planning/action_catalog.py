@@ -7,6 +7,7 @@ from typing import Any, Literal
 from aethergraph.core.graph.action_spec import ActionSpec, IOSlot
 from aethergraph.core.graph.graph_fn import GraphFunction
 from aethergraph.services.planning.graph_io_adapter import graph_io_to_slots
+from aethergraph.services.registry.registry_key import Key
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
 
@@ -32,7 +33,7 @@ class ActionCatalog:
 
         return ActionSpec(
             name=name,
-            ref=f"graphfn:{name}:{latest_version}",
+            ref=Key(nspace="graphfn", name=name, version=latest_version).canonical(),
             kind="graphfn",
             version=latest_version,
             inputs=inputs,
@@ -62,7 +63,7 @@ class ActionCatalog:
 
         return ActionSpec(
             name=name,
-            ref=f"graph:{name}:{latest_version}",
+            ref=Key(nspace="graph", name=name, version=latest_version).canonical(),
             kind="graph",
             version=latest_version,
             description=description,
@@ -131,6 +132,30 @@ class ActionCatalog:
             return self._build_graph_spec(name, version=version)
         else:
             raise ValueError(f"Unknown action kind in ref: {ref}")
+
+    def get_action_by_name(
+        self,
+        name: str,
+        *,
+        kind: Literal["graph", "graphfn"] | None = None,
+        flow_id: str | None = None,
+    ) -> ActionSpec | None:
+        """
+        Convenience lookup: find an ActionSpec by its logical name.
+
+        - kind=None → search both graph and graphfn.
+        - kind="graph" → only graphs.
+        - kind="graphfn" → only graph_fns.
+        """
+        if kind is None:
+            kinds: Iterable[Literal["graph", "graphfn"]] = ("graph", "graphfn")
+        else:
+            kinds = (kind,)
+
+        for spec in self.list_actions(flow_id=flow_id, kinds=kinds):
+            if spec.name == name:
+                return spec
+        return None
 
     def to_llm_prompt(
         self,
