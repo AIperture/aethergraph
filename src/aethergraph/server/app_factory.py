@@ -24,6 +24,8 @@ from aethergraph.api.v1.viz import router as vis_router
 
 # include apis
 from aethergraph.config.config import AppSettings
+from aethergraph.config.context import set_current_settings
+from aethergraph.config.loader import load_settings
 from aethergraph.core.runtime.runtime_services import install_services
 
 # import built-in agents and plugins to register them
@@ -227,6 +229,10 @@ def create_app_from_env() -> FastAPI:
     workspace = os.environ.get("AETHERGRAPH_WORKSPACE", "./aethergraph_data")
     log_level = os.environ.get("AETHERGRAPH_LOG_LEVEL", "warning")
 
+    # 0) Load settings from env like `start_server` and CLI would (__main__.py)
+    cfg = load_settings()
+    set_current_settings(cfg)
+
     # 1) Load user graphs in *this* process
     _load_user_graphs_from_env()
 
@@ -234,7 +240,7 @@ def create_app_from_env() -> FastAPI:
     # If you have a config system, wire it here
     app = create_app(
         workspace=workspace,
-        cfg=None,  # or AppSettings.from_env(), etc.
+        cfg=cfg,
         log_level=log_level,
     )
     return app
