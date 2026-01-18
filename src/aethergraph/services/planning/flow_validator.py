@@ -192,7 +192,10 @@ class FlowValidator:
                             )
                         )
                     else:
-                        if self._is_strict_type_mismatch(slot.type, ext_slot.type):
+                        # ext_slot can be an IOSlot OR a bare value (when planner passes user_inputs).
+                        # In the latter case we don't have type info, so we skip strict type checking.
+                        ext_type = getattr(ext_slot, "type", None)
+                        if self._is_strict_type_mismatch(slot.type, ext_type):
                             issues.append(
                                 ValidationIssue(
                                     kind="type_mismatch",

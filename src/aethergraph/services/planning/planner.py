@@ -13,6 +13,17 @@ from .flow_validator import FlowValidator
 from .plan_types import CandidatePlan
 
 
+class PlanDecodingError(Exception):
+    """
+    Raised when the LLM's response cannot be parsed into a valid JSON plan.
+    Carries the raw text so callers can log or surface it.
+    """
+
+    def __init__(self, message: str, raw_text: str | None = None):
+        super().__init__(message)
+        self.raw_text = raw_text
+
+
 @dataclass
 class ActionPlanner:
     catalog: ActionCatalog
@@ -84,10 +95,26 @@ class ActionPlanner:
                 ),
             )
 
-            raw_json = await self._call_llm_for_plan(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-            )
+            try:
+                raw_json = await self._call_llm_for_plan(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
+            except PlanDecodingError as exc:
+                # Treat this as a failed attempt; emit an event and move to next iteration.
+                self._emit(
+                    on_event,
+                    PlanningEvent(
+                        phase="llm_response",
+                        iteration=iter_idx,
+                        message=f"LLM response could not be parsed as JSON: {exc}",
+                        raw_llm_output=getattr(exc, "raw_text", None),
+                        plan_dict=None,
+                    ),
+                )
+                # Do NOT append a ValidationResult here; this is a transport/format error,
+                # not a semantic plan error. Just try again if we have remaining iters.
+                continue
 
             self._emit(
                 on_event,
@@ -101,12 +128,14 @@ class ActionPlanner:
             )
 
             plan = CandidatePlan.from_dict(raw_json)
+            external_inputs = ctx.external_slots or (ctx.user_inputs or {})
             print("=== Candidate Plan ===")
             print(plan)
+            print("external inputs:", external_inputs)
 
             v = self.validator.validate(
                 plan,
-                external_inputs={},
+                external_inputs=external_inputs,
                 flow_ids=flow_ids,
             )
             history.append(v)
@@ -198,6 +227,9 @@ class ActionPlanner:
     ) -> dict[str, Any]:
         """
         Call the LLM with our plan schema and return the parsed JSON object.
+
+        This is robust to models that ignore output_format="json" and wrap
+        the JSON in ``` fences or surrounding text.
         """
         messages = [
             {"role": "system", "content": system_prompt},
@@ -215,20 +247,57 @@ class ActionPlanner:
             validate_json=True,
         )
 
-        # GenericLLMClient.chat may already return a dict for output_format="json",
-        # but we defensively handle the string case.
-
+        # 1) Already a dict: perfect.
         if isinstance(raw, dict):
             return raw
+
+        # 2) String: try to recover JSON from it.
         if isinstance(raw, str):
             import json
 
-            return json.loads(raw)
+            txt = raw.strip()
+            if not txt:
+                raise PlanDecodingError("Empty LLM response when expecting JSON.", raw_text=raw)
 
-        # Extremely defensive fallback
-        raise TypeError(
+            # Handle ```json ... ``` or ``` ... ``` fences
+            if txt.startswith("```"):
+                # strip leading ``` or ```json / ```JSON
+                if txt.lower().startswith("```json"):
+                    txt = txt[len("```json") :].strip()
+                else:
+                    txt = txt[3:].strip()
+                # strip trailing ```
+                if txt.endswith("```"):
+                    txt = txt[:-3].strip()
+
+            # First attempt: parse whole string
+            try:
+                return json.loads(txt)
+            except json.JSONDecodeError:
+                # Second attempt: extract the first {...} block
+                start = txt.find("{")
+                end = txt.rfind("}")
+                if start != -1 and end != -1 and end > start:
+                    candidate = txt[start : end + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError as exc2:
+                        raise PlanDecodingError(
+                            f"Cannot parse JSON from LLM response (substring). " f"Error: {exc2}",
+                            raw_text=raw,
+                        ) from exc2
+
+                # No obvious JSON object found
+                raise PlanDecodingError(
+                    "Cannot parse JSON from LLM response (no JSON object found).",
+                    raw_text=raw,
+                ) from None  # from None to suppress context
+
+        # 3) Unsupported type
+        raise PlanDecodingError(
             f"LLM returned unsupported structured output type: {type(raw)}; "
-            "expected dict or JSON string."
+            "expected dict or JSON string.",
+            raw_text=str(raw),
         )
 
     def _build_initial_prompt(self, ctx: PlanningContext, actions_md: str) -> str:
@@ -236,7 +305,8 @@ class ActionPlanner:
         Initial prompt: describe goal, context, and actions, ask for a first plan.
         """
         user_inputs_str = repr(ctx.user_inputs or {})
-        external_str = repr(ctx.external_slots or {})
+        external_dict = ctx.external_slots or (ctx.user_inputs or {})
+        external_str = repr(external_dict)
 
         memory_str = ""
         if ctx.memory_snippets:
@@ -296,7 +366,8 @@ class ActionPlanner:
         to return an improved JSON plan.
         """
         user_inputs_str = repr(ctx.user_inputs or {})
-        external_str = repr(ctx.external_slots or {})
+        external_dict = ctx.external_slots or (ctx.user_inputs or {})
+        external_str = repr(external_dict)
 
         return (
             f"Goal:\n{ctx.goal}\n\n"

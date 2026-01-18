@@ -5,6 +5,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.core.runtime.run_manager import RunManager
+from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.runner import run_async
 from aethergraph.services.planning.action_catalog import ActionCatalog
 from aethergraph.services.planning.bindings import parse_binding
@@ -57,7 +60,17 @@ class ExecutionResult:
 @dataclass
 class PlanExecutor:
     """
-    Execute a validated CandidatePlan by invoking graphfns/graphs via run_async.
+    Execute a validated CandidatePlan by invoking graphfns/graphs.
+
+    By default this uses run_async for each step (no RunStore / concurrency limits).
+    If a RunManager is provided, steps are executed via:
+
+        submit_run(...) + wait_run(..., return_outputs=True)
+
+    which:
+      - honors max_concurrent_runs
+      - creates RunRecords visible in the UI
+      - still exposes real Python outputs to the planner.
 
     Assumptions:
       - The plan has already been validated by FlowValidator.
@@ -66,16 +79,11 @@ class PlanExecutor:
       - Bindings use the syntax:
         * "${step_id.output_name}" for step outputs
         * "${user.key}" for external/user inputs
-
-    NOTE:
-       - Here we use a simple run_async call for each step. In the future we may want
-         to support more advanced execution strategies (parallelism, retries, etc.).
-       - For v1, we assume this is used at the top level (agent executing plans),
-         not inside a graphfn. If you embed it inside a graph, we might later
-         adjust how we interact with the registry / context.
     """
 
     catalog: ActionCatalog
+    # Optional: if provided, we use it instead of run_async for steps
+    run_manager: RunManager | None = None
 
     # convenient access
     @property
@@ -88,6 +96,15 @@ class PlanExecutor:
         *,
         user_inputs: dict[str, Any] | None = None,
         on_event: Callable[[ExecutionEvent], None] | None = None,
+        # Optional execution context if using RunManager
+        identity: RequestIdentity | None = None,
+        visibility: RunVisibility | None = RunVisibility.normal,
+        importance: RunImportance | None = RunImportance.normal,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        tags: list[str] | None = None,
+        origin: RunOrigin | None = None,
     ) -> ExecutionResult:
         """
         Execute all steps in the plan in order.
@@ -96,6 +113,8 @@ class PlanExecutor:
             plan: The candidate plan to execute (assumed validated).
             user_inputs: Values that can be referenced as "${user.<key>}".
             on_event: Optional callback to receive ExecutionEvent updates.
+            identity/session_id/agent_id/app_id/tags/origin:
+                Optional context passed through to RunManager when present.
 
         Returns:
             ExecutionResult:
@@ -105,6 +124,7 @@ class PlanExecutor:
         user_inputs = user_inputs or {}
         step_results: dict[str, dict[str, Any]] = {}  # step_id -> outputs dict
         errors: list[ExecutionEvent] = []
+        base_tags = list(tags or [])
 
         self._emit(
             on_event,
@@ -113,6 +133,9 @@ class PlanExecutor:
                 message="Starting plan execution.",
             ),
         )
+
+        # Try to extract a plan id (best-effort, no hard dependency on field names)
+        plan_id = getattr(plan, "id", None) or getattr(plan, "plan_id", None)
 
         # For now we assume steps are already in topological order (validator checked cycles).
         for step in plan.steps:
@@ -127,10 +150,6 @@ class PlanExecutor:
 
             try:
                 # Look up the underlying action object from the registry.
-                #
-                # After we fixed ActionCatalog to use Key(...).canonical(),
-                # action_ref is already the canonical registry key:
-                #   e.g. "graph:surrogate_training_pipeline@0.1.0"
                 action_obj = self.registry.get(step.action_ref)
 
                 # Resolve inputs (bindings + literals)
@@ -140,9 +159,54 @@ class PlanExecutor:
                     user_inputs=user_inputs,
                 )
 
-                # Run the graphfn/graph via AG runtime
-                outputs = await run_async(action_obj, inputs=bound_inputs)
+                # Decide execution path:
+                # - If run_manager is None: use run_async (legacy/simple mode)
+                # - Else: use RunManager to honor concurrency + RunStore
+                if self.run_manager is None:
+                    outputs = await run_async(action_obj, inputs=bound_inputs)
+                else:
+                    graph_id = self._graph_id_from_action_ref(step.action_ref)
 
+                    # Compose tags for this step-run
+                    step_tags = list(base_tags)
+                    if plan_id is not None:
+                        step_tags.append(f"plan:{plan_id}")
+                    step_tags.append(f"plan_step:{step.id}")
+
+                    # Spawn the run
+                    run_record = await self.run_manager.submit_run(
+                        graph_id=graph_id,
+                        inputs=bound_inputs,
+                        session_id=session_id,
+                        identity=identity,
+                        origin=origin,
+                        visibility=visibility,
+                        importance=importance,
+                        agent_id=agent_id,
+                        app_id=app_id,
+                        tags=step_tags,
+                    )
+
+                    # Wait for completion and grab real Python outputs
+                    finished_rec, outputs = await self.run_manager.wait_run(
+                        run_record.run_id,
+                        return_outputs=True,
+                    )
+
+                    # Interpret non-succeeded as failure
+                    status_str = getattr(finished_rec.status, "value", str(finished_rec.status))
+                    if status_str != "succeeded":
+                        # Mirror the run_async behaviour: raise so we hit the except below
+                        raise RuntimeError(
+                            f"Run for step '{step.id}' failed with status={status_str}, "
+                            f"error={finished_rec.error!r}"
+                        )
+
+                    # outputs may still be None if something went very wrong; guard it
+                    if outputs is None:
+                        outputs = {}
+
+                # Store step outputs for later bindings
                 step_results[step.id] = outputs
 
                 self._emit(
@@ -218,6 +282,24 @@ class PlanExecutor:
 
             logger = logging.getLogger(__name__)
             logger.warning("Error in execution on_event callback", exc_info=True)
+
+    @staticmethod
+    def _graph_id_from_action_ref(action_ref: str) -> str:
+        """
+        Extract the graph_id name from a canonical action_ref, e.g.:
+
+            "graph:foo@0.1.0"   -> "foo"
+            "graphfn:bar@0.1.0" -> "bar"
+
+        If the ref doesn't match this pattern, we fall back to the tail
+        after ":" (or the whole string).
+        """
+        ref = action_ref
+        if ":" in ref:
+            _, ref = ref.split(":", 1)
+        if "@" in ref:
+            ref, _ = ref.split("@", 1)
+        return ref
 
     def _resolve_inputs(
         self,

@@ -233,6 +233,7 @@ class NodeContext:
         run_id: str,
         *,
         timeout_s: float | None = None,
+        return_outputs: bool = False,
     ) -> RunRecord:
         """
         Wait for a run to complete and retrieve its final record.
@@ -250,16 +251,18 @@ class NodeContext:
 
             Waiting with a timeout:
             ```python
-            record = await context.wait_run(run_id, timeout_s=30)
+            record, outputs = await context.wait_run(run_id, timeout_s=30, return_outputs=True)
             ```
 
         Args:
             run_id: The unique identifier of the run to wait for.
             timeout_s: Optional timeout in seconds. If set, the method will raise
                 a TimeoutError if the run does not complete in time.
+            return_outputs: If True, also return the run's outputs along with the record.
 
         Returns:
             RunRecord: The final record of the completed run.
+            Output: If `return_outputs` is True, returns a tuple of (RunRecord, outputs dict).
 
         Raises:
             RuntimeError: If the RunManager service is not configured in the context.
@@ -274,7 +277,7 @@ class NodeContext:
         rm: RunManager | None = getattr(self.services, "run_manager", None)
         if rm is None:
             raise RuntimeError("NodeContext.services.run_manager is not configured")
-        return await rm.wait_run(run_id, timeout_s=timeout_s)
+        return await rm.wait_run(run_id, timeout_s=timeout_s, return_outputs=return_outputs)
 
     async def cancel_run(self, run_id: str) -> None:
         """
