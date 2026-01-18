@@ -3,53 +3,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.contracts.services.planning import PlanningContext, PlanningEvent, ValidationResult
 
 from .action_catalog import ActionCatalog
 from .flow_validator import FlowValidator
 from .plan_types import CandidatePlan
-from .validation_types import ValidationResult
-
-PlanningPhase = Literal[
-    "start",
-    "llm_request",
-    "llm_response",
-    "validation",
-    "success",
-    "failure",
-]
-
-
-@dataclass
-class PlanningEvent:
-    """
-    Lightweight event emitted during planning.
-
-    This is designed for:
-      - logging / debugging (print to console)
-      - UI progress (update spinner / status text)
-    """
-
-    phase: PlanningPhase
-    iteration: int
-    message: str | None = None
-
-    # Optional structured payloads:
-    raw_llm_output: dict[str, Any] | None = None
-    plan_dict: dict[str, Any] | None = None
-    validation: ValidationResult | None = None
-
-
-@dataclass
-class PlanningContext:
-    goal: str
-    user_inputs: dict[str, Any]
-    external_slots: dict[str, Any]  # for prompt only, validator sees IOSlot map
-    memory_snippets: list[str] = None
-    artifact_snippets: list[str] = None
-    flow_id: str | None = None
 
 
 @dataclass
@@ -84,23 +45,20 @@ class ActionPlanner:
         max_iter: int = 3,
         on_event: Callable[[PlanningEvent], None] | None = None,
     ) -> tuple[CandidatePlan | None, list[ValidationResult]]:
-        """
-        Try up to `max_iter` times to obtain a valid plan.
-
-        If `on_event` is provided, emit PlanningEvent instances to allow
-        logging / UI progress.
-        """
         history: list[ValidationResult] = []
         plan: CandidatePlan | None = None
 
-        actions_md = self.catalog.pretty_print(flow_id=ctx.flow_id)
+        flow_ids = ctx.flow_ids  # could be None
+        actions_md = self.catalog.pretty_print(
+            flow_ids=flow_ids,
+            include_global=True,
+        )
 
         system_prompt = (
             "You are a planning assistant that builds executable workflows as JSON plans. "
             "You must strictly follow the JSON schema and return ONLY JSON, no extra text."
         )
 
-        # initial "start" event
         self._emit(
             on_event,
             PlanningEvent(
@@ -117,7 +75,6 @@ class ActionPlanner:
                 last_v = history[-1]
                 user_prompt = self._build_repair_prompt(ctx, actions_md, plan, last_v)
 
-            # LLM request event
             self._emit(
                 on_event,
                 PlanningEvent(
@@ -127,7 +84,6 @@ class ActionPlanner:
                 ),
             )
 
-            # 1) Ask LLM for a JSON plan
             raw_json = await self._call_llm_for_plan(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
@@ -145,11 +101,17 @@ class ActionPlanner:
             )
 
             plan = CandidatePlan.from_dict(raw_json)
+            print("=== Candidate Plan ===")
+            print(plan)
 
-            # 2) Validate
-            v = self.validator.validate(plan, external_inputs={}, flow_id=ctx.flow_id)
+            v = self.validator.validate(
+                plan,
+                external_inputs={},
+                flow_ids=flow_ids,
+            )
             history.append(v)
 
+            print(v.summary())
             self._emit(
                 on_event,
                 PlanningEvent(
@@ -190,14 +152,15 @@ class ActionPlanner:
 
     def _plan_schema(self) -> dict[str, Any]:
         """
-        JSON schema for the plan that the LLM must output.
-
-        We keep it intentionally simple and forgiving; FlowValidator will enforce
-        correctness. We can tighten this over time.
+        JSON schema for the plan. We include a plan_version and extras for future evolution.
         """
         return {
             "type": "object",
             "properties": {
+                "plan_version": {
+                    "type": "string",
+                    "default": "1",
+                },
                 "steps": {
                     "type": "array",
                     "items": {
@@ -209,11 +172,19 @@ class ActionPlanner:
                                 "type": "object",
                                 "additionalProperties": True,
                             },
+                            "extras": {  # extension point
+                                "type": "object",
+                                "additionalProperties": True,
+                            },
                         },
                         "required": ["id", "action_ref", "inputs"],
                         "additionalProperties": False,
                     },
-                }
+                },
+                "extras": {  # extension point at plan level
+                    "type": "object",
+                    "additionalProperties": True,
+                },
             },
             "required": ["steps"],
             "additionalProperties": False,

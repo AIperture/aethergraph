@@ -1,8 +1,9 @@
+# aethergraph/services/planning/action_catalog.py
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Literal
 
 from aethergraph.core.graph.action_spec import ActionSpec, IOSlot
 from aethergraph.core.graph.graph_fn import GraphFunction
@@ -15,13 +16,15 @@ from aethergraph.services.registry.unified_registry import UnifiedRegistry
 class ActionCatalog:
     registry: UnifiedRegistry
 
+    # --- builders ---------------------------------------------------------
+
     def _build_graphfn_spec(self, name: str, version: str | None = None) -> ActionSpec:
         gf: GraphFunction = self.registry.get_graphfn(name, version=version)
         meta = self.registry.get_meta("graphfn", name, version=version) or {}
         io = gf.io_signature()
 
         flow_id = meta.get("flow_id", None)
-        tags = meta.get("tags", [])
+        tags = meta.get("tags", []) or []
         description = meta.get("description", None)
 
         # io_signature from GraphFunction are already IOSlot
@@ -29,7 +32,10 @@ class ActionCatalog:
         outputs: list[IOSlot] = io.get("outputs", [])
 
         # resolve final version used
-        latest_version = self.registry.list_graphfns().get(f"graphfn:{name}", version or "0.0.0")
+        latest_version = self.registry.list_graphfns().get(
+            f"graphfn:{name}",
+            version or "0.0.0",
+        )
 
         return ActionSpec(
             name=name,
@@ -51,7 +57,7 @@ class ActionCatalog:
         tags = meta.get("tags") or []
         description = meta.get("description") or name
 
-        # NEW: pass meta to adapter so it can use io_types
+        # pass meta to adapter so it can use io_types
         io_slots = graph_io_to_slots(g, meta=meta)
         inputs = io_slots["inputs"]
         outputs = io_slots["outputs"]
@@ -73,31 +79,56 @@ class ActionCatalog:
             outputs=outputs,
         )
 
+    # --- listing / filtering ---------------------------------------------
+
+    def _flow_filter(
+        self,
+        spec: ActionSpec,
+        *,
+        flow_ids: list[str] | None,
+        include_global: bool,
+    ) -> bool:
+        """
+        Decide whether to include this spec given flow_ids and include_global.
+        - spec.flow_id is a single string or None.
+        - flow_ids is the set of flows we care about, or None for 'no filtering'.
+        """
+        if flow_ids is None:
+            # no restriction → include everything
+            return True
+
+        if spec.flow_id in flow_ids:
+            return True
+
+        # allow "global" actions when requested
+        if include_global and spec.flow_id is None:  # noqa: SIM103
+            return True
+
+        return False
+
     def list_actions(
         self,
         *,
-        flow_id: str | None = None,
+        flow_ids: list[str] | None = None,
         kinds: Iterable[Literal["graph", "graphfn"]] | None = ("graph", "graphfn"),
+        include_global: bool = True,
     ) -> list[ActionSpec]:
         """
-        Docstring for list_actions
-
-        :param self: Description
-        :param flow_id: Description
-        :type flow_id: str | None
-        :param kinds: Description
-        :type kinds: Iterable[Literal["graph", "graphfn"]] | None
-        :return: Description
-        :rtype: list[ActionSpec]
+        Return all ActionSpecs, optionally filtered by:
+          - kinds (graph vs graphfn)
+          - flow_ids (one or more flow ids)
+          - include_global: if True, also include actions with flow_id=None
         """
-
         specs: list[ActionSpec] = []
+
+        if kinds is None:
+            kinds = ("graph", "graphfn")
 
         if "graphfn" in kinds:
             for key, ver in self.registry.list_graphfns().items():
                 _, name = key.split(":", 1)
                 spec = self._build_graphfn_spec(name, version=ver)
-                if flow_id is not None and spec.flow_id != flow_id:
+                if not self._flow_filter(spec, flow_ids=flow_ids, include_global=include_global):
                     continue
                 specs.append(spec)
 
@@ -105,7 +136,7 @@ class ActionCatalog:
             for key, ver in self.registry.list_graphs().items():
                 _, name = key.split(":", 1)
                 spec = self._build_graph_spec(name, version=ver)
-                if flow_id is not None and spec.flow_id != flow_id:
+                if not self._flow_filter(spec, flow_ids=flow_ids, include_global=include_global):
                     continue
                 specs.append(spec)
 
@@ -116,54 +147,69 @@ class ActionCatalog:
     def iter_actions(
         self,
         *,
-        flow_id: str | None = None,
+        flow_ids: list[str] | None = None,
         kinds: Iterable[Literal["graph", "graphfn"]] | None = ("graph", "graphfn"),
+        include_global: bool = True,
     ) -> Iterator[ActionSpec]:
-        for spec in self.list_actions(flow_id=flow_id, kinds=kinds):  # noqa: UP028
+        for spec in self.list_actions(  # noqa: UP028
+            flow_ids=flow_ids,
+            kinds=kinds,
+            include_global=include_global,
+        ):
             yield spec
+
+    # --- lookups ---------------------------------------------------------
 
     def get_action(self, ref: str) -> ActionSpec | None:
         kind, rest = ref.split(":", 1)
-        name, _, version = rest.rpartition(":")
+        name, sep, version = rest.partition("@")
         version = version or None
+
         if kind == "graphfn":
             return self._build_graphfn_spec(name, version=version)
-        elif kind == "graph":
+        if kind == "graph":
             return self._build_graph_spec(name, version=version)
-        else:
-            raise ValueError(f"Unknown action kind in ref: {ref}")
+        raise ValueError(f"Unknown action kind in ref: {ref}")
 
     def get_action_by_name(
         self,
         name: str,
         *,
         kind: Literal["graph", "graphfn"] | None = None,
-        flow_id: str | None = None,
+        flow_ids: list[str] | None = None,
+        include_global: bool = True,
     ) -> ActionSpec | None:
         """
         Convenience lookup: find an ActionSpec by its logical name.
-
-        - kind=None → search both graph and graphfn.
-        - kind="graph" → only graphs.
-        - kind="graphfn" → only graph_fns.
         """
         if kind is None:
             kinds: Iterable[Literal["graph", "graphfn"]] = ("graph", "graphfn")
         else:
             kinds = (kind,)
 
-        for spec in self.list_actions(flow_id=flow_id, kinds=kinds):
+        for spec in self.list_actions(
+            flow_ids=flow_ids,
+            kinds=kinds,
+            include_global=include_global,
+        ):
             if spec.name == name:
                 return spec
         return None
 
+    # --- LLM-facing renderers -------------------------------------------
+
     def to_llm_prompt(
         self,
         *,
-        flow_id: str | None = None,
+        flow_ids: list[str] | None = None,
         kinds: Iterable[Literal["graph", "graphfn"]] | None = ("graph", "graphfn"),
+        include_global: bool = True,
     ) -> str:
-        actions = self.list_actions(flow_id=flow_id, kinds=kinds)
+        actions = self.list_actions(
+            flow_ids=flow_ids,
+            kinds=kinds,
+            include_global=include_global,
+        )
         lines: list[str] = []
         for a in actions:
             lines.append(f"- {a.name} ({a.kind})")
@@ -185,88 +231,22 @@ class ActionCatalog:
             lines.append("")
         return "\n".join(lines)
 
-    def format_actions_table(
-        self,
-        *,
-        group_by_flow: bool = True,
-        include_types: bool = True,
-    ) -> str:
-        """
-        Return a human-readable table of all registered actions.
-
-        - Grouped by flow_id when requested.
-        - Shows inputs/outputs with types when available.
-        """
-        actions = self.list_actions()
-        if not actions:
-            return "No actions registered."
-
-        # Group by flow_id
-        by_flow: dict[str | None, list[Any]] = {}
-        for a in actions:
-            by_flow.setdefault(a.flow_id, []).append(a)
-
-        lines: list[str] = []
-        for flow_id, flow_actions in sorted(by_flow.items(), key=lambda kv: (kv[0] or "")):
-            header = f"Flow: {flow_id or '<none>'}"
-            lines.append(header)
-            lines.append("-" * len(header))
-
-            # sort actions by kind + name for stable view
-            for act in sorted(flow_actions, key=lambda a: (a.kind or "", a.name)):
-                lines.append(f"[{act.kind}] {act.name} @ {act.version}")
-                desc = getattr(act, "description", None)
-                if desc:
-                    lines.append(f"  desc: {desc}")
-
-                # ---- Inputs ----
-                in_slots = getattr(act, "inputs", None) or []
-                if in_slots:
-                    lines.append("  inputs:")
-                    for slot in in_slots:
-                        t = getattr(slot, "type", None) if include_types else None
-                        req_flag = "required" if getattr(slot, "required", True) else "optional"
-                        if t and t != "any":
-                            lines.append(f"    - {slot.name}: {t} ({req_flag})")
-                        else:
-                            lines.append(f"    - {slot.name} ({req_flag})")
-                else:
-                    lines.append("  inputs: <none>")
-
-                # ---- Outputs ----
-                out_slots = getattr(act, "outputs", None) or []
-                if out_slots:
-                    lines.append("  outputs:")
-                    for slot in out_slots:
-                        t = getattr(slot, "type", None) if include_types else None
-                        if t and t != "any":
-                            lines.append(f"    - {slot.name}: {t}")
-                        else:
-                            lines.append(f"    - {slot.name}")
-                else:
-                    lines.append("  outputs: <none>")
-
-                tags = getattr(act, "tags", None) or []
-                if tags:
-                    lines.append(f"  tags: {', '.join(tags)}")
-
-                lines.append("")  # blank line between actions
-
-            lines.append("")  # blank line between flows
-
-        return "\n".join(lines)
-
     def pretty_print(
         self,
         *,
-        flow_id: str | None = None,
+        flow_ids: list[str] | None = None,
         kinds: Iterable[Literal["graph", "graphfn"]] | None = ("graph", "graphfn"),
+        include_global: bool = True,
     ) -> str:
         """
         Human-readable table for planner prompts.
         """
-        actions = self.list_actions(flow_id=flow_id, kinds=kinds)
-        lines = []
+        actions = self.list_actions(
+            flow_ids=flow_ids,
+            kinds=kinds,
+            include_global=include_global,
+        )
+        lines: list[str] = []
         for a in actions:
             inputs = ", ".join(f"{s.name}:{s.type or 'any'}" for s in a.inputs)
             outputs = ", ".join(f"{s.name}:{s.type or 'any'}" for s in a.outputs)

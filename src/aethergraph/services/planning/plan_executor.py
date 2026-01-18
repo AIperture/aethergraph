@@ -1,7 +1,8 @@
+# aethergraph/services/planning/plan_executor.py
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from aethergraph.runner import run_async
@@ -30,8 +31,27 @@ class ExecutionEvent:
     phase: ExecutionPhase
     step_id: str | None = None
     message: str | None = None
+
+    # For success phases
     step_outputs: dict[str, Any] | None = None
+
+    # For failures
     error: Exception | None = None
+
+
+@dataclass
+class ExecutionResult:
+    """
+    Structured result of executing a plan.
+
+    - ok: True if all steps ran successfully.
+    - outputs: outputs of the final step (or {} on failure).
+    - errors: list of failure events (usually 0 or 1 in fail-fast mode).
+    """
+
+    ok: bool
+    outputs: dict[str, Any]
+    errors: list[ExecutionEvent] = field(default_factory=list)
 
 
 @dataclass
@@ -41,17 +61,18 @@ class PlanExecutor:
 
     Assumptions:
       - The plan has already been validated by FlowValidator.
-      - action_ref strings correspond to registry entries in the ActionCatalog.
+      - action_ref strings correspond to registry entries in the ActionCatalog,
+        using canonical refs like 'graph:foo@0.1.0' or 'graphfn:bar@0.1.0'.
       - Bindings use the syntax:
         * "${step_id.output_name}" for step outputs
-        * "${user.key}" for external/user inputs (if you use that)
+        * "${user.key}" for external/user inputs
 
     NOTE:
-       - Here we use a simple run_aync call for each step. In the future we may want to support
-         more advanced execution strategies (e.g., parallel steps where possible, retries, etc).
-         but this is far enough for a first version.
-       - We need to confirm if we should use this inside a graph_fn or only at the top level with the agent
-         executing plans. If inside a graph_fn, we may need to adjust how we look up action objects
+       - Here we use a simple run_async call for each step. In the future we may want
+         to support more advanced execution strategies (parallelism, retries, etc.).
+       - For v1, we assume this is used at the top level (agent executing plans),
+         not inside a graphfn. If you embed it inside a graph, we might later
+         adjust how we interact with the registry / context.
     """
 
     catalog: ActionCatalog
@@ -67,25 +88,33 @@ class PlanExecutor:
         *,
         user_inputs: dict[str, Any] | None = None,
         on_event: Callable[[ExecutionEvent], None] | None = None,
-    ) -> dict[str, Any]:
+    ) -> ExecutionResult:
         """
         Execute all steps in the plan in order.
 
         Args:
-            plan: The candidate plan to execute.
+            plan: The candidate plan to execute (assumed validated).
             user_inputs: Values that can be referenced as "${user.<key>}".
             on_event: Optional callback to receive ExecutionEvent updates.
 
         Returns:
-            The outputs dictionary from the final step.
+            ExecutionResult:
+              - ok=True and final step outputs on success.
+              - ok=False and errors populated on first failure.
         """
         user_inputs = user_inputs or {}
         step_results: dict[str, dict[str, Any]] = {}  # step_id -> outputs dict
+        errors: list[ExecutionEvent] = []
 
-        self._emit(on_event, ExecutionEvent(phase="start", message="Starting plan execution."))
+        self._emit(
+            on_event,
+            ExecutionEvent(
+                phase="start",
+                message="Starting plan execution.",
+            ),
+        )
 
         # For now we assume steps are already in topological order (validator checked cycles).
-        # If we ever need, we can add a topo sort here using the same logic as FlowValidator.
         for step in plan.steps:
             self._emit(
                 on_event,
@@ -97,7 +126,11 @@ class PlanExecutor:
             )
 
             try:
-                # Look up the underlying action object from the registry
+                # Look up the underlying action object from the registry.
+                #
+                # After we fixed ActionCatalog to use Key(...).canonical(),
+                # action_ref is already the canonical registry key:
+                #   e.g. "graph:surrogate_training_pipeline@0.1.0"
                 action_obj = self.registry.get(step.action_ref)
 
                 # Resolve inputs (bindings + literals)
@@ -121,42 +154,50 @@ class PlanExecutor:
                         step_outputs=outputs,
                     ),
                 )
-            except Exception as exc:  # noqa: BLE001
-                self._emit(
-                    on_event,
-                    ExecutionEvent(
-                        phase="step_failure",
-                        step_id=step.id,
-                        message=f"Step '{step.id}' failed: {exc!r}",
-                        error=exc,
-                    ),
-                )
-                # For first version: fail fast and bubble the exception
-                self._emit(
-                    on_event,
-                    ExecutionEvent(
-                        phase="failure",
-                        step_id=step.id,
-                        message="Plan execution aborted due to step failure.",
-                        error=exc,
-                    ),
-                )
-                raise
 
-        # Return outputs of the final step
+            except Exception as exc:  # noqa: BLE001
+                failure_event = ExecutionEvent(
+                    phase="step_failure",
+                    step_id=step.id,
+                    message=f"Step '{step.id}' failed: {exc!r}",
+                    error=exc,
+                )
+                errors.append(failure_event)
+                self._emit(on_event, failure_event)
+
+                # For v1: fail fast and mark the whole plan as failed.
+                final_failure = ExecutionEvent(
+                    phase="failure",
+                    step_id=step.id,
+                    message="Plan execution aborted due to step failure.",
+                    error=exc,
+                )
+                errors.append(final_failure)
+                self._emit(on_event, final_failure)
+
+                return ExecutionResult(
+                    ok=False,
+                    outputs={},
+                    errors=errors,
+                )
+
+        # If we reach here, all steps succeeded.
         final_step = plan.steps[-1]
         final_outputs = step_results.get(final_step.id, {})
 
-        self._emit(
-            on_event,
-            ExecutionEvent(
-                phase="success",
-                step_id=final_step.id,
-                message="Plan execution finished successfully.",
-                step_outputs=final_outputs,
-            ),
+        success_event = ExecutionEvent(
+            phase="success",
+            step_id=final_step.id,
+            message="Plan execution finished successfully.",
+            step_outputs=final_outputs,
         )
-        return final_outputs
+        self._emit(on_event, success_event)
+
+        return ExecutionResult(
+            ok=True,
+            outputs=final_outputs,
+            errors=errors,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
