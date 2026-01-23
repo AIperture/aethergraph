@@ -240,6 +240,9 @@ class ActionCatalog:
     ) -> str:
         """
         Human-readable table for planner prompts.
+
+        Emphasizes the short action name to be used in the \"action\" field
+        of the plan JSON. The internal ref is shown only as secondary info.
         """
         actions = self.list_actions(
             flow_ids=flow_ids,
@@ -247,15 +250,20 @@ class ActionCatalog:
             include_global=include_global,
         )
         lines: list[str] = []
+
         for a in actions:
             inputs = ", ".join(f"{s.name}:{s.type or 'any'}" for s in a.inputs)
             outputs = ", ".join(f"{s.name}:{s.type or 'any'}" for s in a.outputs)
             tag_str = ", ".join(a.tags or [])
-            lines.append(
-                f"- {a.name} [{a.kind}] (ref={a.ref})\n"
-                f"  inputs: {inputs or 'none'}\n"
-                f"  outputs: {outputs or 'none'}\n"
-                f"  tags: {tag_str or '-'}\n"
-                f"  desc: {a.description or '-'}"
-            )
+
+            lines.append(f"- action: {a.name}  [{a.kind}]")
+            lines.append(f"  description: {a.description or '-'}")
+            lines.append(f"  inputs: {inputs or 'none'}")
+            lines.append(f"  outputs: {outputs or 'none'}")
+            if tag_str:
+                lines.append(f"  tags: {tag_str}")
+            # keep ref but label as internal; this discourages the LLM from using it
+            lines.append(f"  internal_ref: {a.ref}")
+            lines.append("")  # blank line between actions
+
         return "\n".join(lines)

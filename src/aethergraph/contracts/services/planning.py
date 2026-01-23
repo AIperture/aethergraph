@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from aethergraph.services.planning.plan_types import CandidatePlan
+
 IntentMode = Literal["chat_only", "quick_action", "plan_and_execute"]
 
 
@@ -57,6 +59,19 @@ class ValidationResult:
     ok: bool  # True if plan is valid, False otherwise
     issues: list[ValidationIssue]  # list of validation issues found in the plan
 
+    # differentiate structural vs “needs user values”
+    has_structural_errors: bool = False
+
+    # key → list of locations (e.g. ["load.dataset_path", "eval.target_metric"])
+    missing_user_bindings: dict[str, list[str]] = field(default_factory=dict)
+
+    def is_partial_ok(self) -> bool:
+        """
+        Structurally valid, but requires user-provided values
+        (e.g. ${user.dataset_path}) before execution.
+        """
+        return (not self.has_structural_errors) and bool(self.missing_user_bindings)
+
     def summary(self) -> str:
         """
         Returns a summary string describing the validity of the plan and any issues found.
@@ -93,26 +108,65 @@ PlanningPhase = Literal[
 
 
 @dataclass
-class SkillSpec:
-    """
-    A placehoder for skill metadata.
-    """
-
-    skill_id: str
+class SkillInputField:
     name: str
     description: str
-    flow_id: str | None = None  # associated flow, if any
-    action_ids: list[str] = field(default_factory=list)  # associated actions, if any
+    required: bool = True
+    infer_from_history: bool = True
+    example: str | None = None
+
+
+@dataclass
+class SkillSpec:
+    """placement for future skill spec structure."""
+
+    id: str
+    title: str
+    description: str
+
+    keywords: list[str] = field(default_factory=list)
+    preferred_flows: list[str] = field(default_factory=list)
+
+    # Defaults for this skill
+    default_intent_mode: str = "chat_only"  # or "plan_and_execute"
+    default_reasoning_mode: str = "direct_answer"  # or "plan_graph", etc.
+
+    # Prompts (loaded from markdown sections)
+    planning_prompt: str = ""
+    chat_prompt: str = ""
+    safety_notes: str = ""
+
+    # Original data / metadata
+    raw_markdown: str | None = None
+    meta: dict[str, Any] | None = None
+    input_fields: list[SkillInputField] = field(default_factory=list)
 
 
 @dataclass
 class AgentContextSnapshot:
-    """
-    Snapshot of the agent's context for planning. Not fixed structure.
-    """
+    """Placeholder -- will change"""
 
-    memory_snippets: list[str] = field(default_factory=list)
-    artifact_summaries: list[str] = field(default_factory=list)
+    session_id: str | None
+    user_message: str | None
+
+    # Chat
+    recent_chat: list[dict[str, Any]]  # [{"role": str, "content": str}, ...]
+    summaries: list[str]  # brief summaries of past interactions
+
+    # Plans & Runs
+    pending_plan: CandidatePlan | None
+    pending_user_inputs: dict[str, Any]
+    pending_question: str | None
+    pending_missing_inputs: dict[str, list[str]]
+
+    last_plans: list[dict[str, Any]]  # serialized agent.plan events
+    last_executions: list[dict[str, Any]]  # serialized agent.execution events
+
+    # Session state snapshot (serialized view of Surrogate Session State )
+    session_state_view: dict[str, Any]
+
+    # Active skill
+    active_skill: SkillSpec | None = None
 
 
 @dataclass
@@ -151,6 +205,12 @@ class PlanningContext:
     # skill + richer agent context (used by planner code, not directly dumped)
     skill: SkillSpec | None = None
     agent_snapshot: AgentContextSnapshot | None = None
+
+    # should planner accept structurally-valid-but-missing-user-input plans?
+    allow_partial_plans: bool = True
+
+    # planner hint – which keys are *allowed / preferred* as ${user.<key>}
+    preferred_external_keys: list[str] | None = None
 
 
 class PlanningContextBuilderProtocol:

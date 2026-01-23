@@ -55,6 +55,7 @@ class FlowValidator:
     ) -> ValidationResult:
         issues: list[ValidationIssue] = []
         external_inputs = external_inputs or {}
+        missing_user_bindings: dict[str, list[str]] = {}
 
         action_index = self._action_index(flow_ids=flow_ids)
         step_index: dict[str, PlanStep] = {step.id: step for step in plan.steps}
@@ -72,7 +73,13 @@ class FlowValidator:
                 )
 
         if any(iss.kind == "unknown_action" for iss in issues):
-            return ValidationResult(ok=False, issues=issues)
+            # structural error, no missing_user_bindings in this path
+            return ValidationResult(
+                ok=False,
+                issues=issues,
+                has_structural_errors=True,
+                missing_user_bindings={},
+            )
 
         # 2) dependency graph
         edges: dict[str, set[str]] = {step.id: set() for step in plan.steps}
@@ -113,7 +120,12 @@ class FlowValidator:
                     message="The plan contains cyclic dependencies among steps.",
                 )
             )
-            return ValidationResult(ok=False, issues=issues)
+            return ValidationResult(
+                ok=False,
+                issues=issues,
+                has_structural_errors=True,
+                missing_user_bindings={},
+            )
 
         # 4) topo order
         in_deg: dict[str, int] = {step_id: 0 for step_id in edges}
@@ -181,8 +193,9 @@ class FlowValidator:
                     key = binding.external_key or ""
                     ext_slot = external_inputs.get(key)
                     if ext_slot is None:
-                        # We simply accept it here. If you *do* want a soft signal,
-                        # you could add a non-fatal issue kind like "external_unbound".
+                        # treat as “needs user value”, not structural error
+                        loc = f"{step_id}.{name}"
+                        missing_user_bindings.setdefault(key, []).append(loc)
                         continue
 
                     # ext_slot can be an IOSlot OR a bare value (when planner passes user_inputs).
@@ -237,4 +250,15 @@ class FlowValidator:
             for out in spec.outputs:
                 available_outputs[f"{step_id}.{out.name}"] = out
 
-        return ValidationResult(ok=(len(issues) == 0), issues=issues)
+        # Decide what counts as “structural” (vs. “needs user values”)
+        structural_kinds = {"unknown_action", "cycle", "missing_input", "type_mismatch"}
+        has_structural_errors = any(iss.kind in structural_kinds for iss in issues)
+
+        ok = (not has_structural_errors) and (len(missing_user_bindings) == 0)
+
+        return ValidationResult(
+            ok=ok,
+            issues=issues,
+            has_structural_errors=has_structural_errors,
+            missing_user_bindings=missing_user_bindings,
+        )
