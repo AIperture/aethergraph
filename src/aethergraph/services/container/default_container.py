@@ -6,6 +6,7 @@ from typing import Any
 
 # ---- core services ----
 from aethergraph.config.config import AppSettings
+from aethergraph.contracts.services.execution import ExecutionService
 
 # ---- optional services (not used by default) ----
 from aethergraph.contracts.services.llm import LLMClientProtocol
@@ -35,6 +36,7 @@ from aethergraph.services.continuations.stores.fs_store import (
     FSContinuationStore,  # AsyncContinuationStore
 )
 from aethergraph.services.eventbus.inmem import InMemoryEventBus
+from aethergraph.services.execution.local_python import LocalPythonExecutionService
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
@@ -170,6 +172,7 @@ class DefaultContainer:
     session_store: SessionStore | None = None  # SessionStore
 
     # optional services (not used by default)
+    execution: ExecutionService | None = None
     event_bus: InMemoryEventBus | None = None
     prompts: FilePromptStore | None = None
     authn: DevTokenAuthn | None = None
@@ -357,6 +360,11 @@ def build_default_container(
     search_backend = build_search_backend(cfg=cfg, embedder=embed_client)
     global_indices = GlobalIndices(backend=search_backend)  # to be set up later as needed
 
+    # Execution service
+    execution = (
+        LocalPythonExecutionService()
+    )  # simple local python executor -- NOT SANDBOXED; just for local functionality testing
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -371,6 +379,7 @@ def build_default_container(
         resume_bus=resume_bus,
         resume_router=resume_router,
         wakeup_queue=wakeup_queue,
+        execution=execution,
         kv_hot=kv_hot,
         state_store=state_store,
         artifacts=artifacts,

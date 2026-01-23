@@ -181,32 +181,25 @@ class FlowValidator:
                     key = binding.external_key or ""
                     ext_slot = external_inputs.get(key)
                     if ext_slot is None:
+                        # We simply accept it here. If you *do* want a soft signal,
+                        # you could add a non-fatal issue kind like "external_unbound".
+                        continue
+
+                    # ext_slot can be an IOSlot OR a bare value (when planner passes user_inputs).
+                    # In the latter case we don't have type info, so we skip strict type checking.
+                    ext_type = getattr(ext_slot, "type", None)
+                    if self._is_strict_type_mismatch(slot.type, ext_type):
                         issues.append(
                             ValidationIssue(
-                                kind="missing_input",
+                                kind="type_mismatch",
                                 step_id=step_id,
                                 field=name,
                                 message=(
-                                    f"External input '{key}' is not declared in external_inputs."
+                                    f"Type mismatch for external input '{key}': "
+                                    f"expected '{slot.type}', got '{ext_slot.type}'."
                                 ),
                             )
                         )
-                    else:
-                        # ext_slot can be an IOSlot OR a bare value (when planner passes user_inputs).
-                        # In the latter case we don't have type info, so we skip strict type checking.
-                        ext_type = getattr(ext_slot, "type", None)
-                        if self._is_strict_type_mismatch(slot.type, ext_type):
-                            issues.append(
-                                ValidationIssue(
-                                    kind="type_mismatch",
-                                    step_id=step_id,
-                                    field=name,
-                                    message=(
-                                        f"Type mismatch for external input '{key}': "
-                                        f"expected '{slot.type}', got '{ext_slot.type}'."
-                                    ),
-                                )
-                            )
 
                 elif binding.kind == "step_output":
                     src_id = binding.source_step_id or ""

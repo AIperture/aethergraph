@@ -218,6 +218,9 @@ class RuntimeEnv:
             mcp=self.mcp_service,  # MCPService
             run_manager=self.container.run_manager,  # RunManager
             indices=indices,  # ScopedIndices for this node
+            execution=self.container.execution
+            if self.container.execution is not None
+            else None,  # ExecutionService
         )
         return ExecutionContext(
             run_id=self.run_id,

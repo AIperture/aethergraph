@@ -93,6 +93,29 @@ PlanningPhase = Literal[
 
 
 @dataclass
+class SkillSpec:
+    """
+    A placehoder for skill metadata.
+    """
+
+    skill_id: str
+    name: str
+    description: str
+    flow_id: str | None = None  # associated flow, if any
+    action_ids: list[str] = field(default_factory=list)  # associated actions, if any
+
+
+@dataclass
+class AgentContextSnapshot:
+    """
+    Snapshot of the agent's context for planning. Not fixed structure.
+    """
+
+    memory_snippets: list[str] = field(default_factory=list)
+    artifact_summaries: list[str] = field(default_factory=list)
+
+
+@dataclass
 class PlanningEvent:
     """
     Lightweight event emitted during planning.
@@ -116,10 +139,18 @@ class PlanningEvent:
 class PlanningContext:
     goal: str
     user_inputs: dict[str, Any]
-    external_slots: dict[str, Any]  # for prompt only, validator sees IOSlot map
-    memory_snippets: list[str] = None
-    artifact_snippets: list[str] = None
+    external_slots: dict[str, Any]
+
+    # Narrow, LLM-facing context
+    memory_snippets: list[str] = field(default_factory=list)
+    artifact_snippets: list[str] = field(default_factory=list)
+
+    # What tools/graphs we’re allowed to use
     flow_ids: list[str] | None = None
+
+    # skill + richer agent context (used by planner code, not directly dumped)
+    skill: SkillSpec | None = None
+    agent_snapshot: AgentContextSnapshot | None = None
 
 
 class PlanningContextBuilderProtocol:

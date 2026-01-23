@@ -59,6 +59,9 @@ class ActionPlanner:
         history: list[ValidationResult] = []
         plan: CandidatePlan | None = None
 
+        print("🍎 === Planning Context ===")
+        print(ctx.memory_snippets)
+        print("========================")
         flow_ids = ctx.flow_ids  # could be None
         actions_md = self.catalog.pretty_print(
             flow_ids=flow_ids,
@@ -127,6 +130,7 @@ class ActionPlanner:
                 ),
             )
 
+            print("🍎 Raw plan JSON from LLM:", raw_json)
             plan = CandidatePlan.from_dict(raw_json)
             external_inputs = ctx.external_slots or (ctx.user_inputs or {})
             print("=== Candidate Plan ===")
@@ -308,6 +312,81 @@ class ActionPlanner:
         external_dict = ctx.external_slots or (ctx.user_inputs or {})
         external_str = repr(external_dict)
 
+        # --- 1) Skill-aware planning header ---
+        if ctx.skill and ctx.skill.planning_prompt:
+            header = ctx.skill.planning_prompt.strip()
+        else:
+            header = (
+                "You are a planning assistant that builds executable workflows as JSON plans. "
+                "You must strictly follow the JSON schema and return ONLY JSON, no extra text."
+            )
+
+        # Optional: small skill name hint
+        if ctx.skill:
+            header += f"\n\nCurrent domain skill: {ctx.skill.title} — {ctx.skill.description}"
+
+        # --- 2) Memory & artifact snippets (already LLM-friendly strings) ---
+        memory_str = ""
+        if ctx.memory_snippets:
+            memory_str = (
+                "Relevant recent context (runs, summaries, etc.):\n"
+                + "\n".join(f"- {m}" for m in ctx.memory_snippets)
+                + "\n\n"
+            )
+
+        artifact_str = ""
+        if ctx.artifact_snippets:
+            artifact_str = (
+                "Relevant artifacts:\n"
+                + "\n".join(f"- {a}" for a in ctx.artifact_snippets)
+                + "\n\n"
+            )
+
+        # --- 3) Main planning instructions (unchanged core, but after header/context) ---
+        return (
+            f"{header}\n\n"
+            f"Goal:\n{ctx.goal}\n\n"
+            f"User inputs (available values):\n{user_inputs_str}\n\n"
+            f"External bindings (available as `{{user.<key>}}`):\n{external_str}\n\n"
+            f"{memory_str}"
+            f"{artifact_str}"
+            "You have the following actions available:\n"
+            f"{actions_md}\n\n"
+            "You must create a workflow as a JSON object of the form:\n"
+            "{\n"
+            '  "steps": [\n'
+            "    {\n"
+            '      "id": "load",\n'
+            '      "action_ref": "<one of the action refs above>",\n'
+            '      "inputs": {\n'
+            '        "arg_name": <literal or binding>\n'
+            "      }\n"
+            "    },\n"
+            "    ...\n"
+            "  ]\n"
+            "}\n\n"
+            "Bindings can be:\n"
+            '- literals, e.g. 0.8 or {"lr": 0.01}\n'
+            '- external values, using the syntax "${user.<key>}" where <key> is one of the external bindings\n'
+            '- outputs from previous steps, using the syntax "${<step_id>.<output_name>}".\n\n'
+            "Make sure that:\n"
+            "- step ids are unique,\n"
+            "- action_ref exactly matches one of the listed action refs,\n"
+            "- you only reference outputs from earlier steps.\n\n"
+            "- Do NOT invent file paths or other external values that are not already provided.\n"
+            '- If you need something like a dataset path and it is not known yet, bind it as "${user.dataset_path}".\n'
+            '- Never hard-code fake paths like "path/to/dataset".\n\n'
+            "Return ONLY the JSON object, with no explanation or comments."
+        )
+
+    def _build_initial_prompt_v0(self, ctx: PlanningContext, actions_md: str) -> str:
+        """
+        Initial prompt: describe goal, context, and actions, ask for a first plan.
+        """
+        user_inputs_str = repr(ctx.user_inputs or {})
+        external_dict = ctx.external_slots or (ctx.user_inputs or {})
+        external_str = repr(external_dict)
+
         memory_str = ""
         if ctx.memory_snippets:
             memory_str = (
@@ -351,10 +430,67 @@ class ActionPlanner:
             "- step ids are unique,\n"
             "- action_ref exactly matches one of the listed action refs,\n"
             "- you only reference outputs from earlier steps.\n\n"
+            "- Do NOT invent file paths or other external values that are not already provided.\n"
+            '- If you need something like a dataset path and it is not known yet, bind it as "${user.dataset_path}".\n'
+            '- Never hard-code fake paths like "path/to/dataset".\n\n'
             "Return ONLY the JSON object, with no explanation or comments."
         )
 
     def _build_repair_prompt(
+        self,
+        ctx: PlanningContext,
+        actions_md: str,
+        plan: CandidatePlan,
+        validation: ValidationResult,
+    ) -> str:
+        """
+        Repair prompt: show the current plan + validation summary and ask the LLM
+        to return an improved JSON plan.
+        """
+        user_inputs_str = repr(ctx.user_inputs or {})
+        external_dict = ctx.external_slots or (ctx.user_inputs or {})
+        external_str = repr(external_dict)
+
+        if ctx.skill and ctx.skill.planning_prompt:
+            header = ctx.skill.planning_prompt.strip()
+        else:
+            header = (
+                "You are a planning assistant that repairs and improves existing "
+                "JSON workflow plans. Return ONLY valid JSON."
+            )
+
+        # Optional: include some compact context again if we want
+        memory_str = ""
+        if ctx.memory_snippets:
+            memory_str = (
+                "Relevant recent context (runs, summaries, etc.):\n"
+                + "\n".join(f"- {m}" for m in ctx.memory_snippets)
+                + "\n\n"
+            )
+
+        return (
+            f"{header}\n\n"
+            f"Goal:\n{ctx.goal}\n\n"
+            f"User inputs (available values):\n{user_inputs_str}\n\n"
+            f"External bindings (available as `{{user.<key>}}`):\n{external_str}\n\n"
+            f"{memory_str}"
+            "You have the following actions available:\n"
+            f"{actions_md}\n\n"
+            "Here is the current candidate plan JSON:\n"
+            f"{plan.to_dict()}\n\n"
+            "Validation result for this plan:\n"
+            f"{validation.summary()}\n\n"
+            "Some issues may also include candidate actions that can provide missing inputs.\n\n"
+            "Please return a corrected plan as a JSON object of the SAME SHAPE:\n"
+            '{ "steps": [ { "id": "...", "action_ref": "...", "inputs": { ... } } ] }\n\n'
+            "You may:\n"
+            "- add, remove, or reorder steps,\n"
+            "- change action_ref values to valid actions,\n"
+            "- fix input bindings and literals.\n\n"
+            "Return ONLY the JSON object, with no explanation or comments."
+        )
+
+    def _build_repair_prompt_v0(
         self,
         ctx: PlanningContext,
         actions_md: str,

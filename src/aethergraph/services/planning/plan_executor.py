@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from uuid import uuid4
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.core.runtime.run_manager import RunManager
@@ -174,9 +175,13 @@ class PlanExecutor:
                     step_tags.append(f"plan_step:{step.id}")
 
                     # Spawn the run
+                    run_id = (
+                        f"plan-{plan_id or 'na'}-{session_id or 'na'}-{step.id}-{uuid4().hex[:8]}"
+                    )
                     run_record = await self.run_manager.submit_run(
                         graph_id=graph_id,
                         inputs=bound_inputs,
+                        run_id=run_id,
                         session_id=session_id,
                         identity=identity,
                         origin=origin,
@@ -186,7 +191,6 @@ class PlanExecutor:
                         app_id=app_id,
                         tags=step_tags,
                     )
-
                     # Wait for completion and grab real Python outputs
                     finished_rec, outputs = await self.run_manager.wait_run(
                         run_record.run_id,

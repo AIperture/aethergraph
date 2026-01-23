@@ -38,3 +38,4 @@ class NodeServices:
     mcp: MCPService | None = None  # MCPService
     run_manager: RunManager | None = None  # RunManager
     indices: ScopedIndices | None = None  # ScopedIndices for this node
+    execution: Any | None = None  # ExecutionService

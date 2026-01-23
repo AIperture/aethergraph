@@ -118,7 +118,7 @@ def _format_search_snippets(event_results, artifact_results, max_total: int = 8)
 
 @graph_fn(
     name="default_chat_agent",
-    inputs=["message", "files", "session_id", "user_meta"],
+    inputs=["message", "files", "context_refs", "session_id", "user_meta"],
     outputs=["reply"],
     as_agent={
         "id": "chat_agent",
@@ -143,26 +143,7 @@ async def default_chat_agent(
     context: NodeContext,
 ):
     """
-    Built-in chat agent with 3-layer session memory:
-
-    1) Layer 1 – Recency (hotlog / recent_chat):
-       - Pulls recent chat turns directly from memory for conversational flow.
-
-    2) Layer 2 – Summaries (distilled long-term + meta summaries):
-       - Uses distillers to periodically compress long histories into
-         long-term summaries.
-       - build_prompt_segments() includes the latest summaries as text.
-
-    3) Layer 3 – Indexed Recall (search_events / search_artifacts):
-       - Uses the global SearchBackend via ScopedIndices to fetch semantically
-         relevant past events and artifacts based on the current query.
-       - Results are injected as a “retrieved snippets” block the LLM can use
-         but is free to ignore if irrelevant.
-
-    Flow:
-      - Record user → build segments (L1+L2) → semantic search (L3)
-        → single LLM.chat() → send reply & auto-log via channel
-        → best-effort distillation for future turns.
+    Built-in chat agent with 3-layer session memory: Recency, Long-term summaries, Semantic search.
     """
 
     logger = context.logger()

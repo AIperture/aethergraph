@@ -216,6 +216,8 @@ def _load_user_graphs_from_env() -> None:
     if report.errors:
         for e in report.errors:
             print(f"⚠️ [worker load error] {e.source}: {e.error}")
+            if e.traceback:
+                print(e.traceback)
 
 
 def create_app_from_env() -> FastAPI:

@@ -2,6 +2,11 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from aethergraph.contracts.services.execution import (
+    CodeExecutionRequest,
+    CodeExecutionResult,
+    ExecutionService,
+)
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 
@@ -45,6 +50,49 @@ class NodeContext:
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:
         return self.services
+
+    async def execute(
+        self,
+        code: str,
+        *,
+        language: str = "python",
+        timeout_s: float = 30.0,
+        args: list[str] | None = None,
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> CodeExecutionResult:
+        """
+        Docstring for execute
+
+        :param self: Description
+        :param code: Description
+        :type code: str
+        :param language: Description
+        :type language: str
+        :param timeout_s: Description
+        :type timeout_s: float
+        :param args: Description
+        :type args: list[str] | None
+        :param workdir: Description
+        :type workdir: str | None
+        :param env: Description
+        :type env: dict[str, str] | None
+        :return: Description
+        :rtype: CodeExecutionResult
+        """
+        exe_svs: ExecutionService | None = getattr(self.services, "execution", None)
+        if exe_svs is None:
+            raise RuntimeError("NodeContext.services.execution is not configured")
+
+        req = CodeExecutionRequest(
+            language=language,
+            code=code,
+            args=args or [],
+            timeout_s=timeout_s,
+            workdir=workdir,
+            env=env,
+        )
+        return await exe_svs.execute(req)
 
     async def spawn_run(
         self,
