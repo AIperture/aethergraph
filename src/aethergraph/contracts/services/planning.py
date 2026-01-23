@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from aethergraph.services.planning.plan_types import CandidatePlan
-
 IntentMode = Literal["chat_only", "quick_action", "plan_and_execute"]
 
 
@@ -144,29 +142,41 @@ class SkillSpec:
 
 @dataclass
 class AgentContextSnapshot:
-    """Placeholder -- will change"""
+    """
+    Generic snapshot of an agent's context for a given session.
 
-    session_id: str | None
-    user_message: str | None
+    - recent_chat / summaries / session_state_view can be used by *any* service.
+    - last_plans / last_executions are planning history.
+    - pending_* captures interactive planning state (clarification / approval).
 
-    # Chat
-    recent_chat: list[dict[str, Any]]  # [{"role": str, "content": str}, ...]
-    summaries: list[str]  # brief summaries of past interactions
+    TODO: refactor into PlanningSnapshot + AgentSnapshot
+    """
 
-    # Plans & Runs
-    pending_plan: CandidatePlan | None
-    pending_user_inputs: dict[str, Any]
-    pending_question: str | None
-    pending_missing_inputs: dict[str, list[str]]
+    # Optional identity; orchestrator can fill or ignore
+    session_id: str | None = None
 
-    last_plans: list[dict[str, Any]]  # serialized agent.plan events
-    last_executions: list[dict[str, Any]]  # serialized agent.execution events
+    # Generic conversational context
+    recent_chat: list[dict[str, Any]] = field(default_factory=list)
+    summaries: list[str] = field(default_factory=list)
 
-    # Session state snapshot (serialized view of Surrogate Session State )
-    session_state_view: dict[str, Any]
+    # Sticky state (things like dataset_path, hyperparams, etc.)
+    session_state_view: dict[str, Any] = field(default_factory=dict)
 
-    # Active skill
-    active_skill: SkillSpec | None = None
+    # Planning / execution history (loose dicts on purpose)
+    last_plans: list[dict[str, Any]] = field(default_factory=list)
+    last_executions: list[dict[str, Any]] = field(default_factory=list)
+
+    # Pending interactive state (for clarification / approval flows)
+    pending_plan: dict[str, Any] | None = None  # serialized CandidatePlan.to_dict()
+    pending_user_inputs: dict[str, Any] = field(default_factory=dict)
+    # e.g. {"dataset_path": ["load.dataset_path"], "hyperparams": ["train.hyperparams"]}
+    pending_missing_inputs: dict[str, list[str]] = field(default_factory=dict)
+    pending_question: str | None = None  # last question we asked the user
+    # "clarification" | "approval" | None  (no strict enum to keep it light)
+    pending_mode: str | None = None
+
+    # Optional: which skill is currently "active" in this session
+    active_skill_id: str | None = None
 
 
 @dataclass
