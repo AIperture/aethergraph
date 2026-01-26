@@ -61,25 +61,7 @@ class NodeContext:
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> CodeExecutionResult:
-        """
-        Docstring for execute
-
-        :param self: Description
-        :param code: Description
-        :type code: str
-        :param language: Description
-        :type language: str
-        :param timeout_s: Description
-        :type timeout_s: float
-        :param args: Description
-        :type args: list[str] | None
-        :param workdir: Description
-        :type workdir: str | None
-        :param env: Description
-        :type env: dict[str, str] | None
-        :return: Description
-        :rtype: CodeExecutionResult
-        """
+        """ """
         exe_svs: ExecutionService | None = getattr(self.services, "execution", None)
         if exe_svs is None:
             raise RuntimeError("NodeContext.services.execution is not configured")
@@ -92,6 +74,8 @@ class NodeContext:
             workdir=workdir,
             env=env,
         )
+        print("Executing code via NodeContext.execute()...")
+        print(req)
         return await exe_svs.execute(req)
 
     async def spawn_run(

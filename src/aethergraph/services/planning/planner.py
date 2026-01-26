@@ -60,13 +60,16 @@ class ActionPlanner:
         plan: CandidatePlan | None = None
 
         print("🍎 === Planning Context ===")
-        print(ctx.memory_snippets)
+        print(ctx)
         print("========================")
         flow_ids = ctx.flow_ids  # could be None
         actions_md = self.catalog.pretty_print(
             flow_ids=flow_ids,
             include_global=True,
         )
+        print("🍎 === Available Actions ===")
+        print(actions_md)
+        print("===========================")
 
         system_prompt = (
             "You are a planning assistant that builds executable workflows as JSON plans. "
@@ -90,7 +93,7 @@ class ActionPlanner:
                 user_prompt = self._build_repair_prompt(ctx, actions_md, plan, last_v)
 
             print("🍎 === Planning Prompt ===")
-            print(user_prompt)
+            print(user_prompt[:1000] + ("..." if len(user_prompt) > 1000 else ""))
             self._emit(
                 on_event,
                 PlanningEvent(

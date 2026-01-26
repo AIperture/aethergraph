@@ -155,6 +155,9 @@ class AgentContextSnapshot:
     # Optional identity; orchestrator can fill or ignore
     session_id: str | None = None
 
+    # Current turn message (optional but very handy)
+    user_message: str | None = None
+
     # Generic conversational context
     recent_chat: list[dict[str, Any]] = field(default_factory=list)
     summaries: list[str] = field(default_factory=list)

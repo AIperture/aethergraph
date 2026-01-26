@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
@@ -25,6 +26,67 @@ class ParsedInputs:
 
 class InputParserError(Exception):
     """Hard failure in the input parser (e.g. LLM/schema problem)."""
+
+
+def normalize_llm_json_object(raw: Any) -> dict[str, Any]:
+    """
+    Normalize raw LLM output into a JSON object (dict).
+
+    Handles:
+      - dict (already parsed)
+      - JSON strings, optionally wrapped in ``` or ```json fences
+      - JSON strings with leading/trailing text, by extracting the first {...} block
+    """
+    # 1) Already a dict: perfect
+    if isinstance(raw, dict):
+        return raw
+
+    # 2) String: try to recover JSON from it
+    if isinstance(raw, str):
+        txt = raw.strip()
+        if not txt:
+            raise InputParserError("Empty LLM response when expecting JSON object.")
+
+        # Handle ```json ... ``` or ``` ... ``` fences
+        if txt.startswith("```"):
+            # Strip first fence line (``` or ```json / ```JSON etc.)
+            first_newline = txt.find("\n")
+            if first_newline != -1:
+                # fence_line = txt[:first_newline].strip().lower()
+                # We don't really care which flavor; drop it
+                txt = txt[first_newline + 1 :].strip()
+            # Strip trailing ``` if present
+            if txt.endswith("```"):
+                txt = txt[:-3].strip()
+
+        # First attempt: parse whole string
+        try:
+            obj = json.loads(txt)
+        except json.JSONDecodeError:
+            # Second attempt: extract the first {...} block
+            start = txt.find("{")
+            end = txt.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = txt[start : end + 1]
+                try:
+                    obj = json.loads(candidate)
+                except json.JSONDecodeError as exc2:
+                    raise InputParserError(
+                        f"Cannot parse JSON object from LLM response (substring). Error: {exc2}"
+                    ) from exc2
+            else:
+                raise InputParserError(
+                    "Cannot parse JSON object from LLM response (no JSON object found)."
+                ) from None
+
+        if not isinstance(obj, dict):
+            raise InputParserError(f"Expected JSON object (dict), got {type(obj)} instead.")
+        return obj
+
+    # 3) Unsupported type
+    raise InputParserError(
+        f"LLM returned unsupported type {type(raw)} when expecting a JSON object."
+    )
 
 
 @dataclass
@@ -119,6 +181,7 @@ class InputParser:
         ]
 
         try:
+            print(f"[input_parser] sending messages: {messages}", flush=True)
             raw, _usage = await self.llm.chat(
                 messages,
                 output_format="json",
@@ -127,6 +190,7 @@ class InputParser:
                 strict_schema=True,
                 validate_json=True,
             )
+            print(f"[input_parser] received raw: {raw}", flush=True)
         except Exception as exc:  # noqa: BLE001
             # Hard LLM failure → all fields still missing; surface error to user.
             return ParsedInputs(
@@ -141,8 +205,10 @@ class InputParser:
                 ],
             )
 
-        if not isinstance(raw, dict):
-            # Should not happen with strict_schema=True, but guard anyway
+        # --- Normalize raw into a Python dict ---
+        try:
+            obj = normalize_llm_json_object(raw)
+        except InputParserError as exc:
             return ParsedInputs(
                 values={},
                 resolved_keys=set(),
@@ -150,16 +216,17 @@ class InputParser:
                 errors=[
                     "I couldn't reliably extract the requested inputs from your reply. "
                     "Please restate the values clearly.",
-                    f"(Parser expected JSON object, got {type(raw)})",
+                    f"(Parser error: {exc!r})",
                 ],
             )
 
+        # From here on, `obj` is a dict
         values: dict[str, Any] = {}
         resolved: set[str] = set()
         missing: set[str] = set()
 
         for key in missing_keys:
-            val = raw.get(key, None)
+            val = obj.get(key, None)
             if val is None:
                 missing.add(key)
             else:

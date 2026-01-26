@@ -1,8 +1,6 @@
-# aethergraph/services/execution/local_python.py
-from __future__ import annotations
-
 import asyncio
 from pathlib import Path
+import subprocess
 import tempfile
 
 from aethergraph.contracts.services.execution import (
@@ -13,13 +11,6 @@ from aethergraph.contracts.services.execution import (
 
 
 class LocalPythonExecutionService(ExecutionService):
-    """
-    Minimal execution service that runs Python code using the local interpreter.
-
-    This is NOT sandboxed. It runs with the same permissions as the AG process.
-    Use only for experimentation or very trusted code.
-    """
-
     def __init__(self, python_executable: str = "python"):
         self.python_executable = python_executable
 
@@ -33,7 +24,6 @@ class LocalPythonExecutionService(ExecutionService):
                 metadata={"reason": "unsupported_language"},
             )
 
-        # Write the code to a temporary .py file
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             script_path = tmp_path / "script.py"
@@ -43,16 +33,15 @@ class LocalPythonExecutionService(ExecutionService):
             if request.args:
                 cmd.extend(request.args)
 
-            # Working directory and environment (optional, for future)
             cwd = request.workdir or tmpdir
             env: dict[str, str] | None = None
             if request.env is not None:
-                # Start from current env, update with overrides
                 import os
 
                 env = os.environ.copy()
                 env.update(request.env)
 
+            # Try async subprocess first
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -74,10 +63,12 @@ class LocalPythonExecutionService(ExecutionService):
                         stderr=stderr,
                         exit_code=proc.returncode,
                         error=None,
-                        metadata={"timeout_s": request.timeout_s},
+                        metadata={
+                            "timeout_s": request.timeout_s,
+                            "mode": "async_subprocess",
+                        },
                     )
                 except asyncio.TimeoutError:
-                    # Kill the process on timeout
                     proc.kill()
                     await proc.wait()
                     return CodeExecutionResult(
@@ -85,8 +76,37 @@ class LocalPythonExecutionService(ExecutionService):
                         stderr="Execution timed out",
                         exit_code=-1,
                         error="timeout",
-                        metadata={"timeout_s": request.timeout_s},
+                        metadata={
+                            "timeout_s": request.timeout_s,
+                            "mode": "async_subprocess",
+                        },
                     )
+
+            except NotImplementedError as exc:
+                # Fallback for event loops that don't support subprocesses (common on Windows)
+                def _run_sync():
+                    completed = subprocess.run(
+                        cmd,
+                        cwd=cwd,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                    )
+                    return completed
+
+                completed = await asyncio.to_thread(_run_sync)
+
+                return CodeExecutionResult(
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    exit_code=completed.returncode,
+                    error=None,
+                    metadata={
+                        "timeout_s": request.timeout_s,
+                        "mode": "thread_subprocess_fallback",
+                        "exception_type": type(exc).__name__,
+                    },
+                )
 
             except Exception as exc:
                 return CodeExecutionResult(

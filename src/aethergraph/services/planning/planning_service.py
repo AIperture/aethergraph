@@ -79,6 +79,10 @@ class PlanningTurnResult:
     needs_approval: bool = False
     approval_message: str | None = None
 
+    # hint for the orchestrator/router
+    fallback_to_router: bool = False
+    fallback_reason: str | None = None
+
 
 @dataclass
 class PlanningService:
@@ -125,6 +129,7 @@ class PlanningService:
         skill_id: str | None = None,
         on_plan_event: Callable[[PlanningEvent], Any] | None = None,
         on_exec_event: Callable[[ExecutionEvent], Any] | None = None,
+        base_snapshot: AgentContextSnapshot | None = None,
     ) -> PlanningTurnResult:
         """
         High-level, single entry point for planning-related turns.
@@ -141,7 +146,29 @@ class PlanningService:
         lower-level planner/executor as needed.
         """
         key = _session_key(agent_id, session_id)
-        snapshot = self._snapshots.get(key)
+
+        # 1) Merge orchestrator-provided base snapshot with our stored planning snapshot.
+        stored = self._snapshots.get(key)
+
+        if stored is None and base_snapshot is not None:
+            # First time we see this (agent,session): start from orchestrator snapshot
+            snapshot = base_snapshot
+        elif stored is not None and base_snapshot is not None:
+            # Merge: keep planning state from stored, refresh memory-ish fields from base
+            snapshot = stored
+
+            # Overwrite memory-related fields from base_snapshot, keep pending_ and last_* from stored.
+            snapshot.recent_chat = base_snapshot.recent_chat or []
+            snapshot.summaries = base_snapshot.summaries or []
+            snapshot.session_state_view = (
+                base_snapshot.session_state_view or snapshot.session_state_view
+            )
+            # You can also merge last_plans / last_executions if memory records them differently,
+            # but simplest is to treat PlanningService as the owner of last_plans/last_executions.
+        else:
+            snapshot = stored or base_snapshot or AgentContextSnapshot(session_id=session_id)
+
+        self._snapshots[key] = snapshot
 
         # --- 1) If we know we're waiting on missing inputs, treat as clarification.
         if (
@@ -208,6 +235,11 @@ class PlanningService:
         )
         self._snapshots[key] = new_snapshot
 
+        fallback_to_router, fallback_reason = self._should_fallback_to_router(
+            plan=plan,
+            validation=validation,
+        )
+
         return PlanningTurnResult(
             kind="new",
             plan=plan,
@@ -223,6 +255,8 @@ class PlanningService:
                 if plan and validation and validation.ok and not allow_auto_execute
                 else None
             ),
+            fallback_to_router=fallback_to_router,
+            fallback_reason=fallback_reason,
         )
 
     async def plan_and_maybe_execute(
@@ -245,6 +279,7 @@ class PlanningService:
         on_exec_event: Callable[[ExecutionEvent], Any] | None = None,
         # optional skill id hint passed to context builder
         skill_id: str | None = None,
+        existing_snapshot: AgentContextSnapshot | None = None,  # NEW
     ) -> tuple[
         CandidatePlan | None, ValidationResult | None, ExecutionResult | None, AgentContextSnapshot
     ]:
@@ -262,7 +297,7 @@ class PlanningService:
         """
 
         key = _session_key(agent_id, session_id)
-        snapshot = self._snapshots.get(key)
+        snapshot = existing_snapshot or self._snapshots.get(key)
 
         # 1) Build PlanningContext
         ctx = await self._build_context(
@@ -575,6 +610,9 @@ class PlanningService:
         snapshot.session_state_view = session_state_view
         snapshot.pending_missing_inputs = still_missing
 
+        # Persist the updated snapshot *for both* success and error paths
+        self._snapshots[key] = snapshot
+
         # If there are parsing errors or still-missing fields, we do NOT replan yet.
         if parsed.errors or still_missing:
             clarification_message = "\n".join(parsed.errors or []) or None
@@ -608,6 +646,7 @@ class PlanningService:
             on_plan_event=on_plan_event,
             on_exec_event=on_exec_event,
             skill_id=skill_id,
+            existing_snapshot=snapshot,
         )
 
         needs_clar, clar_keys, clar_msg = self._derive_clarification_from_validation(
@@ -694,3 +733,37 @@ class PlanningService:
             snap.pending_question = "I have a valid workflow plan. Should I run it?"
 
         return snap
+
+    @staticmethod
+    def _should_fallback_to_router(
+        plan: CandidatePlan | None,
+        validation: ValidationResult | None,
+    ) -> tuple[bool, str | None]:
+        """
+        Decide whether this turn is a bad fit for planning and should be
+        handed back to the general agent/router.
+
+        Heuristic:
+          - No plan at all -> fallback
+          - No validation -> fallback
+          - Validation has structural errors -> fallback
+          - Invalid and no missing_user_bindings -> fallback
+            (i.e. it's not just "please give me dataset_path")
+        """
+        if plan is None:
+            return True, "no_plan_produced"
+
+        if validation is None:
+            return True, "no_validation"
+
+        has_structural = getattr(validation, "has_structural_errors", False)
+        missing = getattr(validation, "missing_user_bindings", {}) or {}
+
+        if has_structural:
+            return True, "structural_errors_in_plan"
+
+        if not validation.ok and not missing:
+            # Not executable, and not just waiting on user inputs = planner is confused
+            return True, "invalid_plan_without_missing_inputs"
+
+        return False, None
