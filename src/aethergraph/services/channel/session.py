@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 import logging
 from typing import Any, Literal
+import uuid
 
 from aethergraph.contracts.services.channel import Button, FileRef, OutEvent
 from aethergraph.services.continuations.continuation import Correlator
@@ -226,6 +227,51 @@ class ChannelSession:
         # merge context meta
         event.meta = self._inject_context_meta(event.meta)
         await self._bus.publish(event)
+
+    async def send_phase(
+        self,
+        phase: str,
+        status: Literal["pending", "active", "done", "failed", "skipped"],
+        *,
+        label: str | None = None,
+        detail: str | None = None,
+        code: str | None = None,
+        channel: str | None = None,
+        key_suffix: str | None = None,
+    ) -> None:
+        """
+        Send a phase/state update for the UI timeline.
+
+        `phase` is a logical stage name like:
+            "routing", "planning", "reasoning", "tools", "reply", ...
+
+        `status` indicates its current state:
+            "pending", "active", "done", "failed", "skipped".
+        """
+        ch_key = self._resolve_key(channel)
+        # Stable upsert per phase per node/run
+        suffix = key_suffix or f"phase:{phase}"
+        upsert_key = f"{self._run_id}:{self._node_id}:{suffix}"
+
+        rich = {
+            "kind": "phase",
+            "phase": phase,
+            "status": status,
+            "label": label or phase.title(),
+            "detail": detail or "",
+        }
+        if code:
+            rich["code"] = code
+
+        await self._bus.publish(
+            OutEvent(
+                type="agent.progress.update",
+                channel=ch_key,
+                upsert_key=upsert_key,
+                rich=rich,
+                meta=self._inject_context_meta(None),
+            )
+        )
 
     async def send_text(
         self,
@@ -1076,13 +1122,15 @@ class ChannelSession:
             )
 
     # ---------- streaming ----------
+
     class _StreamSender:
         def __init__(self, outer: "ChannelSession", *, channel_key: str | None = None):
             self._outer = outer
             self._started = False
             # Resolve once (explicit -> bound -> default)
             self._channel_key = outer._resolve_key(channel_key)
-            self._upsert_key = f"{outer._run_id}:{outer._node_id}:stream"
+            # Unique per stream so multiple streams from same node don’t collide
+            self._upsert_key = f"{outer._run_id}:{outer._node_id}:stream:{uuid.uuid4().hex}"
 
         def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
             return self._outer._inject_context_meta(meta)
@@ -1095,7 +1143,7 @@ class ChannelSession:
                 self.__buf = []
             return self.__buf
 
-        async def start(self):
+        async def start(self) -> None:
             if not self._started:
                 self._started = True
                 await self._outer._bus.publish(
@@ -1107,16 +1155,26 @@ class ChannelSession:
                     )
                 )
 
-        async def delta(self, text_piece: str):
+        async def delta(self, text_piece: str) -> None:
+            """
+            Send a text delta for this stream.
+
+            The UI is expected to append `text_piece` to the message associated
+            with `upsert_key`. We also keep an internal buffer so `end()` can log
+            the full text to memory if needed.
+            """
+            if not text_piece:
+                return
+
             await self.start()
             buf = self._ensure_buf()
             buf.append(text_piece)
-            # Upsert full text so adapters can rewrite one message
+
             await self._outer._bus.publish(
                 OutEvent(
-                    type="agent.message.update",
+                    type="agent.stream.delta",
                     channel=self._channel_key,
-                    text="".join(buf),
+                    text=text_piece,
                     upsert_key=self._upsert_key,
                     meta=self._inject_context_meta(None),
                 )
@@ -1126,35 +1184,31 @@ class ChannelSession:
             self,
             full_text: str | None = None,
             *,
-            # NEW: memory logging
             memory_log: bool = True,
             memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
             memory_tags: list[str] | None = None,
             memory_data: dict[str, Any] | None = None,
             memory_severity: int = 2,
             memory_signal: float | None = None,
-        ):
-            text_to_log = full_text
-            if text_to_log is None:
+        ) -> None:
+            """
+            Finalize the stream.
+
+            - If `full_text` is None, uses the concatenated buffer.
+            - Logs the completed text to memory (once).
+            - Emits `agent.stream.end` with the final text.
+            """
+            # Make sure we at least emitted start if no delta was ever sent
+            await self.start()
+
+            if full_text is None:
                 buf = self._buf()
-                text_to_log = "".join(buf) if buf else ""
+                full_text = "".join(buf) if buf else ""
 
-            # 1) Final UI update
-            if full_text is not None:
-                await self._outer._bus.publish(
-                    OutEvent(
-                        type="agent.message.update",
-                        channel=self._channel_key,
-                        text=full_text,
-                        upsert_key=self._upsert_key,
-                        meta=self._inject_context_meta(None),
-                    )
-                )
-
-            # 2) Memory logging of the completed message
+            # 1) Memory logging of the completed message
             await self._outer._log_chat(
                 memory_role,
-                text_to_log,
+                full_text,
                 tags=memory_tags,
                 data=memory_data,
                 severity=memory_severity,
@@ -1163,11 +1217,12 @@ class ChannelSession:
                 channel=self._channel_key,
             )
 
-            # 3) End-of-stream event
+            # 2) End-of-stream event with final text
             await self._outer._bus.publish(
                 OutEvent(
                     type="agent.stream.end",
                     channel=self._channel_key,
+                    text=full_text,
                     upsert_key=self._upsert_key,
                     meta=self._inject_context_meta(None),
                 )
@@ -1249,6 +1304,7 @@ class ChannelSession:
                         channel=self._channel_key,
                         upsert_key=self._upsert_key,
                         rich={
+                            "kind": "progress",
                             "title": self._title,
                             "subtitle": subtitle or "",
                             "total": self._total,
@@ -1275,6 +1331,7 @@ class ChannelSession:
             if current is not None:
                 self._current = int(current)
             payload = {
+                "kind": "progress",
                 "title": self._title,
                 "subtitle": subtitle or "",
                 "total": self._total,
@@ -1299,6 +1356,7 @@ class ChannelSession:
                     channel=self._channel_key,
                     upsert_key=self._upsert_key,
                     rich={
+                        "kind": "progress",
                         "title": self._title,
                         "subtitle": subtitle or "",
                         "success": bool(success),

@@ -502,6 +502,7 @@ class SessionChatEvent(BaseModel):
     ts: float
     agent_id: str | None = None
     upsert_key: str | None = None  # for idempotent updates
+    rich: dict[str, Any] | None = None  # phase/progress payloads
 
 
 class SessionUpdateRequest(BaseModel):

@@ -128,6 +128,8 @@ def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
 @router.get("/artifacts", response_model=ArtifactListResponse)
 async def list_artifacts(
     scope_id: Annotated[str | None, Query()] = None,
+    run_id: Annotated[str | None, Query()] = None,
+    session_id: Annotated[str | None, Query()] = None,
     kind: Annotated[str | None, Query()] = None,
     tags: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
@@ -141,17 +143,35 @@ async def list_artifacts(
 
     offset = decode_cursor(cursor.strip() if cursor else None)
 
+    # label_filters: dict[str, Any] = {}
+
+    # if scope_id and scope_id.strip():
+    #     label_filters["scope_id"] = scope_id.strip()
+
+    # if tags and tags.strip():
+    #     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    #     if tag_list:
+    #         label_filters["tags"] = tag_list
+
+    # # 🔹 Tenant scoping: org_id + user_id
+    # label_filters.update(_tenant_label_filters(identity))
+
     label_filters: dict[str, Any] = {}
 
+    # execution scopes
+    if run_id and run_id.strip():
+        label_filters["run_id"] = run_id.strip()
+    if session_id and session_id.strip():
+        label_filters["session_id"] = session_id.strip()
+
+    # memory scope (keep for “overview” / RAG-style scoping)
     if scope_id and scope_id.strip():
         label_filters["scope_id"] = scope_id.strip()
 
     if tags and tags.strip():
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-        if tag_list:
-            label_filters["tags"] = tag_list
+        label_filters["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
 
-    # 🔹 Tenant scoping: org_id + user_id
+    print("Label filters:", label_filters)
     label_filters.update(_tenant_label_filters(identity))
 
     artifacts = await index.search(

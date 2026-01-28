@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
@@ -308,20 +309,94 @@ async def default_chat_agent(
     # ------------------------------------------------------------------
     # 5) Single LLM call (all layers already baked into messages)
     # ------------------------------------------------------------------
-    resp, usage = await llm.chat(messages=messages)
+    # await chan.send_phase(
+    #     phase="reasoning",
+    #     status="active",
+    #     label="LLM call",
+    #     detail="Calling LLM...",
+    # )
+
+    # resp, usage = await llm.chat(messages=messages)
+
+    # # ------------------------------------------------------------------
+    # # # 6) Send + auto-log assistant reply via channel (ChannelSession)
+    # # # ------------------------------------------------------------------
+    # try:
+    #     memory_data = {"usage": usage} if usage else None
+    #     await chan.send_text(
+    #         resp,
+    #         memory_tags=["session.chat"],
+    #         memory_data=memory_data,
+    #     )
+    # except Exception:
+    #     logger.warning("Failed to send/log assistant reply via channel", exc_info=True)
+
+    # # Finalize "reasoning" phase
+    # await chan.send_phase(
+    #     phase="reasoning",
+    #     status="done",
+    #     label="LLM call",
+    #     detail="LLM response finished.",
+    # )
 
     # ------------------------------------------------------------------
-    # 6) Send + auto-log assistant reply via channel (ChannelSession)
+    # 5) Single LLM call (streaming into ChannelSession)
     # ------------------------------------------------------------------
     try:
-        memory_data = {"usage": usage} if usage else None
-        await chan.send_text(
-            resp,
-            memory_tags=["session.chat"],
-            memory_data=memory_data,
-        )
+        # Mark the "reasoning" phase as active before calling the LLM
+        try:
+            await chan.send_phase(
+                phase="reasoning",
+                status="active",
+                label="LLM call",
+                detail="Calling LLM (streaming response)...",
+            )
+
+            await asyncio.sleep(0.6)  # slight delay to ensure phase event ordering
+            await chan.send_phase(
+                phase="llm",
+                status="active",
+                label="Planning generating response",
+                detail="Planning is generating the response...",
+            )
+        except Exception:
+            logger.debug("Failed to send LLM phase(active) state", exc_info=True)
+
+        async with chan.stream() as s:
+            # Hook for streaming deltas into the same message
+            async def on_delta(piece: str) -> None:
+                await s.delta(piece)
+
+            # Streaming LLM call
+            resp, usage = await llm.chat_stream(
+                messages=messages,
+                on_delta=on_delta,
+            )
+
+            # Finalize streaming + memory
+            memory_data = {"usage": usage} if usage else None
+            await s.end(
+                full_text=resp,
+                memory_tags=["session.chat"],
+                memory_data=memory_data,
+            )
+
+        # Mark the "reasoning" phase as done
+        try:
+            await chan.send_phase(
+                phase="reasoning",
+                status="done",
+                label="LLM call",
+                detail="LLM response finished.",
+            )
+        except Exception:
+            logger.debug("Failed to send LLM phase(done) state", exc_info=True)
+
     except Exception:
-        logger.warning("Failed to send/log assistant reply via channel", exc_info=True)
+        logger.warning(
+            "Failed to stream/log assistant reply via channel",
+            exc_info=True,
+        )
 
     # ------------------------------------------------------------------
     # 7) Periodic long-term distillation (maintains Layer 2)

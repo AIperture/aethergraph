@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 import json
 import logging
 import os
@@ -36,6 +37,8 @@ from aethergraph.services.llm.utils import (
     _to_gemini_parts,
     _validate_json_schema,
 )
+
+DeltaCallback = Callable[[str], Awaitable[None]]
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -236,22 +239,6 @@ class GenericLLMClient(LLMClientProtocol):
             logger = logging.getLogger("aethergraph.services.llm.generic_client")
             logger.warning(f"llm_metering_failed: {e}")
 
-    # async def _ensure_client(self):
-    #     """Ensure the httpx client is bound to the current event loop.
-    #     This allows safe usage across multiple async contexts.
-    #     """
-    #     loop = asyncio.get_running_loop()
-    #     if self._client is None or self._bound_loop != loop:
-    #         # close old client if any
-    #         if self._client is not None:
-    #             try:
-    #                 await self._client.aclose()
-    #             except Exception:
-    #                 logger = logging.getLogger("aethergraph.services.llm.generic_client")
-    #                 logger.warning("llm_client_close_failed")
-    #         self._client = httpx.AsyncClient(timeout=self._client.timeout)
-    #         self._bound_loop = loop
-
     async def _ensure_client(self):
         loop = asyncio.get_running_loop()
 
@@ -372,6 +359,204 @@ class GenericLLMClient(LLMClientProtocol):
         )
 
         return text, usage
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        output_format: ChatOutputFormat = "text",
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "output",
+        strict_schema: bool = True,
+        validate_json: bool = True,
+        fail_on_unsupported: bool = True,
+        on_delta: DeltaCallback | None = None,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        """
+        Streaming version of chat.
+
+        - Calls provider-specific streaming path if available.
+        - Falls back to non-streaming chat() if streaming is not implemented.
+        - Accumulates full text and returns (full_text, usage) at the end.
+        """
+
+        await self._ensure_client()
+        model = kw.pop("model", self.model)
+        start = time.perf_counter()
+
+        # For now, only OpenAI Responses streaming is implemented.
+        if self.provider == "openai":
+            text, usage = await self._chat_openai_responses_stream(
+                messages,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
+                output_format=output_format,
+                json_schema=json_schema,
+                schema_name=schema_name,
+                strict_schema=strict_schema,
+                fail_on_unsupported=fail_on_unsupported,
+                on_delta=on_delta,
+                **kw,
+            )
+        else:
+            # Fallback: just call normal chat() and send a single delta.
+            text, usage = await self.chat(
+                messages,
+                reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
+                output_format=output_format,
+                json_schema=json_schema,
+                schema_name=schema_name,
+                strict_schema=strict_schema,
+                validate_json=validate_json,
+                fail_on_unsupported=fail_on_unsupported,
+                **kw,
+            )
+            if on_delta is not None and text:
+                await on_delta(text)
+
+        # Postprocess (JSON modes etc.)
+        text = self._postprocess_structured_output(
+            text=text,
+            output_format=output_format,
+            json_schema=json_schema,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+        )
+
+        latency_ms = int((time.perf_counter() - start) * 1000)
+
+        # Rate limits + metering as usual
+        self._enforce_llm_limits_for_run(usage=usage)
+        await self._record_llm_usage(model=model, usage=usage, latency_ms=latency_ms)
+
+        return text, usage
+
+    async def _chat_openai_responses_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+        fail_on_unsupported: bool,
+        on_delta: DeltaCallback | None = None,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        """
+        Stream text using OpenAI Responses API.
+
+        - We only support text / json_object / json_schema here.
+        - We look for `response.output_text.delta` events and call on_delta(delta).
+        - We accumulate full text and best-effort usage from the final event.
+        """
+        await self._ensure_client()
+        assert self._client is not None
+
+        url = f"{self.base_url}/responses"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        input_messages = _normalize_openai_responses_input(messages)
+
+        body: dict[str, Any] = {
+            "model": model,
+            "input": input_messages,
+            "stream": True,
+        }
+
+        if reasoning_effort is not None:
+            body["reasoning"] = {"effort": reasoning_effort}
+        if max_output_tokens is not None:
+            body["max_output_tokens"] = max_output_tokens
+
+        # Structured output config (same as non-streaming path)
+        if output_format == "json_object":
+            body["text"] = {"format": {"type": "json_object"}}
+        elif output_format == "json_schema":
+            if json_schema is None:
+                raise ValueError("output_format='json_schema' requires json_schema")
+            body["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "schema": json_schema,
+                    "strict": bool(strict_schema),
+                }
+            }
+        # else: default "text" format
+
+        full_chunks: list[str] = []
+        usage: dict[str, int] = {}
+
+        async def _handle_event(evt: dict[str, Any]):
+            nonlocal usage
+
+            etype = evt.get("type")
+
+            # Main text deltas
+            if etype == "response.output_text.delta":
+                delta = evt.get("delta") or ""
+                if delta:
+                    full_chunks.append(delta)
+                    if on_delta is not None:
+                        await on_delta(delta)
+
+            # Finalization – grab usage from completed response if present
+            elif etype in ("response.completed", "response.incomplete", "response.failed"):
+                resp = evt.get("response") or {}
+                # Usage may or may not be present, keep best-effort
+                usage = resp.get("usage") or usage
+
+            # Optional: basic error surface
+            elif etype == "error":
+                # in practice `error` may be structured differently; this is just a guardrail
+                msg = evt.get("message") or "Unknown streaming error"
+                raise RuntimeError(f"OpenAI streaming error: {msg}")
+
+        async def _call():
+            async with self._client.stream(
+                "POST",
+                url,
+                headers=headers,
+                json=body,
+            ) as r:
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    text = await r.aread()
+                    raise RuntimeError(f"OpenAI Responses streaming error: {text!r}") from e
+
+                # SSE: each event line is "data: {...}" + blank lines between events
+                async for line in r.aiter_lines():
+                    if not line:
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+
+                    data_str = line[len("data:") :].strip()
+                    if not data_str or data_str == "[DONE]":
+                        # OpenAI ends stream with `data: [DONE]`
+                        break
+
+                    try:
+                        evt = json.loads(data_str)
+                    except Exception:
+                        # best-effort: ignore malformed chunks
+                        continue
+
+                    await _handle_event(evt)
+
+        await self._retry.run(_call)
+
+        return "".join(full_chunks), usage
 
     async def _chat_dispatch(
         self,

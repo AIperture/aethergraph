@@ -7,6 +7,7 @@ import uuid
 
 from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
 from aethergraph.contracts.storage.event_log import EventLog
+from aethergraph.services.channel.event_hub import EventHub
 from aethergraph.services.continuations.continuation import Correlator
 
 
@@ -21,6 +22,9 @@ class UIChannelEvent:
     file: dict[str, Any] | None
     meta: dict[str, Any]
     ts: float
+    files: list[dict[str, Any]] | None = None  # optional
+    rich: dict[str, Any] | None = None  # optional
+    upsert_key: str | None = None  # optional
 
 
 class WebUIChannelAdapter(ChannelAdapter):
@@ -33,8 +37,9 @@ class WebUIChannelAdapter(ChannelAdapter):
 
     capabilities: set[str] = {"text", "buttons", "file", "stream", "edit"}
 
-    def __init__(self, event_log: EventLog):
+    def __init__(self, event_log: EventLog, event_hub: EventHub | None = None) -> None:
         self.event_log = event_log
+        self.event_hub = event_hub
 
     def _extract_target(self, channel_key: str) -> tuple[str, str]:
         """
@@ -74,28 +79,42 @@ class WebUIChannelAdapter(ChannelAdapter):
         buttons = [self._button_to_dict(b) for b in raw_buttons]
         file_info = getattr(event, "file", None) or None
 
-        # richer event support
         files = getattr(event, "files", None) or None
         rich = getattr(event, "rich", None) or None
         upsert_key = getattr(event, "upsert_key", None)
 
         meta = event.meta or {}
-        # Agent_id
-        # prefer cononical agent_id; otherwise fall back to legacy field
         agent_id = meta.get("agent_id") or meta.get("agent")
         if agent_id:
             meta["agent_id"] = agent_id
 
-        # Prefer explicit session_id / run_id from meta when present
         session_id = meta.get("session_id")
         run_id = meta.get("run_id")
 
         if scope_kind == "session":
             scope_id = session_id or target_id
             kind = "session_chat"
-        else:  # "run"
+        else:
             scope_id = run_id or target_id
             kind = "run_channel"
+
+        # ------------------------------------------------------------
+        # ✅ STREAMING POLICY:
+        # - Do NOT persist start/delta
+        # - Persist end as a final agent.message
+        # ------------------------------------------------------------
+        ephemeral_stream_types = {"agent.stream.start", "agent.stream.delta"}
+        is_ephemeral_stream = event.type in ephemeral_stream_types
+        is_stream_end = event.type == "agent.stream.end"
+
+        payload_type = event.type
+        payload_text = event.text
+
+        # Persist stream.end as an agent.message (final)
+        if is_stream_end:
+            payload_type = "agent.message"
+            # Mark it so UI/debug can know it came from a stream
+            meta = {**meta, "_stream_final": True, "_stream_type": "end"}
 
         row = {
             "id": str(uuid.uuid4()),
@@ -103,32 +122,27 @@ class WebUIChannelAdapter(ChannelAdapter):
             "scope_id": scope_id,
             "kind": kind,
             "payload": {
-                "type": event.type,
-                "text": event.text,
+                "type": payload_type,
+                "text": payload_text,
                 "buttons": buttons,
                 "file": file_info,
                 "files": files,
                 "rich": rich,
                 "upsert_key": upsert_key,
                 "meta": meta,
-                # optional convenience copy:
                 "agent_id": meta.get("agent_id"),
             },
         }
-        await self.event_log.append(row)
 
-        ## In the future, if an EventHub is available, broadcast to WebSocket subscribers.
-        ## self.event_log is always the source of truth.
-        # if self.event_hub is not None:
-        #     await self.event_hub.broadcast(row)
+        # ✅ Only persist non-ephemeral stream events
+        if not is_ephemeral_stream:
+            await self.event_log.append(row)
 
-        # Correlator remains run-based for now (session may not map 1-1)
+        # ✅ Always broadcast if hub exists (so streaming works)
+        if self.event_hub is not None:
+            await self.event_hub.broadcast(row)
+
         return {
             "run_id": run_id or target_id,
-            "correlator": Correlator(
-                scheme="ui",
-                channel=event.channel,
-                thread="",
-                message=None,
-            ),
+            "correlator": Correlator(scheme="ui", channel=event.channel, thread="", message=None),
         }

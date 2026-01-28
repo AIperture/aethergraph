@@ -28,6 +28,9 @@ from aethergraph.services.auth.authn import DevTokenAuthn
 from aethergraph.services.auth.authz import AllowAllAuthz
 from aethergraph.services.channel.channel_bus import ChannelBus
 
+# from aethergraph.services.eventhub.event_hub import EventHub
+from aethergraph.services.channel.event_hub import EventHub
+
 # ---- channel services ----
 from aethergraph.services.channel.factory import build_bus, make_channel_adapters_from_env
 from aethergraph.services.channel.ingress import ChannelIngress
@@ -138,6 +141,7 @@ class DefaultContainer:
 
     # channels and interactions
     channels: ChannelBus
+    eventhub: EventHub
 
     # continuations and resume
     cont_store: FSContinuationStore
@@ -266,7 +270,10 @@ def build_default_container(
     }
 
     # channels
-    channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog)
+    event_hub = (
+        EventHub()
+    )  # in-memory event hub for WebUI and other real-time events; not configurable yet
+    channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog, event_hub=event_hub)
     channels = build_bus(
         channel_adapters,
         default="console:stdin",
@@ -373,6 +380,7 @@ def build_default_container(
         logger=logger_factory,
         clock=clock,
         channels=channels,
+        eventhub=event_hub,
         cont_store=cont_store,
         sched_registry=sched_registry,
         wait_registry=wait_registry,
