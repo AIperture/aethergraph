@@ -191,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
 
             # Export them to environment so the worker factory can read them
             os.environ["AETHERGRAPH_WORKSPACE"] = args.workspace
+            os.environ.setdefault(
+                "AETHERGRAPH_ROOT", args.workspace
+            )  # AETHERGRAPH_ROOT is the workspace root in env
             os.environ["AETHERGRAPH_PROJECT_ROOT"] = str(project_root)
             os.environ["AETHERGRAPH_LOAD_MODULES"] = ",".join(modules)
             os.environ["AETHERGRAPH_LOAD_PATHS"] = os.pathsep.join(paths)
