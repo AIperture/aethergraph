@@ -346,7 +346,6 @@ class RunManager:
         - Schedules background execution via asyncio.create_task.
         - Returns immediately with the record (for run_id, status, etc).
         """
-        print("🍎 submit_run called for graph_id:", graph_id, "session_id:", session_id)
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 

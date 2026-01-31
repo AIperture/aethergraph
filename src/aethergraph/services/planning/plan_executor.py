@@ -1,18 +1,19 @@
 # aethergraph/services/planning/plan_executor.py
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+import inspect
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
-from aethergraph.runner import run_async
 from aethergraph.services.planning.action_catalog import ActionCatalog
 from aethergraph.services.planning.bindings import parse_binding
-from aethergraph.services.planning.plan_types import CandidatePlan
+
+if TYPE_CHECKING:
+    from aethergraph.core.runtime.run_manager import RunManager
+    from aethergraph.services.planning.plan_types import CandidatePlan, ExecutionEventCallback
 
 ExecutionPhase = Literal[
     "start",
@@ -96,7 +97,7 @@ class PlanExecutor:
         plan: CandidatePlan,
         *,
         user_inputs: dict[str, Any] | None = None,
-        on_event: Callable[[ExecutionEvent], None] | None = None,
+        on_event: ExecutionEventCallback | None = None,
         # Optional execution context if using RunManager
         identity: RequestIdentity | None = None,
         visibility: RunVisibility | None = RunVisibility.normal,
@@ -127,7 +128,7 @@ class PlanExecutor:
         errors: list[ExecutionEvent] = []
         base_tags = list(tags or [])
 
-        self._emit(
+        await self._emit(
             on_event,
             ExecutionEvent(
                 phase="start",
@@ -140,7 +141,7 @@ class PlanExecutor:
 
         # For now we assume steps are already in topological order (validator checked cycles).
         for step in plan.steps:
-            self._emit(
+            await self._emit(
                 on_event,
                 ExecutionEvent(
                     phase="step_start",
@@ -164,6 +165,8 @@ class PlanExecutor:
                 # - If run_manager is None: use run_async (legacy/simple mode)
                 # - Else: use RunManager to honor concurrency + RunStore
                 if self.run_manager is None:
+                    from aethergraph.runner import run_async  # avoid top-level import cycle
+
                     outputs = await run_async(action_obj, inputs=bound_inputs)
                 else:
                     graph_id = self._graph_id_from_action_ref(step.action_ref)
@@ -213,7 +216,7 @@ class PlanExecutor:
                 # Store step outputs for later bindings
                 step_results[step.id] = outputs
 
-                self._emit(
+                await self._emit(
                     on_event,
                     ExecutionEvent(
                         phase="step_success",
@@ -231,7 +234,7 @@ class PlanExecutor:
                     error=exc,
                 )
                 errors.append(failure_event)
-                self._emit(on_event, failure_event)
+                await self._emit(on_event, failure_event)
 
                 # For v1: fail fast and mark the whole plan as failed.
                 final_failure = ExecutionEvent(
@@ -241,7 +244,7 @@ class PlanExecutor:
                     error=exc,
                 )
                 errors.append(final_failure)
-                self._emit(on_event, final_failure)
+                await self._emit(on_event, final_failure)
 
                 return ExecutionResult(
                     ok=False,
@@ -259,7 +262,7 @@ class PlanExecutor:
             message="Plan execution finished successfully.",
             step_outputs=final_outputs,
         )
-        self._emit(on_event, success_event)
+        await self._emit(on_event, success_event)
 
         return ExecutionResult(
             ok=True,
@@ -272,14 +275,16 @@ class PlanExecutor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _emit(
-        on_event: Callable[[ExecutionEvent], None] | None,
+    async def _emit(
+        on_event: ExecutionEventCallback | None,
         event: ExecutionEvent,
     ) -> None:
         if on_event is None:
             return
         try:
-            on_event(event)
+            result = on_event(event)
+            if inspect.isawaitable(result):
+                await result
         except Exception:
             # Don't let logging/UI errors break execution
             import logging

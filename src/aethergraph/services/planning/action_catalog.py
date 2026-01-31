@@ -3,13 +3,15 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from aethergraph.core.graph.action_spec import ActionSpec, IOSlot
-from aethergraph.core.graph.graph_fn import GraphFunction
 from aethergraph.services.planning.graph_io_adapter import graph_io_to_slots
 from aethergraph.services.registry.registry_key import Key
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
+
+if TYPE_CHECKING:
+    from aethergraph.core.graph.graph_fn import GraphFunction
 
 
 @dataclass

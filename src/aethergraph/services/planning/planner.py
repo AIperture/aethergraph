@@ -1,16 +1,21 @@
 # aethergraph/services/planning/planner.py
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.contracts.services.planning import PlanningContext, PlanningEvent, ValidationResult
 
 from .action_catalog import ActionCatalog
 from .flow_validator import FlowValidator
-from .plan_types import CandidatePlan
+from .plan_types import (
+    CandidatePlan,
+    PlanningContext,
+    PlanningEvent,
+    PlanningEventCallback,
+    ValidationResult,
+)
 
 
 class PlanDecodingError(Exception):
@@ -31,30 +36,34 @@ class ActionPlanner:
     llm: LLMClientProtocol
 
     @staticmethod
-    def _emit(
-        on_event: Callable[[PlanningEvent], None] | None,
+    async def _emit(
+        on_event: PlanningEventCallback | None,
         event: PlanningEvent,
     ) -> None:
         """
         Small helper to safely emit events if a callback is provided.
         """
-        if on_event is not None:
-            try:
-                on_event(event)
-            except Exception:
-                # We don't want a logging/UI bug to crash planning.
-                # Swallow errors here; in the future we may want to at least log them.
-                import logging
+        """
+        Emit planning events, supporting both sync and async callbacks.
+        """
+        if on_event is None:
+            return
+        try:
+            result = on_event(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            import logging
 
-                logger = logging.getLogger(__name__)
-                logger.warning("Error in planning on_event callback", exc_info=True)
+            logger = logging.getLogger(__name__)
+            logger.warning("Error in planning on_event callback", exc_info=True)
 
     async def plan_with_loop(
         self,
         ctx: PlanningContext,
         *,
         max_iter: int = 3,
-        on_event: Callable[[PlanningEvent], None] | None = None,
+        on_event: PlanningEventCallback | None = None,
     ) -> tuple[CandidatePlan | None, list[ValidationResult]]:
         history: list[ValidationResult] = []
         plan: CandidatePlan | None = None
@@ -67,16 +76,16 @@ class ActionPlanner:
             flow_ids=flow_ids,
             include_global=True,
         )
-        print("🍎 === Available Actions ===")
-        print(actions_md)
-        print("===========================")
+        # print("🍎 === Available Actions ===")
+        # print(actions_md)
+        # print("===========================")
 
         system_prompt = (
             "You are a planning assistant that builds executable workflows as JSON plans. "
             "You must strictly follow the JSON schema and return ONLY JSON, no extra text."
         )
 
-        self._emit(
+        await self._emit(
             on_event,
             PlanningEvent(
                 phase="start",
@@ -92,9 +101,9 @@ class ActionPlanner:
                 last_v = history[-1]
                 user_prompt = self._build_repair_prompt(ctx, actions_md, plan, last_v)
 
-            print("🍎 === Planning Prompt ===")
-            print(user_prompt[:1000] + ("..." if len(user_prompt) > 1000 else ""))
-            self._emit(
+            # print("🍎 === Planning Prompt ===")
+            # print(user_prompt[:1000] + ("..." if len(user_prompt) > 1000 else ""))
+            await self._emit(
                 on_event,
                 PlanningEvent(
                     phase="llm_request",
@@ -110,7 +119,7 @@ class ActionPlanner:
                 )
             except PlanDecodingError as exc:
                 # Treat this as a failed attempt; emit an event and move to next iteration.
-                self._emit(
+                await self._emit(
                     on_event,
                     PlanningEvent(
                         phase="llm_response",
@@ -124,7 +133,7 @@ class ActionPlanner:
                 # not a semantic plan error. Just try again if we have remaining iters.
                 continue
 
-            self._emit(
+            await self._emit(
                 on_event,
                 PlanningEvent(
                     phase="llm_response",
@@ -135,7 +144,7 @@ class ActionPlanner:
                 ),
             )
 
-            print("🍎 Raw plan JSON from LLM:", raw_json)
+            # print("🍎 Raw plan JSON from LLM:", raw_json)
             plan = CandidatePlan.from_dict(raw_json)
             plan.resolve_actions(
                 self.catalog,
@@ -143,9 +152,9 @@ class ActionPlanner:
                 include_global=True,
             )
             external_inputs = ctx.external_slots or (ctx.user_inputs or {})
-            print("=== Candidate Plan ===")
-            print(plan)
-            print("external inputs:", external_inputs)
+            # print("=== Candidate Plan ===")
+            # print(plan)
+            # print("external inputs:", external_inputs)
 
             v = self.validator.validate(
                 plan,
@@ -154,8 +163,8 @@ class ActionPlanner:
             )
             history.append(v)
 
-            print(v.summary())
-            self._emit(
+            # print(v.summary())
+            await self._emit(
                 on_event,
                 PlanningEvent(
                     phase="validation",
@@ -168,7 +177,7 @@ class ActionPlanner:
 
             if v.ok:
                 # Fully valid plan
-                self._emit(
+                await self._emit(
                     on_event,
                     PlanningEvent(
                         phase="success",
@@ -182,7 +191,7 @@ class ActionPlanner:
 
             # Accept partial plan if allowed and structurally OK
             if getattr(ctx, "allow_partial_plans", False) and v.is_partial_ok():
-                self._emit(
+                await self._emit(
                     on_event,
                     PlanningEvent(
                         phase="success",
@@ -204,7 +213,7 @@ class ActionPlanner:
 
         if not last or (not last.ok and not accept_partial):
             # Total failure: no fully valid or partial-acceptable plan
-            self._emit(
+            await self._emit(
                 on_event,
                 PlanningEvent(
                     phase="failure",
@@ -259,6 +268,30 @@ class ActionPlanner:
             "required": ["steps"],
             "additionalProperties": False,
         }
+
+    def _base_planning_header(self, ctx: PlanningContext) -> str:
+        default = (
+            "You are a planning assistant that builds executable workflows as JSON plans. "
+            "You must strictly follow the JSON schema and return ONLY JSON, no extra text."
+        )
+
+        skill_prompt = None
+        if ctx.skill and getattr(ctx.skill, "planning_prompt", None):
+            skill_prompt = ctx.skill.planning_prompt.strip()
+
+        # 1) user instruction dominates
+        if ctx.instruction:
+            header = f"{default}\n\nPrimary task instructions:\n{ctx.instruction.strip()}"
+            if skill_prompt:
+                header += f"\n\nDomain background (skill):\n{skill_prompt}"
+            return header
+
+        # 2) no instruction -> use skill prompt if present
+        if skill_prompt:
+            return f"{default}\n\nDomain background (skill):\n{skill_prompt}"
+
+        # 3) bare default
+        return default
 
     async def _call_llm_for_plan(
         self,
@@ -416,13 +449,7 @@ class ActionPlanner:
         external_str = repr(external_view)
 
         # --- 1) Skill-aware planning header ---
-        if ctx.skill and ctx.skill.planning_prompt:
-            header = ctx.skill.planning_prompt.strip()
-        else:
-            header = (
-                "You are a planning assistant that builds executable workflows as JSON plans. "
-                "You must strictly follow the JSON schema and return ONLY JSON, no extra text."
-            )
+        header = self._base_planning_header(ctx)
 
         # Optional: small skill name hint
         if ctx.skill:
@@ -584,13 +611,7 @@ class ActionPlanner:
         external_dict = ctx.external_slots or (ctx.user_inputs or {})
         external_str = repr(external_dict)
 
-        if ctx.skill and ctx.skill.planning_prompt:
-            header = ctx.skill.planning_prompt.strip()
-        else:
-            header = (
-                "You are a planning assistant that repairs and improves existing "
-                "JSON workflow plans. Return ONLY valid JSON."
-            )
+        header = self._base_planning_header(ctx)
 
         # Optional: include some compact context again if we want
         memory_str = ""

@@ -125,47 +125,6 @@ async def run_channel_incoming(
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def _save_upload_as_artifact_deprecated(
-    container, upload: UploadFile, session_id: str, identity: RequestIdentity
-) -> str:
-    """
-    Streams upload to disk, saves as artifact, returns URI.
-    """
-    filename = upload.filename or "unknown"
-    ext = ""
-    if "." in filename:
-        ext = f".{filename.split('.')[-1]}"
-
-    # 1. Plan Staging
-    tmp_path = await container.artifacts.plan_staging_path(
-        planned_ext=f"_{uuid.uuid4().hex[:6]}{ext}"
-    )
-
-    # 2. Save Bytes
-    with open(tmp_path, "wb") as buffer:
-        shutil.copyfileobj(upload.file, buffer)
-
-    # 3. Register Artifact
-    artifact = await container.artifacts.save_file(
-        path=tmp_path,
-        kind="upload",
-        run_id=f"session:{session_id}",
-        graph_id="chat",
-        node_id="user_input",
-        tool_name="web.upload",
-        tool_version="1.0.0",
-        labels={
-            "source": "web_chat",
-            "original_name": filename,
-            "session_id": session_id,
-            "content_type": upload.content_type,
-        },
-    )
-
-    # Return URI
-    return getattr(artifact, "uri", None) or getattr(artifact, "path", None)
-
-
 async def _save_upload_as_artifact(
     container: Any,
     upload: UploadFile,
@@ -210,8 +169,8 @@ async def _save_upload_as_artifact(
         node_id="user_upload",
         tool_name="web.upload",
         tool_version="1.0.0",
-        store=container.artifacts,
-        index=container.artifact_index,
+        art_store=container.artifacts,
+        art_index=container.artifact_index,
         scope=scope,
     )
 
@@ -227,8 +186,9 @@ async def _save_upload_as_artifact(
         },
     )
 
-    # Return URI (or local path fallback)
-    return getattr(artifact, "uri", None) or getattr(artifact, "path", None)
+    return artifact
+    # # Return URI (or local path fallback)
+    # return getattr(artifact, "uri", None) or getattr(artifact, "path", None)
 
 
 @router.post("/sessions/{session_id}/chat/incoming")
@@ -274,15 +234,15 @@ async def session_chat_incoming(
     # 3. Process files -> IncomingFile (and save as artifacts)
     incoming_files: list[IncomingFile] = []
     for upload in files:
-        uri = await _save_upload_as_artifact(container, upload, session_id, identity)
+        artifact = await _save_upload_as_artifact(container, upload, session_id, identity)
         incoming_files.append(
             IncomingFile(
                 id=str(uuid.uuid4()),
                 name=upload.filename,
                 mimetype=upload.content_type,
                 size=getattr(upload, "size", None),
-                url=None,
-                uri=uri,
+                url=f"/api/v1/artifacts/{artifact.artifact_id}/content",
+                uri=artifact.artifact_id,  # 👈 use artifact_id here
                 extra={
                     "source": "web_upload",
                     "session_id": session_id,

@@ -5,13 +5,12 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-from aethergraph.contracts.services.planning import ValidationIssue, ValidationResult
 from aethergraph.core.graph.action_spec import ActionSpec, IOSlot
 
 from .action_catalog import ActionCatalog
 from .bindings import parse_binding
 from .dependency_index import DependencyIndex
-from .plan_types import CandidatePlan, PlanStep
+from .plan_types import CandidatePlan, PlanStep, ValidationIssue, ValidationResult
 
 
 @dataclass

@@ -54,6 +54,11 @@ from aethergraph.services.mcp.service import MCPService
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
 from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
+
+# ---- Planning components ----
+from aethergraph.services.planning.action_catalog import ActionCatalog
+from aethergraph.services.planning.flow_validator import FlowValidator
+from aethergraph.services.planning.planner_service import PlannerService
 from aethergraph.services.prompts.file_store import FilePromptStore
 from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
@@ -174,6 +179,9 @@ class DefaultContainer:
     run_store: RunStore | None = None
     run_manager: RunManager | None = None  # RunManager
     session_store: SessionStore | None = None  # SessionStore
+
+    # planner
+    planner_service: PlannerService | None = None
 
     # optional services (not used by default)
     execution: ExecutionService | None = None
@@ -372,6 +380,16 @@ def build_default_container(
         LocalPythonExecutionService()
     )  # simple local python executor -- NOT SANDBOXED; just for local functionality testing
 
+    # Planner service
+    catalog = ActionCatalog(registry=registry)
+    flow_validator = FlowValidator(catalog=catalog)
+    planner_service = PlannerService(
+        catalog=catalog,
+        llm=llm_service.get("default") if llm_service else None,
+        validator=flow_validator,
+        run_manager=run_manager,
+    )
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -388,6 +406,7 @@ def build_default_container(
         resume_router=resume_router,
         wakeup_queue=wakeup_queue,
         execution=execution,
+        planner_service=planner_service,
         kv_hot=kv_hot,
         state_store=state_store,
         artifacts=artifacts,

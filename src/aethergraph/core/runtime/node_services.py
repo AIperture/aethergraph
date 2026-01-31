@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.planning.planner_service import PlannerService
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -39,3 +40,4 @@ class NodeServices:
     run_manager: RunManager | None = None  # RunManager
     indices: ScopedIndices | None = None  # ScopedIndices for this node
     execution: Any | None = None  # ExecutionService
+    planner_service: PlannerService | None = None  # PlannerService

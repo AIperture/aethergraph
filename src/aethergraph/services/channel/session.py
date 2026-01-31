@@ -1,11 +1,82 @@
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+import inspect
 import logging
+from pathlib import Path, PurePath
 from typing import Any, Literal
 import uuid
 
+from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.services.channel import Button, FileRef, OutEvent
 from aethergraph.services.continuations.continuation import Correlator
+
+
+def _artifact_filename(artifact: Artifact, fallback: str | None = None) -> str:
+    labels = artifact.labels or {}
+    if "filename" in labels and labels["filename"]:
+        return str(labels["filename"])
+
+    # If no explicit filename label, try URI
+    if artifact.uri:
+        try:
+            return PurePath(artifact.uri).name or fallback or artifact.artifact_id
+        except Exception:
+            pass
+
+    return fallback or artifact.artifact_id
+
+
+def _artifact_to_chat_file(
+    artifact: Artifact,
+    fallback_filename: str | None = None,
+) -> dict[str, Any]:
+    labels = artifact.labels or {}
+
+    filename = (
+        labels.get("filename")
+        or (PurePath(artifact.uri).name if artifact.uri else None)
+        or fallback_filename
+        or artifact.artifact_id
+    )
+
+    # 👇 Renderer hint from labels (e.g. {"renderer": "image"})
+    renderer = labels.get("renderer")
+
+    # Make sure we actually set a mimetype if possible
+    mime = artifact.mime
+    if not mime and filename:
+        # crude but fine: infer from extension
+        lower = filename.lower()
+        if lower.endswith(".png"):
+            mime = "image/png"
+        elif lower.endswith((".jpg", ".jpeg")):
+            mime = "image/jpeg"
+        elif lower.endswith(".gif"):
+            mime = "image/gif"
+
+    size = (
+        getattr(artifact, "bytes", None)
+        or getattr(artifact, "size", None)
+        or getattr(artifact, "size_bytes", None)
+    )
+
+    return {
+        "name": filename,
+        "filename": filename,
+        "mimetype": mime,
+        "size": size,
+        "uri": artifact.artifact_id,
+        # "url" key is adapter-specific; we don't set it here; webUI will build from artifact_id and its api
+        "renderer": renderer,  # key for the UI
+    }
+
+
+def _image_filename(title: str | None, alt: str | None) -> str:
+    base = title or alt or "image"
+    p = Path(base)
+    if p.suffix:
+        return base
+    return base + ".png"
 
 
 class ChannelSession:
@@ -367,54 +438,90 @@ class ChannelSession:
         memory_signal: float | None = None,
     ):
         """
-        Send a rich message to the configured channel.
+        Send a rich UI message to the configured channel.
 
-        This method constructs and dispatches an outbound event that can include both plain text and
-        structured rich content (such as cards, tables, or custom payloads). Context-derived metadata
-        is automatically merged, and the event is published via the channel bus.
+        Semantics
+        =========
+        - This sends a normal `agent.message` with optional `text` PLUS a structured `rich`
+          payload for UI-aware adapters (AG WebUI).
+        - Adapters that ignore `rich` (e.g. Slack) will still display the `text`.
+        - `rich` follows a block-based convention:
 
-        Examples:
-            Basic usage to send a rich message:
-            ```python
-            await context.channel().send_rich(
-                text="Here are your results:",
-                rich={"table": {"rows": [["A", 1], ["B", 2]]}}
-            )
-            ```
+          Single block:
+          -------------
+          {
+            "kind": "plot" | "table" | "metrics" | "component" | ...,
+            "title": "optional title",
+            "subtitle": "optional subtitle",
+            "payload": { ... block-specific data ... }
+          }
 
-            Sending with additional metadata and to a specific channel:
-            ```python
-            await context.channel().send_rich(
-                text="Task completed.",
-                rich={"status": "success"},
-                meta={"priority": "high"},
-                channel="web:chat"
-            )
-            ```
+          Multiple blocks:
+          ----------------
+          {
+            "blocks": [
+              { "kind": "plot", ... },
+              { "kind": "metrics", ... },
+            ]
+          }
 
-        Args:
-            text: The primary text content to send (optional).
-            rich: A dictionary containing structured rich content to include with the message.
-            meta: Optional dictionary of metadata to include with the event.
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_*: Parameters controlling logging to memory (see `send_text` for details).
+        Examples
+        ========
 
-        Returns:
-            None
+        Simple plot in one message:
+        ---------------------------
+        await context.channel().send_rich(
+            text="Here is the loss curve:",
+            rich={
+                "kind": "plot",
+                "title": "Training loss",
+                "payload": {
+                    "engine": "vega-lite",
+                    "spec": loss_vega_spec,
+                },
+            },
+        )
 
-        Notes:
-        for AG WebUI, you can set meta with
-        ```python
-            {
-                "agent_id": "agent-123",
-                "name": "Analyst",
-            }
-        ```
+        Multiple blocks in one message:
+        -------------------------------
+        await context.channel().send_rich(
+            text="Training summary:",
+            rich={
+                "blocks": [
+                    {
+                        "kind": "plot",
+                        "title": "Loss",
+                        "payload": {
+                            "engine": "vega-lite",
+                            "spec": loss_vega_spec,
+                        },
+                    },
+                    {
+                        "kind": "metrics",
+                        "title": "Key metrics",
+                        "payload": {
+                            "items": [
+                                {"label": "Best val loss", "value": "0.023"},
+                                {"label": "Epochs", "value": "20"},
+                            ],
+                        },
+                    },
+                ]
+            },
+        )
+
+        Notes
+        =====
+        - For AG WebUI, the `rich` payload is passed through as-is and rendered as
+          UI blocks.
+        - Other adapters may down-level these blocks to plain text or ignore them.
         """
 
+        # --- 1) Memory logging (log *something* even if text=None) ---
+        log_text = text or "[rich message]"
         await self._log_chat(
             memory_role,
-            text or "",
+            log_text,
             tags=memory_tags,
             data=memory_data,
             severity=memory_severity,
@@ -423,6 +530,7 @@ class ChannelSession:
             channel=channel,
         )
 
+        # --- 2) Publish outbound event ---
         await self._bus.publish(
             OutEvent(
                 type="agent.message",
@@ -437,14 +545,16 @@ class ChannelSession:
         self,
         url: str | None = None,
         *,
+        file_bytes: bytes | None = None,
         alt: str = "image",
         title: str | None = None,
         channel: str | None = None,
-        # memory logging handled separately
+        artifact_labels: dict[str, Any] | None = None,
+        # memory logging...
         memory_log: bool = True,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_data: dict[str, Any] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
     ):
@@ -488,26 +598,27 @@ class ChannelSession:
             The capability to render images depends on the client adapter.
         """
 
-        memory_tags = [*(memory_tags or []), "image"]
-        await self._log_chat(
-            memory_role,
-            f"Image: {url or ''} (alt: {alt})",
-            tags=memory_tags,
-            data=memory_data,
-            severity=memory_severity,
-            signal=memory_signal,
-            enabled=memory_log,
-            channel=channel,
-        )
+        labels = {"renderer": "image"}
+        if artifact_labels:
+            labels.update(artifact_labels)
 
-        await self._bus.publish(
-            OutEvent(
-                type="agent.message",
-                channel=self._resolve_key(channel),
-                text=title or alt,
-                image={"url": url or "", "alt": alt, "title": title or ""},
-                meta=self._inject_context_meta(None),
-            )
+        # Reuse memory logging text
+        memory_tags = [*(memory_tags or []), "image"]
+
+        await self.send_file(
+            url=url,
+            file_bytes=file_bytes,
+            filename=_image_filename(title, alt),
+            title=title or alt,
+            channel=channel,
+            artifact_kind="image",
+            artifact_labels=labels,
+            memory_log=memory_log,
+            memory_role=memory_role,
+            memory_tags=memory_tags,
+            memory_data=memory_data,
+            memory_severity=memory_severity,
+            memory_signal=memory_signal,
         )
 
     async def send_file(
@@ -518,11 +629,14 @@ class ChannelSession:
         filename: str = "file.bin",
         title: str | None = None,
         channel: str | None = None,
+        # NEW: optional hints for artifact
+        artifact_kind: str = "file",
+        artifact_labels: dict[str, Any] | None = None,
         # memory logging handled separately
         memory_log: bool = True,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_data: dict[str, Any] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
     ):
@@ -567,16 +681,84 @@ class ChannelSession:
             The capability to handle file uploads depends on the client adapter.
             If both `url` and `file_bytes` are provided, both will be included in the event.
         """
-        file = {"filename": filename}
-        if url:
-            file["url"] = url
-        if file_bytes is not None:
-            file["bytes"] = file_bytes
+        # ------------------------------
+        # 1) Maybe create an Artifact
+        # ------------------------------
+        chat_file: dict[str, Any] = {
+            "name": filename,
+        }
 
+        artifact = None
+
+        # Ensure labels always carry filename
+        effective_labels: dict[str, Any] = dict(artifact_labels or {})
+        effective_labels.setdefault("filename", filename)
+
+        # Case A: raw bytes → stream to ArtifactStore
+        if file_bytes is not None:
+            try:
+                artifacts = self.ctx.artifacts()
+                async with artifacts.writer(
+                    kind=artifact_kind,
+                    planned_ext=Path(filename).suffix or None,
+                    pin=False,
+                ) as w:
+                    write_result = w.write(file_bytes)
+                    if inspect.isawaitable(write_result):
+                        await write_result
+
+                    add_labels = getattr(w, "add_labels", None)
+                    if callable(add_labels):
+                        add_labels(effective_labels)
+
+                artifact = artifacts.last_artifact
+
+            except Exception:
+                import logging
+
+                logging.getLogger("aethergraph.channel").exception("send_file_artifact_failed")
+
+        # Case B: local path (non-HTTP) → save_file
+        elif url and not url.startswith(("http://", "https://")):
+            try:
+                artifacts = self.ctx.artifacts()
+                artifact = await artifacts.save_file(
+                    path=url,
+                    kind=artifact_kind,
+                    labels=effective_labels,
+                    name=filename,
+                    pin=False,
+                )
+            except Exception:
+                import logging
+
+                logging.getLogger("aethergraph.channel").exception("send_file_save_failed")
+
+        # ------------------------------
+        # 1b) Normalize chat_file from artifact or fallback URL
+        # ------------------------------
+        if artifact is not None:
+            # Use artifact meta → url, mimetype, renderer (from labels), etc.
+            chat_file.update(_artifact_to_chat_file(artifact, fallback_filename=filename))
+        else:
+            # Fallback: just pass whatever URL we got (may be remote HTTP or None)
+            if url:
+                chat_file["url"] = url
+
+            # If caller passed renderer in labels, keep honoring it
+            if artifact_labels and "renderer" in artifact_labels:
+                chat_file["renderer"] = artifact_labels["renderer"]
+
+        # For compatibility with existing payloads that used "filename"
+        chat_file.setdefault("filename", chat_file.get("name"))
+
+        # ------------------------------
+        # 2) Log to memory
+        # ------------------------------
         memory_tags = [*(memory_tags or []), "file"]
         await self._log_chat(
             memory_role,
-            f"File: {filename} (url: {url or 'N/A'})",
+            f"File: {filename} (url: {chat_file.get('url') or 'N/A'})",
             tags=memory_tags,
             data=memory_data,
             severity=memory_severity,
@@ -585,12 +767,17 @@ class ChannelSession:
             channel=channel,
         )
 
+        print("chat file:", chat_file)
+
+        # ------------------------------
+        # 3) Publish OutEvent
+        # ------------------------------
         await self._bus.publish(
             OutEvent(
-                type="file.upload",
+                type="agent.message",  # UI treats as normal message with attachment
                 channel=self._resolve_key(channel),
-                text=title,
-                file=file,
+                text=title or filename,
+                file=chat_file,
                 meta=self._inject_context_meta(None),
             )
         )

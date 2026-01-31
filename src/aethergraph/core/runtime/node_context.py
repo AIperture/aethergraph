@@ -9,6 +9,7 @@ from aethergraph.contracts.services.execution import (
 )
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.planning.node_planner import NodePlanner
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -46,6 +47,8 @@ class NodeContext:
     agent_id: str | None = None  # for agent-invoked runs
     app_id: str | None = None  # for app-invoked runs
     bound_memory: BoundMemoryAdapter | None = None  # back-compat
+
+    _planner_facade: NodePlanner | None = None  # lazy init
 
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:
@@ -350,6 +353,16 @@ class NodeContext:
         if rm is None:
             raise RuntimeError("NodeContext.services.run_manager is not configured")
         await rm.cancel_run(run_id)
+
+    def planner(self) -> "NodePlanner":
+        if self._planner_facade is None:
+            if self.services.planner_service is None:
+                raise RuntimeError("NodeContext.services.planner_service is not configured")
+            self._planner_facade = NodePlanner(
+                service=self.services.planner_service,
+                node_ctx=self,
+            )
+        return self._planner_facade
 
     def logger(self):
         return self.services.logger.for_node_ctx(

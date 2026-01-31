@@ -146,6 +146,7 @@ async def default_chat_agent(
     """
     Built-in chat agent with 3-layer session memory: Recency, Long-term summaries, Semantic search.
     """
+    print("files:", files)
 
     logger = context.logger()
     llm = context.llm()
@@ -225,7 +226,6 @@ async def default_chat_agent(
             created_at_min=created_at_min,
             created_at_max=created_at_max,
         )
-        print("🍏 Event search results:", event_results)
 
         # Search artifacts only when the message/files/context suggests it.
         artifact_results = []
@@ -277,7 +277,15 @@ async def default_chat_agent(
     user_data: dict[str, Any] = {}
     if files:
         user_data["files"] = [
-            {k: v for k, v in (f or {}).items() if k in {"name", "url", "mimetype", "size"}}
+            {
+                "id": getattr(f, "id", None),
+                "name": getattr(f, "name", None),
+                "mimetype": getattr(f, "mimetype", None),
+                "size": getattr(f, "size", None),
+                "url": getattr(f, "url", None),
+                "uri": getattr(f, "uri", None),
+                "extra": getattr(f, "extra", None),
+            }
             for f in files
         ]
     if context_refs:
@@ -295,7 +303,6 @@ async def default_chat_agent(
     # Append current user turn to prompt
     messages.append({"role": "user", "content": user_content})
 
-    print("---- Final LLM Prompt Messages ----")
     for m in messages:
         role = m.get("role", "unknown")
         content = m.get("content", "")
@@ -306,42 +313,6 @@ async def default_chat_agent(
                 f"[{role}] {content[:200].replace(chr(10), ' ')}{'...' if len(content) > 200 else ''}"
             )
 
-    # ------------------------------------------------------------------
-    # 5) Single LLM call (all layers already baked into messages)
-    # ------------------------------------------------------------------
-    # await chan.send_phase(
-    #     phase="reasoning",
-    #     status="active",
-    #     label="LLM call",
-    #     detail="Calling LLM...",
-    # )
-
-    # resp, usage = await llm.chat(messages=messages)
-
-    # # ------------------------------------------------------------------
-    # # # 6) Send + auto-log assistant reply via channel (ChannelSession)
-    # # # ------------------------------------------------------------------
-    # try:
-    #     memory_data = {"usage": usage} if usage else None
-    #     await chan.send_text(
-    #         resp,
-    #         memory_tags=["session.chat"],
-    #         memory_data=memory_data,
-    #     )
-    # except Exception:
-    #     logger.warning("Failed to send/log assistant reply via channel", exc_info=True)
-
-    # # Finalize "reasoning" phase
-    # await chan.send_phase(
-    #     phase="reasoning",
-    #     status="done",
-    #     label="LLM call",
-    #     detail="LLM response finished.",
-    # )
-
-    # ------------------------------------------------------------------
-    # 5) Single LLM call (streaming into ChannelSession)
-    # ------------------------------------------------------------------
     try:
         # Mark the "reasoning" phase as active before calling the LLM
         try:

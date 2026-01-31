@@ -127,6 +127,7 @@ class InputParser:
         message: str,
         missing_keys: list[str],
         skill: Any | None = None,
+        instruction: str | None = None,
     ) -> ParsedInputs:
         """
         Ask the LLM to extract values for the given missing_keys.
@@ -162,12 +163,29 @@ class InputParser:
             "Do not try to guess values that are not present."
         )
 
-        # We include field descriptions as a hint to the LLM
+        # Extra context from skill + instruction
+        skill_header = ""
+        if skill is not None:
+            title = getattr(skill, "title", None)
+            desc = getattr(skill, "description", None)
+            if title or desc:
+                skill_header = (
+                    "Domain skill context:\n"
+                    f"- Title: {title or '(none)'}\n"
+                    f"- Description: {desc or '(none)'}\n\n"
+                )
+
+        instr_header = ""
+        if instruction:
+            instr_header = f"Additional instructions for this task:\n{instruction}\n\n"
+
         fields_description_str = "\n".join(
             f"- {name}: {desc or '(no description)'}" for name, desc in field_descriptions.items()
         )
 
         user_prompt = (
+            f"{skill_header}"
+            f"{instr_header}"
             "User message:\n"
             f"{message}\n\n"
             "You must extract values for the following fields (if present):\n"

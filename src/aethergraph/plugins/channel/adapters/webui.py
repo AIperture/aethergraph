@@ -41,6 +41,34 @@ class WebUIChannelAdapter(ChannelAdapter):
         self.event_log = event_log
         self.event_hub = event_hub
 
+    def _normalize_ui_file(self, file_info: dict[str, Any]) -> dict[str, Any]:
+        """
+        WebUI-only decoration for file metadata.
+
+        - If it looks like an artifact (uri or artifact_id) but has no url,
+          we build a relative content endpoint.
+        - Preserve renderer/mimetype; frontend will decide how to render.
+        """
+        if not file_info:
+            return file_info
+
+        out: dict[str, Any] = dict(file_info)
+
+        # Prefer explicit artifact_id, but fall back to uri
+        artifact_id = out.get("artifact_id") or out.get("uri")
+
+        # Only set url if caller didn't already set one
+        if artifact_id and not out.get("url"):
+            out["url"] = f"/artifacts/{artifact_id}/content"
+
+        # Normalize naming a bit so the UI can be consistent
+        if "name" not in out and out.get("filename"):
+            out["name"] = out["filename"]
+        if "filename" not in out and out.get("name"):
+            out["filename"] = out["name"]
+
+        return out
+
     def _extract_target(self, channel_key: str) -> tuple[str, str]:
         """
         Parse "ui:run/<run_id>" or "ui:session/<session_id>".
@@ -115,6 +143,12 @@ class WebUIChannelAdapter(ChannelAdapter):
             payload_type = "agent.message"
             # Mark it so UI/debug can know it came from a stream
             meta = {**meta, "_stream_final": True, "_stream_type": "end"}
+
+        if file_info is not None:
+            file_info = self._normalize_ui_file(file_info)
+
+        if files is not None:
+            files = [self._normalize_ui_file(f) for f in files]
 
         row = {
             "id": str(uuid.uuid4()),
