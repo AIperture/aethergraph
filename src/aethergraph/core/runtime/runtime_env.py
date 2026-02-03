@@ -222,6 +222,7 @@ class RuntimeEnv:
             if self.container.execution is not None
             else None,  # ExecutionService
             planner_service=self.container.planner_service,
+            skills=self.container.skills_registry,
         )
         return ExecutionContext(
             run_id=self.run_id,

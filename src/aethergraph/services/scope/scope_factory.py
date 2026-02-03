@@ -155,8 +155,9 @@ class ScopeFactory:
             base = session_id or run_id
             root = f"session:{base}"
         elif level == "user":
+            o = s.org_id or "orgless"
             u = s.user_id or s.client_id or "anon"
-            root = f"user:{u}"
+            root = f"org:{o}:user:{u}"
         elif level == "run":
             root = f"run:{run_id}"
         elif level == "org":

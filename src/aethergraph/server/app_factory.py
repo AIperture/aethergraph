@@ -30,6 +30,7 @@ from aethergraph.core.runtime.runtime_services import install_services
 
 # import built-in agents and plugins to register them
 from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
+from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec

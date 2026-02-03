@@ -10,6 +10,7 @@ from aethergraph.contracts.services.execution import (
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.planning.node_planner import NodePlanner
+from aethergraph.services.skills.skill_registry import SkillRegistry
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -394,6 +395,11 @@ class NodeContext:
             ChannelSession: The channel session associated with the current run.
         """
         return ChannelSession(self, f"ui:run/{self.run_id}")
+
+    def skills(self) -> SkillRegistry:
+        if not self.services.skills:
+            raise RuntimeError("NodeContext.services.skills is not configured")
+        return self.services.skills
 
     def channel(self, channel_key: str | None = None):
         """

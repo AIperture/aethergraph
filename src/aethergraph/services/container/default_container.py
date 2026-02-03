@@ -59,7 +59,6 @@ from aethergraph.services.metering.eventlog_metering import EventLogMeteringServ
 from aethergraph.services.planning.action_catalog import ActionCatalog
 from aethergraph.services.planning.flow_validator import FlowValidator
 from aethergraph.services.planning.planner_service import PlannerService
-from aethergraph.services.prompts.file_store import FilePromptStore
 from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
 
@@ -72,6 +71,7 @@ from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
+from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
@@ -183,10 +183,12 @@ class DefaultContainer:
     # planner
     planner_service: PlannerService | None = None
 
+    # skills
+    skills_registry: SkillRegistry | None = None
+
     # optional services (not used by default)
     execution: ExecutionService | None = None
     event_bus: InMemoryEventBus | None = None
-    prompts: FilePromptStore | None = None
     authn: DevTokenAuthn | None = None
     authz: AllowAllAuthz | None = None
     redactor: RegexRedactor | None = None
@@ -390,6 +392,9 @@ def build_default_container(
         run_manager=run_manager,
     )
 
+    # skills registry
+    skills_registry = SkillRegistry()
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -399,6 +404,7 @@ def build_default_container(
         clock=clock,
         channels=channels,
         eventhub=event_hub,
+        skills_registry=skills_registry,
         cont_store=cont_store,
         sched_registry=sched_registry,
         wait_registry=wait_registry,
@@ -423,7 +429,6 @@ def build_default_container(
         session_store=session_store,
         secrets=secrets,
         event_bus=None,
-        prompts=None,
         authn=authn,
         authz=authz,
         redactor=None,

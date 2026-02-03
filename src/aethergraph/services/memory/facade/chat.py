@@ -71,6 +71,7 @@ class ChatMixin:
             Event: The fully persisted `Event` object containing the generated ID and timestamp.
         """
         extra_tags = ["chat"]
+
         if tags:
             extra_tags.extend(tags)
         payload: dict[str, Any] = {"role": role, "text": text}
@@ -252,6 +253,7 @@ class ChatMixin:
         *,
         limit: int = 50,
         roles: Sequence[str] | None = None,
+        tags: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
         """
         Retrieve the most recent chat turns as a normalized list.
@@ -259,7 +261,9 @@ class ChatMixin:
         This method fetches the last `limit` chat events of type `chat.turn`
         and returns them in a standardized format. Each item in the returned
         list contains the timestamp, role, text, and tags associated with the
-        chat event.
+        chat event. If `tags` is provided, over-fetch and filter because HotLog doesn't filter by tags.
+        Returned messages are chronological, with the most recent last.
+
 
         Examples:
             Fetch the last 10 chat turns:
@@ -286,23 +290,28 @@ class ChatMixin:
                 - "text": The text content of the chat message.
                 - "tags": A list of tags associated with the event.
         """
-        events = await self.recent(kinds=["chat.turn"], limit=limit)
+        fetch_n = limit
+        if tags:
+            fetch_n = max(limit * 5, 100)
+
+        events = await self.recent(kinds=["chat.turn"], limit=fetch_n)
+
+        want = set(tags or [])
         out: list[dict[str, Any]] = []
 
         for e in events:
-            # 1) Resolve role (from stage or data)
+            etags = set(e.tags or [])
+            if want and not want.issubset(etags):
+                continue
+
             role = (
                 getattr(e, "stage", None)
                 or ((e.data or {}).get("role") if getattr(e, "data", None) else None)
                 or "user"
             )
-
             if roles is not None and role not in roles:
                 continue
 
-            # 2) Resolve text:
-            #    - prefer Event.text
-            #    - fall back to data["text"]
             raw_text = getattr(e, "text", "") or ""
             if not raw_text and getattr(e, "data", None):
                 raw_text = (e.data or {}).get("text", "") or ""
@@ -316,7 +325,8 @@ class ChatMixin:
                 }
             )
 
-        return out
+        # IMPORTANT: keep the most recent `limit` messages
+        return out[-limit:] if limit else []
 
     async def chat_history_for_llm(
         self: MemoryFacadeInterface,

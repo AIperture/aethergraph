@@ -7,6 +7,8 @@ from typing import Any
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.base_service import Service
 from aethergraph.services.llm.generic_client import GenericLLMClient
+from aethergraph.services.skills.skill_registry import SkillRegistry
+from aethergraph.services.skills.skills import Skill
 
 _current = ContextVar("aeg_services", default=None)
 # process-wide fallback (handles contextvar boundary issues)
@@ -400,6 +402,154 @@ def list_mcp_clients() -> list[str]:
     if svc.mcp:
         return svc.mcp.list_clients()
     return []
+
+
+# --------- Skill registry helpers ---------
+def get_skill_registry() -> SkillRegistry:
+    svc = current_services()
+    return svc.skills_registry
+
+
+def register_skill(skill: Skill, *, overwrite: bool = False) -> Skill:
+    """
+    Register an existing Skill object into the global registry.
+
+    Returns the same Skill for convenience so you can use it inline:
+
+        my_skill = register_skill(Skill(...))
+    """
+    reg = get_skill_registry()
+    reg.register(skill, overwrite=overwrite)
+    return skill
+
+
+def register_skill_inline(
+    *,
+    id: str,
+    title: str,
+    description: str = "",
+    tags: list[str] | None = None,
+    domain: str | None = None,
+    modes: list[str] | None = None,
+    version: str | None = None,
+    config: dict[str, Any] | None = None,
+    sections: dict[str, str] | None = None,
+    overwrite: bool = False,
+) -> Skill:
+    """
+    Define and register a Skill entirely in Python.
+
+    Example:
+
+        register_skill_inline(
+            id="surrogate.workflow",
+            title="Surrogate workflow planning",
+            description="Prompts and patterns for surrogate planning.",
+            tags=["surrogate", "planning"],
+            modes=["planning"],
+            sections={
+                "planning.header": "...",
+                "planning.binding_hints": "...",
+                "chat.system": "...",
+            },
+        )
+    """
+    reg = get_skill_registry()
+    return reg.register_inline(
+        id=id,
+        title=title,
+        description=description,
+        tags=tags,
+        domain=domain,
+        modes=modes,
+        version=version,
+        config=config,
+        sections=sections,
+        overwrite=overwrite,
+    )
+
+
+def register_skill_file(path: str | Path, *, overwrite: bool = False) -> Skill:
+    """
+    Load a single markdown skill file and register it.
+
+    The file must follow the same format that `parse_skill_markdown` expects:
+
+    - Start with a YAML front matter block delimited by `---` lines, e.g.:
+
+        ---
+        id: surrogate.workflow
+        title: Surrogate workflow prompts
+        description: Prompts for surrogate planning and chat.
+        tags: [surrogate, planning]
+        domain: ml/surrogate
+        modes: [planning, chat]
+        version: "0.1.0"
+        ---
+
+      At minimum, `id` and `title` should be provided. Extra keys are allowed
+      and kept in `Skill.config` if needed.
+
+    - The body after the front matter is split into sections by H2 headings
+      of the form:
+
+        ## chat.system
+        ## planning.header
+        ## planning.binding_hints
+
+      The heading text is used verbatim (after stripping) as the section key,
+      so `## chat.system` creates a section `"chat.system"`.
+
+    - Any text *before* the first `##` heading is stored in a special section
+      named `"body"` and can be accessed via `section("body")`.
+
+    - Headings deeper than H2 (e.g. `### ...`) are treated as normal content
+      inside the current section and do *not* start a new section.
+
+    - Empty/whitespace-only sections are ignored; section bodies are stored
+      as raw markdown strings with surrounding whitespace stripped.
+
+    This makes it possible to later retrieve structured prompt pieces with:
+
+        skills = context.skills()
+        system_prompt = skills.section("surrogate.workflow", "chat.system")
+
+    Returns the registered `Skill` instance.
+    """
+    reg = get_skill_registry()
+    return reg.load_file(path, overwrite=overwrite)
+
+
+def register_skills_from_path(
+    root: str | Path,
+    *,
+    pattern: str = "*.md",
+    recursive: bool = True,
+    overwrite: bool = False,
+) -> list[Skill]:
+    """
+    Load and register all skill markdown files under a directory.
+
+    Directory layout can be flat or nested:
+
+        skills/
+          surrogate-workflow.md
+          coding-generic.md
+          chat-default.md
+          subdomain/
+            planning-advanced.md
+
+    Example:
+
+        register_skills_from_path("skills/")
+    """
+    reg = get_skill_registry()
+    return reg.load_path(
+        root=root,
+        pattern=pattern,
+        recursive=recursive,
+        overwrite=overwrite,
+    )
 
 
 # --------- Scheduler helpers --------- - (Not used)

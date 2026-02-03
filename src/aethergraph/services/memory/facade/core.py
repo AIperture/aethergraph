@@ -23,6 +23,26 @@ from .retrieval import RetrievalMixin
 from .utils import now_iso, stable_event_id
 
 
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    """
+    Normalize a list of tags by stripping whitespace, removing empties,
+    and deduplicating while preserving order.
+    """
+    if not tags:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags:
+        if not t:
+            continue
+        tt = t.strip()
+        if not tt or tt in seen:
+            continue
+        seen.add(tt)
+        out.append(tt)
+    return out
+
+
 def derive_timeline_id(
     *,
     memory_scope_id: str | None,
@@ -368,6 +388,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
             except Exception:
                 data_field = {"repr": repr(data)}
 
+        # 4) normalize tags to remove empties and duplicates
+        tags = _normalize_tags(tags)
         base: dict[str, Any] = dict(
             kind=kind,
             stage=stage,
@@ -402,6 +424,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         include_recent_tools: bool = False,
         tool: str | None = None,
         tool_limit: int = 10,
+        recent_chat_tags: list[str] | None = None,
+        recent_tool_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Assemble memory context for prompts, including long-term summaries,
@@ -475,25 +499,37 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
                 st = s.get("summary") or s.get("text") or s.get("body") or s.get("value") or ""
                 if st:
                     parts.append(st)
-
             if parts:
-                # multiple long-term summaries → concatenate oldest→newest
                 long_term_text = "\n\n".join(parts)
 
-        recent_chat = await self.recent_chat(limit=recent_chat_limit)
+        # 1) Recent chat (delegate tag filtering + correct "last N" to recent_chat)
+        recent_chat = await self.recent_chat(
+            limit=recent_chat_limit,
+            tags=recent_chat_tags,
+        )
 
+        # 2) Recent tools
         recent_tools: list[dict[str, Any]] = []
         if include_recent_tools:
-            events = await self.recent_tool_results(
-                tool=tool,
-                limit=tool_limit,
-            )
+            fetch_n = tool_limit
+            if recent_tool_tags:
+                fetch_n = max(tool_limit * 5, 50)
+
+            events = await self.recent_tool_results(tool=tool, limit=fetch_n)
+
+            if recent_tool_tags:
+                want = set(recent_tool_tags)
+                events = [e for e in events if want.issubset(set(e.tags or []))]
+
+            # IMPORTANT: keep the most recent tool events
+            events = events[-tool_limit:] if tool_limit else []
+
             for e in events:
                 recent_tools.append(
                     {
                         "ts": getattr(e, "ts", None),
-                        "tool": e.tool,
-                        "message": e.text,
+                        "tool": getattr(e, "tool", None),
+                        "message": getattr(e, "text", None),
                         "inputs": getattr(e, "inputs", None),
                         "outputs": getattr(e, "outputs", None),
                         "tags": list(e.tags or []),

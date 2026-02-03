@@ -6,12 +6,12 @@ import inspect
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.services.planning.action_catalog import ActionCatalog
 from aethergraph.services.planning.bindings import parse_binding
 
 if TYPE_CHECKING:
+    from aethergraph.api.v1.deps import RequestIdentity
     from aethergraph.core.runtime.run_manager import RunManager
     from aethergraph.services.planning.plan_types import CandidatePlan, ExecutionEventCallback
 

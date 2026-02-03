@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import json
 import time
 from typing import Any
 
 from aethergraph.contracts.services.memory import Distiller, Event, HotLog
-
-# re-use stable_event_id from the MemoryFacade module
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.services.memory.utils import _summary_doc_id
 
@@ -15,45 +14,7 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def ar_summary_uri_by_run_id(run_id: str, tag: str, ts: str) -> str:
-    """
-    NOTE: To deprecate this function in favor of ar_summary_uri below.
-
-    Save summaries under the same base "mem/<run_id>/..." tree as append_event,
-    but using a file:// URI so FSPersistence can handle it.
-    """
-    safe_ts = ts.replace(":", "-")
-    return f"file://mem/{run_id}/summaries/{tag}/{safe_ts}.json"
-
-
-def ar_summary_uri(scope_id: str, tag: str, ts: str) -> str:
-    """
-    Scope summaries by a logical memory scope, not by run_id.
-    In simple setups, scope_id == run_id. For long-lived companions, scope_id
-    might be something like "user:zcliu:persona:companion_v1".
-    """
-    safe_ts = ts.replace(":", "-")
-    return f"file://mem/{scope_id}/summaries/{tag}/{safe_ts}.json"
-
-
 class LongTermSummarizer(Distiller):
-    """
-    Generic long-term summarizer.
-
-    Goal:
-      - Take a slice of recent events (by kind and/or tag).
-      - Build a compact textual digest plus small structured metadata.
-      - Persist the summary as JSON via Persistence.save_json(...).
-      - Emit a summary Event with kind=summary_kind and data["summary_uri"].
-
-    This does NOT call an LLM by itself; it's a structural/logical summarizer.
-    An LLM-based distiller can be layered on top later (using the same URI scheme).
-
-    Typical usage:
-      - Kinds: ["chat_user", "chat_assistant"] or app-specific kinds.
-      - Tag:   "session", "daily", "episode:<id>", etc.
-    """
-
     def __init__(
         self,
         *,
@@ -80,9 +41,8 @@ class LongTermSummarizer(Distiller):
             if kinds is not None and e.kind not in kinds:
                 continue
             if tags is not None:
-                if not e.tags:
-                    continue
-                if not tags.issubset(set(e.tags)):
+                et = set(e.tags or [])
+                if not tags.issubset(et):  # AND semantics
                     continue
             if (e.signal or 0.0) < self.min_signal:
                 continue
@@ -93,70 +53,82 @@ class LongTermSummarizer(Distiller):
         self,
         run_id: str,
         timeline_id: str,
-        scope_id: str = None,
+        scope_id: str | None = None,
         *,
         hotlog: HotLog,
         docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
-        """
-        Steps:
-          1) Grab recent events from HotLog for this run.
-          2) Filter by kinds/tags/min_signal.
-          3) Build a digest:
-             - simple text transcript (role: text)
-             - metadata: ts range, num events
-          4) Save JSON summary via DocStore.put(...).
-          5) Log a summary Event to hotlog + persistence, with data.summary_uri.
-        """
-        # 1) fetch more than we might keep to give filter some slack
-        raw = await hotlog.recent(timeline_id, kinds=None, limit=self.max_events * 2)
+        # Over-fetch strategy:
+        # Tag filtering can be very selective (thread/session tags), so fetch more.
+        base_mult = 2
+        if self.include_tags:
+            base_mult = 8
+
+        fetch_limit = max(self.max_events * base_mult, 200)
+
+        # Narrow by kinds early when possible (less noise => more chance to fill max_events)
+        raw = await hotlog.recent(
+            timeline_id,
+            kinds=self.include_kinds,
+            limit=fetch_limit,
+        )
+
         kept = self._filter_events(raw)
         if not kept:
             return {}
 
-        # keep only max_events most recent
         kept = kept[-self.max_events :]
 
-        # 2) Build digest text (simple transcript-like format)
-        lines: list[str] = []
-        src_ids: list[str] = []
         first_ts = kept[0].ts
         last_ts = kept[-1].ts
 
+        # Build digest text (simple transcript-like format) + source ids
+        lines: list[str] = []
+        src_ids: list[str] = []
+
         for e in kept:
+            src_ids.append(e.event_id)
+
             role = e.stage or e.kind or "event"
-            if e.text:
-                lines.append(f"[{role}] {e.text}")
-                src_ids.append(e.event_id)
+
+            content = (e.text or "").strip()
+            if not content and getattr(e, "data", None) is not None:
+                # fall back to a compact JSON line
+                try:
+                    content = json.dumps(e.data, ensure_ascii=False)
+                except Exception:
+                    content = str(e.data)
+
+            if content:
+                if len(content) > 500:
+                    content = content[:500] + "…"
+                lines.append(f"[{role}] {content}")
 
         digest_text = "\n".join(lines)
         ts = _now_iso()
 
-        # 3) Summary JSON shape
+        scope = scope_id or run_id
         summary = {
             "type": self.summary_kind,
             "version": 1,
             "run_id": run_id,
-            "scope_id": scope_id or run_id,
+            "scope_id": scope,
             "summary_tag": self.summary_tag,
             "ts": ts,
-            "time_window": {
-                "from": first_ts,
-                "to": last_ts,
-            },
+            "time_window": {"from": first_ts, "to": last_ts},
             "num_events": len(kept),
             "source_event_ids": src_ids,
             "text": digest_text,
+            "include_kinds": self.include_kinds,
+            "include_tags": self.include_tags,
+            "min_signal": self.min_signal,
+            "fetch_limit": fetch_limit,
         }
 
-        # 4) Persist JSON summary via DocStore
-        scope = scope_id or run_id
         doc_id = _summary_doc_id(scope, self.summary_tag, ts)
         await docs.put(doc_id, summary)
 
-        # 5) Emit summary Event
-        # NOTE: we only store a preview in text and full summary in data["summary_uri"]
         preview = digest_text[:2000] + (" …[truncated]" if len(digest_text) > 2000 else "")
 
         return {

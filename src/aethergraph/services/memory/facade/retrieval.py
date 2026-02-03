@@ -81,6 +81,21 @@ class RetrievalMixin:
         """
         return await self.hotlog.recent(self.timeline_id, kinds=kinds, limit=limit)
 
+    async def recent_events(
+        self,
+        *,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int = 50,
+        overfetch: int = 5,
+    ) -> list[Event]:
+        fetch_n = limit if not tags else max(limit * overfetch, 100)
+        evts = await self.recent(kinds=kinds, limit=fetch_n)
+        if tags:
+            want = set(tags)
+            evts = [e for e in evts if want.issubset(set(e.tags or []))]
+        return evts[-limit:]
+
     async def recent_data(
         self: MemoryFacadeInterface,
         *,

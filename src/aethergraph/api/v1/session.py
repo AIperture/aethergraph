@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import suppress
 from datetime import datetime, timezone
 import logging
 
@@ -11,6 +13,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
+# from starlette.websockets import WebSocketDisconnect
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.api.v1.runs import _extract_app_id_from_tags
@@ -235,10 +238,7 @@ def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
 
 
 @router.websocket("/ws/sessions/{session_id}/chat")
-async def ws_session_chat(
-    websocket: WebSocket,
-    session_id: str,
-):
+async def ws_session_chat(websocket: WebSocket, session_id: str):
     DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
 
     container = current_services()
@@ -246,22 +246,18 @@ async def ws_session_chat(
     hub = getattr(container, "eventhub", None)
 
     if hub is None or event_log is None:
-        logger.error("WS: hub or event_log missing (hub=%r, event_log=%r)", hub, event_log)
         await websocket.close(code=1011)
         return
 
     await websocket.accept()
 
-    try:
-        # 1) history
+    async def send_snapshot() -> None:
         events = await event_log.query(
             scope_id=session_id,
             kinds=["session_chat"],
             since=None,
             limit=200,
         )
-
-        # Filter legacy persisted deltas/start
         filtered = []
         for ev in events:
             payload = ev.get("payload") or {}
@@ -269,35 +265,61 @@ async def ws_session_chat(
             if t in DROP_FROM_HISTORY:
                 continue
             filtered.append(ev)
-        filtered.sort(key=lambda ev: ev.get("ts") or 0)
 
+        filtered.sort(key=lambda ev: ev.get("ts") or 0)
         initial_payload = [
             _row_to_session_chat_event(ev, session_id).model_dump() for ev in filtered
         ]
-
         await websocket.send_json({"kind": "snapshot", "events": initial_payload})
 
-        # 2) live tail
-        async for row in hub.subscribe(scope_id=session_id):
-            if row.get("kind") != "session_chat":
-                continue
+    async def recv_until_disconnect() -> None:
+        # Blocks until disconnect; does not require the client to send meaningful messages.
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                return
 
+    async def send_live() -> None:
+        # If you kept old hub shape, you'd do async for row in hub.subscribe(scope_id=session_id)
+        async for row in hub.subscribe(scope_id=session_id, kind="session_chat"):
             ev = _row_to_session_chat_event(row, session_id)
             await websocket.send_json({"kind": "event", "event": ev.model_dump()})
 
-        logger.warning("WS session chat: EventHub.subscribe ended for session_id=%s", session_id)
+    recv_task = send_task = None
+    try:
+        await send_snapshot()
+
+        recv_task = asyncio.create_task(recv_until_disconnect())
+        send_task = asyncio.create_task(send_live())
+
+        done, pending = await asyncio.wait(
+            {recv_task, send_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Cancel the other task (this is what prevents idle hangs)
+        for t in pending:
+            t.cancel()
+            with suppress(asyncio.CancelledError):
+                await t
 
     except WebSocketDisconnect:
-        logger.info("WS session chat: client disconnected for session_id=%s", session_id)
+        # can happen from send_json
         return
+    except asyncio.CancelledError:
+        # critical for uvicorn --reload
+        with suppress(Exception):
+            await websocket.close(code=1001)
+        raise
     except Exception as e:
-        logger.exception("WS session chat error for session_id=%s", session_id)
-        try:
+        with suppress(Exception):
             await websocket.close(code=1011, reason=str(e)[:120])
-        except Exception:
-            logger.warning(
-                "WS session chat: failed to close websocket for session_id=%s", session_id
-            )
+    finally:
+        for t in (recv_task, send_task):
+            if t and not t.done():
+                t.cancel()
+                with suppress(asyncio.CancelledError):
+                    await t
 
 
 @router.get("/sessions/{session_id}/chat/events", response_model=list[SessionChatEvent])
