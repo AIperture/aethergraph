@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from aethergraph.contracts.services.planning import ValidationResult
+from aethergraph.services.planning.plan_types import ValidationResult
 
 
 @dataclass

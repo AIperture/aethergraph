@@ -1,6 +1,8 @@
 # aethergraph/services/planning/plan_executor.py
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 import inspect
 from typing import TYPE_CHECKING, Any, Literal
@@ -57,6 +59,36 @@ class ExecutionResult:
     ok: bool
     outputs: dict[str, Any]
     errors: list[ExecutionEvent] = field(default_factory=list)
+
+
+@dataclass
+class BackgroundExecutionHandle:
+    """
+    Handle for a background plan execution.
+
+    - id: opaque execution id (good for logging/UI).
+    - plan_id: best-effort id taken from the CandidatePlan.
+    - task: asyncio.Task running PlanExecutor.execute().
+    """
+
+    id: str
+    plan_id: str | None
+    task: asyncio.Task[ExecutionResult]
+
+    def done(self) -> bool:
+        return self.task.done()
+
+    def cancelled(self) -> bool:
+        return self.task.cancelled()
+
+    def cancel(self) -> None:
+        self.task.cancel()
+
+    async def wait(self) -> ExecutionResult:
+        return await self.task
+
+
+OnCompleteCallback = Callable[[ExecutionResult], Any | Awaitable[Any]]
 
 
 @dataclass
@@ -268,6 +300,92 @@ class PlanExecutor:
             ok=True,
             outputs=final_outputs,
             errors=errors,
+        )
+
+    def execute_background(
+        self,
+        plan: CandidatePlan,
+        *,
+        user_inputs: dict[str, Any] | None = None,
+        on_event: ExecutionEventCallback | None = None,
+        identity: RequestIdentity | None = None,
+        visibility: RunVisibility | None = RunVisibility.normal,
+        importance: RunImportance | None = RunImportance.normal,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        tags: list[str] | None = None,
+        origin: RunOrigin | None = None,
+        # callback when done
+        on_complete: Callable[[ExecutionResult], Any] | None = None,
+        # explicit id for tracing
+        exec_id: str | None = None,
+    ) -> BackgroundExecutionHandle:
+        """
+        Fire-and-forget convenience wrapper around execute().
+
+        - Schedules execute(...) on the current event loop using
+          asyncio.create_task()
+        - Returns immediately with a BackgroundExecutionHandle
+        - Still uses on_event for streaming progress
+        - Optionally triggers on_complete(result) when finished
+
+        NOTE: This does not change execution semantics; it's just
+        a lightweight scheduler helper. Orchestrator can use this
+        to let the user continue chatting while a plan runs.
+        """
+        loop = asyncio.get_event_loop()
+
+        plan_id = getattr(plan, "id", None) or getattr(plan, "plan_id", None)
+        exec_id = exec_id or f"bgexec-{plan_id or 'na'}-{uuid4().hex[:8]}"
+
+        async def _runner() -> ExecutionResult:
+            return await self.execute(
+                plan,
+                user_inputs=user_inputs,
+                on_event=on_event,
+                identity=identity,
+                visibility=visibility,
+                importance=importance,
+                session_id=session_id,
+                agent_id=agent_id,
+                app_id=app_id,
+                tags=tags,
+                origin=origin,
+            )
+
+        task: asyncio.Task[ExecutionResult] = loop.create_task(_runner(), name=exec_id)
+
+        if on_complete is not None:
+
+            def _done_callback(t: asyncio.Task[ExecutionResult]) -> None:
+                try:
+                    result = t.result()
+                except Exception as exc:
+                    # very defensive: crash in execute()
+                    # wrap the crash into ExecutionResult so caller get a structured error instead of an unhandled exception
+                    failure_evt = ExecutionEvent(
+                        phase="failure",
+                        step_id=None,
+                        message=f"Background execution '{exec_id}' failed: {t.exception()!r}",
+                        error=exc,
+                    )
+                    result = ExecutionResult(
+                        ok=False,
+                        outputs={},
+                        errors=[failure_evt],
+                    )
+                maybe_awaitable = on_complete(result)
+                if inspect.isawaitable(maybe_awaitable):
+                    # Fire and forget the completion callback as well
+                    loop.create_task(maybe_awaitable)
+
+            task.add_done_callback(_done_callback)
+
+        return BackgroundExecutionHandle(
+            id=exec_id,
+            plan_id=plan_id,
+            task=task,
         )
 
     # ------------------------------------------------------------------

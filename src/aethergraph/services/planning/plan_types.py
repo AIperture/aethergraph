@@ -217,9 +217,8 @@ class PlanningContext:
     # What tools/graphs we’re allowed to use
     flow_ids: list[str] | None = None
 
-    # skill + richer agent context (used by planner code, not directly dumped)
+    # richer agent context (used by planner code, not directly dumped), can be parsed from skills
     instruction: str | None = None
-    skill: SkillSpec | None = None
 
     # should planner accept structurally-valid-but-missing-user-input plans?
     allow_partial_plans: bool = True
@@ -232,110 +231,3 @@ PlanningEventCallback = Callable[[PlanningEvent], None] | Callable[[PlanningEven
 ExecutionEventCallback = (
     Callable[[ExecutionEvent], None] | Callable[[ExecutionEvent], Awaitable[None]]
 )
-
-
-class SkillInputSpec:
-    """
-    Describes one logical input field for a skill, used by InputParser and planner
-    to give the LLM better hints.
-    """
-
-    name: str
-    description: str | None = None
-    required: bool = False
-    example: Any | None = None
-    parse_hint: str | None = None  # e.g. "file path", "float in [0,1]"
-
-
-@dataclass
-class SkillSpec:
-    """
-    High-level "skill" descriptor for planning + input parsing.
-
-    This is intentionally generic and lives in the planning service layer
-    (not the orchestrator). For now it only captures the bits that
-    PlanningContext, InputParser and ActionPlanner can use.
-    """
-
-    id: str
-    title: str
-    description: str
-
-    # Planner-specific
-    flow_ids: list[str] = field(default_factory=list)
-    planning_prompt: str | None = None
-
-    # Input-parser-specific
-    parsing_prompt: str | None = None
-
-    # Which user input keys the planner should prefer as ${user.<key>} bindings
-    default_external_keys: list[str] = field(default_factory=list)
-
-    # Arbitrary metadata; at minimum we expect:
-    #   meta["inputs"] = [ { "name": ..., "description": ..., ... }, ... ]
-    meta: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def with_inputs(
-        cls,
-        *,
-        id: str,
-        title: str,
-        description: str,
-        inputs: list[SkillInputSpec],
-        flow_ids: list[str] | None = None,
-        planning_prompt: str | None = None,
-        parsing_prompt: str | None = None,
-        default_external_keys: list[str] | None = None,
-        extra_meta: dict[str, Any] | None = None,
-    ) -> SkillSpec:
-        """
-        Convenience constructor that converts SkillInputSpec instances into the
-        meta["inputs"] format expected by InputParser.
-        """
-        inputs_meta = [asdict(inp) for inp in inputs]
-        meta: dict[str, Any] = {"inputs": inputs_meta}
-        if extra_meta:
-            meta.update(extra_meta)
-
-        default_keys = list(default_external_keys or [])
-        if not default_keys:
-            # If caller doesn't specify, derive from input names
-            default_keys = [i.name for i in inputs]
-
-        return cls(
-            id=id,
-            title=title,
-            description=description,
-            flow_ids=list(flow_ids or []),
-            planning_prompt=planning_prompt,
-            parsing_prompt=parsing_prompt,
-            default_external_keys=default_keys,
-            meta=meta,
-        )
-
-
-# @dataclass
-# class SkillSpec:
-#     """placement for future skill spec structure."""
-
-#     id: str
-#     title: str
-#     description: str
-
-#     keywords: list[str] = field(default_factory=list)
-#     preferred_flows: list[str] = field(default_factory=list)
-
-#     # Defaults for this skill
-#     default_intent_mode: str = "chat_only"  # or "plan_and_execute"
-#     default_reasoning_mode: str = "direct_answer"  # or "plan_graph", etc.
-
-#     # Prompts (loaded from markdown sections)
-#     planning_prompt: str = ""
-#     chat_prompt: str = ""
-#     safety_notes: str = ""
-
-#     # Original data / metadata
-#     raw_markdown: str | None = None
-#     meta: dict[str, Any] | None = None
-#     input_fields: list[SkillInputField] = field(default_factory=list)

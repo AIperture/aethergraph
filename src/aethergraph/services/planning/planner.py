@@ -270,27 +270,20 @@ class ActionPlanner:
         }
 
     def _base_planning_header(self, ctx: PlanningContext) -> str:
+        """
+        Build the core planning header.
+
+        - Always includes a generic description of the planner role.
+        - Optionally includes ctx.instruction as the primary task spec.
+        """
         default = (
             "You are a planning assistant that builds executable workflows as JSON plans. "
             "You must strictly follow the JSON schema and return ONLY JSON, no extra text."
         )
 
-        skill_prompt = None
-        if ctx.skill and getattr(ctx.skill, "planning_prompt", None):
-            skill_prompt = ctx.skill.planning_prompt.strip()
-
-        # 1) user instruction dominates
         if ctx.instruction:
-            header = f"{default}\n\nPrimary task instructions:\n{ctx.instruction.strip()}"
-            if skill_prompt:
-                header += f"\n\nDomain background (skill):\n{skill_prompt}"
-            return header
+            return f"{default}\n\n" f"Primary task instructions:\n{ctx.instruction.strip()}"
 
-        # 2) no instruction -> use skill prompt if present
-        if skill_prompt:
-            return f"{default}\n\nDomain background (skill):\n{skill_prompt}"
-
-        # 3) bare default
         return default
 
     async def _call_llm_for_plan(
@@ -379,22 +372,17 @@ class ActionPlanner:
         Build a small hint section about which fields should be treated as
         user-provided bindings (e.g. dataset_path, grid_spec, hyperparams).
 
-        We prefer to get this from ctx.skill.meta["inputs"], falling back to
-        the keys in ctx.user_inputs if no skill metadata is available.
+        Skill metadata is deprecated; we infer candidate binding keys from:
+          - ctx.preferred_external_keys (if provided)
+          - otherwise the keys in ctx.user_inputs
         """
-        # 1) Try skill metadata
         preferred_keys: list[str] = []
-        meta = getattr(ctx.skill, "meta", None)
-        if isinstance(meta, dict):
-            inputs_meta = meta.get("inputs") or []
-            if isinstance(inputs_meta, list):
-                for entry in inputs_meta:
-                    if isinstance(entry, dict):
-                        name = entry.get("name")
-                        if name:
-                            preferred_keys.append(name)
 
-        # 2) Fallback: use user_inputs keys if no skill config
+        # 1) Respect explicit preferred_external_keys first
+        if ctx.preferred_external_keys:
+            preferred_keys.extend(ctx.preferred_external_keys)
+
+        # 2) Fallback: use user_inputs keys if nothing explicit was given
         if not preferred_keys:
             preferred_keys = list((ctx.user_inputs or {}).keys())
 
@@ -413,9 +401,9 @@ class ActionPlanner:
             lines.append(f"- {key}")
         lines.append("")
         lines.append(
-            "For example, if you need the dataset path or grid specification, "
-            'use "${user.dataset_path}" or "${user.grid_spec}" instead of '
-            "writing fake file paths or hand-crafted numeric grids."
+            "For example, if you need one of these keys in a step, "
+            'use "${user.<key>}" instead of inventing new file paths, '
+            "numeric grids, or other configuration values."
         )
         lines.append("")
 
@@ -448,12 +436,8 @@ class ActionPlanner:
         user_inputs_str = repr(user_inputs)
         external_str = repr(external_view)
 
-        # --- 1) Skill-aware planning header ---
+        # --- 1) Planning header (instruction-driven) ---
         header = self._base_planning_header(ctx)
-
-        # Optional: small skill name hint
-        if ctx.skill:
-            header += f"\n\nCurrent domain skill: {ctx.skill.title} — {ctx.skill.description}"
 
         # --- 2) Memory & artifact snippets (already LLM-friendly strings) ---
         memory_str = ""
@@ -474,7 +458,7 @@ class ActionPlanner:
 
         binding_hints = self._build_binding_hints(ctx)
 
-        # --- 3) Main planning instructions (unchanged core, but after header/context) ---
+        # --- 3) Main planning instructions ---
         return (
             f"{header}\n\n"
             f"Goal:\n{ctx.goal}\n\n"
@@ -500,7 +484,7 @@ class ActionPlanner:
             "}\n\n"
             "Bindings can be:\n"
             '- external values, using the syntax "${user.<key>}" where <key> is one of the external bindings. '
-            "For configuration-like fields (such as dataset paths, grid specs, hyperparameters, or ratios), "
+            "For configuration-like fields (anything representing user-provided configuration or external resources), "
             "you MUST prefer external bindings over inventing new literal values.\n"
             '- literals, e.g. 0.8 or {"lr": 0.01}, but only when the value is clearly fixed by the goal or already '
             "present in User inputs.\n"
@@ -510,11 +494,12 @@ class ActionPlanner:
             "- action is exactly one of the listed action names,\n"
             "- you only reference outputs from earlier steps.\n\n"
             "- Do NOT invent file paths or other external values that are not already provided.\n"
-            '- If you need something like a dataset path and it is not known yet, bind it as "${user.dataset_path}".\n'
+            "- If you need a value that should come from user configuration and it is not known yet, bind it as "
+            '"${user.<key>}" instead of inventing a fake literal.\n'
             '- Never hard-code fake paths like "path/to/dataset".\n\n'
             "- If the user refers to “previous run”, “last plan”, or “same as before”,  reuse the same logical sequence of actions as past plans for this flow, unless they explicitly request structural changes.\n\n"
             "- If they say “stop after <step>” or “skip <step>”, omit that action from the workflow.\n\n"
-            '            "Return ONLY the JSON object, with no explanation or comments."\n'
+            "Return ONLY the JSON object, with no explanation or comments.\n"
         )
 
     def _build_initial_prompt_v0(self, ctx: PlanningContext, actions_md: str) -> str:

@@ -2,7 +2,6 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from threading import RLock
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
@@ -18,71 +17,17 @@ _services_global: Any = None
 _pending_ext_services: dict[str, Any] = {}
 
 
-_pending_lock = RLock()
-
-# Ordered operations (some things depend on earlier steps)
-_pending_ops_order: list[str] = []
-# Keyed storage so repeated registrations overwrite instead of duplicating
-_pending_ops: dict[str, Callable[[Any], Any]] = {}
-# Optional: store results if you want “handles” later
-_pending_results: dict[str, Any] = {}
-
-
-def _defer_op(key: str, op: Callable[[Any], Any]) -> None:
-    """Register (or replace) a deferred operation."""
-    with _pending_lock:
-        if key not in _pending_ops:
-            _pending_ops_order.append(key)
-        _pending_ops[key] = op
-
-
-def _flush_pending_ops(services: Any) -> None:
-    """Apply all deferred operations once services exist."""
-    with _pending_lock:
-        keys = list(_pending_ops_order)
-        _pending_ops_order.clear()
-        ops = _pending_ops.copy()
-        _pending_ops.clear()
-
-    for key in keys:
-        op = ops.get(key)
-        if op is None:
-            continue
-        try:
-            _pending_results[key] = op(services)
-        except Exception:
-            # You can choose to log here instead of raising,
-            # but raising is usually better so startup fails loudly.
-            raise
-
-
-def _try_apply_or_defer(key: str, fn: Callable[[Any], Any]) -> Any | None:
-    """
-    If services installed: run now and return result.
-    Else: defer it and return None.
-    """
-    try:
-        svc = current_services()
-    except RuntimeError:
-        _defer_op(key, fn)
-        return None
-    else:
-        return fn(svc)
-
-
 def install_services(services: Any) -> None:
     global _services_global, _pending_ext_services
     _services_global = services
 
-    # Attach pending ext services (your existing behavior)
+    # Attach any services that were registered before install_services().
     ext = getattr(services, "ext_services", None)
     if isinstance(ext, dict) and _pending_ext_services:
+        # Don't clobber anything that was already present.
         for name, svc in _pending_ext_services.items():
             ext.setdefault(name, svc)
         _pending_ext_services = {}
-
-    # NEW: apply all other pending mutations
-    _flush_pending_ops(services)
 
     return _current.set(services)
 
@@ -94,16 +39,12 @@ def ensure_services_installed(factory: Callable[[], Any]) -> Any:
         svc = factory()
         _services_global = svc
 
-        # hydrate pending external services
+        # hydrate pending external services here too
         ext = getattr(svc, "ext_services", None)
         if isinstance(ext, dict) and _pending_ext_services:
             for name, s in _pending_ext_services.items():
                 ext.setdefault(name, s)
             _pending_ext_services = {}
-
-        # NEW: apply pending ops on first creation too
-        _flush_pending_ops(svc)
-
     _current.set(svc)
     return svc
 
@@ -133,10 +74,9 @@ def get_channel_service() -> Any:
 
 
 def set_default_channel(key: str) -> None:
-    def _op(svc: Any) -> None:
-        svc.channels.set_default_channel_key(key)
-
-    return _try_apply_or_defer(key, _op)
+    svc = current_services()
+    svc.channels.set_default_channel_key(key)
+    return
 
 
 def get_default_channel() -> str:
@@ -151,7 +91,7 @@ def set_channel_alias(alias: str, channel_key: str) -> None:
 
 def register_channel_adapter(name: str, adapter: Any) -> None:
     svc = current_services()
-    svc.channels.register_adapter(name, adapter)
+    svc.channel.register_adapter(name, adapter)
 
 
 # --------- LLM service helpers ---------
@@ -169,20 +109,17 @@ def register_llm_client(
     api_key: str | None = None,
     timeout: float | None = None,
 ) -> None:
-    def _op(svc: Any) -> LLMClientProtocol:
-        client = svc.llm.configure_profile(
-            profile=profile,
-            provider=provider,
-            model=model,
-            embed_model=embed_model,
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-        )
-        return client
-
-    key = f"llm_client:profile={profile}:provider={provider}:model={model}"
-    return _try_apply_or_defer(key, _op)
+    svc = current_services()
+    client = svc.llm.configure_profile(
+        profile=profile,
+        provider=provider,
+        model=model,
+        embed_model=embed_model,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=timeout,
+    )
+    return client
 
 
 # backend compatibility
@@ -579,16 +516,8 @@ def register_skill_file(path: str | Path, *, overwrite: bool = False) -> Skill:
 
     Returns the registered `Skill` instance.
     """
-
-    p = str(path)
-
-    def _op(svc: Any) -> Skill:
-        reg = svc.skills_registry
-        return reg.load_file(path, overwrite=overwrite)
-
-    # key for deferred op
-    key = f"skills:file:{p}:overwrite={overwrite}"
-    return _try_apply_or_defer(key, _op)
+    reg = get_skill_registry()
+    return reg.load_file(path, overwrite=overwrite)
 
 
 def register_skills_from_path(
@@ -614,18 +543,13 @@ def register_skills_from_path(
 
         register_skills_from_path("skills/")
     """
-    root_str = str(root)
-
-    def _op(svc: Any) -> list[Skill]:
-        return svc.skills_registry.load_path(
-            root=root_str,
-            pattern=pattern,
-            recursive=recursive,
-            overwrite=overwrite,
-        )
-
-    key = f"skills:path:{root_str}:pattern={pattern}:recursive={recursive}:overwrite={overwrite}"
-    return _try_apply_or_defer(key, _op)
+    reg = get_skill_registry()
+    return reg.load_path(
+        root=root,
+        pattern=pattern,
+        recursive=recursive,
+        overwrite=overwrite,
+    )
 
 
 # --------- Scheduler helpers --------- - (Not used)

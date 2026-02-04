@@ -13,7 +13,6 @@ from fastapi import (
     WebSocketDisconnect,
 )
 
-# from starlette.websockets import WebSocketDisconnect
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.api.v1.runs import _extract_app_id_from_tags

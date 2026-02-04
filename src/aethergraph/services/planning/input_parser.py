@@ -97,26 +97,14 @@ class InputParser:
     Given:
       - a user message
       - a set of expected field names
-      - optional skill metadata that describes those fields
+      - an optional free-form `instruction` string
 
     it asks the LLM to extract values and returns a ParsedInputs object.
 
     This parser is intentionally generic across agents/verticals. The only
-    domain-specific hints it uses are the optional `skill.meta["inputs"]`
-    entries, if provided.
-
-    Expected skill.meta["inputs"] format (optional):
-
-        inputs:
-          - name: dataset_path
-            description: Path to the training dataset
-            required: true
-            example: /data/train.csv
-          - name: grid_spec
-            description: Grid configuration for evaluation
-            required: false
-
-    All fields are permitted to be any JSON type; we do not enforce types here.
+    domain-specific hints it uses are:
+      - the field names themselves
+      - the optional `instruction` text
     """
 
     llm: LLMClientProtocol
@@ -126,7 +114,6 @@ class InputParser:
         *,
         message: str,
         missing_keys: list[str],
-        skill: Any | None = None,
         instruction: str | None = None,
     ) -> ParsedInputs:
         """
@@ -135,8 +122,8 @@ class InputParser:
         Args:
             message: The user's natural-language reply.
             missing_keys: Field names whose values we want to extract.
-            skill: Optional SkillSpec-like object with `.meta` containing
-                   an "inputs" list describing each field.
+            instruction: Optional free-form instruction describing what these
+                         fields mean or how they should be interpreted.
 
         Returns:
             ParsedInputs with values/resolved_keys/missing_keys/errors.
@@ -147,8 +134,8 @@ class InputParser:
             - If the LLM call fails or returns invalid JSON, we return an object
               with all keys in missing_keys and a populated `errors` list.
         """
-        # Build per-field descriptions from skill.meta if available
-        field_descriptions = self._build_field_descriptions(missing_keys, skill)
+        # Build per-field descriptions (generic, based on key names only)
+        field_descriptions = self._build_field_descriptions(missing_keys)
 
         # Build JSON schema for extraction
         schema = self._build_extraction_schema(missing_keys)
@@ -163,18 +150,6 @@ class InputParser:
             "Do not try to guess values that are not present."
         )
 
-        # Extra context from skill + instruction
-        skill_header = ""
-        if skill is not None:
-            title = getattr(skill, "title", None)
-            desc = getattr(skill, "description", None)
-            if title or desc:
-                skill_header = (
-                    "Domain skill context:\n"
-                    f"- Title: {title or '(none)'}\n"
-                    f"- Description: {desc or '(none)'}\n\n"
-                )
-
         instr_header = ""
         if instruction:
             instr_header = f"Additional instructions for this task:\n{instruction}\n\n"
@@ -184,7 +159,6 @@ class InputParser:
         )
 
         user_prompt = (
-            f"{skill_header}"
             f"{instr_header}"
             "User message:\n"
             f"{message}\n\n"
@@ -274,40 +248,16 @@ class InputParser:
     @staticmethod
     def _build_field_descriptions(
         missing_keys: list[str],
-        skill: Any | None,
     ) -> dict[str, str | None]:
         """
-        Build a mapping { field_name: description_or_None } using optional skill meta.
+        Build a mapping { field_name: description_or_None }.
 
-        We expect (but do not require):
-
-            skill.meta["inputs"] = [
-                { "name": "dataset_path", "description": "...", ...},
-                ...
-            ]
+        Since skills and structured input metadata are deprecated, we
+        currently just return `(no description)` placeholders. The
+        optional `instruction` string in parse_message_for_fields()
+        provides the main domain context.
         """
-        descs: dict[str, str | None] = {k: None for k in missing_keys}
-
-        meta = getattr(skill, "meta", None) or {}
-        inputs_meta = meta.get("inputs") or []
-        if not isinstance(inputs_meta, list):
-            return descs
-
-        index: dict[str, dict] = {}
-        for entry in inputs_meta:
-            if not isinstance(entry, dict):
-                continue
-            name = entry.get("name")
-            if not name:
-                continue
-            index[name] = entry
-
-        for key in missing_keys:
-            if key in index:
-                desc = index[key].get("description") or index[key].get("help")
-                descs[key] = desc
-
-        return descs
+        return {k: None for k in missing_keys}
 
     @staticmethod
     def _build_extraction_schema(

@@ -18,7 +18,9 @@ if TYPE_CHECKING:
 from .action_catalog import ActionCatalog
 from .input_parser import InputParser, ParsedInputs
 from .plan_executor import (
+    BackgroundExecutionHandle,
     ExecutionResult,
+    OnCompleteCallback,
     PlanExecutor,
 )
 from .plan_types import (
@@ -27,7 +29,6 @@ from .plan_types import (
     PlanningContext,
     PlanningEvent,
     PlanningEventCallback,
-    SkillSpec,
     ValidationResult,
 )
 from .planner import ActionPlanner
@@ -95,7 +96,6 @@ class PlannerService:
         instruction: str | None = None,
         allow_partial: bool = True,
         preferred_external_keys: list[str] | None = None,
-        skill: SkillSpec | None = None,
         memory_snippets: list[str] | None = None,
         artifact_snippets: list[str] | None = None,
         on_event: PlanningEventCallback | None = None,
@@ -111,7 +111,6 @@ class PlannerService:
             artifact_snippets=list(artifact_snippets or []),
             flow_ids=list(flow_ids) if flow_ids is not None else None,
             instruction=instruction,
-            skill=skill,
             allow_partial_plans=allow_partial,
             preferred_external_keys=list(preferred_external_keys or []),
         )
@@ -155,18 +154,17 @@ class PlannerService:
         *,
         message: str,
         missing_keys: list[str],
-        skill: SkillSpec | None = None,
         instruction: str | None = None,  # currently unused, keep for future use
     ) -> ParsedInputs:
         """
-        Parse user message into structured inputs for the given skill.
+        Parse user message into structured inputs for the given inputs.
         """
-        # For now we ignore `instruction` and rely on skill/meta,
+        # For now we ignore `instruction` and rely on meta,
         # We can thread it into the system prompt later.
         return await self.input_parser.parse_message_for_fields(
             message=message,
             missing_keys=missing_keys,
-            skill=skill,
+            instruction=instruction,
         )
 
     async def execute_plan(
@@ -198,6 +196,46 @@ class PlannerService:
             origin=origin,
         )
 
+    async def execute_background(
+        self,
+        plan: CandidatePlan,
+        *,
+        user_inputs: dict[str, Any] | None = None,
+        on_event: ExecutionEventCallback | None = None,
+        identity: RequestIdentity | None = None,
+        visibility: RunVisibility = RunVisibility.normal,
+        importance: RunImportance = RunImportance.normal,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        tags: list[str] | None = None,
+        origin: RunOrigin | None = None,
+        on_complete: OnCompleteCallback | None = None,
+        exec_id: str | None = None,
+    ) -> BackgroundExecutionHandle:
+        """
+        Schedule plan execution in the background and return a handle.
+
+        This is async only for API consistency with other services;
+        it returns as soon as the background task is scheduled.
+        """
+        handle = self.executor.execute_background(
+            plan,
+            user_inputs=user_inputs,
+            on_event=on_event,
+            identity=identity,
+            visibility=visibility,
+            importance=importance,
+            session_id=session_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            tags=tags,
+            origin=origin,
+            on_complete=on_complete,
+            exec_id=exec_id,
+        )
+        return handle
+
     async def plan_and_execute(
         self,
         *,
@@ -208,7 +246,6 @@ class PlannerService:
         instruction: str | None = None,
         allow_partial: bool = False,
         preferred_external_keys: list[str] | None = None,
-        skill: SkillSpec | None = None,
         memory_snippets: list[str] | None = None,
         artifact_snippets: list[str] | None = None,
         planning_events_cb: PlanningEventCallback | None = None,
@@ -233,7 +270,6 @@ class PlannerService:
             instruction=instruction,
             allow_partial=allow_partial,
             preferred_external_keys=preferred_external_keys,
-            skill=skill,
             memory_snippets=memory_snippets,
             artifact_snippets=artifact_snippets,
             on_event=planning_events_cb,
@@ -265,3 +301,75 @@ class PlannerService:
         )
 
         return plan_result, exec_result
+
+    async def plan_and_execute_background(
+        self,
+        *,
+        goal: str,
+        user_inputs: dict[str, Any] | None = None,
+        external_slots: dict[str, Any] | None = None,
+        flow_ids: list[str] | None = None,
+        instruction: str | None = None,
+        allow_partial: bool = False,
+        preferred_external_keys: list[str] | None = None,
+        memory_snippets: list[str] | None = None,
+        artifact_snippets: list[str] | None = None,
+        planning_events_cb: PlanningEventCallback | None = None,
+        execution_events_cb: ExecutionEventCallback | None = None,
+        identity: RequestIdentity | None = None,
+        visibility: RunVisibility | None = RunVisibility.normal,
+        importance: RunImportance | None = RunImportance.normal,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        tags: list[str] | None = None,
+        origin: RunOrigin | None = None,
+        on_complete: OnCompleteCallback | None = None,
+        exec_id: str | None = None,
+    ) -> tuple[PlanResult, BackgroundExecutionHandle | None]:
+        """
+        Plan first, then execute the plan in the background if acceptable.
+
+        Returns:
+          (PlanResult, BackgroundExecutionHandle | None)
+        """
+        plan_result = await self.plan(
+            goal=goal,
+            user_inputs=user_inputs,
+            external_slots=external_slots,
+            flow_ids=flow_ids,
+            instruction=instruction,
+            allow_partial=allow_partial,
+            preferred_external_keys=preferred_external_keys,
+            memory_snippets=memory_snippets,
+            artifact_snippets=artifact_snippets,
+            on_event=planning_events_cb,
+        )
+
+        plan = plan_result.plan
+        validation = plan_result.validation
+
+        if plan is None or validation is None:
+            return plan_result, None
+
+        accept_partial = allow_partial and validation.is_partial_ok()
+        if not validation.ok and not accept_partial:
+            return plan_result, None
+
+        handle = await self.execute_background(
+            plan,
+            user_inputs=user_inputs,
+            on_event=execution_events_cb,
+            identity=identity,
+            visibility=visibility,
+            importance=importance,
+            session_id=session_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            tags=tags,
+            origin=origin,
+            on_complete=on_complete,
+            exec_id=exec_id,
+        )
+
+        return plan_result, handle

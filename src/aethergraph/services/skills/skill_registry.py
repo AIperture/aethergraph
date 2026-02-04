@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +87,8 @@ class SkillRegistry:
         """
         p = Path(path)
         text = p.read_text(encoding="utf-8")
+        print(f"🍎 Loading skill from {p}")
+        print(f"---\n{text[:200]}...\n---")
         skill = parse_skill_markdown(text, path=p)
         self.register(skill, overwrite=overwrite)
         return skill
@@ -113,6 +117,7 @@ class SkillRegistry:
 
         loaded: list[Skill] = []
         for f in sorted(files):
+            print(f"🍎 Loading skill from {f}")
             loaded.append(self.load_file(f, overwrite=overwrite))
         return loaded
 
