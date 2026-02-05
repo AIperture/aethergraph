@@ -30,9 +30,20 @@ ExecutionPhase = Literal[
 @dataclass
 class ExecutionEvent:
     """
-    Lightweight event emitted during plan execution.
+    Represents an event emitted during the execution of a plan.
+    This class is used to encapsulate information about the current state of
+    execution, which can be useful for logging purposes or updating the UI
+    with progress information.
 
-    Useful for logging / UI progress.
+    Attributes:
+        phase (ExecutionPhase): The current phase of execution.
+        step_id (str | None): The identifier of the current step, if applicable.
+        message (str | None): An optional message providing additional context
+            about the event.
+        step_outputs (dict[str, Any] | None): Outputs produced by the step,
+            applicable for success phases.
+        error (Exception | None): The exception raised during execution,
+            applicable for failure phases.
     """
 
     phase: ExecutionPhase
@@ -49,11 +60,12 @@ class ExecutionEvent:
 @dataclass
 class ExecutionResult:
     """
-    Structured result of executing a plan.
+    Represents the result of an execution process.
 
-    - ok: True if all steps ran successfully.
-    - outputs: outputs of the final step (or {} on failure).
-    - errors: list of failure events (usually 0 or 1 in fail-fast mode).
+    Attributes:
+        ok (bool): Indicates whether the execution was successful.
+        outputs (dict[str, Any]): A dictionary containing the outputs of the execution.
+        errors (list[ExecutionEvent]): A list of errors that occurred during execution. Defaults to an empty list.
     """
 
     ok: bool
@@ -64,11 +76,23 @@ class ExecutionResult:
 @dataclass
 class BackgroundExecutionHandle:
     """
-    Handle for a background plan execution.
+    BackgroundExecutionHandle is a data class that represents a handle for managing
+    the execution of a background task.
 
-    - id: opaque execution id (good for logging/UI).
-    - plan_id: best-effort id taken from the CandidatePlan.
-    - task: asyncio.Task running PlanExecutor.execute().
+    Attributes:
+        id (str): A unique identifier for the execution handle.
+        plan_id (str | None): The identifier of the associated plan, if any.
+        task (asyncio.Task[ExecutionResult]): The asyncio task representing the background execution.
+
+    Methods:
+        done() -> bool:
+            Checks if the background task has completed.
+        cancelled() -> bool:
+            Checks if the background task has been cancelled.
+        cancel() -> None:
+            Cancels the background task.
+        wait() -> ExecutionResult:
+            Awaits the completion of the background task and returns its result.
     """
 
     id: str

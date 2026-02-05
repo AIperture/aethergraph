@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import inspect
 from typing import TYPE_CHECKING, Any
 
@@ -29,16 +29,10 @@ from .plan_types import (
     PlanningContext,
     PlanningEvent,
     PlanningEventCallback,
+    PlanResult,
     ValidationResult,
 )
 from .planner import ActionPlanner
-
-
-@dataclass
-class PlanResult:
-    plan: CandidatePlan | None
-    validation: ValidationResult | None
-    events: list[PlanningEvent] = field(default_factory=list)
 
 
 @dataclass

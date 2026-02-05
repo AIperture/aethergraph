@@ -21,6 +21,8 @@ from aethergraph.core.runtime.runtime_services import (
     # llm service helpers
     get_llm_service,
     get_mcp_service,
+    # skill service helpers
+    get_skill_registry,
     # general service management
     install_services,
     list_ext_context_services,
@@ -30,6 +32,10 @@ from aethergraph.core.runtime.runtime_services import (
     register_context_service,
     register_llm_client,
     register_mcp_client,
+    register_skill,
+    register_skill_file,
+    register_skill_inline,
+    register_skills_from_path,
     set_channel_alias,
     set_default_channel,
     # mcp service helpers
@@ -54,6 +60,12 @@ __all__ = [
     "register_llm_client",
     "set_rag_llm_client",
     "set_rag_index_backend",
+    # skill service helpers
+    "get_skill_registry",
+    "register_skill",
+    "register_skill_file",
+    "register_skill_inline",
+    "register_skills_from_path",
     # logger service helpers
     "current_logger_factory",
     # external context service helpers

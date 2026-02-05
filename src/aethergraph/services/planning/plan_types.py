@@ -14,14 +14,19 @@ if TYPE_CHECKING:  # avoid runtime circular import
 class PlanStep:
     """
     Represents a single step in a plan, referencing an action and its inputs.
+
     Attributes:
         id (str): Unique identifier for the plan step.
         action: short, human/LLM-readable name for the action
-        action_ref (str): Reference to the associated action specification.
+        action_ref (str): Reference to the associated action specification. This is a canonicial identifier used in AetherGraph.
         inputs (Dict[str, Any]): Input parameters for the action.
+
     Methods:
         from_dict(data): Creates a PlanStep instance from a dictionary.
         to_dict(): Serializes the PlanStep instance to a dictionary.
+
+    Notes:
+        - this class is usually not accessed unless you are building or inspecting plans directly.
     """
 
     id: str
@@ -48,12 +53,22 @@ class PlanStep:
 @dataclass
 class CandidatePlan:
     """
-    Represents a candidate plan consisting of multiple plan steps.
+    CandidatePlan represents a plan consisting of multiple steps and additional metadata.
+
     Attributes:
-        steps (List[PlanStep]): The list of steps in the candidate plan.
+        steps (list[PlanStep]): A list of steps that make up the plan.
+        extras (dict[str, Any]): Additional metadata or information associated with the plan.
+
     Methods:
-        from_dict(data): Creates a CandidatePlan instance from a dictionary.
-        to_dict(): Serializes the CandidatePlan instance to a dictionary.
+        from_dict(data: dict[str, Any]) -> CandidatePlan:
+            Creates an instance of CandidatePlan from a dictionary representation.
+        to_dict() -> dict[str, Any]:
+            Converts the CandidatePlan instance into a dictionary representation.
+        resolve_actions(
+            include_global: bool = True
+            Ensures that each step in the plan has both `action` (name) and `action_ref`
+            (canonical reference) resolved. Resolves missing fields using the provided
+            action catalog.
     """
 
     steps: list[PlanStep]
@@ -115,6 +130,19 @@ class CandidatePlan:
 
 @dataclass
 class ValidationIssue:
+    """
+    Represents a validation issue encountered in a planning process.
+
+    Attributes:
+        kind (str): The type of validation issue. Possible values include
+            'missing_input', 'unknown_action', 'type_mismatch', 'cycle', etc.
+        step_id (str): The identifier of the plan step where the issue occurred.
+        field (str): The name of the input, output, or other field related to the issue.
+        message (str): A human-readable message describing the issue.
+        details (dict[str, Any]): Additional details about the issue, provided as a dictionary.
+            Defaults to an empty dictionary.
+    """
+
     kind: str  # 'missing_input', 'unknown_action', 'type_mismatch', 'cycle', ...
     step_id: str  # plan step id where the issue occurred
     field: str  # input name, output name, etc.
@@ -124,6 +152,26 @@ class ValidationIssue:
 
 @dataclass
 class ValidationResult:
+    """
+    ValidationResult represents the result of validating a plan, including its validity,
+    any structural errors, and missing user-provided values.
+
+    Attributes:
+        ok (bool): Indicates whether the plan is valid (True) or invalid (False).
+        issues (list[ValidationIssue]): A list of validation issues found in the plan.
+        has_structural_errors (bool): Indicates if the plan has structural errors.
+        missing_user_bindings (dict[str, list[str]]): A dictionary mapping keys to lists of
+            locations where user-provided values are missing.
+    Methods:
+        is_partial_ok() -> bool:
+            Checks if the plan is structurally valid but requires user-provided values
+            before execution.
+        summary() -> str:
+            Generates a summary string describing the validity of the plan and any issues
+            found. If the plan is valid, the summary states "Plan is valid." If invalid,
+            the summary lists the issues with their details.
+    """
+
     ok: bool  # True if plan is valid, False otherwise
     issues: list[ValidationIssue]  # list of validation issues found in the plan
 
@@ -176,22 +224,23 @@ PlanningPhase = Literal[
 
 
 @dataclass
-class SkillInputField:
-    name: str
-    description: str
-    required: bool = True
-    infer_from_history: bool = True
-    example: str | None = None
-
-
-@dataclass
 class PlanningEvent:
     """
-    Lightweight event emitted during planning.
+    Represents a lightweight event emitted during the planning process.
+    This class is intended for use in logging, debugging, and updating UI progress
+    (e.g., updating a spinner or status text). It provides optional structured
+    payloads for additional context.
 
-    This is designed for:
-      - logging / debugging (print to console)
-      - UI progress (update spinner / status text)
+    Attributes:
+        phase (PlanningPhase): The current phase of the planning process.
+        iteration (int): The iteration number within the planning phase.
+        message (str | None): An optional message describing the event.
+        raw_llm_output (dict[str, Any] | None): An optional dictionary containing
+            raw output from the language model.
+        plan_dict (dict[str, Any] | None): An optional dictionary representing the
+            plan structure.
+        validation (ValidationResult | None): An optional validation result
+            associated with the event.
     """
 
     phase: PlanningPhase
@@ -206,6 +255,26 @@ class PlanningEvent:
 
 @dataclass
 class PlanningContext:
+    """
+    Represents the context for planning, including user inputs, external slots,
+    memory snippets, and other parameters that guide the planning process.
+
+    Attributes:
+        goal (str): The goal or objective of the planning process.
+        user_inputs (dict[str, Any]): A dictionary of user-provided inputs.
+        external_slots (dict[str, Any]): A dictionary of external slots or parameters.
+        memory_snippets (list[str]): A list of memory snippets for narrow, LLM-facing context.
+        artifact_snippets (list[str]): A list of artifact snippets for narrow, LLM-facing context.
+        flow_ids (list[str] | None): A list of flow IDs representing the tools/graphs
+            that are allowed to be used. Defaults to None.
+        instruction (str | None): A richer agent context, used by planner code but not
+            directly dumped. Can be parsed from skills. Defaults to None.
+        allow_partial_plans (bool): Indicates whether the planner should accept
+            structurally valid but missing user input plans. Defaults to True.
+        preferred_external_keys (list[str] | None): A list of keys that are allowed or
+            preferred as `${user.<key>}`. Defaults to None.
+    """
+
     goal: str
     user_inputs: dict[str, Any]
     external_slots: dict[str, Any]
@@ -225,6 +294,25 @@ class PlanningContext:
 
     # planner hint – which keys are *allowed / preferred* as ${user.<key>}
     preferred_external_keys: list[str] | None = None
+
+
+@dataclass
+class PlanResult:
+    """
+    PlanResult is a data class that encapsulates the result of a planning operation.
+
+    Attributes:
+        plan (CandidatePlan | None): The candidate plan resulting from the planning operation.
+            It can be None if no valid plan was generated.
+        validation (ValidationResult | None): The validation result associated with the plan.
+            It can be None if validation was not performed or not applicable.
+        events (list[PlanningEvent]): A list of planning events that occurred during the planning process.
+            Defaults to an empty list.
+    """
+
+    plan: CandidatePlan | None
+    validation: ValidationResult | None
+    events: list[PlanningEvent] = field(default_factory=list)
 
 
 PlanningEventCallback = Callable[[PlanningEvent], None] | Callable[[PlanningEvent], Awaitable[None]]

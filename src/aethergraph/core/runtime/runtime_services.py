@@ -477,13 +477,41 @@ def register_skill(skill: Skill, *, overwrite: bool = False) -> Skill:
     """
     Register an existing Skill object into the global registry.
 
-    Returns the same Skill for convenience so you can use it inline:
+    This method adds a `Skill` instance to the global `SkillRegistry`, making it
+    available for use throughout the application. The `overwrite` flag determines
+    whether an existing skill with the same ID will be replaced.
 
-        my_skill = register_skill(Skill(...))
+    Examples:
+        Registering a skill object:
+        ```python
+        skill = Skill(id="example.skill", title="Example Skill")
+        register_skill(skill)
+        ```
+
+        Overwriting an existing skill:
+        ```python
+        skill = Skill(id="example.skill", title="Updated Skill")
+        register_skill(skill, overwrite=True)
+        ```
+
+    Args:
+        skill: The `Skill` object to register.
+        overwrite: Whether to overwrite an existing skill with the same ID. Default is `False`.
+
+    Returns:
+        Skill: The registered `Skill` instance.
+
     """
-    reg = get_skill_registry()
-    reg.register(skill, overwrite=overwrite)
-    return skill
+
+    def _op(svc: Any) -> "Skill":
+        reg = svc.skills_registry
+        reg.register(skill, overwrite=overwrite)
+        return skill
+
+    # Key should be stable and allow overwriting the deferred op if called again.
+    # Usually skill.id is the right identity here.
+    key = f"skills:obj:{skill.id}:overwrite={overwrite}"
+    return _try_apply_or_defer(key, _op)
 
 
 def register_skill_inline(
@@ -502,8 +530,12 @@ def register_skill_inline(
     """
     Define and register a Skill entirely in Python.
 
-    Example:
+    This method allows you to define a Skill inline with all its metadata and sections,
+    and directly register it into the global Skill registry.
 
+    Examples:
+        Registering a skill with basic metadata and sections:
+        ```python
         register_skill_inline(
             id="surrogate.workflow",
             title="Surrogate workflow planning",
@@ -516,68 +548,71 @@ def register_skill_inline(
                 "chat.system": "...",
             },
         )
+        ```
+
+    Args:
+        id (str): The unique identifier for the Skill. (Required)
+        title (str): A human-readable title for the Skill. (Required)
+        description (str): A short description of the Skill's purpose. (Optional)
+        tags (list[str]): A list of tags for categorization. (Optional)
+        domain (str): The domain or namespace for the Skill. (Optional)
+        modes (list[str]): The operational modes supported by the Skill. (Optional)
+        version (str): The version string for the Skill. (Optional)
+        config (dict[str, Any]): Additional configuration data. (Optional)
+        sections (dict[str, str]): A dictionary mapping section names to their content. (Optional)
+        overwrite (bool): Whether to overwrite an existing Skill with the same ID. (Optional)
+
+    Returns:
+        Skill: The registered Skill instance.
     """
-    reg = get_skill_registry()
-    return reg.register_inline(
-        id=id,
-        title=title,
-        description=description,
-        tags=tags,
-        domain=domain,
-        modes=modes,
-        version=version,
-        config=config,
-        sections=sections,
-        overwrite=overwrite,
-    )
+
+    def _op(svc: Any) -> "Skill":
+        reg = svc.skills_registry
+        return reg.register_inline(
+            id=id,
+            title=title,
+            description=description,
+            tags=tags,
+            domain=domain,
+            modes=modes,
+            version=version,
+            config=config,
+            sections=sections,
+            overwrite=overwrite,
+        )
+
+    # Include overwrite, and optionally version to avoid surprising replacements.
+    key = f"skills:inline:{id}:overwrite={overwrite}:version={version or ''}"
+    return _try_apply_or_defer(key, _op)
 
 
 def register_skill_file(path: str | Path, *, overwrite: bool = False) -> Skill:
     """
     Load a single markdown skill file and register it.
 
-    The file must follow the same format that `parse_skill_markdown` expects:
+    This function processes a markdown file containing skill definitions and
+    registers it into the global skill registry. The file must adhere to the
+    expected format for parsing skill metadata and sections.
 
-    - Start with a YAML front matter block delimited by `---` lines, e.g.:
+    Examples:
+        Registering a skill from a markdown file:
+        ```python
+        skill = register_skill_file("skills/surrogate-workflow.md")
+        ```
 
-        ---
-        id: surrogate.workflow
-        title: Surrogate workflow prompts
-        description: Prompts for surrogate planning and chat.
-        tags: [surrogate, planning]
-        domain: ml/surrogate
-        modes: [planning, chat]
-        version: "0.1.0"
-        ---
+    Args:
+        path: The path to the markdown file to load.
+        overwrite: Whether to overwrite an existing skill with the same ID. (Optional, default: False)
 
-      At minimum, `id` and `title` should be provided. Extra keys are allowed
-      and kept in `Skill.config` if needed.
+    Returns:
+        Skill: The registered `Skill` instance.
 
-    - The body after the front matter is split into sections by H2 headings
-      of the form:
+    Notes:
+        To start the server and load all desired packages:
+        1. Open a terminal and navigate to the project directory.
+        2. Run the server using the appropriate command (e.g., `python -m aethergraph.server`).
+        3. Ensure all required dependencies are installed via `pip install -r requirements.txt`.
 
-        ## chat.system
-        ## planning.header
-        ## planning.binding_hints
-
-      The heading text is used verbatim (after stripping) as the section key,
-      so `## chat.system` creates a section `"chat.system"`.
-
-    - Any text *before* the first `##` heading is stored in a special section
-      named `"body"` and can be accessed via `section("body")`.
-
-    - Headings deeper than H2 (e.g. `### ...`) are treated as normal content
-      inside the current section and do *not* start a new section.
-
-    - Empty/whitespace-only sections are ignored; section bodies are stored
-      as raw markdown strings with surrounding whitespace stripped.
-
-    This makes it possible to later retrieve structured prompt pieces with:
-
-        skills = context.skills()
-        system_prompt = skills.section("surrogate.workflow", "chat.system")
-
-    Returns the registered `Skill` instance.
     """
 
     p = str(path)
@@ -586,7 +621,12 @@ def register_skill_file(path: str | Path, *, overwrite: bool = False) -> Skill:
         reg = svc.skills_registry
         return reg.load_file(path, overwrite=overwrite)
 
-    # key for deferred op
+    p = str(path)
+
+    def _op(svc: Any) -> "Skill":
+        reg = svc.skills_registry
+        return reg.load_file(path, overwrite=overwrite)
+
     key = f"skills:file:{p}:overwrite={overwrite}"
     return _try_apply_or_defer(key, _op)
 
@@ -601,18 +641,42 @@ def register_skills_from_path(
     """
     Load and register all skill markdown files under a directory.
 
-    Directory layout can be flat or nested:
+    This method scans the specified directory for markdown files matching the
+    given pattern, parses their content into `Skill` objects, and registers
+    them into the global skill registry. The directory can have a flat or
+    nested structure.
 
-        skills/
-          surrogate-workflow.md
-          coding-generic.md
-          chat-default.md
-          subdomain/
-            planning-advanced.md
-
-    Example:
-
+    Examples:
+        Register all skills in a flat directory:
+        ```python
         register_skills_from_path("skills/")
+        ```
+
+        Register skills in a nested directory structure:
+        ```python
+        register_skills_from_path("skills/", recursive=True)
+        ```
+
+        Use a custom file pattern to filter files:
+        ```python
+        register_skills_from_path("skills/", pattern="*.skill.md")
+        ```
+
+    Args:
+        root: The root directory to scan for skill files.
+        pattern: A glob pattern to match skill files. Default is `"*.md"`.
+        recursive: Whether to scan subdirectories recursively. Default is `True`.
+        overwrite: Whether to overwrite existing skills with the same ID. Default is `False`.
+
+    Returns:
+        list[Skill]: A list of all registered `Skill` objects.
+
+    Notes:
+        To start the server and load all desired packages:
+        1. Open a terminal and navigate to the project directory.
+        2. Run the server using the appropriate command (e.g., `python -m aethergraph.server`).
+        3. Ensure all required dependencies are installed via `pip install -r requirements.txt`.
+
     """
     root_str = str(root)
 

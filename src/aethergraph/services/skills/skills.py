@@ -9,12 +9,31 @@ from typing import Any
 @dataclass
 class Skill:
     """
-    A reusable prompt "skill" loaded from markdown or defined inline.
+    Skill represents a reusable prompt "skill" that can be loaded from markdown or defined inline.
+    It includes metadata, configuration, and sections of content that can be used to generate prompts.
 
-    Typical usage:
-      - Header (front matter) holds structured metadata and config.
-      - Body (markdown) is split into sections keyed by 'dot paths',
-        e.g. 'chat.system', 'planning.header', 'coding.system'.
+    Attributes:
+        id (str): Unique identifier for the skill.
+        title (str): Title of the skill.
+        description (str): Description of the skill. Defaults to an empty string.
+        tags (list[str]): Tags associated with the skill. Defaults to an empty list.
+        domain (str | None): Domain or category of the skill. Defaults to None.
+        modes (list[str]): Modes in which the skill can be used (e.g., 'chat', 'planning', 'coding'). Defaults to an empty list.
+        version (str | None): Version of the skill. Defaults to None.
+        config (dict[str, Any]): Additional configuration for the skill. Defaults to an empty dictionary.
+        sections (dict[str, str]): Parsed sections of the skill, keyed by dot-paths.
+        raw_markdown (str | None): Raw markdown content of the skill. Defaults to None.
+        path (Path | None): File path of the skill, if loaded from a file. Defaults to None.
+
+    Methods:
+        section(key: str, default: str = "") -> str:
+            Retrieve a specific section by its dot-path key. Returns the default value if the section is missing.
+        has_section(key: str) -> bool:
+            Check if a specific section exists in the skill.
+        compile_prompt(*section_keys: str, separator: str, fallback_keys: Iterable[str] | None = None) -> str:
+            Compile a prompt by concatenating specified sections. If no sections are specified, compiles the entire skill.
+        from_dict(meta: Mapping[str, Any], sections: Mapping[str, str], *, raw_markdown: str | None = None, path: Path | None = None) -> Skill:
+            Class method to create a Skill instance from metadata and sections. Useful for programmatically defining skills.
     """
 
     id: str
@@ -34,17 +53,60 @@ class Skill:
     # helpers
     def section(self, key: str, default: str = "") -> str:
         """
-        Return a specific section (by dot-path), or default if missing.
+        Retrieve a specific section value by its dot-path key, or return a default value if the key is missing.
+        This method allows accessing nested sections of a configuration or data structure
+        using a dot-separated key path. If the specified key is not found, the provided
+        default value is returned.
 
-        Example keys:
-          - "chat.system"
-          - "planning.header"
-          - "coding.system"
-          - "body" (for pre-heading text)
+        Examples:
+            Accessing a specific section:
+            ```python
+            value = obj.section("chat.system")
+            ```
+
+            Providing a default value if the key is missing:
+            ```python
+            value = obj.section("nonexistent.key", default="Default Value")
+            ```
+
+        Args:
+            key: A dot-separated string representing the path to the desired section.
+            default: The value to return if the key is not found (default: an empty string).
+
+        Returns:
+            The value of the specified section if found, otherwise the default value.
+
+        Notes:
+            This method assumes that the `sections` attribute is a dictionary-like object
+            that supports the `get` method for key-value retrieval.
         """
         return self.sections.get(key, default)
 
     def has_section(self, key: str) -> bool:
+        """
+        Check if a specific section exists in the skill.
+
+        This method determines whether a given dot-path key corresponds to an
+        existing section in the `sections` attribute.
+
+        Examples:
+            Checking for the existence of a section:
+            ```python
+            exists = skill.has_section("chat.system")
+            ```
+
+            Using the method to conditionally access a section:
+            ```python
+            if skill.has_section("chat.example"):
+                example = skill.section("chat.example")
+            ```
+
+        Args:
+            key: A dot-separated string representing the path to the desired section.
+
+        Returns:
+            bool: True if the section exists, False otherwise.
+        """
         return key in self.sections
 
     def compile_prompt(
