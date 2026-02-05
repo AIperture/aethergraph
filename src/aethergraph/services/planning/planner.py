@@ -68,17 +68,11 @@ class ActionPlanner:
         history: list[ValidationResult] = []
         plan: CandidatePlan | None = None
 
-        print("🍎 === Planning Context ===")
-        print(ctx)
-        print("========================")
         flow_ids = ctx.flow_ids  # could be None
         actions_md = self.catalog.pretty_print(
             flow_ids=flow_ids,
             include_global=True,
         )
-        # print("🍎 === Available Actions ===")
-        # print(actions_md)
-        # print("===========================")
 
         system_prompt = (
             "You are a planning assistant that builds executable workflows as JSON plans. "
@@ -101,8 +95,6 @@ class ActionPlanner:
                 last_v = history[-1]
                 user_prompt = self._build_repair_prompt(ctx, actions_md, plan, last_v)
 
-            # print("🍎 === Planning Prompt ===")
-            # print(user_prompt[:1000] + ("..." if len(user_prompt) > 1000 else ""))
             await self._emit(
                 on_event,
                 PlanningEvent(
@@ -144,7 +136,6 @@ class ActionPlanner:
                 ),
             )
 
-            # print("🍎 Raw plan JSON from LLM:", raw_json)
             plan = CandidatePlan.from_dict(raw_json)
             plan.resolve_actions(
                 self.catalog,
@@ -152,9 +143,6 @@ class ActionPlanner:
                 include_global=True,
             )
             external_inputs = ctx.external_slots or (ctx.user_inputs or {})
-            # print("=== Candidate Plan ===")
-            # print(plan)
-            # print("external inputs:", external_inputs)
 
             v = self.validator.validate(
                 plan,
@@ -163,7 +151,6 @@ class ActionPlanner:
             )
             history.append(v)
 
-            # print(v.summary())
             await self._emit(
                 on_event,
                 PlanningEvent(

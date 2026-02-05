@@ -173,7 +173,6 @@ class InputParser:
         ]
 
         try:
-            print(f"[input_parser] sending messages: {messages}", flush=True)
             raw, _usage = await self.llm.chat(
                 messages,
                 output_format="json",
@@ -182,7 +181,6 @@ class InputParser:
                 strict_schema=True,
                 validate_json=True,
             )
-            print(f"[input_parser] received raw: {raw}", flush=True)
         except Exception as exc:  # noqa: BLE001
             # Hard LLM failure → all fields still missing; surface error to user.
             return ParsedInputs(

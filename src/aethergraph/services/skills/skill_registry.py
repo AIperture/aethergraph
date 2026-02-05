@@ -198,7 +198,6 @@ class SkillRegistry:
 
         loaded: list[Skill] = []
         for f in sorted(files):
-            print(f"🍎 Loading skill from {f}")
             loaded.append(self.load_file(f, overwrite=overwrite))
         return loaded
 

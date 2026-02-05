@@ -376,11 +376,57 @@ class GenericLLMClient(LLMClientProtocol):
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         """
-        Streaming version of chat.
+        Stream a chat request to the LLM provider and return the accumulated response.
 
-        - Calls provider-specific streaming path if available.
-        - Falls back to non-streaming chat() if streaming is not implemented.
-        - Accumulates full text and returns (full_text, usage) at the end.
+        This method handles provider-specific streaming paths, falling back to non-streaming
+        chat() if streaming is not implemented. It supports real-time delta updates via
+        a callback function and returns the full response text and usage statistics at the end.
+
+        Examples:
+            Basic usage with a list of messages:
+            ```python
+            response, usage = await context.llm().chat_stream(
+            messages=[{"role": "user", "content": "Hello, assistant!"}]
+            )
+            ```
+
+            Using a delta callback for real-time updates:
+            ```python
+            async def on_delta(delta):
+                print(delta, end="")
+
+            response, usage = await context.llm().chat_stream(
+                messages=[{"role": "user", "content": "Tell me a joke."}],
+                on_delta=on_delta
+            )
+            ```
+
+        Args:
+            messages: List of message dicts, each with "role" and "content" keys.
+            reasoning_effort: Optional string to control model reasoning depth.
+            max_output_tokens: Optional maximum number of output tokens.
+            output_format: Output format, e.g., "text" or "json".
+            json_schema: Optional JSON schema for validating structured output.
+            schema_name: Name for the root schema object (default: "output").
+            strict_schema: If True, enforce strict schema validation.
+            validate_json: If True, validate JSON output against schema.
+            fail_on_unsupported: If True, raise error for unsupported features.
+            on_delta: Optional callback function to handle real-time text deltas.
+            **kw: Additional provider-specific keyword arguments.
+
+        Returns:
+            tuple[str, dict[str, int]]: The accumulated response text and usage statistics.
+
+        Raises:
+            NotImplementedError: If the provider is not supported.
+            RuntimeError: For various errors including invalid JSON output or rate limit violations.
+            LLMUnsupportedFeatureError: If a requested feature is unsupported by the provider.
+
+        Notes:
+            - This method centralizes handling of streaming and non-streaming paths for LLM providers.
+            - The `on_delta` callback allows for real-time updates, making it suitable for interactive applications.
+            - Rate limiting and usage metering are applied consistently across providers.
+            - Currently, only OpenAI's Responses API streaming is implemented; other providers will fall back to the non-streaming `chat()` method.
         """
 
         await self._ensure_client()

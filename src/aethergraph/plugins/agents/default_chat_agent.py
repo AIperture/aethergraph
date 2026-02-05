@@ -82,7 +82,6 @@ def _format_search_snippets(event_results, artifact_results, max_total: int = 8)
         kind = meta.get("kind", "event")
         tags = meta.get("tags") or []
         text = meta.get("preview") or ""
-        print("🍏 Search event preview:", text)
 
         if not text:
             continue
@@ -146,7 +145,6 @@ async def default_chat_agent(
     """
     Built-in chat agent with 3-layer session memory: Recency, Long-term summaries, Semantic search.
     """
-    print("files:", files)
 
     logger = context.logger()
     llm = context.llm()
@@ -303,33 +301,18 @@ async def default_chat_agent(
     # Append current user turn to prompt
     messages.append({"role": "user", "content": user_content})
 
-    for m in messages:
-        role = m.get("role", "unknown")
-        content = m.get("content", "")
-        if role == "system":
-            print(f"[{role}] {content}")
-        else:
-            print(
-                f"[{role}] {content[:200].replace(chr(10), ' ')}{'...' if len(content) > 200 else ''}"
-            )
-
     try:
         # Mark the "reasoning" phase as active before calling the LLM
         try:
             await chan.send_phase(
-                phase="reasoning",
+                phase="thinking",
                 status="active",
                 label="LLM call",
                 detail="Calling LLM (streaming response)...",
             )
 
-            await asyncio.sleep(0.6)  # slight delay to ensure phase event ordering
-            await chan.send_phase(
-                phase="llm",
-                status="active",
-                label="Planning generating response",
-                detail="Planning is generating the response...",
-            )
+            await asyncio.sleep(0.5)  # slight delay to ensure phase event ordering
+
         except Exception:
             logger.debug("Failed to send LLM phase(active) state", exc_info=True)
 

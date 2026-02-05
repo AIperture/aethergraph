@@ -171,7 +171,6 @@ async def list_artifacts(
     if tags and tags.strip():
         label_filters["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
 
-    print("Label filters:", label_filters)
     label_filters.update(_tenant_label_filters(identity))
 
     artifacts = await index.search(

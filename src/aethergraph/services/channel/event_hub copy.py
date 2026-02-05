@@ -23,7 +23,6 @@ class EventHub:
         Async generator: yields raw EventLog-like rows with keys:
         { "id", "ts", "scope_id", "kind", "payload": {...} }
         """
-        print(f"EventHub: subscribe called for scope_id={scope_id}")
         q: asyncio.Queue = asyncio.Queue()
         async with self._lock:
             self._subscribers[scope_id].add(q)

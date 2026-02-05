@@ -86,8 +86,6 @@ async def list_sessions(
         limit=limit,
         offset=offset,
     )
-    # print(f"Listed {len(sessions)} sessions for user_id={identity.user_id} org_id={identity.org_id} offset={offset} limit={limit}")
-    # print(f"Sessions: {[s for s in sessions]}")
     next_cursor = encode_cursor(offset + limit) if len(sessions) == limit else None
     return SessionListResponse(items=sessions, next_cursor=next_cursor)
 

@@ -311,13 +311,43 @@ class ChannelSession:
         key_suffix: str | None = None,
     ) -> None:
         """
-        Send a phase/state update for the UI timeline.
+        This method constructs a normalized outbound event representing the current
+        phase and its status, merges context-derived metadata, and dispatches the
+        event via the channel bus.
 
-        `phase` is a logical stage name like:
-            "routing", "planning", "reasoning", "tools", "reply", ...
+        Examples:
+            Sending a phase update with a "pending" status:
+            ```python
+            await context.channel().send_phase("routing", "pending")
+            ```
 
-        `status` indicates its current state:
-            "pending", "active", "done", "failed", "skipped".
+            Sending a phase update with additional details and a specific channel:
+            ```python
+            await context.channel().send_phase(
+                "planning",
+                "active",
+                label="Planning Phase",
+                detail="Calculating optimal routes",
+            )
+            ```
+
+        Args:
+            phase: The logical stage name (e.g., "routing", "planning", "reasoning").
+            status: The current state of the phase ("pending", "active", "done", "failed", "skipped").
+            label: Optional custom label for the phase (default: capitalized phase name).
+            detail: Optional detailed description of the phase (default: empty string).
+            code: Optional code identifier for the phase.
+            channel: Optional explicit channel key to override the default or session-bound channel.
+            key_suffix: Optional suffix to customize the upsert key (default: "phase:{phase}").
+
+        Returns:
+            None
+
+        Notes:
+            - This method will show a phase block in AG WebUI's timeline view if the adapter supports it.
+            - Other adapters may choose to render this differently or ignore the rich payload.
+            - All stage, status, label, detail, code fields can be customized without a fixed schema; the UI will treat them as opaque strings for display and filtering.
+            - The `upsert_key` ensures stable updates for the same phase within a node/run.
         """
         ch_key = self._resolve_key(channel)
         # Stable upsert per phase per node/run
@@ -440,81 +470,73 @@ class ChannelSession:
         """
         Send a rich UI message to the configured channel.
 
-        Semantics
-        =========
-        - This sends a normal `agent.message` with optional `text` PLUS a structured `rich`
-          payload for UI-aware adapters (AG WebUI).
-        - Adapters that ignore `rich` (e.g. Slack) will still display the `text`.
-        - `rich` follows a block-based convention:
+        This method constructs a normalized outbound event, merges context-derived metadata,
+        and dispatches the message with an optional `rich` payload for UI-aware adapters.
 
-          Single block:
-          -------------
-          {
-            "kind": "plot" | "table" | "metrics" | "component" | ...,
-            "title": "optional title",
-            "subtitle": "optional subtitle",
-            "payload": { ... block-specific data ... }
-          }
-
-          Multiple blocks:
-          ----------------
-          {
-            "blocks": [
-              { "kind": "plot", ... },
-              { "kind": "metrics", ... },
-            ]
-          }
-
-        Examples
-        ========
-
-        Simple plot in one message:
-        ---------------------------
-        await context.channel().send_rich(
+        Examples:
+            Sending a single rich block:
+            ```python
+            await context.channel().send_rich(
             text="Here is the loss curve:",
             rich={
                 "kind": "plot",
                 "title": "Training loss",
                 "payload": {
-                    "engine": "vega-lite",
-                    "spec": loss_vega_spec,
+                "engine": "vega-lite",
+                "spec": loss_vega_spec,
                 },
             },
-        )
+            )
+            ```
 
-        Multiple blocks in one message:
-        -------------------------------
-        await context.channel().send_rich(
+            Sending multiple rich blocks:
+            ```python
+            await context.channel().send_rich(
             text="Training summary:",
             rich={
                 "blocks": [
-                    {
-                        "kind": "plot",
-                        "title": "Loss",
-                        "payload": {
-                            "engine": "vega-lite",
-                            "spec": loss_vega_spec,
-                        },
+                {
+                    "kind": "plot",
+                    "title": "Loss",
+                    "payload": {
+                    "engine": "vega-lite",
+                    "spec": loss_vega_spec,
                     },
-                    {
-                        "kind": "metrics",
-                        "title": "Key metrics",
-                        "payload": {
-                            "items": [
-                                {"label": "Best val loss", "value": "0.023"},
-                                {"label": "Epochs", "value": "20"},
-                            ],
-                        },
+                },
+                {
+                    "kind": "metrics",
+                    "title": "Key metrics",
+                    "payload": {
+                    "items": [
+                        {"label": "Best val loss", "value": "0.023"},
+                        {"label": "Epochs", "value": "20"},
+                    ],
                     },
+                },
                 ]
             },
-        )
+            )
+            ```
 
-        Notes
-        =====
-        - For AG WebUI, the `rich` payload is passed through as-is and rendered as
-          UI blocks.
-        - Other adapters may down-level these blocks to plain text or ignore them.
+        Args:
+            text: Optional plain text content to send alongside the rich payload.
+            rich: A dictionary representing the structured rich payload. This can be a single block
+            or multiple blocks depending on the use case.
+            meta: Optional dictionary of metadata to include with the event.
+            channel: Optional explicit channel key to override the default or session-bound channel.
+            memory_log: Whether to log this message to memory (default: True).
+            memory_role: The role to use when logging to memory (default: "assistant").
+            memory_tags: Optional list of tags to associate with the memory log entry.
+            memory_data: Optional structured data to include with the memory log entry.
+            memory_severity: Severity level for the memory log entry (default: 2).
+            memory_signal: Optional signal value for the memory log entry.
+
+        Returns:
+            None
+
+        Notes:
+            - For AG WebUI, the `rich` payload is passed through as-is and rendered as UI blocks.
+            - Other adapters may down-level these blocks to plain text or ignore them.
         """
 
         # --- 1) Memory logging (log *something* even if text=None) ---
@@ -561,12 +583,13 @@ class ChannelSession:
         """
         Send an image message to the configured channel.
 
-        This method constructs and dispatches an outbound event containing image metadata,
-        including the image URL, alternative text, and an optional title. Context-derived
-        metadata is automatically merged, and the event is published via the channel bus.
+        This method constructs a normalized outbound event, merges context-derived metadata,
+        and dispatches the image message via the channel bus. The image can be specified
+        using a URL or raw bytes, and additional metadata such as alternative text and title
+        can be provided.
 
         Examples:
-            Basic usage to send an image:
+            Basic usage to send an image by URL:
             ```python
             await context.channel().send_image(
                 url="https://example.com/image.png",
@@ -574,7 +597,7 @@ class ChannelSession:
             )
             ```
 
-            Sending with a custom title and to a specific channel:
+            Sending an image with a custom title and to a specific channel:
             ```python
             await context.channel().send_image(
                 url="https://example.com/photo.jpg",
@@ -584,18 +607,35 @@ class ChannelSession:
             )
             ```
 
+            Sending an image from raw bytes:
+            ```python
+            await context.channel().send_image(
+                file_bytes=b"binaryimagedata...",
+                alt="Generated image",
+                title="Generated Output"
+            )
+            ```
+
         Args:
-            url: The URL of the image to send. If None, an empty string is used.
+            url: The URL of the image to send. If None, raw bytes must be provided.
+            file_bytes: Optional raw bytes of the image to send.
             alt: Alternative text describing the image (for accessibility).
             title: Optional title to display with the image.
             channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_*: Parameters controlling logging to memory (see `send_text` for details).
+            artifact_labels: Optional dictionary of labels to associate with the image artifact.
+            memory_log: Whether to log this message to memory (default: True).
+            memory_role: The role to use when logging to memory (default: "assistant").
+            memory_tags: Optional list of tags to associate with the memory log entry.
+            memory_data: Optional structured data to include with the memory log entry.
+            memory_severity: Severity level for the memory log entry (default: 2).
+            memory_signal: Optional signal value for the memory log entry.
 
         Returns:
             None
 
         Notes:
-            The capability to render images depends on the client adapter.
+            The capability to render images depends on the client adapter. If both `url` and
+            `file_bytes` are provided, both will be included in the event.
         """
 
         labels = {"renderer": "image"}
@@ -766,8 +806,6 @@ class ChannelSession:
             enabled=memory_log,
             channel=channel,
         )
-
-        print("chat file:", chat_file)
 
         # ------------------------------
         # 3) Publish OutEvent
@@ -1425,7 +1463,7 @@ class ChannelSession:
         and end events to the channel bus. The caller is responsible for sending deltas and ending the stream.
 
         Examples:
-            Basic usage to stream LLM output:
+            Basic usage to stream texts:
             ```python
             async with context.channel().stream() as s:
                 await s.delta("Hello, ")
@@ -1440,6 +1478,19 @@ class ChannelSession:
                 await s.end(full_text="Results complete.", memory_tags=["llm"])
             ```
 
+            Streaming with context.llm().stream_chat()
+            ```python
+            async with context.channel().stream() as s:
+                    # The `on_delta` callback sends each piece to the stream.
+                    async def on_delta(piece: str) -> None:
+                        await s.delta(piece)
+                    resp, usage = await llm.chat_stream(
+                        messages=messages,
+                        on_delta=on_delta, # send each delta to the stream as it arrives
+                    )
+                await s.end(full_text=resp)
+            ```
+
         Args:
             channel: Optional explicit channel key to target a specific channel for this stream.
                 If None, uses the session-bound or default channel.
@@ -1449,8 +1500,8 @@ class ChannelSession:
                 for sending deltas and ending the stream.
 
         Notes:
-            The caller must explicitly call `end()` to finalize the stream. No auto-end is performed.
-            The adapter may have specific behaviors for rendering streamed content (update vs. append).
+            - The caller must explicitly call `end()` to finalize the stream. No auto-end is performed.
+            - The adapter may have specific behaviors for rendering streamed content (update vs. append).
         """
         s = ChannelSession._StreamSender(self, channel_key=channel)
         try:

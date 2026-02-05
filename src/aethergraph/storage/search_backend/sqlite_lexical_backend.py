@@ -162,8 +162,6 @@ class SQLiteLexicalSearchBackend(SearchBackend):
             created_at_ts = time.time()
 
         meta_json = json.dumps(metadata, ensure_ascii=False)
-        print(f"🍏 Upserting doc {item_id} into corpus {corpus} with metadata {metadata}")
-        print(f"🍏 Text: {text}")
 
         def _upsert_sync() -> None:
             conn = self._connect()
@@ -302,8 +300,6 @@ class SQLiteLexicalSearchBackend(SearchBackend):
             # Build results, apply any remaining filters in Python, and
             # assign a simple "score" (e.g., count of occurrences)
             results: list[ScoredItem] = []
-            print(f"🍏 Retrieved {len(rows)} candidate rows from DB")
-            print(f"🍏 Searching corpus {corpus} for query {query} with filters {py_filters}")
 
             # Basic bag-of-words: split query into tokens
             tokens = [t for t in query.lower().split() if t]

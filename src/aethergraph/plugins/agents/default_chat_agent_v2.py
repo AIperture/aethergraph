@@ -66,7 +66,6 @@ async def _emit_handoff_capsule(mem, *, prev_ttag: str, prev_session_id: str | N
     Create a lightweight, immediate capsule for the previous thread.
     This is NOT long-term distill; it’s a quick “handoff”.
     """
-    print(f"🍎 Emitting handoff capsule for thread: {prev_ttag}")
     # Pull the tail of the previous thread
     tail = await mem.recent_chat(limit=40, tags=[prev_ttag])
 
@@ -103,7 +102,6 @@ async def _maybe_handoff_on_thread_change(mem, *, session_id: str | None) -> str
     Detect thread change and emit capsule for previous thread.
     Returns prev_ttag if a change was detected.
     """
-    print("🍎 Checking for thread change...")
     cur_ttag = _thread_tag(session_id)
     if not cur_ttag:
         return None
@@ -122,7 +120,6 @@ async def _load_recent_handoff(mem, *, limit: int = 1) -> list[str]:
     """
     Pull most recent handoff capsules from user memory.
     """
-    print("🍎 Loading recent handoff capsules...")
     data = await mem.recent_data(
         kinds=["chat.handoff"],
         tags=["handoff"],
@@ -148,7 +145,6 @@ async def _maybe_distill_session(mem, session_id: str | None) -> None:
     under a filesystem-safe tag path.
     """
     ttag = _thread_tag(session_id)
-    print(f"🍎 Distilling session for thread tag: {ttag}")
     if not ttag:
         return
 
@@ -314,11 +310,8 @@ async def default_chat_agent(
         messages.append({"role": "system", "content": "User memory summary:\n" + long_term_summary})
 
     try:
-        print("🍎 Adding recent chat to prompt...")
         handoffs = await _load_recent_handoff(mem, limit=1)
-        print(f"🍎 Loaded {len(handoffs)} handoff capsules.")
         if handoffs:
-            print(handoffs[0])
             messages.append(
                 {
                     "role": "system",

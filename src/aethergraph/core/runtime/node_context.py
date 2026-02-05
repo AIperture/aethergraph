@@ -78,8 +78,6 @@ class NodeContext:
             workdir=workdir,
             env=env,
         )
-        print("Executing code via NodeContext.execute()...")
-        print(req)
         return await exe_svs.execute(req)
 
     async def spawn_run(
