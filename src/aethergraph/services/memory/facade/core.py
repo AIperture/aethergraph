@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
@@ -9,8 +10,10 @@ from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persis
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.core.runtime.runtime_metering import current_metering
+from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.rag.facade import RAGFacade
 from aethergraph.services.scope.scope import Scope
+from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 from .chat import ChatMixin
 from .distillation import DistillationMixin
@@ -18,6 +21,57 @@ from .rag import RAGMixin
 from .results import ResultMixin
 from .retrieval import RetrievalMixin
 from .utils import now_iso, stable_event_id
+
+
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    """
+    Normalize a list of tags by stripping whitespace, removing empties,
+    and deduplicating while preserving order.
+    """
+    if not tags:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tags:
+        if not t:
+            continue
+        tt = t.strip()
+        if not tt or tt in seen:
+            continue
+        seen.add(tt)
+        out.append(tt)
+    return out
+
+
+def derive_timeline_id(
+    *,
+    memory_scope_id: str | None,
+    run_id: str,
+    org_id: str | None = None,
+    sep: str = "|",
+) -> str:
+    """
+    Derive the storage partition key for timeline events.
+
+    - If org_id is present, prefix with `org:{org_id}|...` to prevent cross-org mixing.
+    - Keep fallback behavior: if memory_scope_id is missing, fall back to run_id.
+    - Avoid redundant `org:{org_id}|org:{org_id}` when the bucket is already org-scoped.
+    """
+    bucket = (memory_scope_id or "").strip()
+    if not bucket:
+        bucket = run_id
+
+    if org_id:
+        org_prefix = f"org:{org_id}"
+
+        # If the bucket is already exactly org-scoped, don't double-prefix
+        if bucket == org_prefix:
+            return org_prefix
+
+        return f"{org_prefix}{sep}{bucket}"
+
+    # No org context -> behave like current local mode
+    return bucket
 
 
 class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RAGMixin):
@@ -36,7 +90,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         scope: Scope | None = None,
         hotlog: HotLog,
         persistence: Persistence,
-        indices: Indices,
+        mem_indices: Indices,
+        scoped_indices: ScopedIndices | None = None,
         docs: DocStore,
         artifact_store: AsyncArtifactStore,
         hot_limit: int = 1000,
@@ -53,7 +108,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         self.scope = scope
         self.hotlog = hotlog
         self.persistence = persistence
-        self.indices = indices
+        self.indices = mem_indices
+        self.scoped_indices = scoped_indices
         self.docs = docs
         self.artifacts = artifact_store
         self.hot_limit = hot_limit
@@ -66,7 +122,11 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         self.memory_scope_id = (
             self.scope.memory_scope_id() if self.scope else self.session_id or self.run_id
         )
-        self.timeline_id = self.memory_scope_id or self.run_id
+        self.timeline_id = derive_timeline_id(
+            memory_scope_id=self.memory_scope_id,
+            run_id=self.run_id,
+            org_id=self.scope.org_id if self.scope else None,
+        )
 
     async def record_raw(
         self,
@@ -112,7 +172,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         Returns:
             Event: The fully constructed and persisted `Event` object.
         """
-        ts = now_iso()
+        ts_iso = now_iso()
+        ts_num = time.time()  # numeric timestamp for created_at_ts
 
         # Merge Scope dimensions
         dims: dict[str, str] = {}
@@ -123,12 +184,25 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         session_id = base.get("session_id") or dims.get("session_id") or self.session_id
         scope_id = base.get("scope_id") or self.memory_scope_id or session_id or run_id
 
+        user_id = base.get("user_id") or dims.get("user_id")
+        org_id = base.get("org_id") or dims.get("org_id")
+        client_id = base.get("client_id") or dims.get("client_id")
+        graph_id = base.get("graph_id") or dims.get("graph_id") or self.graph_id
+        node_id = base.get("node_id") or dims.get("node_id") or self.node_id
+
         base.setdefault("run_id", run_id)
         base.setdefault("scope_id", scope_id)
         base.setdefault("session_id", session_id)
-        # ... (populate other fields from dims if needed) ...
-
+        base.setdefault("run_id", run_id)
+        base.setdefault("graph_id", graph_id)
+        base.setdefault("node_id", node_id)
+        base.setdefault("scope_id", scope_id)
+        base.setdefault("user_id", user_id)
+        base.setdefault("org_id", org_id)
+        base.setdefault("client_id", client_id)
+        base.setdefault("session_id", session_id)
         severity = int(base.get("severity", 2))
+
         signal = base.get("signal")
         if signal is None:
             signal = self._estimate_signal(text=text, metrics=metrics, severity=severity)
@@ -137,7 +211,7 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
 
         eid = stable_event_id(
             {
-                "ts": ts,
+                "ts": ts_iso,
                 "run_id": base["run_id"],
                 "kind": kind,
                 "text": (text or "")[:6000],
@@ -147,25 +221,75 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
 
         evt = Event(
             event_id=eid,
-            ts=ts,
+            ts=ts_iso,
             run_id=run_id,
             scope_id=scope_id,
+            user_id=user_id,
+            org_id=org_id,
+            client_id=client_id,
+            session_id=session_id,
             kind=kind,
+            stage=base.get("stage"),
             text=text,
-            data=base.get("data"),
             tags=base.get("tags"),
+            data=base.get("data"),
             metrics=metrics,
+            graph_id=graph_id,
+            node_id=node_id,
             tool=base.get("tool"),
+            topic=base.get("topic"),
             severity=severity,
             signal=signal,
             inputs=base.get("inputs"),
             outputs=base.get("outputs"),
-            # ... pass other fields ...
+            embedding=base.get("embedding"),
+            pii_flags=base.get("pii_flags"),
             version=2,
         )
 
         await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
         await self.persistence.append_event(self.timeline_id, evt)
+
+        # wire memory event text into ScopedIndices for searchability
+        if self.scoped_indices is not None and self.scoped_indices.backend is not None:
+            try:
+                kind_val = getattr(evt.kind, "value", str(evt.kind))
+                preview = (text or "")[:500] if text else ""
+
+                extra_meta = {
+                    "run_id": evt.run_id,
+                    "scope_id": evt.scope_id,
+                    "session_id": evt.session_id,
+                    "graph_id": evt.graph_id,
+                    "node_id": evt.node_id,
+                    "stage": evt.stage,
+                    "tags": evt.tags or [],
+                    "severity": evt.severity,
+                    "signal": evt.signal,
+                    "tool": evt.tool,
+                    "topic": evt.topic,
+                    "preview": preview,  # short text preview
+                    "timeline_id": self.timeline_id,
+                }
+
+                meta = build_index_meta_from_scope(
+                    kind=kind_val,
+                    source="memory",
+                    ts=ts_iso,
+                    created_at_ts=ts_num,
+                    extra=extra_meta,
+                )
+
+                await self.scoped_indices.upsert(
+                    corpus="event",
+                    item_id=evt.event_id,
+                    text=evt.text or "",
+                    metadata=meta,
+                )
+
+            except Exception:
+                if self.logger:
+                    self.logger.exception("Error indexing memory event %s", evt.event_id)
 
         # Metering hook
         try:
@@ -264,6 +388,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
             except Exception:
                 data_field = {"repr": repr(data)}
 
+        # 4) normalize tags to remove empties and duplicates
+        tags = _normalize_tags(tags)
         base: dict[str, Any] = dict(
             kind=kind,
             stage=stage,
@@ -298,6 +424,8 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         include_recent_tools: bool = False,
         tool: str | None = None,
         tool_limit: int = 10,
+        recent_chat_tags: list[str] | None = None,
+        recent_tool_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
         Assemble memory context for prompts, including long-term summaries,
@@ -371,25 +499,37 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
                 st = s.get("summary") or s.get("text") or s.get("body") or s.get("value") or ""
                 if st:
                     parts.append(st)
-
             if parts:
-                # multiple long-term summaries → concatenate oldest→newest
                 long_term_text = "\n\n".join(parts)
 
-        recent_chat = await self.recent_chat(limit=recent_chat_limit)
+        # 1) Recent chat (delegate tag filtering + correct "last N" to recent_chat)
+        recent_chat = await self.recent_chat(
+            limit=recent_chat_limit,
+            tags=recent_chat_tags,
+        )
 
+        # 2) Recent tools
         recent_tools: list[dict[str, Any]] = []
         if include_recent_tools:
-            events = await self.recent_tool_results(
-                tool=tool,
-                limit=tool_limit,
-            )
+            fetch_n = tool_limit
+            if recent_tool_tags:
+                fetch_n = max(tool_limit * 5, 50)
+
+            events = await self.recent_tool_results(tool=tool, limit=fetch_n)
+
+            if recent_tool_tags:
+                want = set(recent_tool_tags)
+                events = [e for e in events if want.issubset(set(e.tags or []))]
+
+            # IMPORTANT: keep the most recent tool events
+            events = events[-tool_limit:] if tool_limit else []
+
             for e in events:
                 recent_tools.append(
                     {
                         "ts": getattr(e, "ts", None),
-                        "tool": e.tool,
-                        "message": e.text,
+                        "tool": getattr(e, "tool", None),
+                        "message": getattr(e, "text", None),
                         "inputs": getattr(e, "inputs", None),
                         "outputs": getattr(e, "outputs", None),
                         "tags": list(e.tags or []),

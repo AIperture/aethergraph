@@ -120,7 +120,6 @@ async def test_channel_http_roundtrip():
                 "meta": {"foo": "bar"},
             },
         )
-        print(r.text)
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True

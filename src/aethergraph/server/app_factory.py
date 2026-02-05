@@ -31,6 +31,7 @@ from aethergraph.core.runtime.runtime_services import install_services
 # import built-in agents and plugins to register them
 from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
 
+# from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec
 from aethergraph.services.container.default_container import build_default_container
@@ -218,6 +219,8 @@ def _load_user_graphs_from_env() -> None:
     if report.errors:
         for e in report.errors:
             print(f"⚠️ [worker load error] {e.source}: {e.error}")
+            if e.traceback:
+                print(e.traceback)
 
 
 def create_app_from_env() -> FastAPI:

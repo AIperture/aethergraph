@@ -5,32 +5,13 @@ import json
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.contracts.services.memory import Distiller, Event, HotLog, Indices, Persistence
+from aethergraph.contracts.services.memory import Distiller, Event, HotLog
 from aethergraph.contracts.storage.doc_store import DocStore
-
-# metering
-from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
-from aethergraph.services.memory.facade.utils import now_iso, stable_event_id
+from aethergraph.services.memory.facade.utils import now_iso
 from aethergraph.services.memory.utils import _summary_doc_id
 
 
 class LLMLongTermSummarizer(Distiller):
-    """
-    LLM-based long-term summarizer.
-
-    Flow:
-      1) Pull recent events from HotLog.
-      2) Filter by kind/tag/signal.
-      3) Build a prompt that shows the most important events as a transcript.
-      4) Call LLM to generate a structured summary.
-      5) Save summary JSON via Persistence.save_json(uri).
-      6) Emit a long_term_summary Event pointing to summary_uri.
-
-    This is complementary to RAG:
-      - LLM distiller compresses sequences into a digest.
-      - RAG uses many such digests + raw docs for retrieval.
-    """
-
     def __init__(
         self,
         *,
@@ -50,7 +31,7 @@ class LLMLongTermSummarizer(Distiller):
         self.include_tags = include_tags
         self.max_events = max_events
         self.min_signal = min_signal
-        self.model = model  # optional model override
+        self.model = model
 
     def _filter_events(self, events: Iterable[Event]) -> list[Event]:
         out: list[Event] = []
@@ -61,9 +42,8 @@ class LLMLongTermSummarizer(Distiller):
             if kinds is not None and e.kind not in kinds:
                 continue
             if tags is not None:
-                if not e.tags:
-                    continue
-                if not tags.issubset(set(e.tags)):
+                et = set(e.tags or [])
+                if not tags.issubset(et):  # AND semantics
                     continue
             if (e.signal or 0.0) < self.min_signal:
                 continue
@@ -71,17 +51,24 @@ class LLMLongTermSummarizer(Distiller):
         return out
 
     def _build_prompt(self, events: list[Event]) -> list[dict[str, str]]:
-        """
-        Convert events into a chat-style context for summarization.
-
-        We keep it model-agnostic: a list of {role, content} messages.
-        """
         lines: list[str] = []
 
         for e in events:
             role = e.stage or e.kind or "event"
-            if e.text:
-                lines.append(f"[{role}] {e.text}")
+
+            # Prefer text, but fall back to compact JSON of data when needed
+            content = (e.text or "").strip()
+            if not content and getattr(e, "data", None) is not None:
+                try:
+                    content = json.dumps(e.data, ensure_ascii=False)
+                except Exception:
+                    content = str(e.data)
+
+            if content:
+                # keep prompts bounded
+                if len(content) > 500:
+                    content = content[:500] + "…"
+                lines.append(f"[{role}] {content}")
 
         transcript = "\n".join(lines)
 
@@ -97,54 +84,65 @@ class LLMLongTermSummarizer(Distiller):
             "Return a JSON object with keys: "
             "`summary` (string), "
             "`key_facts` (list of strings), "
-            "`open_loops` (list of strings)."
-            "Do not use markdown or include explanations or context outside the JSON."
+            "`open_loops` (list of strings). "
+            "Do not use markdown or include explanations outside the JSON."
         )
 
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
+        return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
     async def distill(
         self,
         run_id: str,
         timeline_id: str,
-        scope_id: str = None,
+        scope_id: str | None = None,
         *,
         hotlog: HotLog,
-        persistence: Persistence,
-        indices: Indices,
         docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
-        # 1) fetch more events than needed, then filter
-        raw = await hotlog.recent(timeline_id, kinds=None, limit=self.max_events * 2)
+        # Over-fetch strategy:
+        # - if include_tags is present, filtering can be very selective, so over-fetch more
+        # - also pass include_kinds to HotLog to reduce noise
+        base_mult = 2
+        if self.include_tags:
+            base_mult = 8  # safer default for thread/session tags
+
+        # cap so we don't go crazy (HotLog may cap internally anyway)
+        fetch_limit = max(self.max_events * base_mult, 200)
+
+        raw = await hotlog.recent(
+            timeline_id,
+            kinds=self.include_kinds,  # narrow early when possible
+            limit=fetch_limit,
+        )
         kept = self._filter_events(raw)
+
         if not kept:
             return {}
 
+        # Keep only the most recent max_events (chronological, newest last)
         kept = kept[-self.max_events :]
+
         first_ts = kept[0].ts
         last_ts = kept[-1].ts
 
-        # 2) Build prompt and call LLM
         messages = self._build_prompt(kept)
 
-        # LLMClientProtocol: assume chat(...) returns (text, usage)
-        summary_json_str, usage = await self.llm.chat(
-            messages,
-        )
+        # Respect model override if the client supports it
+        try:
+            if self.model:
+                summary_json_str, usage = await self.llm.chat(messages, model=self.model)  # type: ignore[arg-type]
+            else:
+                summary_json_str, usage = await self.llm.chat(messages)
+        except TypeError:
+            # Client doesn't accept model=...
+            summary_json_str, usage = await self.llm.chat(messages)
 
-        # 3) Parse LLM JSON response
         try:
             payload = json.loads(summary_json_str)
         except Exception:
-            payload = {
-                "summary": summary_json_str,
-                "key_facts": [],
-                "open_loops": [],
-            }
+            payload = {"summary": summary_json_str, "key_facts": [], "open_loops": []}
+
         ts = now_iso()
 
         summary_obj = {
@@ -161,69 +159,20 @@ class LLMLongTermSummarizer(Distiller):
             "key_facts": payload.get("key_facts", []),
             "open_loops": payload.get("open_loops", []),
             "llm_usage": usage,
-            "llm_model": self.llm.model if hasattr(self.llm, "model") else None,
+            "llm_model": getattr(self.llm, "model", None),
+            "llm_model_override": self.model,
+            "include_kinds": self.include_kinds,
+            "include_tags": self.include_tags,
+            "min_signal": self.min_signal,
+            "fetch_limit": fetch_limit,
         }
 
         scope = scope_id or run_id
         doc_id = _summary_doc_id(scope, self.summary_tag, ts)
         await docs.put(doc_id, summary_obj)
 
-        # 4) Emit summary Event with preview + uri in data
         text = summary_obj["summary"] or ""
         preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
-
-        evt = Event(
-            event_id="",
-            ts=ts,
-            run_id=run_id,
-            scope_id=scope,
-            kind=self.summary_kind,
-            stage="summary_llm",
-            text=preview,
-            tags=["summary", "llm", self.summary_tag],
-            data={
-                "summary_doc_id": doc_id,
-                "summary_tag": self.summary_tag,
-                "time_window": summary_obj["time_window"],
-                "num_events": len(kept),
-            },
-            metrics={"num_events": len(kept)},
-            severity=2,
-            signal=0.7,
-        )
-
-        evt.event_id = stable_event_id(
-            {
-                "ts": ts,
-                "run_id": run_id,
-                "kind": self.summary_kind,
-                "summary_tag": self.summary_tag,
-                "preview": preview[:200],
-            }
-        )
-
-        await hotlog.append(timeline_id, evt, ttl_s=7 * 24 * 3600, limit=1000)
-        await persistence.append_event(timeline_id, evt)
-
-        # Metering: record summary event
-        try:
-            meter = current_metering()
-            ctx = current_meter_context.get()
-            user_id = ctx.get("user_id")
-            org_id = ctx.get("org_id")
-
-            await meter.record_event(
-                user_id=user_id,
-                org_id=org_id,
-                run_id=run_id,
-                scope_id=scope,
-                kind=f"memory.{self.summary_kind}",  # e.g. "memory.long_term_summary"
-            )
-        except Exception:
-            import logging
-
-            logger = logging.getLogger("aethergraph.services.memory.distillers.llm_long_term")
-            logger.error("Failed to record metering event for long_term_summary")
 
         return {
             "summary_doc_id": doc_id,
@@ -231,4 +180,6 @@ class LLMLongTermSummarizer(Distiller):
             "summary_tag": self.summary_tag,
             "time_window": summary_obj["time_window"],
             "num_events": len(kept),
+            "preview": preview,
+            "ts": ts,
         }

@@ -1,6 +1,7 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from enum import Enum
+import json
 from typing import Any
 
 # used to represent the status of a run, primiarily used in endpoint with RunManager
@@ -87,3 +88,55 @@ class SessionKind(str, Enum):
     playground = "playground"
     notebook = "notebook"
     pipline = "pipeline"  # future
+
+
+MAX_PREVIEW_CHARS = 16_000  # tune as you like
+
+
+def _to_json_ish(obj: Any) -> Any:
+    """
+    Best-effort conversion of arbitrary Python objects to something JSON-ish.
+    This is ONLY for UI preview, never for planner semantics.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, (str, int, float, bool)):  # noqa: UP038
+        return obj
+    if isinstance(obj, (list, tuple, set)):  # noqa: UP038
+        return [_to_json_ish(x) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _to_json_ish(v) for k, v in obj.items()}
+    if is_dataclass(obj):
+        return _to_json_ish(asdict(obj))
+
+    # Optional: numpy handling
+    try:
+        import numpy as np  # type: ignore
+
+        if isinstance(obj, np.ndarray):
+            return {
+                "__ndarray__": True,
+                "shape": obj.shape,
+                "dtype": str(obj.dtype),
+                "preview": _to_json_ish(obj.flatten()[:10].tolist()),
+            }
+    except Exception:
+        pass
+
+    return repr(obj)
+
+
+def _make_preview(obj: Any, max_chars: int = MAX_PREVIEW_CHARS) -> tuple[str, bool]:
+    """
+    Returns (preview_str, truncated_flag).
+    Never used for planning; only for UI.
+    """
+    jsonish = _to_json_ish(obj)
+    try:
+        s = json.dumps(jsonish, ensure_ascii=False)
+    except TypeError:
+        s = repr(jsonish)
+    truncated = len(s) > max_chars
+    if truncated:
+        s = s[:max_chars] + "... (truncated)"
+    return s, truncated

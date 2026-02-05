@@ -16,6 +16,7 @@ from aethergraph.core.runtime.run_types import (
     RunRecord,
     RunStatus,
     RunVisibility,
+    _make_preview,
 )
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_registry import current_registry
@@ -40,68 +41,6 @@ def _is_graphfn(obj: Any) -> bool:
 
 class RunManager:
     """
-    High-level coordinator for running graphs.
-
-    Responsibilities
-    ----------------
-    - Resolve graph targets (TaskGraph / GraphFunction) from the UnifiedRegistry.
-    - Create and persist RunRecord metadata in the RunStore.
-    - Enforce a soft concurrency limit via an in-process run slot counter.
-    - Drive execution via run_or_resume_async and record status / errors.
-    - Emit metering events (duration, status, user/org, graph_id).
-    - Best-effort cancellation by talking to the scheduler registry.
-
-    Key entrypoints
-    ---------------
-    submit_run(...)
-        Non-blocking API entrypoint (used by HTTP routes).
-        - Acquires a run slot (respecting max_concurrent_runs).
-        - Creates a RunRecord (status=running) and saves it.
-        - Schedules a background coroutine (_bg) that:
-            * Calls _run_and_finalize(...)
-            * Always releases the run slot in a finally block.
-        - Returns immediately with the RunRecord so the caller can poll status.
-
-    start_run(...)
-        Blocking helper (tests / CLI).
-        - Same setup as submit_run, but runs _run_and_finalize(...) inline.
-        - Returns (RunRecord, outputs, has_waits, continuations).
-
-    _run_and_finalize(...)
-        Shared core logic used by both submit_run and start_run.
-        - Calls run_or_resume_async(target, inputs, run_id, session_id).
-        - Maps successful results into a dict of outputs.
-        - Handles:
-            * Normal completion  -> status = succeeded.
-            * GraphHasPendingWaits -> status = failed (for now), has_waits=True.
-            * asyncio.CancelledError -> status = canceled.
-            * Other exceptions -> status = failed, error message recorded.
-        - Updates RunStore status fields (finished_at, error).
-        - Sends a metering event with status / duration.
-
-    Concurrency model
-    -----------------
-    - _acquire_run_slot / _release_run_slot protect a _running counter with an
-      asyncio.Lock to enforce max_concurrent_runs within this process.
-    - submit_run takes ownership of a slot until responsibility is handed to
-      the background runner (_bg). Once _bg is scheduled, it is responsible
-      for releasing the slot in its finally block.
-    - If submit_run fails before the handoff, it releases the slot itself to
-      avoid leaks.
-
-    Cancellation
-    ------------
-    cancel_run(run_id)
-        - Looks up the RunRecord (if available) and, if not terminal, marks it
-          as cancellation_requested in the RunStore.
-        - Uses the scheduler registry to find the scheduler for this run:
-            * GlobalForwardScheduler: terminate_run(run_id)
-            * ForwardScheduler: terminate()
-        - The actual transition to RunStatus.canceled happens when the
-          scheduler cancels the task and run_or_resume_async raises
-          asyncio.CancelledError, which _run_and_finalize() translates into
-          a canceled run.
-
     TODO: for global schedulers, we may want to have a dedicated run manager -- current
     implementation utilize the async_run which create a local ForwardScheduler instance
     each graph run. This is fine for concurrent graphs under thousands but may
@@ -167,6 +106,84 @@ class RunManager:
         raise KeyError(f"Graph '{graph_id}' not found")
 
     # -------- core execution helper --------
+    async def _build_run_record(
+        self,
+        *,
+        graph_id: str,
+        run_id: str | None,
+        session_id: str | None,
+        tags: list[str] | None,
+        identity: RequestIdentity,
+        origin: RunOrigin | None,
+        visibility: RunVisibility | None,
+        importance: RunImportance | None,
+        agent_id: str | None,
+        app_id: str | None,
+    ) -> tuple[RunRecord, Any]:
+        """
+        Shared helper for submit_run and run_and_wait:
+        - Resolves target
+        - Determines kind
+        - Attaches flow_id and session tags
+
+        Return:
+        - RunRecord (not yet persisted)
+        - target object: graph or graphfn
+        """
+        rid = run_id or f"run-{uuid4().hex[:8]}"
+        started_at = _utcnow()
+        tags = list(tags or [])
+
+        target = await self._resolve_target(graph_id)
+        if _is_task_graph(target):
+            kind = "taskgraph"
+        elif _is_graphfn(target):
+            kind = "graphfn"
+        else:
+            kind = "other"
+
+        flow_id: str | None = None
+        reg = self.registry()
+        if reg is not None:
+            if kind == "taskgraph":
+                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+            elif kind == "graphfn":
+                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+            else:
+                meta = {}
+            flow_id = meta.get("flow_id") or graph_id
+
+        if session_id is None:
+            session_id = rid
+
+        record = RunRecord(
+            run_id=rid,
+            graph_id=graph_id,
+            kind=kind,
+            status=RunStatus.running,
+            started_at=started_at,
+            tags=tags,
+            user_id=identity.user_id,
+            org_id=identity.org_id,
+            meta={},
+            session_id=session_id,
+            origin=origin or RunOrigin.app,
+            visibility=visibility or RunVisibility.normal,
+            importance=importance or RunImportance.normal,
+            agent_id=agent_id,
+            app_id=app_id,
+        )
+
+        if flow_id:
+            record.meta["flow_id"] = flow_id
+            if f"flow:{flow_id}" not in record.tags:
+                record.tags.append(f"flow:{flow_id}")
+        if session_id:
+            record.meta["session_id"] = session_id
+            if f"session:{session_id}" not in record.tags:
+                record.tags.append(f"session:{session_id}")
+
+        return record, target
 
     async def _run_and_finalize(
         self,
@@ -213,6 +230,18 @@ class RunManager:
             outputs = result if isinstance(result, dict) else {"result": result}
             record.status = RunStatus.succeeded
             record.finished_at = _utcnow()
+
+            # Optional: store a UI-only output preview
+            try:
+                preview, truncated = _make_preview(outputs)
+                record.meta["output_preview"] = preview
+                record.meta["output_truncated"] = truncated
+            except Exception:
+                import logging
+
+                logging.getLogger("aethergraph.runtime.run_manager").exception(
+                    "Error creating output preview for run_id=%s", record.run_id
+                )
 
         except asyncio.CancelledError:
             # Cancellation path: scheduler.terminate() or external cancel.
@@ -281,7 +310,8 @@ class RunManager:
 
         try:
             if record.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
-                await self._resolve_run_future(record.run_id, record)
+                # IMPORTANT: now resolve with (record, outputs)
+                await self._resolve_run_future(record.run_id, (record, outputs))
         except Exception:  # noqa: BLE001
             import logging
 
@@ -319,9 +349,6 @@ class RunManager:
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
-        user_id = identity.user_id
-        org_id = identity.org_id
-
         # Acquire run slot (rate limiting)
         await self._acquire_run_slot()
         # Tracks whether responsibility for releasing the slot has been handed
@@ -331,59 +358,31 @@ class RunManager:
 
         try:
             tags = tags or []
-            target = await self._resolve_target(graph_id)
-            rid = run_id or f"run-{uuid4().hex[:8]}"
-            started_at = _utcnow()
 
-            if _is_task_graph(target):
-                kind = "taskgraph"
-            elif _is_graphfn(target):
-                kind = "graphfn"
-            else:
-                kind = "other"
-
-            # pull flow_id and entrypoint from registry if possible
-            flow_id: str | None = None
-            reg = self.registry()
-            if reg is not None:
-                if kind == "taskgraph":
-                    meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
-                elif kind == "graphfn":
-                    meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
-                else:
-                    meta = {}
-                flow_id = meta.get("flow_id") or graph_id
-
-            # use run_id as session_id if not provided
-            if session_id is None:
-                session_id = rid
-
-            record = RunRecord(
-                run_id=rid,
+            record, target = await self._build_run_record(
                 graph_id=graph_id,
-                kind=kind,
-                status=RunStatus.running,  # we go straight to running as before
-                started_at=started_at,
-                tags=list(tags),
-                user_id=user_id,
-                org_id=org_id,
-                meta={},
+                run_id=run_id,
                 session_id=session_id,
-                origin=origin or RunOrigin.app,  # app is a typical default for graph runs
-                visibility=visibility or RunVisibility.normal,
-                importance=importance or RunImportance.normal,
+                tags=tags,
+                identity=identity,
+                origin=origin,
+                visibility=visibility,
+                importance=importance,
                 agent_id=agent_id,
                 app_id=app_id,
             )
 
-            if flow_id:
-                record.meta["flow_id"] = flow_id
-                if f"flow:{flow_id}" not in record.tags:
-                    record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
-            if session_id:
-                record.meta["session_id"] = session_id
-                if f"session:{session_id}" not in record.tags:
-                    record.tags.append(f"session:{session_id}")  # add session tag if missing
+            # Optional: store a UI-only input preview
+            try:
+                preview, truncated = _make_preview(inputs)
+                record.meta["input_preview"] = preview
+                record.meta["input_truncated"] = truncated
+            except Exception:
+                import logging
+
+                logging.getLogger("aethergraph.runtime.run_manager").exception(
+                    "Error creating input preview for run_id=%s", record.run_id
+                )
 
             if self._store is not None:
                 await self._store.create(record)
@@ -395,28 +394,22 @@ class RunManager:
                         target=target,
                         graph_id=graph_id,
                         inputs=inputs,
-                        # user_id=user_id,
-                        # org_id=org_id,
                         identity=identity,
                     )
                 finally:
                     await self._release_run_slot()
 
-            # If we're in an event loop (server), schedule in the background.
-            # If not (CLI), just run inline so behaviour is still sane.
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                # Not inside a running loop – e.g., CLI usage.
                 slot_handed_to_bg = True
-                # _bg() is responsible for releasing the slot in its finally.
                 await _bg()
             else:
                 slot_handed_to_bg = True
-                # Background tasks; _bg() will release the slot in its finally.
                 loop.create_task(_bg())
 
             return record
+
         except Exception:
             # If submit_run itself fails *before* handing off to _bg, we must release the slot here.
             # Once slot_handed_to_bg is True, _bg is responsible for releasing the slot.
@@ -459,65 +452,35 @@ class RunManager:
 
         try:
             tags = tags or []
-            target = await self._resolve_target(
-                graph_id
-            )  # same resolver as submit_run :contentReference[oaicite:1]{index=1}
-            rid = run_id or f"run-{uuid4().hex[:8]}"
-            started_at = _utcnow()
 
-            if _is_task_graph(target):
-                kind = "taskgraph"
-            elif _is_graphfn(target):
-                kind = "graphfn"
-            else:
-                kind = "other"
-
-            # flow_id extraction same pattern as submit_run :contentReference[oaicite:2]{index=2}
-            flow_id: str | None = None
-            reg = self.registry()
-            if reg is not None:
-                if kind == "taskgraph":
-                    meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
-                elif kind == "graphfn":
-                    meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
-                else:
-                    meta = {}
-                flow_id = meta.get("flow_id") or graph_id
-
-            if session_id is None:
-                session_id = rid
-
-            record = RunRecord(
-                run_id=rid,
+            record, target = await self._build_run_record(
                 graph_id=graph_id,
-                kind=kind,
-                status=RunStatus.running,
-                started_at=started_at,
-                tags=list(tags),
-                user_id=identity.user_id,
-                org_id=identity.org_id,
-                meta={},
+                run_id=run_id,
                 session_id=session_id,
-                origin=origin or RunOrigin.app,
-                visibility=visibility or RunVisibility.normal,
-                importance=importance or RunImportance.normal,
+                tags=tags,
+                identity=identity,
+                origin=origin,
+                visibility=visibility,
+                importance=importance,
                 agent_id=agent_id,
                 app_id=app_id,
             )
 
-            if flow_id:
-                record.meta["flow_id"] = flow_id
-                if f"flow:{flow_id}" not in record.tags:
-                    record.tags.append(f"flow:{flow_id}")
-            if session_id:
-                record.meta["session_id"] = session_id
-                if f"session:{session_id}" not in record.tags:
-                    record.tags.append(f"session:{session_id}")
+            # Optional: UI-only input preview
+            try:
+                preview, truncated = _make_preview(inputs)
+                record.meta["input_preview"] = preview
+                record.meta["input_truncated"] = truncated
+            except Exception:
+                import logging
+
+                logging.getLogger("aethergraph.runtime.run_manager").exception(
+                    "Error creating input preview for run_id=%s", record.run_id
+                )
 
             if self._store is not None:
                 await self._store.create(record)
 
-            # Inline execution; still uses run_or_resume_async under the hood :contentReference[oaicite:3]{index=3}
             return await self._run_and_finalize(
                 record=record,
                 target=target,
@@ -528,105 +491,6 @@ class RunManager:
         finally:
             if count_slot:
                 await self._release_run_slot()
-
-    # -------- old: blocking start_run (CLI/tests) --------
-    async def start_run(
-        self,
-        graph_id: str,
-        *,
-        inputs: dict[str, Any],
-        run_id: str | None = None,
-        session_id: str | None = None,
-        tags: list[str] | None = None,
-        identity: RequestIdentity | None = None,
-        agent_id: str | None = None,
-        app_id: str | None = None,
-    ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
-        """
-        Blocking helper (original behaviour).
-
-        - Resolves target.
-        - Creates RunRecord with status=running.
-        - Runs once via run_or_resume_async.
-        - Updates store + metering.
-        - Returns (record, outputs, has_waits, continuations).
-
-        Still useful for tests/CLI, but the HTTP route should prefer submit_run().
-
-        NOTE:
-        agent_id and app_id will override any value pulled from original graphs. Use it
-        only when you want to explicitly set these fields for tracking purpose.
-        """
-        if identity is None:
-            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
-
-        tags = tags or []
-        target = await self._resolve_target(graph_id)
-        rid = run_id or f"run-{uuid4().hex[:8]}"
-        started_at = _utcnow()
-
-        if _is_task_graph(target):
-            kind = "taskgraph"
-        elif _is_graphfn(target):
-            kind = "graphfn"
-        else:
-            kind = "other"
-
-        # pull flow_id and entrypoint from registry if possible
-        flow_id: str | None = None
-        reg = self.registry()
-        if reg is not None:
-            if kind == "taskgraph":
-                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
-            elif kind == "graphfn":
-                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
-            else:
-                meta = {}
-            flow_id = meta.get("flow_id") or graph_id
-
-        # use run_id as session_id if not provided
-        if session_id is None:
-            session_id = rid
-
-        record = RunRecord(
-            run_id=rid,
-            graph_id=graph_id,
-            kind=kind,
-            status=RunStatus.running,  # we go straight to running as before
-            started_at=started_at,
-            tags=list(tags),
-            user_id=identity.user_id,
-            org_id=identity.org_id,
-            meta={},
-            session_id=session_id,
-            origin=RunOrigin.app,  # app is a typical default for graph runs
-            visibility=RunVisibility.normal,
-            importance=RunImportance.normal,
-            agent_id=agent_id,
-            app_id=app_id,
-        )
-
-        if flow_id:
-            record.meta["flow_id"] = flow_id
-            if f"flow:{flow_id}" not in record.tags:
-                record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
-        if session_id:
-            record.meta["session_id"] = session_id
-            if f"session:{session_id}" not in record.tags:
-                record.tags.append(f"session:{session_id}")  # add session tag if missing
-
-        if self._store is not None:
-            await self._store.create(record)
-
-        return await self._run_and_finalize(
-            record=record,
-            target=target,
-            graph_id=graph_id,
-            inputs=inputs,
-            identity=identity,
-            # agent_id=agent_id,
-            # app_id=app_id,
-        )
 
     async def get_record(self, run_id: str) -> RunRecord | None:
         if self._store is None:
@@ -748,16 +612,45 @@ class RunManager:
         run_id: str,
         *,
         timeout_s: float | None = None,
-    ) -> RunRecord:
+        return_outputs: bool = False,
+    ) -> RunRecord | tuple[RunRecord, dict[str, Any] | None]:
+        """
+        Wait for a run to reach a terminal state.
+
+        - If return_outputs=False (default), returns RunRecord (backwards compatible).
+        - If return_outputs=True, returns (RunRecord, outputs_dict_or_none).
+
+        NOTE:
+        - outputs are only guaranteed when the run was executed in THIS process
+          via RunManager. If the run is already terminal in the store and no
+          in-process outputs exist, outputs will be None.
+        """
         # Fast path: already terminal in store
         rec = await self.get_record(run_id)
         if rec and rec.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+            if return_outputs:
+                return rec, None
             return rec
 
         fut = await self._get_or_create_run_future(run_id)
+
         if timeout_s is not None:
-            return await asyncio.wait_for(fut, timeout=timeout_s)
-        return await fut
+            result = await asyncio.wait_for(fut, timeout=timeout_s)
+        else:
+            result = await fut
+
+        # result is either:
+        # - RunRecord (old-style resolvers)
+        # - or (RunRecord, outputs) from _run_and_finalize
+        if isinstance(result, RunRecord):
+            if return_outputs:
+                return result, None
+            return result
+
+        rec2, outputs = result
+        if return_outputs:
+            return rec2, outputs
+        return rec2
 
     async def _get_or_create_run_future(self, run_id: str) -> asyncio.Future:
         async with self._run_waiters_lock:
@@ -781,3 +674,102 @@ class RunManager:
             if fut and not fut.done():
                 fut.set_exception(err)
             self._run_waiters.pop(run_id, None)
+
+    # -------- old: blocking start_run (CLI/tests) --------
+    async def start_run(
+        self,
+        graph_id: str,
+        *,
+        inputs: dict[str, Any],
+        run_id: str | None = None,
+        session_id: str | None = None,
+        tags: list[str] | None = None,
+        identity: RequestIdentity | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+    ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+        """
+        Blocking helper (original behaviour).
+
+        - Resolves target.
+        - Creates RunRecord with status=running.
+        - Runs once via run_or_resume_async.
+        - Updates store + metering.
+        - Returns (record, outputs, has_waits, continuations).
+
+        Still useful for tests/CLI, but the HTTP route should prefer submit_run().
+
+        NOTE:
+        agent_id and app_id will override any value pulled from original graphs. Use it
+        only when you want to explicitly set these fields for tracking purpose.
+        """
+        if identity is None:
+            identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+
+        tags = tags or []
+        target = await self._resolve_target(graph_id)
+        rid = run_id or f"run-{uuid4().hex[:8]}"
+        started_at = _utcnow()
+
+        if _is_task_graph(target):
+            kind = "taskgraph"
+        elif _is_graphfn(target):
+            kind = "graphfn"
+        else:
+            kind = "other"
+
+        # pull flow_id and entrypoint from registry if possible
+        flow_id: str | None = None
+        reg = self.registry()
+        if reg is not None:
+            if kind == "taskgraph":
+                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+            elif kind == "graphfn":
+                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+            else:
+                meta = {}
+            flow_id = meta.get("flow_id") or graph_id
+
+        # use run_id as session_id if not provided
+        if session_id is None:
+            session_id = rid
+
+        record = RunRecord(
+            run_id=rid,
+            graph_id=graph_id,
+            kind=kind,
+            status=RunStatus.running,  # we go straight to running as before
+            started_at=started_at,
+            tags=list(tags),
+            user_id=identity.user_id,
+            org_id=identity.org_id,
+            meta={},
+            session_id=session_id,
+            origin=RunOrigin.app,  # app is a typical default for graph runs
+            visibility=RunVisibility.normal,
+            importance=RunImportance.normal,
+            agent_id=agent_id,
+            app_id=app_id,
+        )
+
+        if flow_id:
+            record.meta["flow_id"] = flow_id
+            if f"flow:{flow_id}" not in record.tags:
+                record.tags.append(f"flow:{flow_id}")  # add flow tag if missing
+        if session_id:
+            record.meta["session_id"] = session_id
+            if f"session:{session_id}" not in record.tags:
+                record.tags.append(f"session:{session_id}")  # add session tag if missing
+
+        if self._store is not None:
+            await self._store.create(record)
+
+        return await self._run_and_finalize(
+            record=record,
+            target=target,
+            graph_id=graph_id,
+            inputs=inputs,
+            identity=identity,
+            # agent_id=agent_id,
+            # app_id=app_id,
+        )

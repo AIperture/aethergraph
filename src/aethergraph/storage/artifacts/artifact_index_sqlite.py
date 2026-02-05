@@ -273,9 +273,19 @@ class SqliteArtifactIndexSync:
                         where.append("(" + " OR ".join(ors) + ")")
                     continue
 
+                # if k in TENANT_KEYS:
+                #     where.append(f"{TENANT_KEYS[k]} = ?")
+                #     params.append(v)
+                #     continue
+
                 if k in TENANT_KEYS:
-                    where.append(f"{TENANT_KEYS[k]} = ?")
-                    params.append(v)
+                    col = TENANT_KEYS[k]
+                    sv = str(v)
+
+                    # column OR labels_json fallback
+                    where.append(f"({col} = ? OR labels_json LIKE ?)")
+                    params.append(sv)
+                    params.append(f'%"{k}": "{sv}"%')
                     continue
 
                 where.append("labels_json LIKE ?")

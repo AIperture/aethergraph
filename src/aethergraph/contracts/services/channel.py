@@ -18,6 +18,23 @@ EventType = Literal[
 ]
 
 
+class PhaseRich(TypedDict, total=False):
+    kind: Literal["phase"]
+    phase: str  # "routing", "planning", "reasoning", "tools", "reply"
+    status: Literal["pending", "active", "done", "failed", "skipped"]
+    label: str | None  # short human label
+    detail: str | None  # optional extra text
+    code: str | None  # internal code like "routing.planning"
+
+
+class ProgressRich(TypedDict, total=False):
+    kind: Literal["progress"]
+    label: str | None
+    current: float | int | None
+    total: float | int | None
+    unit: str | None  # "%", "steps", etc.
+
+
 class FileRef(TypedDict, total=False):
     id: str  # platform file id (e.g., Slack file ID)
     name: str  # suggested filename
@@ -46,7 +63,7 @@ class OutEvent:
     rich: dict[str, Any] | None = None
     meta: dict[str, Any] | None = None
     # Optional structured extras most adapters can use, e.g., for buttons, attachments, files, etc.
-    buttons: dict[str, Button] | None = None  # for approvals or link actions
+    buttons: list[Button] | None = None
     image: dict[str, Any] | None = None  # e.g., {"url": "...", "alt": "...", "title": "..."}
     file: dict[str, Any] | None = (
         None  # e.g., {"bytes" b"...", "filename": "...", "mimetype": "..."} or {"url": "...", "filename": "...", "mimetype": "..."}

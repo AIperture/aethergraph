@@ -110,6 +110,29 @@ print("   version:", version)
     run([str(venv_python), "-c", code])
 
 
+def smoke_test_server(venv_python: Path):
+    """Basic server sanity checks: import entrypoint and run CLI help."""
+    # 1) Import server entrypoint to ensure it’s packaged correctly
+    code_import = r"""
+from aethergraph.server import server
+print("✅ server module imported OK:", server.__file__)
+"""
+    run([str(venv_python), "-c", code_import])
+
+    # 2) Run CLI help for `aethergraph serve` to ensure argument parsing works
+    # This uses the console script entry point via -m to stay inside the venv.
+    code_cli = r"""
+import sys
+from aethergraph.__main__ import main
+
+# Simulate: aethergraph serve --help
+sys.argv = ["aethergraph", "serve", "--help"]
+print("✅ running `aethergraph serve --help`")
+main()
+"""
+    run([str(venv_python), "-c", code_cli])
+
+
 def main():
     print(f"[info] Project root: {ROOT}")
 
@@ -122,6 +145,7 @@ def main():
     venv_python = create_fresh_venv()
     install_wheel_in_venv(venv_python)
     smoke_test_import(venv_python)
+    smoke_test_server(venv_python)
 
     print("\n🎉 Smoke test completed successfully.")
 

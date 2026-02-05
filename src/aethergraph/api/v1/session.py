@@ -1,6 +1,17 @@
+import asyncio
+from contextlib import suppress
 from datetime import datetime, timezone
+import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
@@ -19,6 +30,7 @@ from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
 router = APIRouter(tags=["sessions"])
+logger = logging.getLogger(__name__)
 
 
 @router.post("/sessions", response_model=Session)
@@ -74,8 +86,6 @@ async def list_sessions(
         limit=limit,
         offset=offset,
     )
-    # print(f"Listed {len(sessions)} sessions for user_id={identity.user_id} org_id={identity.org_id} offset={offset} limit={limit}")
-    # print(f"Sessions: {[s for s in sessions]}")
     next_cursor = encode_cursor(offset + limit) if len(sessions) == limit else None
     return SessionListResponse(items=sessions, next_cursor=next_cursor)
 
@@ -206,6 +216,109 @@ async def get_session_runs(
     return SessionRunsResponse(items=summaries)
 
 
+def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
+    payload = row.get("payload", {}) or {}
+    return SessionChatEvent(
+        id=row.get("id"),
+        session_id=session_id,
+        ts=row.get("ts"),
+        type=payload.get("type") or "agent.message",
+        text=payload.get("text"),
+        buttons=payload.get("buttons", []),
+        file=payload.get("file"),
+        files=payload.get("files") or None,
+        rich=payload.get("rich") or None,
+        meta=payload.get("meta", {}) or {},
+        agent_id=payload.get("agent_id"),
+        upsert_key=payload.get("upsert_key"),
+    )
+
+
+@router.websocket("/ws/sessions/{session_id}/chat")
+async def ws_session_chat(websocket: WebSocket, session_id: str):
+    DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
+
+    container = current_services()
+    event_log = container.eventlog
+    hub = getattr(container, "eventhub", None)
+
+    if hub is None or event_log is None:
+        await websocket.close(code=1011)
+        return
+
+    await websocket.accept()
+
+    async def send_snapshot() -> None:
+        events = await event_log.query(
+            scope_id=session_id,
+            kinds=["session_chat"],
+            since=None,
+            limit=200,
+        )
+        filtered = []
+        for ev in events:
+            payload = ev.get("payload") or {}
+            t = payload.get("type") or "agent.message"
+            if t in DROP_FROM_HISTORY:
+                continue
+            filtered.append(ev)
+
+        filtered.sort(key=lambda ev: ev.get("ts") or 0)
+        initial_payload = [
+            _row_to_session_chat_event(ev, session_id).model_dump() for ev in filtered
+        ]
+        await websocket.send_json({"kind": "snapshot", "events": initial_payload})
+
+    async def recv_until_disconnect() -> None:
+        # Blocks until disconnect; does not require the client to send meaningful messages.
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                return
+
+    async def send_live() -> None:
+        # If you kept old hub shape, you'd do async for row in hub.subscribe(scope_id=session_id)
+        async for row in hub.subscribe(scope_id=session_id, kind="session_chat"):
+            ev = _row_to_session_chat_event(row, session_id)
+            await websocket.send_json({"kind": "event", "event": ev.model_dump()})
+
+    recv_task = send_task = None
+    try:
+        await send_snapshot()
+
+        recv_task = asyncio.create_task(recv_until_disconnect())
+        send_task = asyncio.create_task(send_live())
+
+        done, pending = await asyncio.wait(
+            {recv_task, send_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Cancel the other task (this is what prevents idle hangs)
+        for t in pending:
+            t.cancel()
+            with suppress(asyncio.CancelledError):
+                await t
+
+    except WebSocketDisconnect:
+        # can happen from send_json
+        return
+    except asyncio.CancelledError:
+        # critical for uvicorn --reload
+        with suppress(Exception):
+            await websocket.close(code=1001)
+        raise
+    except Exception as e:
+        with suppress(Exception):
+            await websocket.close(code=1011, reason=str(e)[:120])
+    finally:
+        for t in (recv_task, send_task):
+            if t and not t.done():
+                t.cancel()
+                with suppress(asyncio.CancelledError):
+                    await t
+
+
 @router.get("/sessions/{session_id}/chat/events", response_model=list[SessionChatEvent])
 async def get_session_chat_events(
     session_id: str,
@@ -213,6 +326,8 @@ async def get_session_chat_events(
     since_ts: float | None = Query(None),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> list[SessionChatEvent]:
+    DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
+
     container = current_services()
     event_log = container.eventlog
 
@@ -234,6 +349,9 @@ async def get_session_chat_events(
         # make cursor exclusive -- only return events after since_ts to avoid duplicates
         events = [ev for ev in events if (ev.get("ts") or 0) > since_ts]
 
+    # Filter legacy persisted deltas/start
+    events = [ev for ev in events if (ev.get("payload") or {}).get("type") not in DROP_FROM_HISTORY]
+
     out: list[SessionChatEvent] = []
     for ev in events:
         payload = ev.get("payload", {}) or {}
@@ -250,6 +368,7 @@ async def get_session_chat_events(
                 meta=payload.get("meta", {}) or {},
                 agent_id=payload.get("agent_id"),
                 upsert_key=payload.get("upsert_key"),  # forward idempotent key
+                rich=payload.get("rich") or None,  # forward rich content
             )
         )
     out.sort(key=lambda e: e.ts)

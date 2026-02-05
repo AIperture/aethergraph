@@ -2,7 +2,15 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from aethergraph.contracts.services.execution import (
+    CodeExecutionRequest,
+    CodeExecutionResult,
+    ExecutionService,
+)
 from aethergraph.services.artifacts.facade import ArtifactFacade
+from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.planning.node_planner import NodePlanner
+from aethergraph.services.skills.skill_registry import SkillRegistry
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -41,9 +49,36 @@ class NodeContext:
     app_id: str | None = None  # for app-invoked runs
     bound_memory: BoundMemoryAdapter | None = None  # back-compat
 
+    _planner_facade: NodePlanner | None = None  # lazy init
+
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:
         return self.services
+
+    async def execute(
+        self,
+        code: str,
+        *,
+        language: str = "python",
+        timeout_s: float = 30.0,
+        args: list[str] | None = None,
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> CodeExecutionResult:
+        """ """
+        exe_svs: ExecutionService | None = getattr(self.services, "execution", None)
+        if exe_svs is None:
+            raise RuntimeError("NodeContext.services.execution is not configured")
+
+        req = CodeExecutionRequest(
+            language=language,
+            code=code,
+            args=args or [],
+            timeout_s=timeout_s,
+            workdir=workdir,
+            env=env,
+        )
+        return await exe_svs.execute(req)
 
     async def spawn_run(
         self,
@@ -83,7 +118,7 @@ class NodeContext:
                 inputs={"foo": "bar"},
                 tags=["experiment", "priority"],
                 agent_id="agent-123",    # associate with an agent if applicable
-                visibility=RunVisibility.ineline, # not shown in UI
+                visibility=RunVisibility.inline, # not shown in UI
             )
             ```
 
@@ -232,6 +267,7 @@ class NodeContext:
         run_id: str,
         *,
         timeout_s: float | None = None,
+        return_outputs: bool = False,
     ) -> RunRecord:
         """
         Wait for a run to complete and retrieve its final record.
@@ -249,16 +285,18 @@ class NodeContext:
 
             Waiting with a timeout:
             ```python
-            record = await context.wait_run(run_id, timeout_s=30)
+            record, outputs = await context.wait_run(run_id, timeout_s=30, return_outputs=True)
             ```
 
         Args:
             run_id: The unique identifier of the run to wait for.
             timeout_s: Optional timeout in seconds. If set, the method will raise
                 a TimeoutError if the run does not complete in time.
+            return_outputs: If True, also return the run's outputs along with the record.
 
         Returns:
             RunRecord: The final record of the completed run.
+            Output: If `return_outputs` is True, returns a tuple of (RunRecord, outputs dict).
 
         Raises:
             RuntimeError: If the RunManager service is not configured in the context.
@@ -273,7 +311,7 @@ class NodeContext:
         rm: RunManager | None = getattr(self.services, "run_manager", None)
         if rm is None:
             raise RuntimeError("NodeContext.services.run_manager is not configured")
-        return await rm.wait_run(run_id, timeout_s=timeout_s)
+        return await rm.wait_run(run_id, timeout_s=timeout_s, return_outputs=return_outputs)
 
     async def cancel_run(self, run_id: str) -> None:
         """
@@ -315,6 +353,16 @@ class NodeContext:
             raise RuntimeError("NodeContext.services.run_manager is not configured")
         await rm.cancel_run(run_id)
 
+    def planner(self) -> "NodePlanner":
+        if self._planner_facade is None:
+            if self.services.planner_service is None:
+                raise RuntimeError("NodeContext.services.planner_service is not configured")
+            self._planner_facade = NodePlanner(
+                service=self.services.planner_service,
+                node_ctx=self,
+            )
+        return self._planner_facade
+
     def logger(self):
         return self.services.logger.for_node_ctx(
             run_id=self.run_id, node_id=self.node_id, graph_id=self.graph_id
@@ -345,6 +393,11 @@ class NodeContext:
             ChannelSession: The channel session associated with the current run.
         """
         return ChannelSession(self, f"ui:run/{self.run_id}")
+
+    def skills(self) -> SkillRegistry:
+        if not self.services.skills:
+            raise RuntimeError("NodeContext.services.skills is not configured")
+        return self.services.skills
 
     def channel(self, channel_key: str | None = None):
         """
@@ -520,6 +573,16 @@ class NodeContext:
         if not self.services.mcp:
             raise RuntimeError("MCPService not available")
         return self.services.mcp.get(name)
+
+    def indices(self) -> ScopedIndices:
+        if not self.services.indices:
+            raise RuntimeError("ScopedIndices not available")
+        return self.services.indices
+
+    # def run_manager(self) -> RunManager:
+    #     if not self.services.run_manager:
+    #         raise RuntimeError("RunManager not available")
+    #     return self.services.run_manager
 
     def continuations(self):
         return self.services.continuation_store

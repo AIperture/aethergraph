@@ -47,7 +47,9 @@ class ChannelBus:
     def register_alias(self, alias: str, target: str) -> None:
         """Register or overwrite a human-friendly alias -> canonical key."""
         if self._prefix(target) not in self.adapters:
-            raise RuntimeError(f"Cannot alias to unknown channel prefix: {self._prefix(target)}")
+            raise RuntimeError(
+                f"Cannot alias to unknown channel prefix: {self._prefix(target)}. Please check if you have enabled the required channel service in .env and registered the adapter."
+            )
 
         self.channel_aliases[alias] = target
 

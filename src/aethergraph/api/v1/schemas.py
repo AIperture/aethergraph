@@ -488,6 +488,11 @@ class SessionChatFile(BaseModel):
     mimetype: str | None = None
     size: int | None = None
     uri: str | None = None  # optional, useful for artifact URIs
+    renderer: Literal["image", "download", "vega", "plotly"] | None = None  # optional, for UI hints
+
+    class Config:
+        # Optional but nice: future-proof against extra keys
+        extra = "allow"
 
 
 class SessionChatEvent(BaseModel):
@@ -498,10 +503,12 @@ class SessionChatEvent(BaseModel):
     buttons: list[dict[str, Any]]
     file: SessionChatFile | None = None  # legacy/single
     files: list[SessionChatFile] | None = None  # NEW: multi
+    attachments: list[SessionChatFile] | None = None  # 🔹 placeholder for future richer usage
     meta: dict[str, Any]
     ts: float
     agent_id: str | None = None
     upsert_key: str | None = None  # for idempotent updates
+    rich: dict[str, Any] | None = None  # phase/progress payloads
 
 
 class SessionUpdateRequest(BaseModel):

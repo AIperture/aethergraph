@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.planning.planner_service import PlannerService
+from aethergraph.services.skills.skill_registry import SkillRegistry
+
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.services.channel.channel_bus import ChannelBus
@@ -35,3 +39,7 @@ class NodeServices:
     rag: NodeRAG | None = None  # RAGService
     mcp: MCPService | None = None  # MCPService
     run_manager: RunManager | None = None  # RunManager
+    indices: ScopedIndices | None = None  # ScopedIndices for this node
+    execution: Any | None = None  # ExecutionService
+    planner_service: PlannerService | None = None  # PlannerService
+    skills: SkillRegistry | None = None  # SkillRegistry

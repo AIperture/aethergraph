@@ -6,6 +6,7 @@ from typing import Any
 
 # ---- core services ----
 from aethergraph.config.config import AppSettings
+from aethergraph.contracts.services.execution import ExecutionService
 
 # ---- optional services (not used by default) ----
 from aethergraph.contracts.services.llm import LLMClientProtocol
@@ -27,6 +28,9 @@ from aethergraph.services.auth.authn import DevTokenAuthn
 from aethergraph.services.auth.authz import AllowAllAuthz
 from aethergraph.services.channel.channel_bus import ChannelBus
 
+# from aethergraph.services.eventhub.event_hub import EventHub
+from aethergraph.services.channel.event_hub import EventHub
+
 # ---- channel services ----
 from aethergraph.services.channel.factory import build_bus, make_channel_adapters_from_env
 from aethergraph.services.channel.ingress import ChannelIngress
@@ -35,9 +39,14 @@ from aethergraph.services.continuations.stores.fs_store import (
     FSContinuationStore,  # AsyncContinuationStore
 )
 from aethergraph.services.eventbus.inmem import InMemoryEventBus
+from aethergraph.services.execution.local_python import LocalPythonExecutionService
+
+# ---- Global Indices ----
+from aethergraph.services.indices.global_indices import GlobalIndices
 
 # ---- kv services ----
 from aethergraph.services.llm.factory import build_llm_clients
+from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -45,11 +54,15 @@ from aethergraph.services.mcp.service import MCPService
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
 from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
-from aethergraph.services.prompts.file_store import FilePromptStore
+
+# ---- Planning components ----
+from aethergraph.services.planning.action_catalog import ActionCatalog
+from aethergraph.services.planning.flow_validator import FlowValidator
+from aethergraph.services.planning.planner_service import PlannerService
 from aethergraph.services.rag.chunker import TextSplitter
 from aethergraph.services.rag.facade import RAGFacade
 
-# ---- RAG components ----
+# ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
 from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
@@ -58,10 +71,13 @@ from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
+from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.tracing.noop import NoopTracer
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
+
+# ---- storage builders ----
 from aethergraph.storage.factory import (
     build_artifact_index,
     build_artifact_store,
@@ -78,6 +94,7 @@ from aethergraph.storage.factory import (
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
+from aethergraph.storage.search_factory import build_search_backend
 
 SERVICE_KEYS = [
     # core
@@ -129,6 +146,7 @@ class DefaultContainer:
 
     # channels and interactions
     channels: ChannelBus
+    eventhub: EventHub
 
     # continuations and resume
     cont_store: FSContinuationStore
@@ -144,6 +162,7 @@ class DefaultContainer:
     artifacts: AsyncArtifactStore
     artifact_index: AsyncArtifactIndex
     eventlog: EventLog
+    global_indices: GlobalIndices
 
     # memory
     memory_factory: MemoryFactory
@@ -161,9 +180,15 @@ class DefaultContainer:
     run_manager: RunManager | None = None  # RunManager
     session_store: SessionStore | None = None  # SessionStore
 
+    # planner
+    planner_service: PlannerService | None = None
+
+    # skills
+    skills_registry: SkillRegistry | None = None
+
     # optional services (not used by default)
+    execution: ExecutionService | None = None
     event_bus: InMemoryEventBus | None = None
-    prompts: FilePromptStore | None = None
     authn: DevTokenAuthn | None = None
     authz: AllowAllAuthz | None = None
     redactor: RegexRedactor | None = None
@@ -255,7 +280,10 @@ def build_default_container(
     }
 
     # channels
-    channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog)
+    event_hub = (
+        EventHub()
+    )  # in-memory event hub for WebUI and other real-time events; not configurable yet
+    channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog, event_hub=event_hub)
     channels = build_bus(
         channel_adapters,
         default="console:stdin",
@@ -278,6 +306,7 @@ def build_default_container(
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     llm_clients = build_llm_clients(cfg.llm, secrets)  # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
+    embed_client = GenericEmbeddingClient(provider="openai", model="text-embedding-3-small")
 
     # RAG facade
     vec_index = build_vector_index(cfg)
@@ -295,12 +324,12 @@ def build_default_container(
     # memory factory
     persistence = build_memory_persistence(cfg)
     hotlog = build_memory_hotlog(cfg)
-    indices = build_memory_indices(cfg)
+    memory_indices = build_memory_indices(cfg)
     docs = build_doc_store(cfg)
     memory_factory = MemoryFactory(
         hotlog=hotlog,
         persistence=persistence,
-        indices=indices,
+        indices=memory_indices,
         artifacts=artifacts,
         docs=docs,
         hot_limit=int(cfg.memory.hot_limit),
@@ -337,6 +366,35 @@ def build_default_container(
     authn = DevTokenAuthn()
     authz = AllowAllAuthz()
 
+    # global scoped indices
+    # from aethergraph.storage.search_backend.generic_vector_backend import SQLiteVectorSearchBackend
+
+    # search_backend = SQLiteVectorSearchBackend(
+    #     index=vec_index,
+    #     embedder=embed_client,
+    # )
+
+    search_backend = build_search_backend(cfg=cfg, embedder=embed_client)
+    global_indices = GlobalIndices(backend=search_backend)  # to be set up later as needed
+
+    # Execution service
+    execution = (
+        LocalPythonExecutionService()
+    )  # simple local python executor -- NOT SANDBOXED; just for local functionality testing
+
+    # Planner service
+    catalog = ActionCatalog(registry=registry)
+    flow_validator = FlowValidator(catalog=catalog)
+    planner_service = PlannerService(
+        catalog=catalog,
+        llm=llm_service.get("default") if llm_service else None,
+        validator=flow_validator,
+        run_manager=run_manager,
+    )
+
+    # skills registry
+    skills_registry = SkillRegistry()
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -345,16 +403,21 @@ def build_default_container(
         logger=logger_factory,
         clock=clock,
         channels=channels,
+        eventhub=event_hub,
+        skills_registry=skills_registry,
         cont_store=cont_store,
         sched_registry=sched_registry,
         wait_registry=wait_registry,
         resume_bus=resume_bus,
         resume_router=resume_router,
         wakeup_queue=wakeup_queue,
+        execution=execution,
+        planner_service=planner_service,
         kv_hot=kv_hot,
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,
+        global_indices=global_indices,
         viz_service=viz_service,
         eventlog=eventlog,
         memory_factory=memory_factory,
@@ -366,7 +429,6 @@ def build_default_container(
         session_store=session_store,
         secrets=secrets,
         event_bus=None,
-        prompts=None,
         authn=authn,
         authz=authz,
         redactor=None,

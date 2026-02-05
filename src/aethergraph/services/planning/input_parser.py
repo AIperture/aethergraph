@@ -1,0 +1,312 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from typing import Any
+
+from aethergraph.contracts.services.llm import LLMClientProtocol
+
+
+@dataclass
+class ParsedInputs:
+    """
+    Result of attempting to parse user-provided values for some fields.
+
+    - values: successfully parsed values, keyed by field name.
+    - resolved_keys: subset of field names for which we got a non-null value.
+    - missing_keys: subset of field names we still lack.
+    - errors: human-readable errors that the agent/orchestrator can surface.
+    """
+
+    values: dict[str, Any]
+    resolved_keys: set[str]
+    missing_keys: set[str]
+    errors: list[str]
+
+
+class InputParserError(Exception):
+    """Hard failure in the input parser (e.g. LLM/schema problem)."""
+
+
+def normalize_llm_json_object(raw: Any) -> dict[str, Any]:
+    """
+    Normalize raw LLM output into a JSON object (dict).
+
+    Handles:
+      - dict (already parsed)
+      - JSON strings, optionally wrapped in ``` or ```json fences
+      - JSON strings with leading/trailing text, by extracting the first {...} block
+    """
+    # 1) Already a dict: perfect
+    if isinstance(raw, dict):
+        return raw
+
+    # 2) String: try to recover JSON from it
+    if isinstance(raw, str):
+        txt = raw.strip()
+        if not txt:
+            raise InputParserError("Empty LLM response when expecting JSON object.")
+
+        # Handle ```json ... ``` or ``` ... ``` fences
+        if txt.startswith("```"):
+            # Strip first fence line (``` or ```json / ```JSON etc.)
+            first_newline = txt.find("\n")
+            if first_newline != -1:
+                # fence_line = txt[:first_newline].strip().lower()
+                # We don't really care which flavor; drop it
+                txt = txt[first_newline + 1 :].strip()
+            # Strip trailing ``` if present
+            if txt.endswith("```"):
+                txt = txt[:-3].strip()
+
+        # First attempt: parse whole string
+        try:
+            obj = json.loads(txt)
+        except json.JSONDecodeError:
+            # Second attempt: extract the first {...} block
+            start = txt.find("{")
+            end = txt.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = txt[start : end + 1]
+                try:
+                    obj = json.loads(candidate)
+                except json.JSONDecodeError as exc2:
+                    raise InputParserError(
+                        f"Cannot parse JSON object from LLM response (substring). Error: {exc2}"
+                    ) from exc2
+            else:
+                raise InputParserError(
+                    "Cannot parse JSON object from LLM response (no JSON object found)."
+                ) from None
+
+        if not isinstance(obj, dict):
+            raise InputParserError(f"Expected JSON object (dict), got {type(obj)} instead.")
+        return obj
+
+    # 3) Unsupported type
+    raise InputParserError(
+        f"LLM returned unsupported type {type(raw)} when expecting a JSON object."
+    )
+
+
+@dataclass
+class InputParser:
+    """
+    Generic, LLM-backed input parser.
+
+    Given:
+      - a user message
+      - a set of expected field names
+      - an optional free-form `instruction` string
+
+    it asks the LLM to extract values and returns a ParsedInputs object.
+
+    This parser is intentionally generic across agents/verticals. The only
+    domain-specific hints it uses are:
+      - the field names themselves
+      - the optional `instruction` text
+    """
+
+    llm: LLMClientProtocol
+
+    async def parse_message_for_fields(
+        self,
+        *,
+        message: str,
+        missing_keys: list[str],
+        instruction: str | None = None,
+    ) -> ParsedInputs:
+        """
+        Ask the LLM to extract values for the given missing_keys.
+
+        Args:
+            message: The user's natural-language reply.
+            missing_keys: Field names whose values we want to extract.
+            instruction: Optional free-form instruction describing what these
+                         fields mean or how they should be interpreted.
+
+        Returns:
+            ParsedInputs with values/resolved_keys/missing_keys/errors.
+
+        Notes:
+            - If the LLM cannot confidently determine a field, it should set it
+              to null. We then treat that as "missing".
+            - If the LLM call fails or returns invalid JSON, we return an object
+              with all keys in missing_keys and a populated `errors` list.
+        """
+        # Build per-field descriptions (generic, based on key names only)
+        field_descriptions = self._build_field_descriptions(missing_keys)
+
+        # Build JSON schema for extraction
+        schema = self._build_extraction_schema(missing_keys)
+
+        system_prompt = (
+            "You are an input extraction assistant. "
+            "Your task is to read a user message and extract values for a fixed "
+            "set of fields. You must return ONLY a JSON object that conforms "
+            "to the provided JSON schema.\n\n"
+            "If a field is not clearly specified in the user's message, or you "
+            "are not confident about its value, you MUST set that field to null. "
+            "Do not try to guess values that are not present."
+        )
+
+        instr_header = ""
+        if instruction:
+            instr_header = f"Additional instructions for this task:\n{instruction}\n\n"
+
+        fields_description_str = "\n".join(
+            f"- {name}: {desc or '(no description)'}" for name, desc in field_descriptions.items()
+        )
+
+        user_prompt = (
+            f"{instr_header}"
+            "User message:\n"
+            f"{message}\n\n"
+            "You must extract values for the following fields (if present):\n"
+            f"{fields_description_str}\n\n"
+            "Return ONLY the JSON object, no explanations."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        try:
+            raw, _usage = await self.llm.chat(
+                messages,
+                output_format="json",
+                json_schema=schema,
+                schema_name="ParsedInputs",
+                strict_schema=True,
+                validate_json=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Hard LLM failure → all fields still missing; surface error to user.
+            return ParsedInputs(
+                values={},
+                resolved_keys=set(),
+                missing_keys=set(missing_keys),
+                errors=[
+                    "I couldn't reliably extract the requested inputs from your reply. "
+                    "Please restate the values clearly, for example:\n"
+                    + "\n".join(f"- {k} = <value>" for k in missing_keys),
+                    f"(Internal parser error: {exc!r})",
+                ],
+            )
+
+        # --- Normalize raw into a Python dict ---
+        try:
+            obj = normalize_llm_json_object(raw)
+        except InputParserError as exc:
+            return ParsedInputs(
+                values={},
+                resolved_keys=set(),
+                missing_keys=set(missing_keys),
+                errors=[
+                    "I couldn't reliably extract the requested inputs from your reply. "
+                    "Please restate the values clearly.",
+                    f"(Parser error: {exc!r})",
+                ],
+            )
+
+        # From here on, `obj` is a dict
+        values: dict[str, Any] = {}
+        resolved: set[str] = set()
+        missing: set[str] = set()
+
+        for key in missing_keys:
+            val = obj.get(key, None)
+            if val is None:
+                missing.add(key)
+            else:
+                values[key] = val
+                resolved.add(key)
+
+        errors: list[str] = []
+        if missing:
+            errors.append(
+                "I still don't have values for the following fields: "
+                + ", ".join(sorted(missing))
+                + ". Please specify them explicitly, for example:\n"
+                + "\n".join(f"- {k} = <value>" for k in sorted(missing))
+            )
+
+        return ParsedInputs(
+            values=values,
+            resolved_keys=resolved,
+            missing_keys=missing,
+            errors=errors,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_field_descriptions(
+        missing_keys: list[str],
+    ) -> dict[str, str | None]:
+        """
+        Build a mapping { field_name: description_or_None }.
+
+        Since skills and structured input metadata are deprecated, we
+        currently just return `(no description)` placeholders. The
+        optional `instruction` string in parse_message_for_fields()
+        provides the main domain context.
+        """
+        return {k: None for k in missing_keys}
+
+    @staticmethod
+    def _build_extraction_schema(
+        missing_keys: list[str],
+    ) -> dict[str, Any]:
+        """
+        Build a permissive JSON schema for the extraction object.
+
+        Each field is allowed to be any JSON type or null. We rely on the
+        LLM + external validation to make sense of the values.
+
+        Schema:
+
+            {
+              "type": "object",
+              "properties": {
+                "<field>": {
+                  "anyOf": [
+                    {"type": "string"},
+                    {"type": "number"},
+                    {"type": "integer"},
+                    {"type": "boolean"},
+                    {"type": "object"},
+                    {"type": "array"},
+                    {"type": "null"}
+                  ]
+                },
+                ...
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+        """
+        field_schema: dict[str, Any] = {
+            "anyOf": [
+                {"type": "string"},
+                {"type": "number"},
+                {"type": "integer"},
+                {"type": "boolean"},
+                {"type": "object"},
+                {"type": "array"},
+                {"type": "null"},
+            ]
+        }
+
+        props: dict[str, Any] = {k: field_schema for k in missing_keys}
+
+        return {
+            "type": "object",
+            "properties": props,
+            # We do NOT require any fields; LLM sets missing ones to null.
+            "required": [],
+            "additionalProperties": False,
+        }

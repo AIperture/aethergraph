@@ -75,20 +75,26 @@ class JsonlArtifactIndexSync:
         if labels:
             for k, v in labels.items():
                 if k in TENANT_KEYS:
-                    # Match against top-level JSON fields
-                    rows = [r for r in rows if r.get(k) == v]
-                    continue
-
-                # Normal label filters
-                if isinstance(v, list):
+                    sv = str(v)
                     rows = [
                         r
                         for r in rows
-                        if isinstance(r.get("labels", {}).get(k), list)
-                        and set(v).issubset(set(r["labels"][k]))
+                        if str(r.get(k) or "") == sv
+                        or str((r.get("labels") or {}).get(k) or "") == sv
                     ]
-                else:
-                    rows = [r for r in rows if r.get("labels", {}).get(k) == v]
+                    continue
+
+                # Normal label filters
+                if k == "tags":
+                    want = v if isinstance(v, list) else [v]
+                    want = [str(t).strip() for t in want if str(t).strip()]
+                    if want:
+                        rows = [
+                            r
+                            for r in rows
+                            if any(t in (r.get("labels", {}).get("tags") or []) for t in want)
+                        ]
+                    continue
 
         if metric and mode:
             rows = [r for r in rows if metric in r.get("metrics", {})]

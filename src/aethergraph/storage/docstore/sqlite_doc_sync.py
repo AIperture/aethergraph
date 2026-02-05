@@ -67,7 +67,7 @@ class SQLiteDocStoreSync:
                     (doc_id, payload, now),
                 )
             except sqlite3.Error as e:
-                print("🍓 SQLiteDocStoreSync ERROR during put:", doc_id, repr(e))
+                print("SQLiteDocStoreSync ERROR during put:", doc_id, repr(e))
                 raise
 
     def get(self, doc_id: str) -> dict[str, Any] | None:

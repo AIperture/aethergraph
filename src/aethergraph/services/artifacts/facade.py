@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -12,12 +12,15 @@ from urllib.parse import urlparse
 
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
+from aethergraph.contracts.storage.search_backend import ScoredItem
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.artifacts.paths import _from_uri_or_path
+from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearchResult, ArtifactView
+from aethergraph.services.artifacts.utils import _infer_content_mode
+from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.scope.scope import Scope
-
-ArtifactView = Literal["node", "graph", "run", "all"]
+from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 
 class ArtifactFacade:
@@ -37,8 +40,9 @@ class ArtifactFacade:
         node_id: str,
         tool_name: str,
         tool_version: str,
-        store: AsyncArtifactStore,
-        index: AsyncArtifactIndex,
+        art_store: AsyncArtifactStore,
+        art_index: AsyncArtifactIndex,
+        scoped_indices: ScopedIndices | None = None,
         scope: Scope | None = None,
     ) -> None:
         self.run_id = run_id
@@ -46,8 +50,9 @@ class ArtifactFacade:
         self.node_id = node_id
         self.tool_name = tool_name
         self.tool_version = tool_version
-        self.store = store
-        self.index = index
+        self.store = art_store
+        self.index = art_index
+        self.scoped_indices = scoped_indices
 
         # set scope -- this should be done outside in NodeContext and passed in, but here is a fallback
         self.scope = scope
@@ -124,10 +129,93 @@ class ArtifactFacade:
             a.session_id = a.session_id or dims.get("session_id")
             # run_id / graph_id / node_id are already set
 
+        # 1.1) Normalize timestamp: ensure a.created_at is a UTC datetime
+        created_dt: datetime
+        if isinstance(a.created_at, datetime):
+            if a.created_at.tzinfo is None:
+                created_dt = a.created_at.replace(tzinfo=timezone.utc)
+            else:
+                created_dt = a.created_at.astimezone(timezone.utc)
+        elif isinstance(a.created_at, str):
+            # Best-effort parse; if it fails, fall back to "now"
+            try:
+                # Accept either Z-suffixed or offset ISO
+                if a.created_at.endswith("Z"):
+                    created_dt = datetime.fromisoformat(a.created_at.replace("Z", "+00:00"))
+                else:
+                    created_dt = datetime.fromisoformat(a.created_at)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                else:
+                    created_dt = created_dt.astimezone(timezone.utc)
+            except Exception:
+                created_dt = datetime.now(timezone.utc)
+        else:
+            # No timestamp provided → use now
+            created_dt = datetime.now(timezone.utc)
+
+        # Persist normalized timestamp back onto the artifact
+        a.created_at = created_dt
+        # Canonical forms:
+        ts_iso = created_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        created_at_ts = created_dt.timestamp()
+
         # 2) Record in index + occurrence log
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
         self.last_artifact = a
+
+        # 2.1) Wire artifact text into ScopedIndices for searchability
+        if self.scoped_indices is not None and self.scoped_indices.backend is not None:
+            try:
+                # Build a simple text blob from labels, metrics, and kind
+                # Build text blob
+                parts: list[str] = []
+                if a.kind:
+                    parts.append(str(a.kind))
+                if a.labels:
+                    parts.append("; ".join(f"{k}: {v}" for k, v in a.labels.items()))
+                if a.metrics:
+                    parts.append("; ".join(f"{k}: {v}" for k, v in a.metrics.items()))
+                text = " ".join(parts).strip()
+
+                extra_meta: dict[str, Any] = {
+                    "run_id": a.run_id,
+                    "graph_id": a.graph_id,
+                    "node_id": a.node_id,
+                    "tool_name": a.tool_name,
+                    "tool_version": a.tool_version,
+                    "pinned": a.pinned,
+                }
+
+                # Add artifact kind as explicit metadata field
+                if a.kind:
+                    extra_meta["artifact_kind"] = a.kind
+
+                # Flatten labels last so they can override if needed
+                if a.labels:
+                    extra_meta.update(a.labels)
+
+                meta = build_index_meta_from_scope(
+                    kind="artifact",
+                    source="artifact_index",
+                    ts=ts_iso,  # human-readable ISO
+                    created_at_ts=created_at_ts,  # numeric timestamp
+                    extra=extra_meta,
+                )
+
+                await self.scoped_indices.upsert(
+                    corpus="artifact",
+                    item_id=a.artifact_id,
+                    text=text,
+                    metadata=meta,
+                )
+            except Exception:
+                import logging
+
+                logging.getLogger("aethergraph.indices").exception(
+                    "scoped_indices_artifact_upsert_failed"
+                )
 
         # 3) Metering hook for artifact writes
         try:
@@ -158,18 +246,6 @@ class ArtifactFacade:
         except Exception:
             return  # outside runtime context, nothing to do
 
-        # Normalize timestamp
-        ts: datetime | None
-        if isinstance(a.created_at, datetime):
-            ts = a.created_at
-        elif isinstance(a.created_at, str):
-            try:
-                ts = datetime.fromisoformat(a.created_at)
-            except Exception:
-                ts = None
-        else:
-            ts = None
-
         # Update run metadata
         run_store = getattr(services, "run_store", None)
         if run_store is not None and a.run_id:
@@ -178,7 +254,7 @@ class ArtifactFacade:
                 await record_artifact(
                     a.run_id,
                     artifact_id=a.artifact_id,
-                    created_at=ts,
+                    created_at=created_dt,
                 )
 
         # Update session metadata
@@ -189,7 +265,7 @@ class ArtifactFacade:
             if callable(sess_record_artifact):
                 await sess_record_artifact(
                     session_id,
-                    created_at=ts,
+                    created_at=created_dt,
                 )
 
     # ---------- core staging/ingest ----------
@@ -823,6 +899,53 @@ class ArtifactFacade:
         text = await self.load_text_by_id(artifact_id, encoding=encoding, errors=errors)
         return json.loads(text)
 
+    async def load_content(
+        self,
+        artifact_id: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+        max_bytes: int | None = None,
+    ) -> ArtifactContent:
+        """
+        Docstring for load_content
+
+        :param self: Description
+        :param artifact_id: Description
+        :type artifact_id: str
+        :param encoding: Description
+        :type encoding: str
+        :param errors: Description
+        :type errors: str
+        :param max_bytes: Description
+        :type max_bytes: int | None
+        :return: Description
+        :rtype: ArtifactContent
+        """
+        art = await self.get_by_id(artifact_id=artifact_id)
+        if art is None:
+            raise FileNotFoundError(f"Artifact {artifact_id} not found")
+
+        mode = _infer_content_mode(art)
+
+        def maybe_truncate(data: bytes) -> bytes:
+            if max_bytes is not None and len(data) > max_bytes:
+                return data[:max_bytes]
+            return data
+
+        if mode == "json":
+            data = await self.load_json_by_id(artifact_id, encoding=encoding, errors=errors)
+            return ArtifactContent(artifact=art, mode=mode, json=data)
+
+        if mode == "text":
+            text = await self.load_text_by_id(artifact_id, encoding=encoding, errors=errors)
+            return ArtifactContent(artifact=art, mode=mode, text=text)
+
+        # raw bytes
+        raw = await self.load_bytes_by_id(artifact_id)
+        raw = maybe_truncate(raw)
+        return ArtifactContent(artifact=art, mode="bytes", data=raw)
+
     async def as_local_file_by_id(
         self,
         artifact_id: str,
@@ -1278,6 +1401,19 @@ class ArtifactFacade:
             None
         """
         await self.index.pin(artifact_id, pinned=pinned)
+
+    # ---------- search result hydration ----------
+    async def fetch_artifacts_for_search_results(
+        self,
+        scored_items: list[ScoredItem],
+        corpus: str = "artifact",
+    ) -> list[ArtifactSearchResult]:
+        artifact_items = [it for it in scored_items if it.corpus == corpus]
+        results: list[ArtifactSearchResult] = []
+        for it in artifact_items:
+            art = await self.get_by_id(it.item_id)
+            results.append(ArtifactSearchResult(item=it, artifact=art))
+        return results
 
     # ---------- internal helpers ----------
     async def _record_simple(self, a: Artifact) -> None:
