@@ -1,8 +1,7 @@
-from dataclasses import dataclass
-from typing import Literal
+from dataclasses import dataclass, replace
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.services.scope.scope import Scope
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
 @dataclass(frozen=True)
@@ -77,50 +76,6 @@ class ScopeFactory:
             flow_id=flow_id,
         )
 
-    def for_memory_custom_override(
-        self,
-        *,
-        identity: RequestIdentity | None = None,
-        run_id: str,
-        graph_id: str | None = None,
-        node_id: str | None = None,
-        session_id: str | None = None,
-        level: Literal["session", "user", "run", "org"] = "session",
-        custom_scope_id: str | None = None,
-    ):
-        """
-        Scope for MemoryFacade. level defines how we group memory:
-        - "session": per-session (default)
-        - "user":    across runs/sessions for a given user
-        - "run":     per-run
-        - "org":     org-level memory
-        """
-        s = self.for_node(
-            identity=identity,
-            run_id=run_id,
-            graph_id=graph_id,
-            node_id=node_id,
-            session_id=session_id,
-        )
-        if custom_scope_id is not None:
-            mem_id = custom_scope_id
-        else:
-            if level == "session":
-                base = session_id or run_id
-                mem_id = f"session:{base}"
-            elif level == "user":
-                u = s.user_id or s.client_id or "anon"
-                mem_id = f"user:{u}"
-            elif level == "run":
-                mem_id = f"run:{run_id}"
-            elif level == "org":
-                o = s.org_id or "orgless"
-                mem_id = f"org:{o}"
-            else:  # pragma: no cover
-                mem_id = f"run:{run_id}"
-
-        return s.with_memory_scope(mem_id)
-
     def for_memory(
         self,
         *,
@@ -129,20 +84,23 @@ class ScopeFactory:
         graph_id: str | None = None,
         node_id: str | None = None,
         session_id: str | None = None,
-        level: Literal["session", "user", "run", "org"] = "session",
+        level: ScopeLevel | None = "session",
         custom_scope_id: str | None = None,
-    ):
+    ) -> Scope:
         """
-        Rule of thumb for memory scope IDs:
-        - session-level:   "session:{session_id}" or "session:{run_id}" if no session
-        - user-level:      "user:{user_id}" or "user:{client_id}"
-        - run-level:       "run:{run_id}"
-        - org-level:       "org:{org_id}"
-        1) Compute the base ID from the level
-        2) If a custom scope is provided, treat it as a suffix under the root
-            e.g. "session:{base}:{custom_scope_id}"
+        Build a Scope for MemoryFacade.
+
+        Responsibilities:
+          - Attach tenant/user/run/session/node identity.
+          - Record the desired memory_level (run/session/user/org/scope).
+          - Optionally apply a *full* custom memory scope override.
+
+        Bucket string semantics (when no custom_scope_id is provided) now live
+        in Scope.memory_scope_id(), which uses:
+          - memory_level (if set), then
+          - fallback precedence: session > user > run > org > app > global.
         """
-        s = self.for_node(
+        base = self.for_node(
             identity=identity,
             run_id=run_id,
             graph_id=graph_id,
@@ -150,23 +108,12 @@ class ScopeFactory:
             session_id=session_id,
         )
 
-        # 1) Compute the base ID from the level
-        if level == "session":
-            base = session_id or run_id
-            root = f"session:{base}"
-        elif level == "user":
-            o = s.org_id or "orgless"
-            u = s.user_id or s.client_id or "anon"
-            root = f"org:{o}:user:{u}"
-        elif level == "run":
-            root = f"run:{run_id}"
-        elif level == "org":
-            o = s.org_id or "orgless"
-            root = f"org:{o}"
-        else:  # pragma: no cover
-            root = f"run:{run_id}"
+        # Attach memory_level to the scope
+        s = replace(base, memory_level=level)
 
-        # 2) If a custom scope is provided, treat it as a suffix under the root
-        mem_id = f"{root}:{custom_scope_id}" if custom_scope_id else root
+        # If a custom_scope_id is provided, treat it as the canonical bucket ID.
+        # This will become _memory_scope_id and override memory_scope_id().
+        if custom_scope_id:
+            return s.with_memory_scope(custom_scope_id, memory_level=level)
 
-        return s.with_memory_scope(mem_id)
+        return s

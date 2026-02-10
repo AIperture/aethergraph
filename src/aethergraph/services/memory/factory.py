@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from aethergraph.contracts.services.artifacts import AsyncArtifactStore  # generic protocol
-from aethergraph.contracts.services.memory import HotLog, Indices, Persistence
-from aethergraph.contracts.storage.doc_store import DocStore
+from aethergraph.contracts.services.memory import HotLog, Persistence
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.scope.scope import Scope
@@ -46,9 +45,7 @@ class MemoryFactory:
 
     hotlog: HotLog
     persistence: Persistence
-    indices: Indices  # key-value backed indices for fast lookups, not artifact storage index
     artifacts: AsyncArtifactStore
-    docs: DocStore  # document store for RAG
     hot_limit: int = 1000
     hot_ttl_s: int = 7 * 24 * 3600
     default_signal_threshold: float = 0.0
@@ -74,9 +71,7 @@ class MemoryFactory:
             scope=scope,
             hotlog=self.hotlog,
             persistence=self.persistence,
-            mem_indices=self.indices,
             scoped_indices=scoped_indices,
-            docs=self.docs,
             artifact_store=self.artifacts,
             hot_limit=self.hot_limit,
             hot_ttl_s=self.hot_ttl_s,

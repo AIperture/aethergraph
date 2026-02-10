@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from aethergraph.contracts.services.memory import Event
+from aethergraph.services.scope.scope import ScopeLevel
+
 # Assuming this external util exists based on original imports
-from ..utils import _summary_prefix
 
 if TYPE_CHECKING:
     from .types import MemoryFacadeInterface
@@ -12,10 +14,43 @@ if TYPE_CHECKING:
 class DistillationMixin:
     """Methods for memory summarization and distillation."""
 
+    async def _collect_events_for_distillation(
+        self: MemoryFacadeInterface,
+        *,
+        include_kinds: list[str] | None,
+        include_tags: list[str] | None,
+        max_events: int,
+        level: ScopeLevel = "scope",
+    ) -> list[Event]:
+        overfetch_mult = 2
+        if include_tags:
+            overfetch_mult = 8
+
+        fetch_limit = max(max_events * overfetch_mult, 200)
+
+        try:
+            events = await self.recent_persisted(
+                kinds=include_kinds,
+                tags=include_tags,
+                limit=fetch_limit,
+                level=level,
+            )
+        except Exception:
+            events = await self.recent(
+                kinds=include_kinds,
+                limit=fetch_limit,
+                level=level,
+            )
+
+        if not events:
+            return []
+
+        return events[-max_events:]
+
     async def distill_long_term(
         self: MemoryFacadeInterface,
-        scope_id: str | None = None,
         *,
+        level: ScopeLevel | None = None,
         summary_tag: str = "session",
         summary_kind: str = "long_term_summary",
         include_kinds: list[str] | None = None,
@@ -51,8 +86,7 @@ class DistillationMixin:
             ```
 
         Args:
-            scope_id: The scope ID for the memory to summarize. If None,
-                defaults to the instance's `memory_scope_id`.
+
             summary_tag: A tag to categorize the generated summary. Defaults
                 to `"session"`.
             summary_kind: The kind of summary to generate. Defaults to
@@ -84,52 +118,70 @@ class DistillationMixin:
             ```
         """
 
-        scope_id = scope_id or self.memory_scope_id
+        eff_level = level or "scope"
+        min_signal = min_signal if min_signal is not None else self.default_signal_threshold
 
+        # 1) Collect candidate events
+        events = await self._collect_events_for_distillation(
+            include_kinds=include_kinds,
+            include_tags=include_tags,
+            max_events=max_events,
+            level=eff_level,
+        )
+        if not events:
+            return {}
+
+        # Optional: filter by signal here if needed before passing to summarizer; summarizers may also apply their own filtering
+        filtered: list[Event] = []
+        for e in events:
+            sig = getattr(e, "signal", None) or 0.0
+            if sig < min_signal:
+                continue
+            filtered.append(e)
+        if not filtered:
+            return {}
+
+        # 2) Choose summarizer
         if use_llm:
             if not self.llm:
                 raise RuntimeError("LLM client not configured")
             from aethergraph.services.memory.distillers.llm_long_term import LLMLongTermSummarizer
 
-            d = LLMLongTermSummarizer(
+            summarizer = LLMLongTermSummarizer(
                 llm=self.llm,
                 summary_kind=summary_kind,
                 summary_tag=summary_tag,
                 include_kinds=include_kinds,
                 include_tags=include_tags,
                 max_events=max_events,
-                min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
+                min_signal=min_signal,
             )
         else:
             from aethergraph.services.memory.distillers.long_term import LongTermSummarizer
 
-            d = LongTermSummarizer(
+            summarizer = LongTermSummarizer(
                 summary_kind=summary_kind,
                 summary_tag=summary_tag,
                 include_kinds=include_kinds,
                 include_tags=include_tags,
                 max_events=max_events,
-                min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
+                min_signal=min_signal,
             )
 
-        result = await d.distill(
-            run_id=self.run_id,
-            timeline_id=self.timeline_id,
-            scope_id=scope_id or self.memory_scope_id,
-            hotlog=self.hotlog,
-            docs=self.docs,
-        )
+        # 3) Let the summarizer transform the events into a structured payload
+        summary = await summarizer.distill(events=filtered)
 
-        # If nothing returned, return empty dict
-        if not result:
+        if not summary:
             return {}
 
-        # Record the summary as a memory event via record_raw
-        preview = result.get("preview", "")
-        num_events = result.get("num_events", 0)
-        time_window = result.get("time_window", {})
+        # expected keys: summary, key_facts, open_loops, time_window, num_events, ...
+        text = summary.get("summary", "") or summary.get("text", "")
+        preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
 
-        # Use a different stage + tags depending on LLM or not
+        # time_window = summary.get("time_window", {})
+        num_events = summary.get("num_events", len(filtered))
+
+        # 4) Record as a memory event; this writes to HotLog, Persistence, and indices
         stage = "summary_llm" if use_llm else "summary"
         tags = ["summary", summary_tag]
         if use_llm:
@@ -137,34 +189,28 @@ class DistillationMixin:
 
         evt = await self.record_raw(
             base={
-                "kind": summary_kind,  # e.g. "long_term_summary"
-                "stage": stage,  # "summary_llm" or "summary"
+                "kind": summary_kind,
+                "stage": stage,
                 "tags": tags,
-                "data": {
-                    "summary_doc_id": result.get("summary_doc_id"),
-                    "summary_tag": summary_tag,
-                    "time_window": time_window,
-                    "num_events": num_events,
-                },
-                "scope_id": scope_id,
-                # run_id / graph_id / node_id / session_id / user/org/client
-                # etc. are filled in by record_raw from self.scope.
+                "data": summary,  # full summary object lives here
                 "severity": 2,
-                # optional: slight bias; record_raw will compute a default signal if None
                 "signal": 0.7 if use_llm else None,
             },
             text=preview,
             metrics={"num_events": num_events},
         )
 
-        # Optionally return the event_id with the result
-        result["event_id"] = evt.event_id
-        return result
+        # Attach event_id for downstream inspection
+        summary["event_id"] = evt.event_id
+        summary["summary_kind"] = summary_kind
+        summary["summary_tag"] = summary_tag
+
+        return summary
 
     async def distill_meta_summary(
         self,
-        scope_id: str | None = None,
         *,
+        level: ScopeLevel | None = None,
         source_kind: str = "long_term_summary",
         source_tag: str = "session",
         summary_kind: str = "meta_summary",
@@ -231,18 +277,40 @@ class DistillationMixin:
             }
             ```
         """
-        scope_id = scope_id or self.memory_scope_id  # order of precedence
+        eff_level = level or "scope"
+        min_signal = min_signal if min_signal is not None else self.default_signal_threshold
 
         if not use_llm:
-            # Placeholder for a future non-LLM meta summarizer if desired.
             raise NotImplementedError("Non-LLM meta summarization is not implemented yet")
-
         if not self.llm:
             raise RuntimeError("LLM client not configured in MemoryFacade for meta distillation")
 
-        from aethergraph.services.memory.distillers.llm_meta_summary import (
-            LLMMetaSummaryDistiller,
+        # 1) Fetch candidate summary events (persistence view)
+        events = await self.recent_persisted(
+            kinds=[source_kind],
+            tags=["summary", source_tag],
+            limit=max_summaries * 4,
+            level=eff_level,
         )
+
+        # return {}  # short-circuit for now
+        if not events:
+            return {}
+
+        # sort by ts ascending and keep last max_summaries
+        events = sorted(events, key=lambda e: e.ts)[-max_summaries:]
+
+        # optional: filter by signal
+        filtered = []
+        for e in events:
+            sig = getattr(e, "signal", None) or 0.0
+            if sig < min_signal:
+                continue
+            filtered.append(e)
+        if not filtered:
+            return {}
+
+        from aethergraph.services.memory.distillers.llm_meta_summary import LLMMetaSummaryDistiller
 
         d = LLMMetaSummaryDistiller(
             llm=self.llm,
@@ -251,51 +319,48 @@ class DistillationMixin:
             summary_kind=summary_kind,
             summary_tag=summary_tag,
             max_summaries=max_summaries,
-            min_signal=min_signal if min_signal is not None else self.default_signal_threshold,
-        )
-        result = await d.distill(
-            run_id=self.run_id,
-            timeline_id=self.timeline_id,
-            scope_id=scope_id or self.memory_scope_id,
-            hotlog=self.hotlog,
-            docs=self.docs,
+            min_signal=min_signal,
         )
 
-        # If nothing returned, return empty dict
-        if not result:
+        summary = await d.distill(
+            events=filtered,
+        )
+
+        if not summary:
             return {}
-        # Record the meta-summary as a memory event via record_raw
-        preview = result.get("preview", "")
-        num_summaries = result.get("num_source_summaries", 0)
-        time_window = result.get("time_window", {})
+
+        text = summary.get("summary", "") or summary.get("text", "")
+        preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
+
+        num_summaries = summary.get("num_source_summaries", len(filtered))
+        time_window = summary.get("time_window", {})
+
         evt = await self.record_raw(
             base={
-                "kind": summary_kind,  # e.g. "meta_summary"
+                "kind": summary_kind,
                 "stage": "meta_summary_llm",
                 "tags": ["summary", "llm", summary_tag],
-                "data": {
-                    "summary_doc_id": result.get("summary_doc_id"),
-                    "summary_tag": summary_tag,
-                    "time_window": time_window,
-                    "num_source_summaries": num_summaries,
-                },
-                "scope_id": scope_id,
-                # run_id / graph_id / node_id / session_id / user/org/client
-                # etc. are filled in by record_raw from self.scope.
+                "data": summary,
                 "severity": 2,
                 "signal": 0.8,
             },
             text=preview,
             metrics={"num_source_summaries": num_summaries},
         )
-        result["event_id"] = evt.event_id
-        return result
+
+        summary["event_id"] = evt.event_id
+        summary["summary_kind"] = summary_kind
+        summary["summary_tag"] = summary_tag
+        summary["time_window"] = time_window
+
+        return summary
 
     async def load_last_summary(
         self,
         scope_id: str | None = None,
         *,
         summary_tag: str = "session",
+        summary_kind: str = "long_term_summary",
     ) -> dict[str, Any] | None:
         """
         Load the most recent JSON summary for the specified memory scope and tag.
@@ -325,34 +390,37 @@ class DistillationMixin:
             dict[str, Any] | None: The most recent summary as a dictionary, or None if no summary is found.
         """
         scope_id = scope_id or self.memory_scope_id
-        prefix = _summary_prefix(scope_id, summary_tag)
 
-        try:
-            ids = await self.docs.list()
-        except Exception as e:
-            self.logger and self.logger.warning("load_last_summary: doc_store.list() failed: %s", e)
+        events = await self.recent_persisted(
+            kinds=[summary_kind],
+            tags=["summary", summary_tag],
+            limit=1,
+            level="scope",
+        )
+        if not events:
             return None
 
-        # Filter and take the latest
-        candidates = [d for d in ids if d.startswith(prefix)]
-        if not candidates:
-            return None
+        evt = events[-1]
+        # Prefer structured data
+        if evt.data:
+            return evt.data  # type: ignore[return-value]
 
-        latest_id = sorted(candidates)[-1]
-        try:
-            return await self.docs.get(latest_id)  # type: ignore[return-value]
-        except Exception as e:
-            self.logger and self.logger.warning(
-                "load_last_summary: failed to load %s: %s", latest_id, e
-            )
-            return None
+        # Fallback: reconstruct from text
+        return {
+            "summary": evt.text or "",
+            "summary_kind": summary_kind,
+            "summary_tag": summary_tag,
+            "event_id": evt.event_id,
+            "ts": evt.ts,
+        }
 
     async def load_recent_summaries(
         self,
-        scope_id: str | None = None,
         *,
         summary_tag: str = "session",
         limit: int = 3,
+        summary_kind: str = "long_term_summary",
+        level: ScopeLevel | None = "scope",
     ) -> list[dict[str, Any]]:
         """
         Load the most recent JSON summaries for the specified scope and tag.
@@ -390,38 +458,40 @@ class DistillationMixin:
         Returns:
             list[dict[str, Any]]: A list of summary dictionaries, ordered from oldest to newest.
         """
-        scope_id = scope_id or self.memory_scope_id
-        prefix = _summary_prefix(scope_id, summary_tag)
+        events = await self.recent_persisted(
+            kinds=[summary_kind],
+            tags=["summary", summary_tag],
+            limit=limit,
+            level=level,
+        )
 
-        try:
-            ids = await self.docs.list()
-        except Exception as e:
-            self.logger and self.logger.warning(
-                "load_recent_summaries: doc_store.list() failed: %s", e
-            )
+        if not events:
             return []
 
-        candidates = sorted(d for d in ids if d.startswith(prefix))
-        if not candidates:
-            return []
-
-        chosen = candidates[-limit:]
+        # Ensure chronological order
+        events = sorted(events, key=lambda e: e.ts)
         out: list[dict[str, Any]] = []
-        for doc_id in chosen:
-            try:
-                doc = await self.docs.get(doc_id)
-                if doc is not None:
-                    out.append(doc)  # type: ignore[arg-type]
-            except Exception:
-                continue
+        for evt in events:
+            if evt.data:
+                out.append(evt.data)  # type: ignore[arg-type]
+            else:
+                out.append(
+                    {
+                        "summary": evt.text or "",
+                        "summary_kind": summary_kind,
+                        "summary_tag": summary_tag,
+                        "event_id": evt.event_id,
+                        "ts": evt.ts,
+                    }
+                )
         return out
 
     async def soft_hydrate_last_summary(
         self,
-        scope_id: str | None = None,
         *,
         summary_tag: str = "session",
         summary_kind: str = "long_term_summary",
+        level: ScopeLevel | None = "scope",
     ) -> dict[str, Any] | None:
         """
         Load the most recent summary for the specified scope and tag, and log a hydrate event.
@@ -452,12 +522,15 @@ class DistillationMixin:
         Side Effects:
             Appends a hydrate event to HotLog and Persistence for the current timeline.
         """
-        scope_id = scope_id or self.memory_scope_id
-        summary = await self.load_last_summary(scope_id=scope_id, summary_tag=summary_tag)
+        summary = await self.load_last_summary(
+            summary_tag=summary_tag,
+            summary_kind=summary_kind,
+            level=level,
+        )
         if not summary:
             return None
 
-        text = summary.get("text") or summary.get("summary") or ""  # try both fields
+        text = summary.get("summary") or summary.get("text") or ""
         preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
 
         await self.record_raw(
@@ -466,9 +539,6 @@ class DistillationMixin:
                 "stage": "hydrate",
                 "tags": ["summary", "hydrate", summary_tag],
                 "data": {"summary": summary},
-                "scope_id": scope_id,
-                # run_id / graph_id / node_id / session_id / user/org/client
-                # etc. are filled in by record_raw from self.scope.
                 "severity": 1,
                 "signal": 0.4,
             },

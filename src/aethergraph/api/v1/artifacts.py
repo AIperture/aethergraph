@@ -3,6 +3,7 @@
 import mimetypes
 import os
 from typing import Annotated, Any
+import unicodedata
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
@@ -19,6 +20,19 @@ from .schemas import (
     ArtifactSearchRequest,
     ArtifactSearchResponse,
 )
+
+
+def _latin1_safe(s: str, fallback: str = "") -> str:
+    try:
+        s.encode("latin-1")
+        return s
+    except UnicodeEncodeError:
+        # Fallback: strip accents & non-ascii
+        ascii_guess = (
+            unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii") or fallback
+        )
+        return ascii_guess or "artifact"
+
 
 router = APIRouter(tags=["artifacts"])
 
@@ -246,7 +260,7 @@ async def get_artifact_content(
         media_type=media_type,
         headers={
             "Content-Length": str(len(data)),
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": f'attachment; filename="{_latin1_safe(filename)}"',
             "X-AetherGraph-Artifact-Id": artifact.artifact_id,
         },
     )

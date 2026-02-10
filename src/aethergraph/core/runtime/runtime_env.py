@@ -51,6 +51,10 @@ class RuntimeEnv:
     # optional predicate to skip execution
     should_run_fn: Callable[[], bool] | None = None
 
+    # memory override (for testing/demo purposes)
+    memory_level_override: str | None = None
+    memory_scope_override: str | None = None
+
     # --- convenience projections of commonly used services ---
     @property
     def schedulers(self) -> dict[str, Any]:
@@ -256,6 +260,10 @@ class RuntimeEnv:
            - agent/app-backed runs -> "session"
            - plain graph runs      -> "run"
         """
+        # Explicit overrides from RuntimeEnv take highest precedence
+        if self.memory_level_override:
+            return self.memory_level_override, self.memory_scope_override
+
         registry = self.registry
         level: str = "session"  # safe default
         custom_scope_id: str | None = None

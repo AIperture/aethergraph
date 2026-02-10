@@ -5,9 +5,7 @@ import json
 import time
 from typing import Any
 
-from aethergraph.contracts.services.memory import Distiller, Event, HotLog
-from aethergraph.contracts.storage.doc_store import DocStore
-from aethergraph.services.memory.utils import _summary_doc_id
+from aethergraph.contracts.services.memory import Distiller, Event
 
 
 def _now_iso() -> str:
@@ -15,6 +13,14 @@ def _now_iso() -> str:
 
 
 class LongTermSummarizer(Distiller):
+    """
+    Non-LLM long-term summarizer.
+
+    v2: does NOT talk to HotLog or DocStore. It just takes a list of Event
+    objects and produces a structured summary dict. Storage is handled by
+    MemoryFacade.record_raw().
+    """
+
     def __init__(
         self,
         *,
@@ -51,30 +57,21 @@ class LongTermSummarizer(Distiller):
 
     async def distill(
         self,
-        run_id: str,
-        timeline_id: str,
-        scope_id: str | None = None,
         *,
-        hotlog: HotLog,
-        docs: DocStore,
-        **kw: Any,
+        events: list[Event],
     ) -> dict[str, Any]:
-        # Over-fetch strategy:
-        # Tag filtering can be very selective (thread/session tags), so fetch more.
-        base_mult = 2
-        if self.include_tags:
-            base_mult = 8
+        """
+        Produce a long-term summary from a list of events.
 
-        fetch_limit = max(self.max_events * base_mult, 200)
+        The caller (MemoryFacade) is responsible for:
+        - choosing which events to pass (max_events / overfetch / level)
+        - recording the resulting summary as a memory event.
+        """
+        if not events:
+            return {}
 
-        # Narrow by kinds early when possible (less noise => more chance to fill max_events)
-        raw = await hotlog.recent(
-            timeline_id,
-            kinds=self.include_kinds,
-            limit=fetch_limit,
-        )
-
-        kept = self._filter_events(raw)
+        # Filter + cap
+        kept = self._filter_events(events)
         if not kept:
             return {}
 
@@ -108,12 +105,10 @@ class LongTermSummarizer(Distiller):
         digest_text = "\n".join(lines)
         ts = _now_iso()
 
-        scope = scope_id or run_id
-        summary = {
+        # This object will be stored into evt.data by MemoryFacade.record_raw()
+        summary_obj: dict[str, Any] = {
             "type": self.summary_kind,
             "version": 1,
-            "run_id": run_id,
-            "scope_id": scope,
             "summary_tag": self.summary_tag,
             "ts": ts,
             "time_window": {"from": first_ts, "to": last_ts},
@@ -123,20 +118,11 @@ class LongTermSummarizer(Distiller):
             "include_kinds": self.include_kinds,
             "include_tags": self.include_tags,
             "min_signal": self.min_signal,
-            "fetch_limit": fetch_limit,
+            # kept for introspection; this used to be the overfetch limit
+            "max_events": self.max_events,
         }
 
-        doc_id = _summary_doc_id(scope, self.summary_tag, ts)
-        await docs.put(doc_id, summary)
-
-        preview = digest_text[:2000] + (" …[truncated]" if len(digest_text) > 2000 else "")
-
-        return {
-            "summary_doc_id": doc_id,
-            "summary_kind": self.summary_kind,
-            "summary_tag": self.summary_tag,
-            "time_window": summary["time_window"],
-            "num_events": len(kept),
-            "preview": preview,
-            "ts": ts,
-        }
+        # MemoryFacade will:
+        #   - generate preview text
+        #   - record as kind=summary_kind, tags=["summary", summary_tag], data=summary_obj
+        return summary_obj

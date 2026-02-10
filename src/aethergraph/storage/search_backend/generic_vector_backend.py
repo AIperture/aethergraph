@@ -17,9 +17,23 @@ class GenericVectorSearchBackend(SearchBackend):
     """
     SearchBackend implementation on top of a VectorIndex + EmbeddingClient.
 
-    - Upserts: embed text and store (vector, metadata) in the index
+    - Upserts: embed text and store (vector, metadata) in the index.
     - Search: embed query, retrieve top-k by cosine similarity,
       then apply Python-level metadata filters.
+
+    DESIGN NOTES
+    ------------
+    - Only *promoted* fields (see PROMOTED_FIELDS) are pushed down into the VectorIndex.
+      Everything else (e.g. list-valued filters, tags) is handled as a post-filter.
+    - Tags:
+        For now, tags are intentionally *not* promoted. They should live under
+        meta["tags"] (usually a list[str]) and are filtered using _match_value().
+        This makes tag behavior consistent across different storage backends.
+
+        If later introduce a dedicated tag index, this is the main place to
+        adjust the filter splitting logic:
+          * Move "tags" (or some subset) from post_filters into index_filters.
+          * Optionally add a separate tag lookup to pre-restrict candidate IDs.
     """
 
     index: VectorIndex
@@ -41,6 +55,10 @@ class GenericVectorSearchBackend(SearchBackend):
         - If val is scalar:
             - if mv is list-like      -> match if val is in mv
             - else                    -> match if mv == val
+
+        This supports patterns like:
+            meta["tags"] = ["tool_result", "surrogate"]
+            filter["tags"] = ["surrogate"]
         """
         if val is None:
             return True
@@ -65,9 +83,17 @@ class GenericVectorSearchBackend(SearchBackend):
     @staticmethod
     def _matches_filters(meta: dict[str, Any], filters: dict[str, Any]) -> bool:
         """
-        Simple AND filter: all filter keys must match exactly.
-        - If filter value is a list, meta[key] must be in that list.
+        Simple AND filter: all filter keys must match exactly (via _match_value).
+
+        - If filter value is a list, meta[key] must overlap with that list.
         - If filter value is None, we don't constrain that key.
+
+        NOTE:
+            This is where tag filters (meta["tags"]) are evaluated today.
+            If later add a tag index / tag table:
+              - Split tags out earlier (in search()).
+              - Use that index to pre-restrict candidate IDs.
+              - Keep this as a secondary sanity check.
         """
         for k, v in filters.items():
             if v is None:
@@ -89,7 +115,7 @@ class GenericVectorSearchBackend(SearchBackend):
         metadata: dict[str, Any],
     ) -> None:
         if not text:
-            # avoid zero vector; caller should ensure text is non-empty
+            # Avoid zero vector; caller should ensure text is meaningful.
             text = ""
 
         vector = await self._embed(text)
@@ -112,24 +138,25 @@ class GenericVectorSearchBackend(SearchBackend):
         created_at_max: float | None = None,
     ) -> list[ScoredItem]:
         filters = filters or {}
-        if not query.strip():
-            return []
+        no_query = query is None or not query.strip()
 
-        q_vec = await self._embed(query)
+        # ---- 1) Embed query if present ----------------------------------
+        if no_query:
+            q_vec: list[float] = []
+        else:
+            q_vec = await self._embed(query)
 
-        # ---- 1) Handle time constraints ---------------------------------
+        # ---- 2) Handle time constraints --------------------------------
         now_ts = time()
 
-        # If time_window is provided and no explicit min, interpret it as [now - window, now]
         if time_window and created_at_min is None:
             duration = _parse_time_window(time_window)
             created_at_min = now_ts - duration
 
-        # If max is not provided but we used a time_window, default to now
         if time_window and created_at_max is None:
             created_at_max = now_ts
 
-        # ---- 2) Split filters into index-level vs Python-level ---------
+        # ---- 3) Split filters into index-level vs Python-level ----------
         index_filters: dict[str, Any] = {}
         post_filters: dict[str, Any] = {}
 
@@ -142,13 +169,13 @@ class GenericVectorSearchBackend(SearchBackend):
             else:
                 post_filters[key] = val
 
-        # ---- 3) Ask index for scoped, time-bounded candidates ----------
+        # ---- 4) Ask index for candidates (semantic or structural) ------
         raw_k = max(top_k * 3, top_k)
         max_candidates = max(top_k * 50, raw_k)  # tunable safety cap
 
         rows = await self.index.search(
             corpus_id=corpus,
-            query_vec=q_vec,
+            query_vec=q_vec,  # empty => structural search, see VectorIndex contract
             k=raw_k,
             where=index_filters,
             max_candidates=max_candidates,
@@ -156,7 +183,7 @@ class GenericVectorSearchBackend(SearchBackend):
             created_at_max=created_at_max,
         )
 
-        # ---- 4) Apply Python-level filters + build ScoredItem list -----
+        # ---- 5) Apply Python-level filters + build ScoredItem list -----
         results: list[ScoredItem] = []
         for row in rows:
             chunk_id = row["chunk_id"]
@@ -177,54 +204,4 @@ class GenericVectorSearchBackend(SearchBackend):
             if len(results) >= top_k:
                 break
 
-        return results
-
-    async def search_old(
-        self,
-        *,
-        corpus: str,
-        query: str,
-        top_k: int = 10,
-        filters: dict[str, Any] | None = None,
-    ) -> list[ScoredItem]:
-        """
-        1) Embed the query
-        2) Vector search in the underlying index
-        3) Apply metadata filters in Python
-        """
-        filters = filters or {}
-        if not query.strip():
-            # empty query: probably return nothing for now
-            return []
-
-        q_vec = await self._embed(query)
-
-        # Ask underlying VectorIndex for more than top_k, since we may
-        # filter some out. Factor 3 is arbitrary but usually safe.
-        raw_k = max(top_k * 3, top_k)
-        rows = await self.index.search(
-            corpus_id=corpus,
-            query_vec=q_vec,
-            k=raw_k,
-        )
-
-        results: list[ScoredItem] = []
-        for row in rows:
-            chunk_id = row["chunk_id"]
-            score = float(row["score"])
-            meta = dict(row.get("meta") or {})
-
-            if filters and not self._matches_filters(meta, filters):
-                continue
-
-            results.append(
-                ScoredItem(
-                    item_id=chunk_id,
-                    corpus=corpus,
-                    score=score,
-                    metadata=meta,
-                )
-            )
-            if len(results) >= top_k:
-                break
         return results

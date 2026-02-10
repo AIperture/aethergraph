@@ -160,6 +160,9 @@ class SQLiteEventLogSync:
         with self._lock:
             rows = self._db.execute(sql, params).fetchall()
 
+        print(
+            f"🔍 Queried events with scope_id={scope_id}, since={since}, until={until}, kinds={kinds}, tags={tags}, user_id={user_id}, org_id={org_id}. Fetched {len(rows)} rows before tag filtering."
+        )
         tags_set = set(tags or [])
         filtered: list[dict] = []
         for payload_str, tags_json in rows:

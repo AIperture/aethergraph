@@ -82,11 +82,9 @@ from aethergraph.storage.factory import (
     build_artifact_index,
     build_artifact_store,
     build_continuation_store,
-    build_doc_store,
     build_event_log,
     build_graph_state_store,
     build_memory_hotlog,
-    build_memory_indices,
     build_memory_persistence,
     build_run_store,
     build_session_store,
@@ -324,14 +322,10 @@ def build_default_container(
     # memory factory
     persistence = build_memory_persistence(cfg)
     hotlog = build_memory_hotlog(cfg)
-    memory_indices = build_memory_indices(cfg)
-    docs = build_doc_store(cfg)
     memory_factory = MemoryFactory(
         hotlog=hotlog,
         persistence=persistence,
-        indices=memory_indices,
         artifacts=artifacts,
-        docs=docs,
         hot_limit=int(cfg.memory.hot_limit),
         hot_ttl_s=int(cfg.memory.hot_ttl_s),
         default_signal_threshold=float(cfg.memory.signal_threshold),

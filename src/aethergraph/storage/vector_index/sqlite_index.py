@@ -92,18 +92,21 @@ class SQLiteVectorIndex(VectorIndex):
     """
     Simple SQLite-backed vector index.
 
-    Baseline path uses brute-force cosine similarity over SQL-limited candidates. :contentReference[oaicite:1]{index=1}
+    Baseline path uses brute-force cosine similarity over SQL-limited candidates.
 
     Optional FAISS acceleration:
       - If faiss is installed and enabled, maintains a per-corpus FAISS HNSW index on disk.
-      - Index is marked dirty on add/delete and rebuilt lazily on next search. NOTE: this can be slow for large corpora.
-      - This is a local index for small to medium workloads; for distributed or large-scale use cases, consider other backends.
+      - Index is marked dirty on add/delete and rebuilt lazily on next search.
+        (This can be slow for large corpora.)
 
-    Promoted fields you *may* pass in meta: :contentReference[oaicite:2]{index=2}
+    Promoted fields you *may* pass in meta:
       - scope_id, user_id, org_id, client_id, session_id
       - run_id, graph_id, node_id
       - kind, source
       - created_at_ts (float UNIX timestamp)
+
+    Tags are *not* promoted here. They live only in meta_json and are handled
+    by SearchBackend as Python-level filters.
     """
 
     def __init__(
@@ -431,6 +434,88 @@ class SQLiteVectorIndex(VectorIndex):
                 out[str(cid)] = (str(meta_json), created_at_ts)
         return out
 
+    def _search_bruteforce_no_query(
+        self,
+        corpus_id: str,
+        k: int,
+        where: dict[str, Any],
+        max_candidates: int | None,
+        created_at_min: float | None,
+        created_at_max: float | None,
+    ) -> list[dict[str, Any]]:
+        """
+        Structural search with *no* semantic query:
+
+        - Filter by promoted fields + time bounds.
+        - Order by created_at_ts DESC.
+        - Return up to k items as {chunk_id, score, meta} where score encodes recency.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+
+            sql = """
+                SELECT e.chunk_id, c.meta_json, e.created_at_ts
+                FROM embeddings e
+                JOIN chunks c
+                ON e.corpus_id = c.corpus_id AND e.chunk_id = c.chunk_id
+                WHERE e.corpus_id=?
+            """
+            params: list[Any] = [corpus_id]
+
+            promoted_cols = {
+                "scope_id",
+                "user_id",
+                "org_id",
+                "client_id",
+                "session_id",
+                "run_id",
+                "graph_id",
+                "node_id",
+                "kind",
+                "source",
+            }
+
+            for key, val in where.items():
+                if val is None:
+                    continue
+                if key in promoted_cols:
+                    sql += f" AND e.{key} = ?"
+                    params.append(val)
+
+            if created_at_min is not None:
+                sql += " AND e.created_at_ts >= ?"
+                params.append(created_at_min)
+            if created_at_max is not None:
+                sql += " AND e.created_at_ts <= ?"
+                params.append(created_at_max)
+
+            candidate_limit = max_candidates or self._brute_force_candidate_limit
+            sql += " ORDER BY e.created_at_ts DESC"
+            sql += " LIMIT ?"
+            params.append(candidate_limit)
+
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        out: list[dict[str, Any]] = []
+        for chunk_id, meta_json, created_at_ts in rows:
+            meta = json.loads(meta_json)
+            ts = float(created_at_ts or 0.0)
+            out.append(
+                {
+                    "chunk_id": str(chunk_id),
+                    "score": ts,  # recency-based score
+                    "meta": meta,
+                }
+            )
+            if len(out) >= k:
+                break
+
+        return out
+
     def _search_bruteforce_sync(
         self,
         corpus_id: str,
@@ -629,8 +714,25 @@ class SQLiteVectorIndex(VectorIndex):
         created_at_min: float | None = None,
         created_at_max: float | None = None,
     ) -> list[dict[str, Any]]:
-        q = np.asarray(query_vec, dtype=np.float32)
         where = where or {}
+
+        # --- no-query structural path -----------------------------------
+        if not query_vec:
+
+            def _search_no_query_sync() -> list[dict[str, Any]]:
+                return self._search_bruteforce_no_query(
+                    corpus_id=corpus_id,
+                    k=k,
+                    where=where,
+                    max_candidates=max_candidates,
+                    created_at_min=created_at_min,
+                    created_at_max=created_at_max,
+                )
+
+            return await asyncio.to_thread(_search_no_query_sync)
+
+        # --- normal semantic path ---------------------------------------
+        q = np.asarray(query_vec, dtype=np.float32)
 
         def _search_sync() -> list[dict[str, Any]]:
             if self._faiss_enabled:

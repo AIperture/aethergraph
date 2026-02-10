@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypedDict
 
-from aethergraph.contracts.storage.doc_store import DocStore
-
 EventKind = Literal[
     "user_msg",
     "assistant_msg",
@@ -79,27 +77,24 @@ class Persistence(Protocol):
         scope_id: str,
         event_ids: list[str],
     ) -> list[Event]: ...
-
-
-class Indices(Protocol):
-    async def update(self, run_id: str, evt: Event) -> None: ...
-    async def last_by_name(self, run_id: str, name: str) -> dict[str, Any] | None: ...
-    async def latest_refs_by_kind(
-        self, run_id: str, kind: str, *, limit: int = 50
-    ) -> list[dict[str, Any]]: ...
-    async def last_outputs_by_topic(self, run_id: str, topic: str) -> dict[str, Any] | None: ...
-
-
-class Distiller(Protocol):
-    async def distill(
+    async def query_events(
         self,
         scope_id: str,
         *,
-        hotlog: HotLog,
-        persistence: Persistence,
-        indices: Indices,
-        docs: DocStore,
-        **kw,
+        since: str | None = None,
+        until: str | None = None,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Event]: ...
+
+
+class Distiller(Protocol):  # or base class
+    async def summarize(
+        self,
+        *,
+        events: list[Event],
     ) -> dict[str, Any]: ...
 
 

@@ -225,18 +225,19 @@ class SQLiteLexicalSearchBackend(SearchBackend):
         created_at_min: float | None = None,
         created_at_max: float | None = None,
     ) -> list[ScoredItem]:
-        if not query.strip():
-            return []
+        """
+        Lexical search with optional filter-only mode.
 
+        - If `query` is non-empty: do naive token-based scoring.
+        - If `query` is empty/whitespace: skip text scoring and return the
+          most recent rows that match filters/time window (filter-only search).
+        """
         filters = filters or {}
 
         # Compute final time bounds
         created_at_min, created_at_max = self._parse_time_window(
             time_window, created_at_min, created_at_max
         )
-
-        # We’ll do a cheap LIKE search on text and apply filters in SQL where possible,
-        # remaining filters in Python.
 
         def _search_sync() -> list[ScoredItem]:
             conn = self._connect()
@@ -271,6 +272,7 @@ class SQLiteLexicalSearchBackend(SearchBackend):
                 for k, v in filters.items():
                     if v is None:
                         continue
+                    # scalar filters on promoted columns go into SQL
                     if k in promoted_cols and not isinstance(v, (list, tuple, set)):  # noqa: UP038
                         sql_filters[k] = v
                     else:
@@ -288,8 +290,9 @@ class SQLiteLexicalSearchBackend(SearchBackend):
                     sql += " AND created_at_ts <= ?"
                     params.append(created_at_max)
 
-                # Bias toward recent, like vector backend
+                # Bias toward recent, similar to a vector backend
                 sql += " ORDER BY created_at_ts DESC LIMIT ?"
+                # overfetch a bit so lexical scoring can prune, or filter-only can still pick top_k
                 params.append(max(top_k * 50, top_k))
 
                 cur.execute(sql, params)
@@ -297,12 +300,11 @@ class SQLiteLexicalSearchBackend(SearchBackend):
             finally:
                 conn.close()
 
-            # Build results, apply any remaining filters in Python, and
-            # assign a simple "score" (e.g., count of occurrences)
             results: list[ScoredItem] = []
 
-            # Basic bag-of-words: split query into tokens
-            tokens = [t for t in query.lower().split() if t]
+            # Tokenize query; empty tokens => filter-only mode
+            tokens = [t for t in (query or "").lower().split() if t]
+            filter_only = len(tokens) == 0
 
             for item_id, text, meta_json, _ in rows:
                 meta = json.loads(meta_json)
@@ -320,24 +322,25 @@ class SQLiteLexicalSearchBackend(SearchBackend):
                 if not match:
                     continue
 
-                text_lower = (text or "").lower()
+                if filter_only:
+                    # No lexical query: treat as pure filter + recency
+                    score = 1.0
+                else:
+                    # Naive token scoring
+                    text_lower = (text or "").lower()
+                    match_tokens = 0
+                    total_hits = 0
+                    for tok in tokens:
+                        c = text_lower.count(tok)
+                        if c > 0:
+                            match_tokens += 1
+                            total_hits += c
 
-                # Naive scoring: token-based exact matches
-                match_tokens = 0
-                total_hits = 0
-                for tok in tokens:
-                    c = text_lower.count(tok)
-                    if c > 0:
-                        match_tokens += 1
-                        total_hits += c
+                    # If none of the tokens appear, skip
+                    if match_tokens == 0:
+                        continue
 
-                # If none of the tokens appear, skip
-                if match_tokens == 0:
-                    continue
-
-                # Score: prioritize docs that match more distinct tokens,
-                # with a small bump for repeated occurrences.
-                score = float(match_tokens) + 0.1 * float(total_hits)
+                    score = float(match_tokens) + 0.1 * float(total_hits)
 
                 results.append(
                     ScoredItem(

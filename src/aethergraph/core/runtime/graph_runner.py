@@ -92,6 +92,8 @@ async def _build_env(
         container=container,
         agent_id=agent_id,
         app_id=app_id,
+        memory_level_override=rt_overrides.get("memory_level"),
+        memory_scope_override=rt_overrides.get("memory_scope"),
     )
 
     retry = rt_overrides.get("retry") or RetryPolicy()
@@ -329,6 +331,7 @@ async def run_async(
             - Despite this, you can still use `graph` without persistence features; just avoid resuming such graphs.
 
     """
+
     inputs = inputs or {}
     # GraphFunction path
     if isinstance(target, GraphFunction):

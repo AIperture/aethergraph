@@ -5,10 +5,7 @@ import json
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.contracts.services.memory import Distiller, Event, HotLog
-from aethergraph.contracts.storage.doc_store import DocStore
-from aethergraph.services.memory.facade.utils import now_iso
-from aethergraph.services.memory.utils import _summary_doc_id
+from aethergraph.contracts.services.memory import Distiller, Event
 
 
 class LLMLongTermSummarizer(Distiller):
@@ -43,7 +40,7 @@ class LLMLongTermSummarizer(Distiller):
                 continue
             if tags is not None:
                 et = set(e.tags or [])
-                if not tags.issubset(et):  # AND semantics
+                if not tags.issubset(et):
                     continue
             if (e.signal or 0.0) < self.min_signal:
                 continue
@@ -55,8 +52,6 @@ class LLMLongTermSummarizer(Distiller):
 
         for e in events:
             role = e.stage or e.kind or "event"
-
-            # Prefer text, but fall back to compact JSON of data when needed
             content = (e.text or "").strip()
             if not content and getattr(e, "data", None) is not None:
                 try:
@@ -65,7 +60,6 @@ class LLMLongTermSummarizer(Distiller):
                     content = str(e.data)
 
             if content:
-                # keep prompts bounded
                 if len(content) > 500:
                     content = content[:500] + "…"
                 lines.append(f"[{role}] {content}")
@@ -92,35 +86,13 @@ class LLMLongTermSummarizer(Distiller):
 
     async def distill(
         self,
-        run_id: str,
-        timeline_id: str,
-        scope_id: str | None = None,
         *,
-        hotlog: HotLog,
-        docs: DocStore,
-        **kw: Any,
+        events: list[Event],
     ) -> dict[str, Any]:
-        # Over-fetch strategy:
-        # - if include_tags is present, filtering can be very selective, so over-fetch more
-        # - also pass include_kinds to HotLog to reduce noise
-        base_mult = 2
-        if self.include_tags:
-            base_mult = 8  # safer default for thread/session tags
-
-        # cap so we don't go crazy (HotLog may cap internally anyway)
-        fetch_limit = max(self.max_events * base_mult, 200)
-
-        raw = await hotlog.recent(
-            timeline_id,
-            kinds=self.include_kinds,  # narrow early when possible
-            limit=fetch_limit,
-        )
-        kept = self._filter_events(raw)
-
+        kept = self._filter_events(events)
         if not kept:
             return {}
 
-        # Keep only the most recent max_events (chronological, newest last)
         kept = kept[-self.max_events :]
 
         first_ts = kept[0].ts
@@ -128,14 +100,12 @@ class LLMLongTermSummarizer(Distiller):
 
         messages = self._build_prompt(kept)
 
-        # Respect model override if the client supports it
         try:
             if self.model:
                 summary_json_str, usage = await self.llm.chat(messages, model=self.model)  # type: ignore[arg-type]
             else:
                 summary_json_str, usage = await self.llm.chat(messages)
         except TypeError:
-            # Client doesn't accept model=...
             summary_json_str, usage = await self.llm.chat(messages)
 
         try:
@@ -143,15 +113,10 @@ class LLMLongTermSummarizer(Distiller):
         except Exception:
             payload = {"summary": summary_json_str, "key_facts": [], "open_loops": []}
 
-        ts = now_iso()
-
-        summary_obj = {
+        return {
             "type": self.summary_kind,
             "version": 1,
-            "run_id": run_id,
-            "scope_id": scope_id or run_id,
             "summary_tag": self.summary_tag,
-            "ts": ts,
             "time_window": {"from": first_ts, "to": last_ts},
             "num_events": len(kept),
             "source_event_ids": [e.event_id for e in kept],
@@ -164,22 +129,4 @@ class LLMLongTermSummarizer(Distiller):
             "include_kinds": self.include_kinds,
             "include_tags": self.include_tags,
             "min_signal": self.min_signal,
-            "fetch_limit": fetch_limit,
-        }
-
-        scope = scope_id or run_id
-        doc_id = _summary_doc_id(scope, self.summary_tag, ts)
-        await docs.put(doc_id, summary_obj)
-
-        text = summary_obj["summary"] or ""
-        preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
-
-        return {
-            "summary_doc_id": doc_id,
-            "summary_kind": self.summary_kind,
-            "summary_tag": self.summary_tag,
-            "time_window": summary_obj["time_window"],
-            "num_events": len(kept),
-            "preview": preview,
-            "ts": ts,
         }

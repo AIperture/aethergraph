@@ -6,11 +6,11 @@ import time
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persistence
+from aethergraph.contracts.services.memory import Event, HotLog, Persistence
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
-from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.memory.facade.introspection import IntrospectionMixin
 from aethergraph.services.rag.facade import RAGFacade
 from aethergraph.services.scope.scope import Scope
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
@@ -20,6 +20,7 @@ from .distillation import DistillationMixin
 from .rag import RAGMixin
 from .results import ResultMixin
 from .retrieval import RetrievalMixin
+from .state import StateMixin
 from .utils import now_iso, stable_event_id
 
 
@@ -74,7 +75,15 @@ def derive_timeline_id(
     return bucket
 
 
-class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RAGMixin):
+class MemoryFacade(
+    ChatMixin,
+    StateMixin,
+    ResultMixin,
+    RetrievalMixin,
+    DistillationMixin,
+    RAGMixin,
+    IntrospectionMixin,
+):
     """
     MemoryFacade coordinates core memory services for a specific run/session.
     Functionality is split across mixins in the `facade/` directory.
@@ -90,9 +99,7 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         scope: Scope | None = None,
         hotlog: HotLog,
         persistence: Persistence,
-        mem_indices: Indices,
         scoped_indices: ScopedIndices | None = None,
-        docs: DocStore,
         artifact_store: AsyncArtifactStore,
         hot_limit: int = 1000,
         hot_ttl_s: int = 7 * 24 * 3600,
@@ -108,9 +115,7 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         self.scope = scope
         self.hotlog = hotlog
         self.persistence = persistence
-        self.indices = mem_indices
         self.scoped_indices = scoped_indices
-        self.docs = docs
         self.artifacts = artifact_store
         self.hot_limit = hot_limit
         self.hot_ttl_s = hot_ttl_s
@@ -196,7 +201,6 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         base.setdefault("run_id", run_id)
         base.setdefault("graph_id", graph_id)
         base.setdefault("node_id", node_id)
-        base.setdefault("scope_id", scope_id)
         base.setdefault("user_id", user_id)
         base.setdefault("org_id", org_id)
         base.setdefault("client_id", client_id)
@@ -248,6 +252,7 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         )
 
         await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
+
         await self.persistence.append_event(self.timeline_id, evt)
 
         # wire memory event text into ScopedIndices for searchability
@@ -550,19 +555,43 @@ class MemoryFacade(ChatMixin, ResultMixin, RetrievalMixin, DistillationMixin, RA
         reason: str | None = None,
         topic: str | None = None,
     ) -> None:
-        """
-        Stub / placeholder:
+        # 1) Look up the event from persistence
+        evt = await self.persistence.get_event_by_id(event_id)
+        if evt is None:
+            if self.logger:
+                self.logger.warning("mark_event_important: event %s not found", event_id)
+            return
 
-        Mark a given event as "important" / "core_fact" for future policies.
+        # 2) Compute updated tags / signal
+        tags = set(evt.tags or [])
+        tags.update(["important", "core_fact"])
+        if topic:
+            tags.add(f"topic:{topic}")
 
-        Intended future behavior (not implemented yet):
-          - Look up the Event by event_id (via Persistence).
-          - Re-emit an updated Event with an added tag (e.g. "core_fact" or "pinned").
-          - Optionally promote to a fact artifact or RAG doc.
+        # 3) Emit a derived “mark” event (append-only)
+        await self.record_raw(
+            base={
+                "kind": "memory.core_fact",  # or reuse evt.kind if you prefer
+                "stage": "mark_important",
+                "tags": sorted(tags),
+                "data": {
+                    "source_event_id": evt.event_id,
+                    "source_kind": evt.kind,
+                    "source_tags": evt.tags or [],
+                    "reason": reason,
+                    "topic": topic or evt.topic,
+                },
+                "scope_id": evt.scope_id,  # keep it in the same memory bucket
+                "severity": max(evt.severity or 2, 2),
+                "signal": max(evt.signal or 0.0, 0.85),
+                "topic": topic or evt.topic,
+            },
+            text=evt.text,
+            metrics=None,
+        )
 
-        For now, this is a no-op / NotImplementedError to avoid surprise behavior.
-        """
-        raise NotImplementedError("mark_event_important is reserved for future memory policy")
+        # 4) Optionally: promote to a RAG doc / artifact
+        #    This can be added later without changing the public API.
 
     async def save_core_fact_artifact(
         self,

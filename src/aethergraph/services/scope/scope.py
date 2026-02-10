@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
+
+ScopeLevel = Literal["scope", "session", "run", "user", "org"]
 
 
 @dataclass(frozen=True)
@@ -21,17 +23,19 @@ class Scope:
     node_id: str | None = None
     flow_id: str | None = None  # optional flow ID within a graph -- not implemented yet
 
-    # Tooling / proveance (optional)
+    # Tooling / proveance (to delete or move later)
     tool_name: str | None = None
     tool_version: str | None = None
 
-    # Extra tags
+    # Extra tags (to delete or move later)
     labels: dict[str, Any] = field(default_factory=dict)
 
+    # logical memory level (scope/session/run/user/org); if None, will be inferred from other fields
+    memory_level: ScopeLevel | None = None
     # Internal override for memory scope ID
     _memory_scope_id: str | None = None
 
-    def __item__(self, key: str) -> Any:
+    def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -104,17 +108,53 @@ class Scope:
             out["flow_id"] = self.flow_id
         return out
 
-    def with_memory_scope(self, mem_scope_id: str) -> Scope:
+    def with_memory_scope(self, mem_scope_id: str, memory_level: ScopeLevel | None = None) -> Scope:
         """Return a copy with explicit memory scope override"""
-        return replace(self, _memory_scope_id=mem_scope_id)
+        return replace(
+            self,
+            _memory_scope_id=mem_scope_id,
+            memory_level=memory_level if memory_level is not None else self.memory_level,
+        )
 
     def memory_scope_id(self) -> str:
         """
         Stable key for “memory bucket”.
-        Default precedence: explicit override > session > user > run > org > app.
+
+        If memory_level is set, we derive scope ID from it:
+        - "session" -> session:<session_id>
+        - "user"   -> user:<user_id>
+        - "run"    -> run:<run_id>
+        - "org"    -> org:<org_id>
+        - "scope"  -> global
+
+        Otherwise, fall back to precedence:
+          override > session > user > run > org > app > global
         """
+        # 1) Explicit override always wins
         if self._memory_scope_id:
             return self._memory_scope_id
+
+        # 2) If we know the logical memory level, honor it
+        lvl = self.memory_level
+        if lvl == "session" and self.session_id:
+            # could be "session:<session_id>" or richer like "org:...:user:...:session:..."
+            return f"session:{self.session_id}"
+        if lvl == "user":
+            if self.org_id and self.user_id:
+                return f"org:{self.org_id}:user:{self.user_id}"
+            if self.user_id:
+                return f"user:{self.user_id}"
+            if self.client_id:
+                return f"user:{self.client_id}"
+            return "user:anon"
+        if lvl == "run" and self.run_id:
+            return f"run:{self.run_id}"
+        if lvl == "org" and self.org_id:
+            return f"org:{self.org_id}"
+        if lvl == "scope":
+            return "global"
+
+        # 3) Fallback to old precedence for back-compat
         if self.session_id:
             return f"session:{self.session_id}"
         if self.user_id:
@@ -133,6 +173,9 @@ class Scope:
         scope_id is usually memory_scope_id (for memory-tied corpora),
         but can be any logical scope key.
         """
+        if scope_id is None:
+            scope_id = self.memory_scope_id()
+
         out: dict[str, Any] = {}
         out.update(self._base_identity_labels())
         if scope_id:
@@ -148,12 +191,14 @@ class Scope:
         - user_id (actor within tenant)
         - scope_id (memory bucket, usually memory_scope_id)
         """
+        if scope_id is None:
+            scope_id = self.memory_scope_id()
+
         out: dict[str, Any] = {}
         if self.user_id:
             out["user_id"] = self.user_id
         if self.org_id:
             out["org_id"] = self.org_id
-        # scope_id is usually memory_scope_id() (e.g. session:, user:, run:, org:, app:)
         if scope_id:
             out["scope_id"] = scope_id
         return out

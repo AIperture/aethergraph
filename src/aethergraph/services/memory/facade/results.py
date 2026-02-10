@@ -226,7 +226,6 @@ class ResultMixin:
             text=message,
             metrics=metrics,
         )
-        await self.indices.update(self.timeline_id, evt)
         return evt
 
     async def write_tool_result(
@@ -279,37 +278,3 @@ class ResultMixin:
             message=message,
             severity=severity,
         )
-
-    async def last_tool_result(self, tool: str) -> Event | None:
-        """
-        Convenience: return the most recent tool_result Event for a given tool.
-        """
-        events = await self.recent_tool_results(tool=tool, limit=1)
-        return events[-1] if events else None
-
-    async def last_by_name(self, name: str):
-        """Return the last output value by `name` from Indices (fast path)."""
-        return await self.indices.last_by_name(self.timeline_id, name)
-
-    async def last_output_by_name(self, name: str):
-        """Return the last output value (Value.value) by `name` from Indices (fast path)."""
-        out = await self.indices.last_by_name(self.timeline_id, name)
-        if out is None:
-            return None
-        return out.get("value")  # type: ignore
-
-    async def last_outputs_by_topic(self, topic: str):
-        """Return the last output map for a given topic (tool/flow/agent) from Indices."""
-        return await self.indices.last_outputs_by_topic(self.timeline_id, topic)
-
-    # replace last_tool_result_outputs
-    async def last_tool_result_outputs(self, tool: str) -> dict[str, Any] | None:
-        """
-        Convenience wrapper around KVIndices.last_outputs_by_topic for this run.
-        Returns the last outputs map for a given tool, or None.
-        """
-        return await self.indices.last_outputs_by_topic(self.timeline_id, tool)
-
-    async def latest_refs_by_kind(self, kind: str, *, limit: int = 50):
-        """Return latest ref outputs by ref.kind (fast path, KV-backed)."""
-        return await self.indices.latest_refs_by_kind(self.timeline_id, kind, limit=limit)

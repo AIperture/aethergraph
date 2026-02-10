@@ -6,6 +6,9 @@ import time
 from typing import Any
 import unicodedata
 
+from aethergraph.contracts.services.memory import Event
+from aethergraph.services.scope.scope import Scope, ScopeLevel
+
 _SAFE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -41,3 +44,47 @@ def save_sticky(path: str, m: dict):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(m, f, ensure_ascii=False, indent=2)
+
+
+def event_matches_level(evt: Event, scope: Scope | None, *, level: ScopeLevel) -> bool:
+    """
+    Generic filter for in-memory / persistence events.
+
+    - "scope":  everything in this memory scope (timeline) – always True.
+    - "session": events whose session_id matches current scope.session_id.
+    - "run":    events whose run_id matches current scope.run_id.
+    - "user":   events whose user/client matches current scope user.
+    - "org":    events whose org_id matches current scope org.
+    """
+    if scope is None:
+        # If we have no scope context, just return everything on the timeline.
+        return True
+
+    # scope-level: caller already used a scope-specific timeline_id
+    if level == "scope":
+        return True
+
+    if level == "session":
+        if not scope.session_id:
+            return True  # nothing to constrain by; treat as global on this timeline
+        return evt.session_id == scope.session_id
+
+    if level == "run":
+        if not scope.run_id:
+            return True
+        return evt.run_id == scope.run_id
+
+    if level == "user":
+        u = scope.user_id or scope.client_id
+        if not u:
+            return True
+        # Support both user_id and client_id on events
+        return (evt.user_id == u) or (evt.client_id == u)
+
+    if level == "org":
+        if not scope.org_id:
+            return True
+        return evt.org_id == scope.org_id
+
+    # Fallback: be permissive
+    return True

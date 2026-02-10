@@ -254,6 +254,8 @@ class ChatMixin:
         limit: int = 50,
         roles: Sequence[str] | None = None,
         tags: Sequence[str] | None = None,
+        level: str | None = None,
+        use_persistence: bool = False,
     ) -> list[dict[str, Any]]:
         """
         Retrieve the most recent chat turns as a normalized list.
@@ -281,6 +283,9 @@ class ChatMixin:
         Args:
             limit: The maximum number of chat events to retrieve. Defaults to 50.
             roles: An optional sequence of roles to filter by (e.g., `["user", "assistant"]`).
+            tags: An optional sequence of tags to filter by. If provided, the method will over-fetch and filter results to include only those that have at least one of the specified tags.
+            level: Optional scope level to filter events by (e.g., "session", "run", "user", "org"). If provided, the search will be constrained to events associated with the specified scope level.
+            use_persistence: Whether to include events from the full persistence layer (True) or just the hotlog (False). Defaults to False.
 
         Returns:
             list[dict[str, Any]]: A list of chat events, each represented as a dictionary
@@ -290,20 +295,18 @@ class ChatMixin:
                 - "text": The text content of the chat message.
                 - "tags": A list of tags associated with the event.
         """
-        fetch_n = limit
-        if tags:
-            fetch_n = max(limit * 5, 100)
+        events = await self.recent_events(
+            kinds=["chat.turn"],
+            tags=list(tags) if tags else None,
+            limit=limit,
+            overfetch=5,
+            level=level,
+            use_persistence=use_persistence,
+        )
 
-        events = await self.recent(kinds=["chat.turn"], limit=fetch_n)
-
-        want = set(tags or [])
         out: list[dict[str, Any]] = []
 
         for e in events:
-            etags = set(e.tags or [])
-            if want and not want.issubset(etags):
-                continue
-
             role = (
                 getattr(e, "stage", None)
                 or ((e.data or {}).get("role") if getattr(e, "data", None) else None)
@@ -325,7 +328,8 @@ class ChatMixin:
                 }
             )
 
-        # IMPORTANT: keep the most recent `limit` messages
+        # events from recent_events should already be <= limit and chronological;
+        # this slice is safe but technically redundant
         return out[-limit:] if limit else []
 
     async def chat_history_for_llm(
