@@ -54,7 +54,8 @@ class ScopedIndices:
         - "user":    constrain to this user/client
         - "org":     constrain to this org_id
         """
-        base = self._base_filters()
+        # base = self._base_filters()
+        base = self.scope.rag_filter(scope_id=self.scope.memory_scope_id())
 
         if not level or level == "scope":
             return {k: v for k, v in base.items() if v is not None}
@@ -122,7 +123,6 @@ class ScopedIndices:
         merged: dict[str, Any] = {**base, **(metadata or {})}
         # strip None so backends can treat them as wildcards
         merged = {k: v for k, v in merged.items() if v is not None}
-
         await self.backend.upsert(
             corpus=corpus,
             item_id=item_id,

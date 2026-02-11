@@ -18,11 +18,14 @@ class Artifact:
     bytes: int | None = None
     mime: str | None = None
     created_at: str | None = None
+
+    tags: list[str] | None = None
     labels: dict[str, Any] | None = None
     metrics: dict[str, Any] | None = None
     pinned: bool = False
     uri: str | None = None
     preview_uri: str | None = None
+
     # tenant fields
     org_id: str | None = None
     user_id: str | None = None
@@ -44,6 +47,7 @@ class Artifact:
             "tool_name": self.tool_name,
             "tool_version": self.tool_version,
             "created_at": self.created_at,
+            "tags": self.tags,
             "labels": self.labels,
             "metrics": self.metrics,
             "preview_uri": self.preview_uri,

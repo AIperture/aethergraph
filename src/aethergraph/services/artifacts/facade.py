@@ -16,10 +16,10 @@ from aethergraph.contracts.storage.search_backend import ScoredItem
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.artifacts.paths import _from_uri_or_path
-from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearchResult, ArtifactView
+from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearchResult
 from aethergraph.services.artifacts.utils import _infer_content_mode
 from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.scope.scope import Scope
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 
@@ -89,29 +89,27 @@ class ArtifactFacade:
             labels["client_id"] = self.scope.client_id
         return labels
 
-    def _view_labels(self, view: ArtifactView) -> dict[str, Any]:
-        """Labels to filter by for a given ArtifactView.
-        view options:
-          - "node": filter by (run_id, graph_id, node_id)
-          - "graph": filter by (run_id, graph_id)
-          - "run": filter by (run_id)   [default]
-          - "all": no implicit filters
+    def _filters_for_level(self, level: ScopeLevel) -> dict[str, Any]:
+        if self.scope is None:
+            return {}
 
-          In cloud/demo mode, we AND tenant filters on.
-          In local mode, tenants are no-ops.
-        """
-        base: dict[str, Any] = {}
+        base = self.scope.rag_filter(scope_id=self.scope.memory_scope_id())
 
-        if view == "node":
-            base = {"run_id": self.run_id, "graph_id": self.graph_id, "node_id": self.node_id}
-        elif view == "graph":
-            base = {"run_id": self.run_id, "graph_id": self.graph_id}
-        elif view == "run":
-            base = {"run_id": self.run_id}
-        # "all" => no run/graph/node filter
+        if not level or level == "scope":
+            return {k: v for k, v in base.items() if v is not None}
 
-        base.update(self._tenant_labels_for_search())
-        return base
+        if level == "session" and self.scope.session_id:
+            base["session_id"] = self.scope.session_id
+        elif level == "run" and self.scope.run_id:
+            base["run_id"] = self.scope.run_id
+        elif level == "user":
+            u = self.scope.user_id or self.scope.client_id
+            if u:
+                base["user_id"] = u
+        elif level == "org" and self.scope.org_id:
+            base["org_id"] = self.scope.org_id
+
+        return {k: v for k, v in base.items() if v is not None}
 
     # Metering-enhanced record
     async def _record(self, a: Artifact) -> None:
@@ -173,6 +171,8 @@ class ArtifactFacade:
                 parts: list[str] = []
                 if a.kind:
                     parts.append(str(a.kind))
+                if a.tags:
+                    parts.extend(a.tags)
                 if a.labels:
                     parts.append("; ".join(f"{k}: {v}" for k, v in a.labels.items()))
                 if a.metrics:
@@ -186,6 +186,7 @@ class ArtifactFacade:
                     "tool_name": a.tool_name,
                     "tool_version": a.tool_version,
                     "pinned": a.pinned,
+                    "tags": a.tags or [],
                 }
 
                 # Add artifact kind as explicit metadata field
@@ -328,6 +329,7 @@ class ArtifactFacade:
         staged_path: str,
         *,
         kind: str,
+        tags: list[str] | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         suggested_uri: str | None = None,
@@ -363,6 +365,7 @@ class ArtifactFacade:
         Args:
             staged_path: The local path to the staged file.
             kind: The artifact type (e.g., "model", "dataset").
+            tags: Optional list of tags to associate with the artifact.
             labels: Optional dictionary of metadata labels.
             metrics: Optional dictionary of numeric metrics.
             suggested_uri: Optional logical URI for the artifact.
@@ -376,7 +379,16 @@ class ArtifactFacade:
             cleanup of the staged file if configured in the underlying store.
             If you already have a file at a specific URI (e.g. "s3://bucket/file" or local file path), consider using `save_file` instead.
         """
-        labels = self._with_scope_labels(labels)
+        # Start with user labels
+        eff_labels: dict[str, Any] = dict(labels or {})
+
+        # Mirror tags into labels for structured search/back-compat
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        # Add scope identity + scope_id
+        scoped_labels = self._with_scope_labels(eff_labels)
+
         a = await self.store.ingest_staged_file(
             staged_path=staged_path,
             kind=kind,
@@ -385,7 +397,8 @@ class ArtifactFacade:
             node_id=self.node_id,
             tool_name=self.tool_name,
             tool_version=self.tool_version,
-            labels=labels,
+            tags=tags,
+            labels=scoped_labels,
             metrics=metrics,
             suggested_uri=suggested_uri,
             pin=pin,
@@ -433,8 +446,22 @@ class ArtifactFacade:
             Artifact: The fully persisted `Artifact` object with metadata and identifiers.
 
         """
-        labels = self._with_scope_labels(kwargs.pop("labels", None))
-        kwargs["labels"] = labels
+
+        # Extract user labels/tags from kwargs
+        raw_labels = kwargs.pop("labels", None)
+        tags = kwargs.pop("tags", None)
+
+        eff_labels: dict[str, Any] = dict(raw_labels or {})
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        # Inject scope identity + scope_id
+        scoped_labels = self._with_scope_labels(eff_labels)
+
+        # Put back into kwargs for the store
+        kwargs["labels"] = scoped_labels
+        kwargs["tags"] = tags
+
         a = await self.store.ingest_directory(
             staged_dir=staged_dir,
             run_id=self.run_id,
@@ -453,6 +480,7 @@ class ArtifactFacade:
         path: str,
         *,
         kind: str,
+        tags: list[str] | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         suggested_uri: str | None = None,
@@ -508,6 +536,9 @@ class ArtifactFacade:
         # Start with user labels
         eff_labels: dict[str, Any] = dict(labels or {})
 
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
         # If caller passed an explicit name, prefer that as filename label
         if name:
             eff_labels.setdefault("filename", name)
@@ -527,6 +558,7 @@ class ArtifactFacade:
             node_id=self.node_id,
             tool_name=self.tool_name,
             tool_version=self.tool_version,
+            tags=tags,
             labels=labels,
             metrics=metrics,
             suggested_uri=suggested_uri,
@@ -543,6 +575,7 @@ class ArtifactFacade:
         suggested_uri: str | None = None,
         name: str | None = None,
         kind: str = "text",
+        tags: list[str] | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         pin: bool = False,
@@ -598,6 +631,7 @@ class ArtifactFacade:
         return await self.save_file(
             path=staged,
             kind=kind,
+            tags=tags,
             labels=labels,
             metrics=metrics,
             suggested_uri=suggested_uri,
@@ -612,6 +646,7 @@ class ArtifactFacade:
         suggested_uri: str | None = None,
         name: str | None = None,
         kind: str = "json",
+        tags: list[str] | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         pin: bool = False,
@@ -670,6 +705,7 @@ class ArtifactFacade:
         return await self.save_file(
             path=staged,
             kind=kind,
+            tags=tags,
             labels=labels,
             metrics=metrics,
             suggested_uri=suggested_uri,
@@ -724,6 +760,10 @@ class ArtifactFacade:
 
         Returns:
             AsyncIterator[Any]: Yields a writer object for streaming data and metadata.
+
+        Notes:
+            - Scope labels are added during `_record` after the context exits, so they are not available during the write phase.
+            - If you want tags, call `w.add_labels({"tags": [...]})` inside the context
         """
         # 1) Delegate to the store's async context manager
         async with self.store.open_writer(
@@ -1190,7 +1230,15 @@ class ArtifactFacade:
         return path
 
     # ---------- indexing helpers ----------
-    async def list(self, *, view: ArtifactView = "run") -> list[Artifact]:
+    async def list(
+        self,
+        *,
+        level: ScopeLevel | None = "run",
+        include_node: bool = True,
+        tags: list[str] | None = None,
+        filters: dict[str, str] | None = None,
+        limit: int | None = None,
+    ) -> list[Artifact]:
         """
         List artifacts scoped to the current run, graph, or node.
 
@@ -1227,85 +1275,128 @@ class ArtifactFacade:
         Returns:
             list[Artifact]: A list of `Artifact` objects matching the specified scope.
         """
-        if view == "all":
-            # still tenant-scoped
-            labels = self._tenant_labels_for_search()
-            return await self.index.search(labels=labels or None)
-        labels = self._view_labels(view)
-        return await self.index.search(labels=labels or None)
+        base_labels = self._filters_for_level(level=level)
+
+        # Constrain to this graph/node by default
+        if include_node:
+            if self.graph_id:
+                base_labels.setdefault("graph_id", self.graph_id)
+            if self.node_id:
+                base_labels.setdefault("node_id", self.node_id)
+
+        eff_labels: dict[str, Any] = dict(filters or {})
+        eff_labels.update(base_labels)
+
+        # Tag filter, represented as labels["tags"] for ArtifactIndex
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        return await self.index.search(
+            labels=eff_labels or None,
+            limit=limit,
+        )
 
     async def search(
         self,
         *,
+        query: str | None = None,
         kind: str | None = None,
+        tags: list[str] | None = None,
         labels: dict[str, str] | None = None,
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
-        view: ArtifactView = "run",
+        level: ScopeLevel | None = "run",
         extra_scope_labels: dict[str, str] | None = None,
         limit: int | None = None,
+        include_graph: bool = False,
+        include_node: bool = False,
     ) -> list[Artifact]:
         """
         Search for artifacts with flexible scoping and filtering.
 
-        This method allows you to query artifacts by type, labels, metrics, and other
-        criteria. It automatically applies view-based scoping and merges any additional
-        scope labels provided. The search is dispatched to the underlying index.
-
-        Examples:
-            Basic usage to find all artifacts of a given kind:
-            ```python
-            results = await context.artifacts().search(kind="model")
-            ```
-
-            Searching with specific labels and metric optimization:
-            ```python
-            results = await context.artifacts().search(
-                kind="dataset",
-                labels={"domain": "finance"},
-                metric="accuracy",
-                mode="max",
-                limit=10,
-            )
-            ```
-            Extending scope with extra labels:
-            ```python
-            results = await context.artifacts().search(
-                extra_scope_labels={"project": "alpha"}
-            )
-            ```
+        Behavior:
+            - If query is None/empty: structured search via ArtifactIndex.
+            - If query is non-empty: semantic search via ScopedIndices (corpus="artifact"),
+              then hydrate from the artifact store.
 
         Args:
-            kind: The type of artifact to search for (e.g., "model", "dataset").
-            labels: Dictionary of label key-value pairs to filter artifacts.
-            metric: Name of a metric to optimize (e.g., "accuracy").
-            mode: Optimization mode for the metric, either "max" or "min".
-            view: The artifact view context, which determines default scoping.
-            extra_scope_labels: Additional labels to further scope the search.
-            limit: Maximum number of results to return.
+            query: Optional free text query for semantic search.
+            kind: Optional artifact kind to filter on (structured path only).
+            tags: Optional list of tag strings for filtering.
+            labels: Extra label filters to apply.
+            metric: Optional metric name to optimize (structured path).
+            mode: "max" or "min" for metric optimization (structured path).
+            level: Scope level controlling tenant/scope filtering.
+            extra_scope_labels: Additional scope labels to merge on top of level filters.
+            limit: Maximum number of results (top_k for semantic; limit for structured).
 
         Returns:
-            list[Artifact]: A list of matching `Artifact` objects.
-
-        Notes:
-            - The `view` parameter controls the base scoping of the search. Additional labels provided
-                in `extra_scope_labels` are merged on top of the view-based labels.
-            - If both `labels` and `extra_scope_labels` are provided, they are combined for filtering.
-
+            list[Artifact]
         """
 
-        eff_labels: dict[str, str] = dict(labels or {})
-        eff_labels.update(self._view_labels(view))
+        # 1) Build base labels from scope + level (org/user/scope_id/run/session)
+        base_labels = self._filters_for_level(level)
+
+        # Only optionally constrain by graph/node
+        if include_graph and self.graph_id:
+            base_labels.setdefault("graph_id", self.graph_id)
+        if include_node and self.node_id:
+            base_labels.setdefault("node_id", self.node_id)
+
+        # 2) Merge in user-provided labels and extra scope labels
+        eff_labels: dict[str, Any] = dict(labels or {})
+        eff_labels.update(base_labels)
         if extra_scope_labels:
             eff_labels.update(extra_scope_labels)
 
-        return await self.index.search(
-            kind=kind,
-            labels=eff_labels or None,
-            metric=metric,
-            mode=mode,
-            limit=limit,
+        # 3) Tag filter
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        # --- Structured path: no query or empty query ---------------------
+        if not query:
+            return await self.index.search(
+                kind=kind,
+                labels=eff_labels or None,
+                metric=metric,
+                mode=mode,
+                limit=limit,
+            )
+
+        # --- Semantic path: use ScopedIndices corpus="artifact" -----------
+        if self.scoped_indices is None:
+            # Fallback: if no vector backend is available, degrade to structured search
+            return await self.index.search(
+                kind=kind,
+                labels=eff_labels or None,
+                metric=metric,
+                mode=mode,
+                limit=limit,
+            )
+
+        top_k = limit or 20
+
+        scored = await self.scoped_indices.search(
+            corpus="artifact",
+            query=query,
+            top_k=top_k,
+            filters=eff_labels,
+            level=None,  # level already applied via filters
         )
+
+        ids = [s.item_id for s in scored]
+        if not ids:
+            return []
+
+        print(
+            f"Semantic search for '{query}' returned {len(ids)} candidates, hydrating artifacts..."
+        )
+        arts = []
+        for art_id in ids:
+            art = await self.get_by_id(art_id)
+            if art:
+                arts.append(art)
+        return arts
 
     async def best(
         self,
@@ -1313,7 +1404,8 @@ class ArtifactFacade:
         kind: str,
         metric: str,
         mode: Literal["max", "min"],
-        view: ArtifactView = "run",
+        level: ScopeLevel | None = "run",
+        tags: list[str] | None = None,
         filters: dict[str, str] | None = None,
     ) -> Artifact | None:
         """
@@ -1365,7 +1457,9 @@ class ArtifactFacade:
             Artifact | None: The best matching `Artifact` object, or `None` if no match is found.
         """
         eff_filters: dict[str, str] = dict(filters or {})
-        eff_filters.update(self._view_labels(view))
+        eff_filters.update(self._filters_for_level(level))
+        if tags:
+            eff_filters["tags"] = tags
 
         return await self.index.best(
             kind=kind,
@@ -1421,15 +1515,6 @@ class ArtifactFacade:
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
         self.last_artifact = a
-
-    def _scope_labels(self, scope: Scope) -> dict[str, Any]:
-        if scope == "node":
-            return {"run_id": self.run_id, "graph_id": self.graph_id, "node_id": self.node_id}
-        if scope == "graph":
-            return {"run_id": self.run_id, "graph_id": self.graph_id}
-        if scope == "run":
-            return {"run_id": self.run_id}
-        return {}  # "all"
 
     # ---------- deprecated / compatibility ----------
     async def stage(self, ext: str = "") -> str:

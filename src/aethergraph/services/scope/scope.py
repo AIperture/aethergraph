@@ -38,16 +38,9 @@ class Scope:
     def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
-
-    def _base_identity_labels(self) -> dict[str, str]:
+    def identity_labels(self) -> dict[str, str]:
         """
-        Docstring for _base_identity_labels
-
-        :param self: Description
-        :return: Description
-        :rtype: dict[str, str]
+        Canonical identity labels shared across memory, artifacts, and metering.
         """
         out: dict[str, str] = {}
         if self.org_id:
@@ -72,21 +65,23 @@ class Scope:
             out["flow_id"] = self.flow_id
         return out
 
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
     def artifact_scope_labels(self) -> dict[str, str]:
         """
         Labels to attach to every artifact for this scope.
         These will be mirrored both into Artifact.labels and the index.
         """
         out: dict[str, str] = {}
-        out.update(self._base_identity_labels())
-
-        # Cononical scope id for artifacts == memory scope id
-        # So filter the memory + artifacts by the same value
-        out["scope_id"] = self.memory_scope_id()
+        out.update(self.identity_labels())
+        scope_id = self.memory_scope_id()
+        if scope_id:
+            out["scope_id"] = scope_id
         return out
 
     def metering_dimensions(self) -> dict[str, Any]:
-        """Dimensions for MeteringService: what to attach to events."""
+        """Dimensions for MeteringService."""
         out: dict[str, Any] = {}
         if self.user_id:
             out["user_id"] = self.user_id
@@ -177,7 +172,7 @@ class Scope:
             scope_id = self.memory_scope_id()
 
         out: dict[str, Any] = {}
-        out.update(self._base_identity_labels())
+        out.update(self.identity_labels())
         if scope_id:
             out["scope_id"] = scope_id
         return out

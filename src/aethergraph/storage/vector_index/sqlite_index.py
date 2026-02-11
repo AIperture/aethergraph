@@ -513,7 +513,6 @@ class SQLiteVectorIndex(VectorIndex):
             )
             if len(out) >= k:
                 break
-
         return out
 
     def _search_bruteforce_sync(
@@ -715,7 +714,6 @@ class SQLiteVectorIndex(VectorIndex):
         created_at_max: float | None = None,
     ) -> list[dict[str, Any]]:
         where = where or {}
-
         # --- no-query structural path -----------------------------------
         if not query_vec:
 

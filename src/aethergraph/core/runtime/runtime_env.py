@@ -182,7 +182,7 @@ class RuntimeEnv:
             art_store=self.artifacts,
             art_index=self.artifact_index,
             scoped_indices=indices,
-            scope=node_scope,
+            scope=mem_scope,
         )
 
         # ------- Viz Service tied to this node/run -------'

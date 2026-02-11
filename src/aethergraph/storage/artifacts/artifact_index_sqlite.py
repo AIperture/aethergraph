@@ -111,6 +111,38 @@ class SqliteArtifactIndexSync:
 
         self._conn.commit()
 
+    def _normalize_tags(self, v: Any) -> list[str]:
+        """
+        Normalize tags from various representations to a list[str].
+        Accepts list[str], list[Any], or a single string.
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = [v]
+        if isinstance(v, (list, tuple)):  # noqa: UP038
+            out: list[str] = []
+            for t in v:
+                if t is None:
+                    continue
+                s = str(t).strip()
+                if s:
+                    out.append(s)
+            return out
+        return []
+
+    def _artifact_has_tags(self, art: Artifact, required: list[str]) -> bool:
+        """
+        Return True if artifact.tags contains ALL required tags.
+        """
+        if not required:
+            return True
+        art_tags = set(self._normalize_tags(getattr(art, "tags", None)))
+        if not art_tags and art.labels:
+            # Fallback: derive from labels["tags"] if tags field is missing
+            art_tags = set(self._normalize_tags(art.labels.get("tags")))
+        return all(t in art_tags for t in required)
+
     def upsert(self, a: Artifact) -> None:
         rec = a.to_dict()
         labels_json = json.dumps(rec.get("labels") or {}, ensure_ascii=False)
@@ -209,7 +241,13 @@ class SqliteArtifactIndexSync:
                 "session_id": rec.get("session_id"),
             },
         )
+
         self._conn.commit()
+
+        cur = self._conn.execute(
+            "SELECT artifact_id, kind, run_id, org_id, user_id, labels_json FROM artifacts"
+        )
+        print(cur.fetchall())
 
     def list_for_run(self, run_id: str) -> list[Artifact]:
         cur = self._conn.execute(
@@ -260,36 +298,30 @@ class SqliteArtifactIndexSync:
             "run_id": "run_id",
         }
 
+        tag_filter: list[str] | None = None
+        labels_for_sql: dict[str, Any] = {}
+
         if labels:
+            # split out tags for Python-side filtering
             for k, v in labels.items():
                 if k == "tags":
-                    tag_list = v if isinstance(v, list) else [v]
-                    tag_list = [t for t in (t.strip() for t in tag_list) if t]
-                    if tag_list:
-                        ors = []
-                        for t in tag_list:
-                            ors.append("labels_json LIKE ?")
-                            params.append(f'%"{k}":%"{t}"%')
-                        where.append("(" + " OR ".join(ors) + ")")
+                    tag_filter = self._normalize_tags(v)
                     continue
-
-                # if k in TENANT_KEYS:
-                #     where.append(f"{TENANT_KEYS[k]} = ?")
-                #     params.append(v)
-                #     continue
 
                 if k in TENANT_KEYS:
                     col = TENANT_KEYS[k]
                     sv = str(v)
-
-                    # column OR labels_json fallback
                     where.append(f"({col} = ? OR labels_json LIKE ?)")
                     params.append(sv)
                     params.append(f'%"{k}": "{sv}"%')
                     continue
 
-                where.append("labels_json LIKE ?")
-                params.append(f'%"{k}": "{v}"%')
+                labels_for_sql[k] = v
+
+        # Non-tag label filters still go through JSON LIKE
+        for k, v in labels_for_sql.items():
+            where.append("labels_json LIKE ?")
+            params.append(f'%"{k}": "{v}"%')
 
         base_sql = "SELECT * FROM artifacts"
         if where:
@@ -302,12 +334,16 @@ class SqliteArtifactIndexSync:
                 sql += " LIMIT ? OFFSET ?"
                 params.extend([limit, offset])
             elif offset:
-                # offset without limit is weird; just add a huge limit for safety
                 sql += " LIMIT -1 OFFSET ?"
                 params.append(offset)
 
             cur = self._conn.execute(sql, params)
             rows = [self._row_to_artifact(r) for r in cur.fetchall()]
+
+            # Apply Python-side tag filtering
+            if tag_filter:
+                rows = [a for a in rows if self._artifact_has_tags(a, tag_filter)]
+
             return rows
 
         # Slow path: metric sorting in Python (same as before)
@@ -315,12 +351,16 @@ class SqliteArtifactIndexSync:
         cur = self._conn.execute(sql, params)
         rows = [self._row_to_artifact(r) for r in cur.fetchall()]
 
+        # Tag filter first
+        if tag_filter:
+            rows = [a for a in rows if self._artifact_has_tags(a, tag_filter)]
+
+        # Then metric filter
         rows = [a for a in rows if metric in (a.metrics or {})]
         rows.sort(
             key=lambda a: a.metrics[metric],
             reverse=(mode == "max"),
         )
-
         if offset:
             rows = rows[offset:]
         if limit is not None:
@@ -380,6 +420,14 @@ class SqliteArtifactIndexSync:
     def _row_to_artifact(self, row: sqlite3.Row) -> Artifact:
         labels = json.loads(row["labels_json"] or "{}")
         metrics = json.loads(row["metrics_json"] or "{}")
+        # Extract tags from labels["tags"], but keep labels intact
+        raw_tags = labels.get("tags")
+        tags: list[str] | None = None
+        if isinstance(raw_tags, list):
+            tags = [str(t) for t in raw_tags]
+        elif isinstance(raw_tags, str):
+            tags = [raw_tags]
+
         return Artifact(
             artifact_id=row["artifact_id"],
             run_id=row["run_id"],
@@ -393,6 +441,7 @@ class SqliteArtifactIndexSync:
             mime=row["mime"],
             created_at=row["created_at"],
             labels=labels,
+            tags=tags,
             metrics=metrics,
             pinned=bool(row["pinned"]),
             uri=row["uri"],  #  real URI
