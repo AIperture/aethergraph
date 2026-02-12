@@ -155,11 +155,79 @@ class SQLiteVectorIndex(VectorIndex):
         return (self._faiss_dir / f"{safe}.index", self._faiss_dir / f"{safe}.meta.pkl")
 
     def _mark_dirty(self, corpus_id: str) -> None:
+        """
+        Mark a corpus as having un-flushed changes.
+
+        We keep the in-memory FAISS index (if any) usable for queries.
+        'Dirty' now means: 'disk copy may be stale and/or index may
+        benefit from compaction', not 'index is invalid'.
+        """
         if not self._faiss_enabled:
             return
         with self._faiss_lock:
             self._faiss_dirty.add(corpus_id)
-            self._faiss_cache.pop(corpus_id, None)
+            # NOTE: do NOT drop _faiss_cache here anymore
+            # We want to keep the in-memory index hot for queries.
+
+    def _faiss_add_vectors(
+        self,
+        corpus_id: str,
+        chunk_ids: list[str],
+        vectors: list[list[float]],
+    ) -> None:
+        """
+        Incrementally add new vectors to the in-memory FAISS index for a corpus.
+
+        - Only runs if FAISS is enabled and an index is already loaded in memory.
+        - Does NOT handle deletions; those are still cleaned up by a full rebuild.
+        """
+        if not self._faiss_enabled:
+            return
+
+        with self._faiss_lock:
+            cached = self._faiss_cache.get(corpus_id)
+            if cached is None:
+                # No in-memory index yet; we'll build from DB on first query.
+                return
+
+            index, id_to_chunk, dim = cached
+            if index is None or dim <= 0:
+                # Nothing usable
+                return
+
+            next_id = len(id_to_chunk)
+
+            new_ids: list[int] = []
+            new_vecs: list[np.ndarray] = []
+
+            for cid, vec in zip(chunk_ids, vectors, strict=True):
+                v = np.asarray(vec, dtype=np.float32)
+                if v.ndim != 1:
+                    v = v.reshape(-1)
+
+                # Dimension mismatch: skip to avoid corrupting the index.
+                if v.shape[0] != dim:
+                    # You may want to log a warning here instead of silently skipping.
+                    continue
+
+                v_norm = _l2_normalize_vec(v)
+                new_ids.append(next_id)
+                new_vecs.append(v_norm)
+                id_to_chunk.append(cid)
+                next_id += 1
+
+            if not new_ids:
+                # Nothing valid to add
+                return
+
+            xs = np.stack(new_vecs, axis=0).astype(np.float32, copy=False)
+            ids = np.asarray(new_ids, dtype=np.int64)
+
+            index.add_with_ids(xs, ids)
+
+            # Update cache entry and mark as dirty (needs flush/compact later)
+            self._faiss_cache[corpus_id] = (index, id_to_chunk, dim)
+            self._faiss_dirty.add(corpus_id)
 
     def _build_faiss_index_from_db(self, corpus_id: str) -> tuple[Any, list[str], int]:
         """
@@ -220,7 +288,9 @@ class SQLiteVectorIndex(VectorIndex):
 
         with self._faiss_lock:
             cached = self._faiss_cache.get(corpus_id)
-            if cached is not None and corpus_id not in self._faiss_dirty:
+            if cached is not None:
+                # Even if 'dirty', the in-memory index is usable; 'dirty'
+                # only means it may not be flushed to disk / compacted.
                 return cached
 
             index_path, meta_path = self._faiss_paths(corpus_id)
@@ -337,10 +407,16 @@ class SQLiteVectorIndex(VectorIndex):
             finally:
                 conn.close()
 
-            # Mark FAISS corpus index dirty (lazy rebuild on next search)
-            self._mark_dirty(corpus_id)
-
+        # 1) Write to SQLite (blocking in thread)
         await asyncio.to_thread(_add_sync)
+
+        # 2) Update in-memory FAISS index if present (incremental add).
+        #    This keeps queries fast without forcing a full rebuild.
+        self._faiss_add_vectors(corpus_id, chunk_ids, vectors)
+
+        # 3) Mark corpus as 'dirty' so a future maintenance pass can
+        #    compact/flush indices to disk if desired.
+        self._mark_dirty(corpus_id)
 
     async def delete(self, corpus_id: str, chunk_ids: list[str] | None = None) -> None:
         def _delete_sync():
