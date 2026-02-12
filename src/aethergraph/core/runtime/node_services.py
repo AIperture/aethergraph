@@ -17,7 +17,6 @@ from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.mcp.service import MCPService
 from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.rag.node_rag import NodeRAG
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
 
@@ -37,7 +36,6 @@ class NodeServices:
     memory_facade: MemoryFacade | None = None  # bound memory for this node
     viz: VizFacade | None = None  # VizFacade
     llm: LLMService | None = None  # LLMService
-    rag: NodeRAG | None = None  # RAGService
     mcp: MCPService | None = None  # MCPService
     run_manager: RunManager | None = None  # RunManager
     indices: ScopedIndices | None = None  # ScopedIndices for this node

@@ -18,6 +18,7 @@ from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBacke
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 from .chunker import TextSplitter
+from .rerank import lexical_score  # adjust path to wherever you put it
 
 
 def _now_iso() -> str:
@@ -348,11 +349,14 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
         top_k: int = 10,
         kb_namespace: str | None = None,
         filters: Mapping[str, Any] | None = None,
-        level: ScopeLevel | None = None,
+        level: ScopeLevel | None = None,  # currently unused; reserved for future
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
+        mode: str = "hybrid",  # ["dense", "hybrid"]
+        alpha: float = 0.8,  # fused = alpha * dense + (1-alpha) * lexical
     ) -> list[KBSearchHit]:
+        # --- 1) Build filters based on scope + kb_namespace + user filters ----
         base_filters: dict[str, Any] = {}
         if scope is not None:
             # User-level KB filters: org_id + user_id + kb_scope_id
@@ -361,23 +365,20 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
         if kb_namespace:
             base_filters["kb_namespace"] = kb_namespace
 
-        merged = {**base_filters, **(filters or {})}
-        merged = {k: v for k, v in merged.items() if v is not None}
-
-        rows: list[ScoredItem] = await self.search_backend.search(
-            corpus=f"{corpus_id}",
-            query=query,
-            top_k=top_k,
-            filters=merged,
-        )
-
         merged: dict[str, Any] = {**base_filters, **(filters or {})}
         merged = {k: v for k, v in merged.items() if v is not None}
 
+        # --- 2) Dense retrieval from SearchBackend ----------------------------
+        # If we're going to hybrid rerank, over-fetch a bit from the vector index.
+        if mode == "hybrid":  # noqa SIM108
+            dense_k = min(top_k * 3, 100)
+        else:
+            dense_k = top_k
+
         rows: list[ScoredItem] = await self.search_backend.search(
             corpus=f"{corpus_id}",
             query=query,
-            top_k=top_k,
+            top_k=dense_k,
             filters=merged,
             time_window=time_window,
             created_at_min=created_at_min,
@@ -385,27 +386,46 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
         )
 
         print(
-            f"⚠️ KB search: corpus={corpus_id} query='{query}' top_k={top_k} filters={merged} -> {len(rows)} hits"
+            f"⚠️ KB search: corpus={corpus_id} query='{query}' "
+            f"top_k={top_k} dense_k={dense_k} mode={mode} filters={merged} -> {len(rows)} hits"
         )
+
         # Need chunk map to get text/doc_id, since backend only returns metadata + score.
         chunks_map = self._load_chunks_map(corpus_id)
 
+        # --- 3) Build KBSearchHit list and optionally hybrid-rerank -----------
         hits: list[KBSearchHit] = []
         for row in rows:
             cid = row.item_id
             rec = chunks_map.get(cid, {})
             text = (rec.get("text") or "").strip()
             meta = dict(row.metadata or {})
+            dense_score = row.score or 0.0
+
+            # Optional hybrid rerank: fuse dense + lexical
+            if mode == "hybrid":
+                lex = lexical_score(query, text)
+                fused = alpha * dense_score + (1.0 - alpha) * lex
+                score = fused
+            else:
+                score = dense_score
+
             hits.append(
                 KBSearchHit(
                     chunk_id=cid,
                     doc_id=rec.get("doc_id", ""),
                     corpus_id=corpus_id,
-                    score=row.score,
+                    score=score,
                     text=text,
                     meta=meta,
                 )
             )
+
+        # If hybrid, sort by fused score and trim back to top_k
+        if mode == "hybrid":
+            hits.sort(key=lambda h: h.score, reverse=True)
+            if len(hits) > top_k:
+                hits = hits[:top_k]
 
         return hits
 

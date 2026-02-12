@@ -11,13 +11,11 @@ from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.memory.facade.introspection import IntrospectionMixin
-from aethergraph.services.rag.facade import RAGFacade
 from aethergraph.services.scope.scope import Scope
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 from .chat import ChatMixin
 from .distillation import DistillationMixin
-from .rag import RAGMixin
 from .results import ResultMixin
 from .retrieval import RetrievalMixin
 from .state import StateMixin
@@ -81,7 +79,6 @@ class MemoryFacade(
     ResultMixin,
     RetrievalMixin,
     DistillationMixin,
-    RAGMixin,
     IntrospectionMixin,
 ):
     """
@@ -105,7 +102,6 @@ class MemoryFacade(
         hot_ttl_s: int = 7 * 24 * 3600,
         default_signal_threshold: float = 0.0,
         logger=None,
-        rag: RAGFacade | None = None,
         llm: LLMClientProtocol | None = None,
     ):
         self.run_id = run_id
@@ -121,7 +117,6 @@ class MemoryFacade(
         self.hot_ttl_s = hot_ttl_s
         self.default_signal_threshold = default_signal_threshold
         self.logger = logger or logging.getLogger(__name__)
-        self.rag = rag
         self.llm = llm
 
         self.memory_scope_id = (

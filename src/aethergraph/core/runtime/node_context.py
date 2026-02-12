@@ -570,11 +570,6 @@ class NodeContext:
         svc = self.services.llm
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
 
-    def rag(self):
-        if not self.services.rag:
-            raise RuntimeError("RAGService not available")
-        return self.services.rag
-
     def mcp(self, name):
         if not self.services.mcp:
             raise RuntimeError("MCPService not available")

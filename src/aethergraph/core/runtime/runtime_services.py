@@ -7,7 +7,6 @@ from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.base_service import Service
-from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.skills.skills import Skill
 
@@ -187,68 +186,6 @@ def register_llm_client(
 
 # backend compatibility
 set_llm_client = register_llm_client
-
-
-def set_rag_llm_client(
-    client: LLMClientProtocol | None = None,
-    *,
-    provider: str | None = None,
-    model: str | None = None,
-    embed_model: str | None = None,
-    base_url: str | None = None,
-    api_key: str | None = None,
-    timeout: float | None = None,
-) -> LLMClientProtocol:
-    """Set the LLM client to use for RAG service.
-    If client is provided, use it directly.
-    Otherwise, create a new client using the provided parameters."""
-    svc = current_services()
-    if client is None:
-        if provider is None or model is None or embed_model is None:
-            raise ValueError(
-                "Must provide provider, model, and embed_model to create RAG LLM client"
-            )
-        try:
-            client = GenericLLMClient(
-                provider=provider,
-                model=model,
-                embed_model=embed_model,
-                base_url=base_url,
-                api_key=api_key,
-                timeout=timeout,
-            )
-        except Exception as e:
-            raise RuntimeError(f"Failed to create RAG LLM client: {e}") from e
-
-    svc.rag.set_llm_client(client=client)
-    return client
-
-
-def set_rag_index_backend(
-    *,
-    backend: str | None = None,  # "sqlite" | "faiss"
-    index_path: str | None = None,
-    dim: int | None = None,
-):
-    """
-    Configure the RAG index backend. If backend='faiss' but FAISS is missing,
-    we log a warning and fall back to SQLite automatically.
-    """
-    from aethergraph.services.rag.index_factory import create_vector_index
-
-    svc = current_services()
-    # resolve defaults from settings
-    s = svc.settings.rag  # AppSettings.rag bound into services
-    backend = backend or s.backend
-    index_path = index_path or s.index_path
-    dim = dim if dim is not None else s.dim
-    root = svc.settings.root
-
-    index = create_vector_index(
-        backend=backend, index_path=index_path, dim=dim, root=str(Path(root) / "rag")
-    )
-    svc.rag.set_index_backend(index)
-    return index
 
 
 # --------- Logger helpers ---------

@@ -51,7 +51,6 @@ class MemoryFactory:
     default_signal_threshold: float = 0.0
     logger: Any | None = None
     llm_service: Any | None = None  # LLMService
-    rag_facade: Any | None = None  # RAGFacade
 
     def for_session(
         self,
@@ -77,6 +76,5 @@ class MemoryFactory:
             hot_ttl_s=self.hot_ttl_s,
             default_signal_threshold=self.default_signal_threshold,
             logger=self.logger,
-            rag=self.rag_facade,
             llm=self.llm_service,
         )

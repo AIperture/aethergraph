@@ -44,6 +44,7 @@ from aethergraph.services.execution.local_python import LocalPythonExecutionServ
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
+from aethergraph.services.knowledge.chunker import TextSplitter
 
 # ---- kv services ----
 from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBackend
@@ -61,8 +62,6 @@ from aethergraph.services.metering.eventlog_metering import EventLogMeteringServ
 from aethergraph.services.planning.action_catalog import ActionCatalog
 from aethergraph.services.planning.flow_validator import FlowValidator
 from aethergraph.services.planning.planner_service import PlannerService
-from aethergraph.services.rag.chunker import TextSplitter
-from aethergraph.services.rag.facade import RAGFacade
 
 # ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
@@ -90,7 +89,6 @@ from aethergraph.storage.factory import (
     build_memory_persistence,
     build_run_store,
     build_session_store,
-    build_vector_index,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
@@ -173,7 +171,6 @@ class DefaultContainer:
 
     # optional llm service
     llm: LLMClientProtocol | None = None
-    rag: RAGFacade | None = None
     mcp: MCPService | None = None
 
     # run controls -- for http endpoints and run manager
@@ -309,17 +306,6 @@ def build_default_container(
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
     embed_client = GenericEmbeddingClient(provider="openai", model="text-embedding-3-small")
 
-    # RAG facade
-    vec_index = build_vector_index(cfg)
-    rag_facade = RAGFacade(
-        corpus_root=str(root_p / "rag" / "rag_corpora"),
-        artifacts=artifacts,
-        embed_client=llm_service.get("default"),
-        llm_client=llm_service.get("default"),
-        index_backend=vec_index,
-        chunker=TextSplitter(),
-        logger=logger_factory.for_run(),
-    )
     mcp = MCPService()  # empty MCP service; users can register clients as needed
 
     # memory factory
@@ -334,7 +320,6 @@ def build_default_container(
         default_signal_threshold=float(cfg.memory.signal_threshold),
         logger=logger_factory.for_run(),
         llm_service=llm_service.get("default") if llm_service else None,
-        rag_facade=rag_facade,
     )
 
     # run store and manager
@@ -431,7 +416,6 @@ def build_default_container(
         eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
-        rag=rag_facade,
         mcp=mcp,
         run_store=run_store,
         run_manager=run_manager,

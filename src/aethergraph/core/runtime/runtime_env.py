@@ -20,7 +20,6 @@ from aethergraph.services.continuations.stores.fs_store import (
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.rag.node_rag import NodeRAG
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
@@ -198,15 +197,6 @@ class RuntimeEnv:
             scope=node_scope,
         )
 
-        # ------- RAG Facade in Memory tied to this node/run -------'
-        rag_for_node = None
-        if self.rag_facade is not None and node_scope is not None:
-            rag_for_node = NodeRAG(
-                rag=self.rag_facade,
-                scope=node_scope,
-                default_scope_id=(mem_scope.memory_scope_id() if mem_scope else None),
-            )
-
         kb = NodeKB(
             backend=self.container.kb_backend,
             scope=mem_scope,
@@ -224,7 +214,6 @@ class RuntimeEnv:
             memory_facade=mem,  # bound memory for this run/node
             viz=vis_facade,
             llm=self.llm_service,  # LLMService
-            rag=rag_for_node,  # RAGService
             mcp=self.mcp_service,  # MCPService
             run_manager=self.container.run_manager,  # RunManager
             indices=indices,  # ScopedIndices for this node

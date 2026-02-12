@@ -6,7 +6,6 @@ from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import Event, HotLog, Indices, Persistence
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
-from aethergraph.services.rag.facade import RAGFacade
 from aethergraph.services.scope.scope import Scope
 
 
@@ -27,7 +26,6 @@ class MemoryFacadeInterface(Protocol):
     artifacts: AsyncArtifactStore
     scope: Scope | None
 
-    rag: RAGFacade | None
     llm: LLMClientProtocol | None
     logger: Any
 
