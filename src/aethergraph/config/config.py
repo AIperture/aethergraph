@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .llm import LLMSettings
-from .search import SearchBackendSettings
+from .search import KnowledgeSettings, SearchBackendSettings
 from .storage import StorageSettings
 
 
@@ -138,6 +138,7 @@ class AppSettings(BaseSettings):
     rag: RAGSettings = RAGSettings()
     storage: StorageSettings = StorageSettings()
     search: SearchBackendSettings = SearchBackendSettings()
+    knowledge: KnowledgeSettings = KnowledgeSettings()
 
     # Future fields:
     # authn: ...

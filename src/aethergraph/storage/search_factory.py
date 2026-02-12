@@ -34,22 +34,18 @@ def build_vector_index_for_search(root: str, cfg: SearchBackendSettings) -> Vect
     raise ValueError(f"build_vector_index_for_search: unsupported backend {cfg.backend!r}")
 
 
-def build_search_backend(
-    cfg: AppSettings,
+def build_search_backend_from_settings(
     *,
+    root: str,
+    settings: SearchBackendSettings,
     embedder: EmbeddingClientProtocol | None,
 ) -> SearchBackend:
     """
-    Factory to build the high-level SearchBackend used by ScopedIndices.
+    Build a SearchBackend from a SearchBackendSettings block.
 
-    Respects cfg.search.backend:
-      - "none"          -> NullSearchBackend
-      - "sqlite_lexical"-> SQLiteLexicalSearchBackend
-      - "sqlite_vector" -> VectorSearchBackend + SQLiteVectorIndex
-      - "faiss_vector"  -> VectorSearchBackend + FAISSVectorIndex
+    This is the generic builder used by indices, KB, etc.
     """
-    scfg = cfg.search
-    root = os.path.abspath(cfg.root)
+    scfg = settings
 
     # 1) No search at all
     if scfg.backend == "none":
@@ -66,10 +62,48 @@ def build_search_backend(
         if embedder is None:
             raise RuntimeError(
                 f"Search backend {scfg.backend!r} requires an embedding client. "
-                "Pass an EmbeddingClientProtocol instance into build_search_backend()."
+                "Pass an EmbeddingClientProtocol instance into build_search_backend_from_settings()."
             )
 
         index = build_vector_index_for_search(root, scfg)
         return GenericVectorSearchBackend(index=index, embedder=embedder)
 
     raise ValueError(f"Unknown search backend: {scfg.backend!r}")
+
+
+def build_search_backend(
+    cfg: AppSettings,
+    *,
+    embedder: EmbeddingClientProtocol | None,
+) -> SearchBackend:
+    """
+    Factory to build the high-level SearchBackend used by ScopedIndices.
+
+    Respects cfg.search.backend:
+      - "none"          -> NullSearchBackend
+      - "sqlite_lexical"-> SQLiteLexicalSearchBackend
+      - "sqlite_vector" -> VectorSearchBackend + SQLiteVectorIndex
+      - "faiss_vector"  -> VectorSearchBackend + FAISSVectorIndex
+    """
+    root = os.path.abspath(cfg.root)
+    return build_search_backend_from_settings(
+        root=root,
+        settings=cfg.search,
+        embedder=embedder,
+    )
+
+
+def build_kb_search_backend(
+    cfg: AppSettings,
+    *,
+    embedder: EmbeddingClientProtocol | None,
+) -> SearchBackend:
+    """
+    Build the SearchBackend used by the KnowledgeBackend / KB.
+    """
+    root = os.path.abspath(cfg.root)
+    return build_search_backend_from_settings(
+        root=root,
+        settings=cfg.knowledge.search,
+        embedder=embedder,
+    )

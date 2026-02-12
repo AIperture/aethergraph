@@ -197,3 +197,43 @@ class Scope:
         if scope_id:
             out["scope_id"] = scope_id
         return out
+
+    def kb_scope_id(self) -> str:
+        """
+        Stable key for knowledge base buckets.
+
+        Unlike memory_scope_id(), this is intentionally *not* session/run-scoped.
+        It's primarily org+user (or client) based so KB persists across sessions.
+        """
+        if self.org_id and (self.user_id or self.client_id):
+            u = self.user_id or self.client_id
+            return f"org:{self.org_id}:user:{u}:kb"
+        if self.user_id:
+            return f"user:{self.user_id}:kb"
+        if self.client_id:
+            return f"user:{self.client_id}:kb"
+        return "kb:global"
+
+    def kb_index_labels(self) -> dict[str, Any]:
+        """
+        Labels we want to push into the KB vector index.
+
+        We deliberately omit session_id/run_id so KB is user-level by default.
+        """
+        out: dict[str, Any] = {}
+        if self.org_id:
+            out["org_id"] = self.org_id
+        u = self.user_id or self.client_id
+        if u:
+            out["user_id"] = u
+        out["kb_scope_id"] = self.kb_scope_id()
+        return out
+
+    def kb_filter(self) -> dict[str, Any]:
+        """
+        Default filter for KB searches.
+
+        Typically org_id + user_id + kb_scope_id so each user sees their KB.
+        """
+        out = self.kb_index_labels()
+        return {k: v for k, v in out.items() if v is not None}

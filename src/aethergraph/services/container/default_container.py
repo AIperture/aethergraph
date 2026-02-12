@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from aethergraph.services.execution.local_python import LocalPythonExecutionServ
 from aethergraph.services.indices.global_indices import GlobalIndices
 
 # ---- kv services ----
+from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBackend
 from aethergraph.services.llm.factory import build_llm_clients
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.service import LLMService
@@ -92,7 +94,7 @@ from aethergraph.storage.factory import (
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
-from aethergraph.storage.search_factory import build_search_backend
+from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
 
 SERVICE_KEYS = [
     # core
@@ -161,6 +163,7 @@ class DefaultContainer:
     artifact_index: AsyncArtifactIndex
     eventlog: EventLog
     global_indices: GlobalIndices
+    kb_backend: LocalFSKnowledgeBackend  # for now just use the local FS backend as the default; in the future, we can make this swappable like the global indices backend, and add auto-indexing to the NodeKB facade
 
     # memory
     memory_factory: MemoryFactory
@@ -368,8 +371,19 @@ def build_default_container(
     #     embedder=embed_client,
     # )
 
-    search_backend = build_search_backend(cfg=cfg, embedder=embed_client)
-    global_indices = GlobalIndices(backend=search_backend)  # to be set up later as needed
+    global_indices_backend = build_search_backend(cfg=cfg, embedder=embed_client)
+    global_indices = GlobalIndices(backend=global_indices_backend)  # to be set up later as needed
+
+    kb_search_backend = build_kb_search_backend(cfg, embedder=embed_client)
+    kb_backend = LocalFSKnowledgeBackend(
+        corpus_root=os.path.join(os.path.abspath(cfg.root), cfg.knowledge.corpus_root),
+        artifacts=artifacts,  # this is store, not Facade with auto-indexing, long doc has its own indexing method
+        search_backend=kb_search_backend,
+        embed_client=embed_client,
+        llm_client=llm_clients.get("default") if llm_clients else None,
+        chunker=TextSplitter(),
+        logger=logger_factory.for_run(),
+    )
 
     # Execution service
     execution = (
@@ -412,6 +426,7 @@ def build_default_container(
         artifacts=artifacts,
         artifact_index=artifact_index,
         global_indices=global_indices,
+        kb_backend=kb_backend,
         viz_service=viz_service,
         eventlog=eventlog,
         memory_factory=memory_factory,

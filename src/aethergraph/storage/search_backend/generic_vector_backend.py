@@ -139,7 +139,9 @@ class GenericVectorSearchBackend(SearchBackend):
     ) -> list[ScoredItem]:
         filters = filters or {}
         no_query = query is None or not query.strip()
-
+        print(
+            f"🔍 [GenericVectorSearchBackend] corpus={corpus} query='{query}' top_k={top_k} filters={filters} time_window={time_window} created_at_min={created_at_min} created_at_max={created_at_max}"
+        )
         # ---- 1) Embed query if present ----------------------------------
         if no_query:
             q_vec: list[float] = []
@@ -181,6 +183,9 @@ class GenericVectorSearchBackend(SearchBackend):
             max_candidates=max_candidates,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+        )
+        print(
+            f"⚡ [VectorIndex] returned {len(rows)} candidates for corpus={corpus} query='{query}' index_filters={index_filters} time_window={time_window} created_at_min={created_at_min} created_at_max={created_at_max}"
         )
 
         # ---- 5) Apply Python-level filters + build ScoredItem list -----

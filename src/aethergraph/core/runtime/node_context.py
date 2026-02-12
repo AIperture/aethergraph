@@ -9,6 +9,7 @@ from aethergraph.contracts.services.execution import (
 )
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.planning.node_planner import NodePlanner
 from aethergraph.services.skills.skill_registry import SkillRegistry
 
@@ -450,6 +451,11 @@ class NodeContext:
         if not self.services.viz:
             raise RuntimeError("Viz service (facade) not available")
         return self.services.viz
+
+    def kb(self) -> NodeKB:
+        if not self.services.kb:
+            raise RuntimeError("NodeKB service not available")
+        return self.services.kb
 
     def llm(
         self,

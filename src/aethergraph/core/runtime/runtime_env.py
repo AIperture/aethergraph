@@ -18,6 +18,7 @@ from aethergraph.services.continuations.stores.fs_store import (
 
 # ---- memory services ----
 from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.rag.node_rag import NodeRAG
 from aethergraph.services.resume.router import ResumeRouter
@@ -206,6 +207,11 @@ class RuntimeEnv:
                 default_scope_id=(mem_scope.memory_scope_id() if mem_scope else None),
             )
 
+        kb = NodeKB(
+            backend=self.container.kb_backend,
+            scope=mem_scope,
+        )
+
         services = NodeServices(
             channels=self.channels,
             continuation_store=self.continuation_store,
@@ -227,6 +233,7 @@ class RuntimeEnv:
             else None,  # ExecutionService
             planner_service=self.container.planner_service,
             skills=self.container.skills_registry,
+            kb=kb,  # NodeKB
         )
         return ExecutionContext(
             run_id=self.run_id,

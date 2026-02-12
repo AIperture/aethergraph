@@ -117,3 +117,30 @@ class ScopeFactory:
             return s.with_memory_scope(custom_scope_id, memory_level=level)
 
         return s
+
+    def for_kb(
+        self,
+        *,
+        identity: RequestIdentity | None = None,
+        app_id: str | None = None,
+    ) -> Scope:
+        """
+        Build a stable, user-level Scope for the knowledge base.
+
+        - Ignores run/session/node so KB corpora naturally live across runs.
+        - Sets memory_level='user' so memory_scope_id() is user-centric.
+        """
+        base = self.base_from_identity(identity)
+
+        s = Scope(
+            org_id=base.org_id,
+            user_id=base.user_id,
+            client_id=base.client_id,
+            mode=base.mode,
+            app_id=app_id or base.app_id or self.default_app_id,
+            # NOTE: no session/run/graph/node here – KB is not run-scoped
+        )
+
+        # For KB we want a user-centric bucket by default
+        # (org:user:user_id if org present; falls back to user/client).
+        return replace(s, memory_level="user")

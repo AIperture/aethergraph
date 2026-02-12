@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.planning.planner_service import PlannerService
 from aethergraph.services.skills.skill_registry import SkillRegistry
 
@@ -43,3 +44,4 @@ class NodeServices:
     execution: Any | None = None  # ExecutionService
     planner_service: PlannerService | None = None  # PlannerService
     skills: SkillRegistry | None = None  # SkillRegistry
+    kb: NodeKB | None = None  # NodeKB
