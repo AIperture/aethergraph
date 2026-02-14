@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBackend
+from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBackend, SearchMode
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
@@ -141,6 +141,7 @@ class ScopedIndices:
         created_at_min: float | None = None,
         created_at_max: float | None = None,
         level: ScopeLevel | None = None,
+        mode: SearchMode = "auto",
     ) -> list[ScoredItem]:
         """
         Perform a search operation on the specified corpus.
@@ -193,6 +194,7 @@ class ScopedIndices:
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            mode=mode,
         )
 
     # ergonomic helpers (optional but nice)
@@ -207,6 +209,7 @@ class ScopedIndices:
         created_at_min: float | None = None,
         created_at_max: float | None = None,
         level: ScopeLevel | None = None,
+        mode: SearchMode | None = "semantic",
     ) -> list[ScoredItem]:
         """
         Perform a search for events based on the given query and optional filters.
@@ -259,8 +262,8 @@ class ScopedIndices:
             created_at_min=created_at_min,
             created_at_max=created_at_max,
             level=level,
+            mode=mode,
         )
-
         return items
 
     async def search_artifacts(

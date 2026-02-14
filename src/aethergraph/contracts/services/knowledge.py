@@ -5,7 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from aethergraph.contracts.services.llm import EmbeddingClientProtocol, LLMClientProtocol
-from aethergraph.services.scope.scope import Scope
+from aethergraph.contracts.storage.search_backend import SearchMode
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
 @dataclass
@@ -85,6 +86,8 @@ class KnowledgeBackend(Protocol):
         top_k: int = 10,
         kb_namespace: str | None = None,
         filters: dict[str, Any] | None = None,
+        level: ScopeLevel | None = None,
+        mode: SearchMode | None = None,
     ) -> list[KBSearchHit]:
         """
         Search for relevant chunks/docs given the query and optional filters.
@@ -104,6 +107,7 @@ class KnowledgeBackend(Protocol):
         kb_namespace: str | None = None,
         filters: dict[str, Any] | None = None,
         k: int = 10,
+        mode: SearchMode | None = None,
     ) -> KBAnswer:
         """
         Produce an answer to the question using the knowledge base.

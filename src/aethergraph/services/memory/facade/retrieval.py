@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from aethergraph.contracts.storage.search_backend import ScoredItem
+from aethergraph.contracts.storage.search_backend import ScoredItem, SearchMode
+from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.memory.facade.utils import event_matches_level
 from aethergraph.services.scope.scope import ScopeLevel
 
@@ -158,6 +159,7 @@ class RetrievalMixin:
         use_embedding: bool = True,
         level: ScopeLevel | None = None,
         time_window: str | None = None,
+        mode: SearchMode | None = None,
     ) -> list[Event]:
         """
         Search for events based on a query.
@@ -189,7 +191,7 @@ class RetrievalMixin:
         """
         # --- 1) Try index-backed search (ScopedIndices) ------------------
         if use_embedding and getattr(self, "scoped_indices", None) is not None:
-            idx = self.scoped_indices
+            idx: ScopedIndices = self.scoped_indices
             if idx is not None and idx.backend is not None:
                 filters: dict[str, Any] = {}
 
@@ -202,12 +204,19 @@ class RetrievalMixin:
                     # supports list↔list intersection semantics.
                     filters["tags"] = tags
 
+                # Decide effective mode
+                if mode is not None:
+                    eff_mode: SearchMode = mode
+                else:
+                    eff_mode = "semantic" if use_embedding else "lexical"
+
                 items = await idx.search_events(
                     query=query,
                     top_k=limit,
                     filters=filters,
                     time_window=time_window,
                     level=level,
+                    mode=eff_mode,
                 )
 
                 if items:

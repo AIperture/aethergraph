@@ -45,8 +45,12 @@ class SearchBackendSettings(BaseModel):
         dim=None,
     )
 
-    # Lexical search backend
+    # Lexical search backend (for pure sqlite_lexical backend, *and* for
+    # optional lexical index when enable_lexical=True on vector backends).
     sqlite_lexical: SQLiteLexicalSearchSettings = SQLiteLexicalSearchSettings()
+
+    # NEW: toggle lexical index when using vector backends
+    enable_lexical: bool = True
 
 
 class KnowledgeSettings(BaseModel):
@@ -68,4 +72,5 @@ class KnowledgeSettings(BaseModel):
             dir="kb/search/sqlite_lexical",
             filename="index.sqlite",
         ),
+        enable_lexical=True,
     )

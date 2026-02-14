@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
-from aethergraph.contracts.storage.search_backend import ScoredItem
+from aethergraph.contracts.storage.search_backend import ScoredItem, SearchMode
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.artifacts.paths import _from_uri_or_path
@@ -1304,23 +1304,25 @@ class ArtifactFacade:
         tags: list[str] | None = None,
         labels: dict[str, str] | None = None,
         metric: str | None = None,
-        mode: Literal["max", "min"] | None = None,
+        metric_mode: Literal["max", "min"] | None = None,
         level: ScopeLevel | None = "run",
         extra_scope_labels: dict[str, str] | None = None,
         limit: int | None = None,
         include_graph: bool = False,
         include_node: bool = False,
+        time_window: str | None = None,
+        mode: SearchMode | None = None,
     ) -> list[Artifact]:
         """
         Search for artifacts with flexible scoping and filtering.
 
         Behavior:
             - If query is None/empty: structured search via ArtifactIndex.
-            - If query is non-empty: semantic search via ScopedIndices (corpus="artifact"),
-              then hydrate from the artifact store.
+            - If query is non-empty: SearchBackend via ScopedIndices (corpus="artifact"),
+              + semantic/lexical/hybrid selected by `search_mode`.
 
         Args:
-            query: Optional free text query for semantic search.
+            query: Optional free text query for semantic/lexical/hybrid search.
             kind: Optional artifact kind to filter on (structured path only).
             tags: Optional list of tag strings for filtering.
             labels: Extra label filters to apply.
@@ -1329,6 +1331,8 @@ class ArtifactFacade:
             level: Scope level controlling tenant/scope filtering.
             extra_scope_labels: Additional scope labels to merge on top of level filters.
             limit: Maximum number of results (top_k for semantic; limit for structured).
+            time_window: Optional time window for created_at_ts filtering (SearchBackend).
+            search_mode: SearchMode for the semantic path ("auto"/"semantic"/"lexical"/"hybrid"/"structural").
 
         Returns:
             list[Artifact]
@@ -1337,7 +1341,7 @@ class ArtifactFacade:
         # 1) Build base labels from scope + level (org/user/scope_id/run/session)
         base_labels = self._filters_for_level(level)
 
-        # Only optionally constrain by graph/node
+        # Optionally constrain by graph/node for structured path
         if include_graph and self.graph_id:
             base_labels.setdefault("graph_id", self.graph_id)
         if include_node and self.node_id:
@@ -1349,7 +1353,7 @@ class ArtifactFacade:
         if extra_scope_labels:
             eff_labels.update(extra_scope_labels)
 
-        # 3) Tag filter
+        # 3) Tag filter (stored in labels["tags"] and handled downstream)
         if tags:
             eff_labels.setdefault("tags", tags)
 
@@ -1359,39 +1363,39 @@ class ArtifactFacade:
                 kind=kind,
                 labels=eff_labels or None,
                 metric=metric,
-                mode=mode,
+                mode=metric_mode,  # metric ranking mode: "max"/"min"
                 limit=limit,
             )
 
-        # --- Semantic path: use ScopedIndices corpus="artifact" -----------
+        # --- Semantic / lexical / hybrid path via ScopedIndices ----------
         if self.scoped_indices is None:
-            # Fallback: if no vector backend is available, degrade to structured search
+            # Fallback: if no SearchBackend is available, degrade to structured search
             return await self.index.search(
                 kind=kind,
                 labels=eff_labels or None,
                 metric=metric,
-                mode=mode,
+                mode=metric_mode,
                 limit=limit,
             )
 
         top_k = limit or 20
+        eff_mode: SearchMode = mode or "semantic"
 
         scored = await self.scoped_indices.search(
             corpus="artifact",
             query=query,
             top_k=top_k,
             filters=eff_labels,
-            level=None,  # level already applied via filters
+            level=None,  # level already applied via eff_labels
+            time_window=time_window,
+            mode=eff_mode,  # SearchMode, not metric mode
         )
 
         ids = [s.item_id for s in scored]
         if not ids:
             return []
 
-        print(
-            f"Semantic search for '{query}' returned {len(ids)} candidates, hydrating artifacts..."
-        )
-        arts = []
+        arts: list[Artifact] = []
         for art_id in ids:
             art = await self.get_by_id(art_id)
             if art:
@@ -1403,7 +1407,7 @@ class ArtifactFacade:
         *,
         kind: str,
         metric: str,
-        mode: Literal["max", "min"],
+        metric_mode: Literal["max", "min"],
         level: ScopeLevel | None = "run",
         tags: list[str] | None = None,
         filters: dict[str, str] | None = None,
@@ -1464,7 +1468,7 @@ class ArtifactFacade:
         return await self.index.best(
             kind=kind,
             metric=metric,
-            mode=mode,
+            mode=metric_mode,  # still the metric ranking mode for the index
             filters=eff_filters or None,
         )
 

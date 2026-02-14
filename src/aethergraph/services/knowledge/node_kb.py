@@ -9,6 +9,7 @@ from aethergraph.contracts.services.knowledge import (
     KBSearchHit,
     KnowledgeBackend,
 )
+from aethergraph.contracts.storage.search_backend import SearchMode
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
@@ -49,6 +50,8 @@ class NodeKB:
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
+        mode: SearchMode | None = None,
+        lexical_rerank: bool = True,
     ) -> list[KBSearchHit]:
         return await self.backend.search(
             scope=self.scope,
@@ -61,6 +64,8 @@ class NodeKB:
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            mode=mode,
+            lexical_rerank=lexical_rerank,
         )
 
     async def answer(
@@ -76,6 +81,8 @@ class NodeKB:
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
+        mode: SearchMode | None = None,
+        lexical_rerank: bool = True,
     ) -> KBAnswer:
         return await self.backend.answer(
             scope=self.scope,
@@ -89,6 +96,8 @@ class NodeKB:
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            mode=mode,
+            lexical_rerank=lexical_rerank,
         )
 
     async def list_corpora(self) -> list[dict[str, Any]]:

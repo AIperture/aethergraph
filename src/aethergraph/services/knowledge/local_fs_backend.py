@@ -14,7 +14,7 @@ from aethergraph.contracts.services.llm import (
     EmbeddingClientProtocol,
     LLMClientProtocol,
 )
-from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBackend
+from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBackend, SearchMode
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 from .chunker import TextSplitter
@@ -353,9 +353,36 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
-        mode: str = "hybrid",  # ["dense", "hybrid"]
+        mode: SearchMode | None = None,
+        lexical_rerank: bool = True,
         alpha: float = 0.8,  # fused = alpha * dense + (1-alpha) * lexical
     ) -> list[KBSearchHit]:
+        """
+        KB search over corpus chunks.
+
+        Parameters:
+            mode:
+                Search mode passed to the underlying SearchBackend:
+
+                    - "auto":      backend decides (usually semantic if query, structural otherwise)
+                    - "semantic":  embedding-based ANN
+                    - "lexical":   FTS/BM25 if available
+                    - "hybrid":    backend-level fusion of semantic + lexical
+                    - "structural": recency-only, ignores query vector
+
+                If None, defaults to "semantic" for KB (dense first).
+
+            lexical_rerank:
+                If True, apply an additional lexical BM25-style rerank on top of the
+                backend scores using `lexical_score(query, text)`:
+
+                    fused_score = alpha * dense_score + (1 - alpha) * lexical_score
+
+                If False, return backend scores as-is.
+
+            alpha:
+                Weight for backend score vs lexical score in the fusion.
+        """
         # --- 1) Build filters based on scope + kb_namespace + user filters ----
         base_filters: dict[str, Any] = {}
         if scope is not None:
@@ -368,12 +395,11 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
         merged: dict[str, Any] = {**base_filters, **(filters or {})}
         merged = {k: v for k, v in merged.items() if v is not None}
 
-        # --- 2) Dense retrieval from SearchBackend ----------------------------
-        # If we're going to hybrid rerank, over-fetch a bit from the vector index.
-        if mode == "hybrid":  # noqa SIM108
-            dense_k = min(top_k * 3, 100)
-        else:
-            dense_k = top_k
+        # --- 2) Decide search mode for the SearchBackend ---------------------
+        search_mode: SearchMode = mode or "semantic"
+
+        # If we're going to lexical-rerank, over-fetch a bit from the backend.
+        dense_k = min(top_k * 3, 100) if lexical_rerank else top_k
 
         rows: list[ScoredItem] = await self.search_backend.search(
             corpus=f"{corpus_id}",
@@ -383,17 +409,27 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            mode=search_mode,
         )
 
-        print(
-            f"⚠️ KB search: corpus={corpus_id} query='{query}' "
-            f"top_k={top_k} dense_k={dense_k} mode={mode} filters={merged} -> {len(rows)} hits"
-        )
+        if self.logger:
+            self.logger.debug(
+                "KB search: corpus=%s query=%r top_k=%s dense_k=%s "
+                "mode=%s lexical_rerank=%s filters=%s -> %s hits",
+                corpus_id,
+                query,
+                top_k,
+                dense_k,
+                search_mode,
+                lexical_rerank,
+                merged,
+                len(rows),
+            )
 
         # Need chunk map to get text/doc_id, since backend only returns metadata + score.
         chunks_map = self._load_chunks_map(corpus_id)
 
-        # --- 3) Build KBSearchHit list and optionally hybrid-rerank -----------
+        # --- 3) Build KBSearchHit list and optionally lexical-rerank ---------
         hits: list[KBSearchHit] = []
         for row in rows:
             cid = row.item_id
@@ -402,8 +438,7 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
             meta = dict(row.metadata or {})
             dense_score = row.score or 0.0
 
-            # Optional hybrid rerank: fuse dense + lexical
-            if mode == "hybrid":
+            if lexical_rerank:
                 lex = lexical_score(query, text)
                 fused = alpha * dense_score + (1.0 - alpha) * lex
                 score = fused
@@ -421,8 +456,7 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
                 )
             )
 
-        # If hybrid, sort by fused score and trim back to top_k
-        if mode == "hybrid":
+        if lexical_rerank:
             hits.sort(key=lambda h: h.score, reverse=True)
             if len(hits) > top_k:
                 hits = hits[:top_k]
@@ -443,6 +477,8 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
+        mode: SearchMode | None = None,
+        lexical_rerank: bool = True,
     ) -> KBAnswer:
         # 1) retrieve relevant chunks
         hits = await self.search(
@@ -456,6 +492,8 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            mode=mode,
+            lexical_rerank=lexical_rerank,
         )
 
         if not hits:
