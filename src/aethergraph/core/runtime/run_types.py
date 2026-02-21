@@ -24,6 +24,7 @@ class RunOrigin(str, Enum):
     playground = "playground"  # launched from a playground environment (sidecar/SDK/local dev)
     api = "api"  # launched from an API call
     system = "system"  # launched from a system process (internal maintenance, cron job, etc.)
+    schedule = "schedule"  # launched from a time-based trigger
 
 
 class RunVisibility(str, Enum):

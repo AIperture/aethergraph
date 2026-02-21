@@ -12,6 +12,7 @@ from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.planning.node_planner import NodePlanner
 from aethergraph.services.skills.skill_registry import SkillRegistry
+from aethergraph.services.triggers.trigger_facade import TriggerFacade
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -394,6 +395,11 @@ class NodeContext:
             ChannelSession: The channel session associated with the current run.
         """
         return ChannelSession(self, f"ui:run/{self.run_id}")
+
+    def triggers(self) -> TriggerFacade:
+        if not self.services.triggers:
+            raise RuntimeError("NodeContext.services.triggers is not configured")
+        return self.services.triggers
 
     def skills(self) -> SkillRegistry:
         if not self.services.skills:

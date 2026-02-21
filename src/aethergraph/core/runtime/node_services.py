@@ -7,6 +7,7 @@ from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.planning.planner_service import PlannerService
 from aethergraph.services.skills.skill_registry import SkillRegistry
+from aethergraph.services.triggers.trigger_facade import TriggerFacade
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -43,3 +44,4 @@ class NodeServices:
     planner_service: PlannerService | None = None  # PlannerService
     skills: SkillRegistry | None = None  # SkillRegistry
     kb: NodeKB | None = None  # NodeKB
+    triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes

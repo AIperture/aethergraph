@@ -21,6 +21,7 @@ from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.resume.router import ResumeRouter
+from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
 
@@ -202,6 +203,17 @@ class RuntimeEnv:
             scope=mem_scope,
         )
 
+        # ----- TriggerFacade tied to this node/run -----
+        triggers = None
+        if (
+            hasattr(self.container, "trigger_service")
+            and self.container.trigger_service is not None
+        ):
+            triggers = TriggerFacade(
+                trigger_service=self.container.trigger_service,
+                scope=mem_scope,
+            )
+
         services = NodeServices(
             channels=self.channels,
             continuation_store=self.continuation_store,
@@ -223,6 +235,7 @@ class RuntimeEnv:
             planner_service=self.container.planner_service,
             skills=self.container.skills_registry,
             kb=kb,  # NodeKB
+            triggers=triggers,  # TriggerFacade for this node
         )
         return ExecutionContext(
             run_id=self.run_id,

@@ -190,6 +190,14 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
             # - kb_index_labels flattened for searching.
             labels = user_labels
 
+            # If caller didn't specify a format, infer from path extension.
+            if "format" not in user_labels:
+                path = d.get("path")
+                if path:
+                    ext = os.path.splitext(path)[1].lstrip(".").lower()
+                    if ext:
+                        user_labels["format"] = ext
+
             title = d.get("title") or os.path.basename(d.get("path", "") or "") or "untitled"
             doc_id = _stable_id({"title": title, "labels": labels, "ts": _now_iso()})
             text: str | None = None
@@ -214,17 +222,21 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
 
                 lower = path.lower()
                 if lower.endswith(".pdf"):
-                    from .parsers.pdf import extract_text  # adjust imports
+                    from .parsers.pdf import extract_text  # type: ignore[assignment]
 
-                    text, extra_meta = extract_text(path)  # type: ignore[assignment]
+                    text, extra_meta = extract_text(path)
                 elif lower.endswith((".md", ".markdown", ".mkd")):
-                    from .parsers.md import extract_text
+                    from .parsers.md import extract_text  # type: ignore[assignment]
 
-                    text, extra_meta = extract_text(path)  # type: ignore[assignment]
+                    text, extra_meta = extract_text(path)
+                elif lower.endswith(".rst"):
+                    from .parsers.rst import extract_text  # type: ignore[assignment]
+
+                    text, extra_meta = extract_text(path)
                 else:
-                    from .parsers.txt import extract_text
+                    from .parsers.txt import extract_text  # type: ignore[assignment]
 
-                    text, extra_meta = extract_text(path)  # type: ignore[assignment]
+                    text, extra_meta = extract_text(path)
 
             else:
                 # inline text -> stage as artifact
@@ -302,7 +314,30 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
             added_docs += 1
 
             # ---- chunking + embedding ----
-            chunks = self.chunker.split(text)
+            # ---- chunking + embedding ----
+            # Choose splitter mode based on format
+            fmt = (labels.get("format") or "").lower()
+
+            if fmt in {"md", "markdown", "mkd"}:
+                split_mode = "markdown"
+            elif fmt in {"rst"}:
+                split_mode = "rst"
+            elif fmt in {"py", "ipynb", "toml", "yaml", "yml"}:
+                # In case you ever index code/config
+                split_mode = "code"
+            else:
+                split_mode = "plain"
+
+            # Reuse base chunker sizing but adjust mode per doc
+            base_chunker = self.chunker
+
+            chunker = TextSplitter(
+                target_tokens=getattr(base_chunker, "n", 400),
+                overlap_tokens=getattr(base_chunker, "o", 60),
+                mode=split_mode,
+            )
+
+            chunks = chunker.split(text)
             if not chunks:
                 continue
 

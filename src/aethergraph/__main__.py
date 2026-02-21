@@ -162,6 +162,34 @@ def main(argv: list[str] | None = None) -> int:
         help="Enable auto-reload on code changes (dev only).",
     )
 
+    serve.add_argument(
+        "--reload-dir",
+        action="append",
+        default=[],
+        help=(
+            "Additional directory to watch for auto-reload (repeatable). "
+            "If not provided, defaults to project-root plus parents of --load-path."
+        ),
+    )
+    serve.add_argument(
+        "--reload-include",
+        action="append",
+        default=[],
+        help=(
+            "Glob pattern of files/dirs to include for auto-reload (repeatable). "
+            "Example: --reload-include 'src/**/*.py'"
+        ),
+    )
+    serve.add_argument(
+        "--reload-exclude",
+        action="append",
+        default=[],
+        help=(
+            "Glob pattern of files/dirs to exclude from auto-reload (repeatable). "
+            "Example: --reload-exclude 'aethergraph_data/**/*' --reload-exclude '*/__pycache__/*'"
+        ),
+    )
+
     args = parser.parse_args(argv)
     print(args)
 
@@ -273,11 +301,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[AetherGraph] ♻️  {'Auto-reload:':<18} enabled (uvicorn)")
             print("=" * 50 + "\n")
 
-            reload_dirs: list[str] = [str(project_root)]
-            for p in paths:
-                reload_dirs.append(str(Path(p).parent))
+            # --- reload dirs ---
+            reload_dirs: list[str] = []
 
-            # Use import string + factory=True here
+            if args.reload_dir:
+                # User explicitly requested reload dirs -> trust them
+                reload_dirs.extend(args.reload_dir)
+            else:
+                # Default behavior: project_root + parents of load-paths
+                reload_dirs.append(str(project_root))
+                for p in paths:
+                    reload_dirs.append(str(Path(p).parent))
+
+            # De-duplicate while preserving order
+            seen = set()
+            reload_dirs = [d for d in reload_dirs if not (d in seen or seen.add(d))]
+
+            # --- include/exclude globs (None = use uvicorn defaults) ---
+            reload_includes = args.reload_include or None
+            reload_excludes = args.reload_exclude or None
+            print(f"👀 Watching for changes in dirs: {reload_dirs}")
+            print(f"👀 Auto-reload include patterns: {reload_includes or 'uvicorn defaults'}")
+            print(f"👀 Auto-reload exclude patterns: {reload_excludes or 'uvicorn defaults'}")
+
             uvicorn.run(
                 "aethergraph.server.app_factory:create_app_from_env",
                 host=args.host,
@@ -285,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
                 log_level=args.uvicorn_log_level,
                 reload=True,
                 reload_dirs=reload_dirs,
+                reload_includes=reload_includes,
+                reload_excludes=reload_excludes,
                 factory=True,
             )
             return 0

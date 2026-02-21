@@ -17,9 +17,13 @@ from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
+
+# ---- trigger services ----
+from aethergraph.contracts.services.trigger import TriggerService
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.event_log import EventLog
+from aethergraph.contracts.storage.trigger_store import TriggerStore
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
@@ -74,6 +78,8 @@ from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.tracing.noop import NoopTracer
+from aethergraph.services.triggers.engine import TriggerEngine
+from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
@@ -83,6 +89,7 @@ from aethergraph.storage.factory import (
     build_artifact_index,
     build_artifact_store,
     build_continuation_store,
+    build_doc_store,
     build_event_log,
     build_graph_state_store,
     build_memory_hotlog,
@@ -93,6 +100,7 @@ from aethergraph.storage.factory import (
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
+from aethergraph.storage.triggers.trigger_docstore import DocTriggerStore
 
 SERVICE_KEYS = [
     # core
@@ -154,6 +162,9 @@ class DefaultContainer:
     resume_router: ResumeRouter
     wakeup_queue: ThreadSafeWakeupQueue
     state_store: GraphStateStore
+    trigger_engine: TriggerEngine
+    trigger_service: TriggerService
+    trigger_store: TriggerStore
 
     # storage and artifacts
     kv_hot: EphemeralKV
@@ -388,6 +399,21 @@ def build_default_container(
     # skills registry
     skills_registry = SkillRegistry()
 
+    # trigger services
+    trigger_store = DocTriggerStore(
+        doc_store=build_doc_store(cfg)
+    )  # for simplicity, we use the event log as the backing store for triggers; in the future, we can make this swappable like other storage services
+    trigger_service = TriggerServiceImpl(
+        store=trigger_store, event_log=eventlog, logger=logger_factory.for_run()
+    )
+    trigger_engine = TriggerEngine(
+        store=trigger_store,
+        run_manager=run_manager,
+        event_log=eventlog,
+        run_store=run_store,
+        logger=logger_factory.for_run(),
+    )
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -404,6 +430,9 @@ def build_default_container(
         resume_bus=resume_bus,
         resume_router=resume_router,
         wakeup_queue=wakeup_queue,
+        trigger_store=trigger_store,
+        trigger_engine=trigger_engine,
+        trigger_service=trigger_service,
         execution=execution,
         planner_service=planner_service,
         kv_hot=kv_hot,

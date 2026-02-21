@@ -35,6 +35,7 @@ from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec
 from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.utils.optdeps import require
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,16 @@ def create_app(
         # --- Startup: attach settings/container and start external transports ---
         app.state.settings = settings
         app.state.container = container
+
+        trigger_engine_task = None
+
+        # Start trigger engine if trigger_service is present
+        if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
+            print("🍎 Starting TriggerEngine background task...")
+            trigger_engine: TriggerEngine = container.trigger_engine
+            trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
+            app.state.trigger_engine_task = trigger_engine_task
+            print("🍎 TriggerEngine started.")
 
         slack_task = None
         tg_task = None
@@ -96,10 +107,24 @@ def create_app(
             yield
         finally:
             # --- Shutdown: best-effort cleanup of background tasks ---
+            # 1) Stop TriggerEngine gracefully
+            if trigger_engine_task is not None:
+                trigger_engine: TriggerEngine = container.trigger_engine
+                try:
+                    await trigger_engine.stop()
+                except Exception:
+                    logger.exception("Error stopping TriggerEngine")
+
+                if not trigger_engine_task.done():
+                    # In case it's still waiting on the poll sleep
+                    trigger_engine_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await trigger_engine_task
+
+            # 2) Stop Slack / Telegram tasks
             for task in (slack_task, tg_task):
                 if task is not None and not task.done():
                     task.cancel()
-                    # swallow cancellation errors
                     with suppress(asyncio.CancelledError):
                         await task
 
