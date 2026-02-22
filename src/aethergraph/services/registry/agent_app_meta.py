@@ -258,6 +258,8 @@ def build_agent_meta(
     cfg: dict[str, Any] = dict(agent_cfg)
     base_tags = graph_meta.get("tags") or []
 
+    graph_id = graph_name
+
     agent_id = cfg.get("id", graph_name)
     agent_title = cfg.get("title", f"Agent for {graph_name}")
     agent_flow_id = cfg.get("flow_id", graph_meta.get("flow_id", graph_name))
@@ -285,6 +287,7 @@ def build_agent_meta(
     meta: dict[str, Any] = {
         "kind": "agent",
         "id": agent_id,
+        "graph_id": graph_id,
         "title": agent_title,
         "description": description,
         "short_description": short_description,
@@ -355,6 +358,8 @@ def build_app_meta(
     cfg: dict[str, Any] = dict(app_cfg)
     base_tags = graph_meta.get("tags") or []
 
+    graph_id = graph_name
+
     app_id = cfg.get("id", graph_name)
     app_flow_id = cfg.get("flow_id", graph_meta.get("flow_id", graph_name))
     app_name = cfg.get("name", f"App for {graph_name}")
@@ -372,8 +377,8 @@ def build_app_meta(
     meta: dict[str, Any] = {
         "kind": "app",
         "id": app_id,
+        "graph_id": graph_id,
         "name": app_name,
-        "graph_id": graph_name,
         "flow_id": app_flow_id,
         "badge": cfg.get("badge"),
         "category": cfg.get("category"),

@@ -39,6 +39,7 @@ async def list_agents(
         out.append(
             AgentDescriptor(
                 id=agent_id,
+                graph_id=meta.get("graph_id", name),
                 meta=meta,
             )
         )

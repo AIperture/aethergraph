@@ -119,13 +119,29 @@ class ScopeFactory:
         self,
         *,
         identity: RequestIdentity | None = None,
+        graph_id: str,
+        session_id: str | None = None,
+        app_id: str | None = None,
+        agent_id: str | None = None,
+        memory_level: ScopeLevel | None = "session",
     ) -> Scope:
         """
         Build a Scope for TriggerFacade.
 
         For now, this is basically the same as base_from_identity, but we keep it separate in case trigger-specific logic emerges.
         """
-        return self.base_from_identity(identity)
+        base = self.base_from_identity(identity)
+        return Scope(
+            org_id=base.org_id,
+            user_id=base.user_id,
+            client_id=base.client_id,
+            mode=base.mode,
+            graph_id=graph_id,
+            app_id=app_id or base.app_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            memory_level=memory_level,
+        )
 
     def for_kb(
         self,

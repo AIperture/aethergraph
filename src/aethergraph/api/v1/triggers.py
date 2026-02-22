@@ -221,14 +221,9 @@ async def list_triggers(
     services = current_services()
     trigger_svc: TriggerService = services.trigger_service
     tenant = _tenant_for_identity(identity)
-    print(f"list_triggers called with tenant={tenant}, identity={identity}")
     recs = await trigger_svc.list_for_owner(**tenant)
 
     metas = [_trigger_to_meta(rec) for rec in recs]
-    for m in metas:
-        print(
-            f"  trigger: id={m.trigger_id}, name={m.trigger_name}, status={m.status}, next_fire_at={m.next_fire_at}, tenant=({m.org_id}, {m.user_id}, {m.client_id})"
-        )
     return TriggerListResponse(triggers=metas)
 
 
@@ -244,9 +239,46 @@ async def create_trigger(
     trigger_svc: TriggerService = services.trigger_service
     scope_factory = services.scope_factory
 
-    # Build a scope representing "this user/app/client/org" for the trigger; this is used for scoping triggers in the store and later for scoping memory/agent/session when the trigger fires
-    # TODO: check if we need to use the memory_level/agent_id/app_id/session_id hints from the request to further customize the scope
-    scope = scope_factory.for_trigger(identity=identity)
+    # unpack id
+    app_id = payload.app_id
+    agent_id = payload.agent_id
+    session_id = payload.session_id
+    graph_id = payload.graph_id
+
+    scope = scope_factory.for_trigger(
+        identity=identity,
+        session_id=session_id,
+        graph_id=graph_id,
+        app_id=app_id,
+        agent_id=agent_id,
+    )
+
+    # customize input for both AG UI and external usage:
+    # shapes for now:
+    # - for AG UI agent, we requires: message, files, context_refs, session_id, user_meta in the inputs
+    #   for now we only have message and session_id (the rest need additional plumbing to support)
+    # - for AG UI app, we do not have input for now
+    # - for external usage, we just pass the default_inputs as is
+
+    inputs = {}
+    if agent_id:
+        inputs["message"] = payload.default_inputs.get(
+            "message", ""
+        )  # dummy message for no input from user
+        inputs["session_id"] = scope.session_id
+        inputs["files"] = payload.default_inputs.get(
+            "files", []
+        )  # optional files input for agent, for now we don't have a way to upload files via API so this would be empty; in the future we can add support for file uploads and include references here
+        inputs["context_refs"] = payload.default_inputs.get(
+            "context_refs", []
+        )  # optional context_refs input for agent, for now we don't have a way to specify this via API so this would be empty; in the future we can allow users to specify context_refs to include when firing the trigger
+        inputs["user_meta"] = payload.default_inputs.get(
+            "user_meta", {}
+        )  # optional user_meta input for agent, for now we don't have a way to specify this via API so this would be empty; in the future we can allow users to specify user_meta when firing the trigger
+    if app_id:
+        inputs = payload.default_inputs or {}
+    if not agent_id and not app_id:
+        inputs = payload.default_inputs or {}
 
     if payload.kind == "cron" and not payload.cron_expr:
         raise HTTPException(status_code=400, detail="cron_expr is required for cron triggers")
@@ -262,7 +294,7 @@ async def create_trigger(
     rec = await trigger_svc.create_from_scope(
         scope=scope,
         graph_id=payload.graph_id,
-        default_inputs=payload.default_inputs or {},
+        default_inputs=inputs,
         kind=payload.kind,
         cron_expr=payload.cron_expr,
         interval_seconds=payload.interval_seconds,
@@ -275,7 +307,6 @@ async def create_trigger(
         trigger_name=payload.trigger_name,
         meta=payload.meta or {},
     )
-
     return _trigger_to_meta(rec)
 
 

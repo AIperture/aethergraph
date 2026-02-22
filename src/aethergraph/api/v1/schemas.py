@@ -526,6 +526,7 @@ class AgentDescriptor(BaseModel):
     """
 
     id: str
+    graph_id: str
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
