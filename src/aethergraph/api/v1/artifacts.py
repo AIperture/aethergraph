@@ -150,6 +150,7 @@ async def list_artifacts(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
+    # print(f"list_artifacts called with scope_id={scope_id}, run_id={run_id}, session_id={session_id}, kind={kind}, tags={tags}, cursor={cursor}, limit={limit}, identity={identity}")
     container = current_services()
     index = getattr(container, "artifact_index", None)
     if index is None:

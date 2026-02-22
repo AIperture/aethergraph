@@ -254,6 +254,7 @@ def build_default_container(
     logger_factory = StdLoggerService.build(
         LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs"))
     )
+
     clock = SystemClock()
     # registry = UnifiedRegistry()
     registry: UnifiedRegistry = current_registry()

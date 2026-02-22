@@ -31,6 +31,8 @@ class RateLimitSettings(BaseSettings):
 class LoggingSettings(BaseModel):
     nspace: str = Field("aethergraph", description="Root logger namespace")
     level: str = Field("INFO", description="Root log level")
+    console_level: str | None = Field(None, description="Console log level")
+    file_level: str | None = Field("INFO", description="File log level")
     json_logs: bool = Field(False, description="Emit JSON logs")
     enable_queue: bool = Field(default=False, description="Enable async logging via queue")
 

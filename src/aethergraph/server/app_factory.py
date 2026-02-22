@@ -55,7 +55,8 @@ def create_app(
 
     # Resolve settings and container up front so lifespan can capture them
     settings = cfg or AppSettings()
-    settings.logging.level = log_level
+    if settings.logging.console_level is None:
+        settings.logging.console_level = log_level
 
     container = build_default_container(root=workspace, cfg=settings)
 

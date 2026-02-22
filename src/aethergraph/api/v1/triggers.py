@@ -186,7 +186,7 @@ def _tenant_for_identity(identity: RequestIdentity) -> dict[str, str | None]:
     return {
         "org_id": identity.org_id,
         "user_id": user_or_client,
-        "client_id": identity.client_id,
+        # "client_id": identity.client_id,
     }
 
 
@@ -205,8 +205,8 @@ def _check_trigger_belongs_to_identity(
         if not (rec.user_id == t["user_id"] or rec.client_id == t["user_id"]):
             return False
 
-    if t["client_id"] is not None and rec.client_id != t["client_id"]:  # noqa: SIM103
-        return False
+    # if t["client_id"] is not None and rec.client_id != t["client_id"]:  # noqa: SIM103
+    #     return False
 
     return True
 
@@ -221,9 +221,14 @@ async def list_triggers(
     services = current_services()
     trigger_svc: TriggerService = services.trigger_service
     tenant = _tenant_for_identity(identity)
+    print(f"list_triggers called with tenant={tenant}, identity={identity}")
     recs = await trigger_svc.list_for_owner(**tenant)
 
     metas = [_trigger_to_meta(rec) for rec in recs]
+    for m in metas:
+        print(
+            f"  trigger: id={m.trigger_id}, name={m.trigger_name}, status={m.status}, next_fire_at={m.next_fire_at}, tenant=({m.org_id}, {m.user_id}, {m.client_id})"
+        )
     return TriggerListResponse(triggers=metas)
 
 

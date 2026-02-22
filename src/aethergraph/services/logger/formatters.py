@@ -6,6 +6,8 @@ import sys
 import time
 from typing import Any
 
+from aethergraph.core.graph.graph_refs import GRAPH_INPUTS_NODE_ID
+
 
 class SafeFormatter(logging.Formatter):
     """
@@ -14,10 +16,16 @@ class SafeFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
+        # print("🍎 SafeFormatter: Formatting log record with message:", record.getMessage())
         # Provide default values for our known keys so %()s doesn't KeyError
         for k in ("run_id", "node_id", "graph_id", "agent_id"):
             if not hasattr(record, k):
                 setattr(record, k, "-")
+
+        # Collapse noisy sentinel for graph inputs
+        if getattr(record, "node_id", None) == GRAPH_INPUTS_NODE_ID:
+            record.node_id = "-"
+        # print("🍎 SafeFormatter: After ensuring safe keys, record has run_id:", getattr(record, "run_id", None), "node_id:", getattr(record, "node_id", None))
         return super().format(record)
 
 
