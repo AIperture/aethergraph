@@ -6,8 +6,6 @@ from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 @dataclass(frozen=True)
 class ScopeFactory:
-    default_app_id: str | None = None
-
     def base_from_identity(self, identity: RequestIdentity | None) -> Scope:
         """
         Create a base Scope from a RequestIdentity.
@@ -20,7 +18,6 @@ class ScopeFactory:
             user_id=identity.user_id,
             client_id=identity.client_id,
             mode=identity.mode,
-            app_id=self.default_app_id,
         )
 
     def for_node(
@@ -117,6 +114,18 @@ class ScopeFactory:
             return s.with_memory_scope(custom_scope_id, memory_level=level)
 
         return s
+
+    def for_trigger(
+        self,
+        *,
+        identity: RequestIdentity | None = None,
+    ) -> Scope:
+        """
+        Build a Scope for TriggerFacade.
+
+        For now, this is basically the same as base_from_identity, but we keep it separate in case trigger-specific logic emerges.
+        """
+        return self.base_from_identity(identity)
 
     def for_kb(
         self,

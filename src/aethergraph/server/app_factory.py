@@ -20,6 +20,7 @@ from aethergraph.api.v1.misc import router as misc_router
 from aethergraph.api.v1.runs import router as runs_router
 from aethergraph.api.v1.session import router as session_router
 from aethergraph.api.v1.stats import router as stats_router
+from aethergraph.api.v1.triggers import router as triggers_router
 from aethergraph.api.v1.viz import router as vis_router
 
 # include apis
@@ -197,6 +198,7 @@ def create_app(
     app.include_router(router=session_router, prefix="/api/v1")
     app.include_router(router=apps_router, prefix="/api/v1")
     app.include_router(router=agents_router, prefix="/api/v1")
+    app.include_router(router=triggers_router, prefix="/api/v1")
 
     # Webui router
     from aethergraph.plugins.channel.routes.webui_routes import router as webui_router

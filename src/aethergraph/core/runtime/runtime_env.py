@@ -204,15 +204,15 @@ class RuntimeEnv:
         )
 
         # ----- TriggerFacade tied to this node/run -----
-        triggers = None
-        if (
-            hasattr(self.container, "trigger_service")
-            and self.container.trigger_service is not None
-        ):
-            triggers = TriggerFacade(
-                trigger_service=self.container.trigger_service,
-                scope=mem_scope,
-            )
+        # trigger_scope = self.container.scope_factory.for_trigger(identity=self.identity)
+        trigger_scope = (
+            mem_scope  # for now we need trigger to launch runs with the same session id etc
+        )
+        triggers = TriggerFacade(
+            trigger_service=self.container.trigger_service,
+            trigger_engine=self.container.trigger_engine,
+            scope=trigger_scope,
+        )
 
         services = NodeServices(
             channels=self.channels,

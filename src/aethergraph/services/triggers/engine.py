@@ -4,16 +4,18 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.storage.event_log import EventLog
-from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunStatus, RunVisibility
 from aethergraph.storage.triggers.trigger_docstore import TriggerStore
 
 from .types import TriggerRecord
+
+if TYPE_CHECKING:
+    from aethergraph.core.runtime.run_manager import RunManager
 
 
 @dataclass
@@ -73,16 +75,27 @@ class TriggerEngine:
                 if self.logger:
                     self.logger.error(f"Error firing trigger {trig.trigger_id}: {e}")
 
-    async def fire_event(self, event_key: str, payload: dict[str, Any] | None = None) -> None:
+    async def fire_event(
+        self,
+        event_key: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        # optional tenant scoping for event-based triggers; if provided, only triggers matching these will be fired
+        org_id: str | None = None,
+        user_id: str | None = None,
+        client_id: str | None = None,
+    ) -> None:
         """
         Fire all active event-based triggers for this event_key.
 
         payload, if provided, will be merged into default_inputs under key 'event'
         (we can change this merging policy).
         """
-
         now = datetime.now(timezone.utc)
-        triggers = await self.store.list_by_event_key(event_key)
+        triggers = await self.store.list_by_event_key(
+            event_key, org_id=org_id, user_id=user_id, client_id=client_id
+        )
+
         for trig in triggers:
             try:
                 extra_inputs = {"event": payload} if payload else None

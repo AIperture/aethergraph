@@ -90,19 +90,21 @@ class TriggerServiceImpl(TriggerService):
         await self.store.update(trig)
         await self._log_trigger_event(trig, action="canceled")
 
+    async def delete(self, trigger_id: str) -> None:
+        trig: TriggerRecord | None = await self.store.get(trigger_id)
+        if not trig:
+            return
+        await self.store.delete(trigger_id)
+        await self._log_trigger_event(trig, action="deleted")
+
     async def get(self, trigger_id: str) -> TriggerRecord | None:
         return await self.store.get(trigger_id)
 
     async def list_for_owner(
         self, *, org_id: str | None, user_id: str | None
     ) -> list[TriggerRecord]:
-        # Simple: load all active and filter; we can optimize later.
-        all_trigs: list[TriggerRecord] = await self.store.list_active()
-        return [
-            t
-            for t in all_trigs
-            if (org_id is None or t.org_id == org_id) and (user_id is None or t.user_id == user_id)
-        ]
+        all_trigs = await self.store.list_all(org_id=org_id, user_id=user_id)
+        return all_trigs
 
     # ------------ helpers -----------
 

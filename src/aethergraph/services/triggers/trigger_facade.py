@@ -6,6 +6,7 @@ from typing import Any
 
 from aethergraph.contracts.services.trigger import TriggerKind
 from aethergraph.services.scope.scope import Scope, ScopeLevel
+from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerService
 from aethergraph.services.triggers.types import TriggerRecord
 
@@ -32,6 +33,7 @@ class TriggerFacade:
     """
 
     trigger_service: TriggerService
+    trigger_engine: TriggerEngine
     scope: Scope
 
     # ------------ low-level: generic trigger management, mostly delegating to TriggerService --------------
@@ -194,3 +196,25 @@ class TriggerFacade:
 
     async def get(self, trigger_id: str) -> TriggerRecord | None:
         return await self.trigger_service.get(trigger_id)
+
+    async def fire_event(
+        self,
+        event_key: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Fire all active triggers for this event_key.
+
+        payload, if provided, will be merged into default_inputs under key 'event'
+        (we can change this merging policy).
+        """
+        org_id = self.scope.org_id
+        user_id = self.scope.user_id
+        client_id = self.scope.client_id
+        await self.trigger_engine.fire_event(
+            event_key=event_key,
+            payload=payload,
+            org_id=org_id,
+            user_id=user_id,
+            client_id=client_id,
+        )

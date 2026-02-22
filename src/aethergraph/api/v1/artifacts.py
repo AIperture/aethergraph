@@ -156,20 +156,6 @@ async def list_artifacts(
         return ArtifactListResponse(artifacts=[], next_cursor=None)
 
     offset = decode_cursor(cursor.strip() if cursor else None)
-
-    # label_filters: dict[str, Any] = {}
-
-    # if scope_id and scope_id.strip():
-    #     label_filters["scope_id"] = scope_id.strip()
-
-    # if tags and tags.strip():
-    #     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-    #     if tag_list:
-    #         label_filters["tags"] = tag_list
-
-    # # 🔹 Tenant scoping: org_id + user_id
-    # label_filters.update(_tenant_label_filters(identity))
-
     label_filters: dict[str, Any] = {}
 
     # execution scopes

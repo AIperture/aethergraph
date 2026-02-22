@@ -14,4 +14,12 @@ class TriggerStore(Protocol):
 
     async def list_active(self) -> list[Any]: ...
     async def list_due(self, now: datetime) -> list[Any]: ...
-    async def list_by_event_key(self, event_key: str) -> list[Any]: ...
+    async def list_by_event_key(
+        self,
+        event_key: str,
+        *,
+        org_id: str | None = None,
+        user_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+    ) -> list[Any]: ...  # used for event-based triggers
