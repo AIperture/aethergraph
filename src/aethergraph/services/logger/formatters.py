@@ -16,7 +16,6 @@ class SafeFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        # print("🍎 SafeFormatter: Formatting log record with message:", record.getMessage())
         # Provide default values for our known keys so %()s doesn't KeyError
         for k in ("run_id", "node_id", "graph_id", "agent_id"):
             if not hasattr(record, k):
@@ -25,8 +24,24 @@ class SafeFormatter(logging.Formatter):
         # Collapse noisy sentinel for graph inputs
         if getattr(record, "node_id", None) == GRAPH_INPUTS_NODE_ID:
             record.node_id = "-"
-        # print("🍎 SafeFormatter: After ensuring safe keys, record has run_id:", getattr(record, "run_id", None), "node_id:", getattr(record, "node_id", None))
-        return super().format(record)
+
+        # First do the normal formatting
+        s = super().format(record)
+
+        # Then strip any "field=-" tokens for missing context,
+        # assuming your patterns use "run=%(run_id)s", "node=%(node_id)s", etc.
+        for prefix, attr in (
+            ("run", "run_id"),
+            ("node", "node_id"),
+            ("graph", "graph_id"),
+            ("agent", "agent_id"),
+        ):
+            val = getattr(record, attr, None)
+            if not val or val == "-":
+                token = f" {prefix}=-"
+                s = s.replace(token, "")
+
+        return s
 
 
 class JsonFormatter(logging.Formatter):

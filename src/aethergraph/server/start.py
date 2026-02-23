@@ -239,6 +239,9 @@ def start_server(
         )  # strangly, this needs two spaces unlike the rest
         print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
         print(f"[AetherGraph] 📂 {'Workspace:':<18} {workspace}")
+
+        log_path = Path(workspace) / "logs" / "aethergraph.log"
+        print(f"[AetherGraph] 🧩 {'Log Path:':<18} {log_path}")
         print("=" * 50 + "\n")
 
         handle = ServerHandle(url=url, server=server, thread=t)

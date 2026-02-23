@@ -230,8 +230,6 @@ class StdLoggerService(LoggerService):
         _ensure_dir(Path(cfg.log_dir))
         file_path = Path(cfg.log_dir) / "aethergraph.log"
 
-        print(f"🍎 LoggerService.build: logging to {file_path}")
-
         if cfg.enable_queue:
             q = queue.Queue(-1)
             qh = logging.handlers.QueueHandler(q)

@@ -70,11 +70,11 @@ def create_app(
 
         # Start trigger engine if trigger_service is present
         if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
-            print("🍎 Starting TriggerEngine background task...")
+            logger.info("Starting TriggerEngine background task")
             trigger_engine: TriggerEngine = container.trigger_engine
             trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
             app.state.trigger_engine_task = trigger_engine_task
-            print("🍎 TriggerEngine started.")
+            logger.info("TriggerEngine background task started")
 
         slack_task = None
         tg_task = None

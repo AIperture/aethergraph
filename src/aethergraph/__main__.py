@@ -272,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
                 },
             )
 
+        log_path = Path(args.workspace) / "logs" / "aethergraph.log"
         if not args.reload:
             # Run blocking server (lock released so others can read server.json)
             print("\n" + "=" * 50)
@@ -282,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
             )  # strangly, this needs two spaces unlike the rest
             print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
             print(f"[AetherGraph] 📂 {'Workspace:':<18} {args.workspace}")
+            print(f"[AetherGraph] 🧩 {'Log Path:':<18} {log_path}")
             print("=" * 50 + "\n")
             uvicorn.run(
                 app,
@@ -298,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[AetherGraph] 🖥️  {'UI:':<18} {url}/ui   (if built)")
             print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
             print(f"[AetherGraph] 📂 {'Workspace:':<18} {args.workspace}")
+            print(f"[AetherGraph] 🧩 {'Log Path:':<18} {log_path}")
             print(f"[AetherGraph] ♻️  {'Auto-reload:':<18} enabled (uvicorn)")
             print("=" * 50 + "\n")
 

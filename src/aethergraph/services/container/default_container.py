@@ -266,12 +266,14 @@ def build_default_container(
     sched_registry = SchedulerRegistry()
     wait_registry = WaitRegistry()
     resume_bus = MultiSchedulerResumeBus(
-        registry=sched_registry, store=cont_store, logger=logger_factory.for_run()
+        registry=sched_registry,
+        store=cont_store,
+        logger=logger_factory.for_service(ns="resume_bus"),
     )
     resume_router = ResumeRouter(
         store=cont_store,
         runner=resume_bus,
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_service(ns="resume_router"),
         wait_registry=wait_registry,
     )
     wakeup_queue = ThreadSafeWakeupQueue()  # TODO: this is a placeholder, not fully implemented
@@ -297,7 +299,7 @@ def build_default_container(
     channels = build_bus(
         channel_adapters,
         default="console:stdin",
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_channel(),
         resume_router=resume_router,
         cont_store=cont_store,
     )
@@ -330,7 +332,7 @@ def build_default_container(
         hot_limit=int(cfg.memory.hot_limit),
         hot_ttl_s=int(cfg.memory.hot_ttl_s),
         default_signal_threshold=float(cfg.memory.signal_threshold),
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_service(ns="memory"),
         llm_service=llm_service.get("default") if llm_service else None,
     )
 
@@ -379,7 +381,7 @@ def build_default_container(
         embed_client=embed_client,
         llm_client=llm_clients.get("default") if llm_clients else None,
         chunker=TextSplitter(),
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_service(ns="kb_backend"),
     )
 
     # Execution service
@@ -405,14 +407,16 @@ def build_default_container(
         doc_store=build_doc_store(cfg)
     )  # for simplicity, we use the event log as the backing store for triggers; in the future, we can make this swappable like other storage services
     trigger_service = TriggerServiceImpl(
-        store=trigger_store, event_log=eventlog, logger=logger_factory.for_run()
+        store=trigger_store,
+        event_log=eventlog,
+        logger=logger_factory.for_service(ns="trigger_service"),
     )
     trigger_engine = TriggerEngine(
         store=trigger_store,
         run_manager=run_manager,
         event_log=eventlog,
         run_store=run_store,
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_service(ns="trigger_engine"),
     )
 
     container = DefaultContainer(
