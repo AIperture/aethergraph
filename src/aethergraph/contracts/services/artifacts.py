@@ -33,13 +33,23 @@ class Artifact:
     app_id: str | None = None
     session_id: str | None = None
 
+    # ---- alias: mimetype <-> mime ----
+    @property
+    def mimetype(self) -> str | None:
+        return self.mime
+
+    @mimetype.setter
+    def mimetype(self, value: str | None) -> None:
+        self.mime = value
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "artifact_id": self.artifact_id,
             "uri": self.uri,
             "kind": self.kind,
             "bytes": self.bytes,
             "sha256": self.sha256,
+            # keep existing key
             "mime": self.mime,
             "run_id": self.run_id,
             "graph_id": self.graph_id,
@@ -59,6 +69,10 @@ class Artifact:
             "session_id": self.session_id,
         }
 
+        # optional: additive for new clients (won’t break old ones)
+        d["mimetype"] = self.mime
+        return d
+
 
 class AsyncArtifactStore(Protocol):
     async def save_file(
@@ -71,6 +85,7 @@ class AsyncArtifactStore(Protocol):
         node_id: str,
         tool_name: str,
         tool_version: str,
+        mime: str | None = None,
         suggested_uri: str | None = None,
         pin: bool = False,
         labels: dict | None = None,

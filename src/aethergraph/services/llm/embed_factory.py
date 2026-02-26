@@ -1,13 +1,17 @@
+# aethergraph/services/llm/embedding_factory.py
+from __future__ import annotations
+
 import logging
 import os
 
 from pydantic import SecretStr
 
-from aethergraph.config.llm import LLMProfile, LLMSettings
+from aethergraph.config.llm import EmbeddingProfile, EmbeddingSettings
+from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
+from aethergraph.services.metering.eventlog_metering import MeteringService
 
 from ..secrets.base import Secrets
-from .generic_client import GenericLLMClient
-from .providers import Provider
+from .factory import _provider_default_base_url  # reuse from LLM factory if possible
 
 
 def _resolve_key(direct: SecretStr | None, ref: str | None, secrets: Secrets) -> str | None:
@@ -18,44 +22,27 @@ def _resolve_key(direct: SecretStr | None, ref: str | None, secrets: Secrets) ->
     return None
 
 
-def _provider_default_base_url(provider: Provider) -> str | None:
-    # Fallback base URLs if not given in config or env
-    if provider == "openai":
-        return "https://api.openai.com/v1"
-    if provider == "azure":
-        # Must still rely on env/config for endpoint
-        return os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/") or None
-    if provider == "anthropic":
-        return "https://api.anthropic.com"
-    if provider == "google":
-        return "https://generativelanguage.googleapis.com"
-    if provider == "openrouter":
-        return "https://openrouter.ai/api/v1"
-    if provider == "lmstudio":
-        return os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
-    if provider == "ollama":
-        return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    return None
-
-
-def _apply_env_overrides_to_profile(
+def _apply_env_overrides_to_embed_profile(
     name: str,
-    p: LLMProfile,
+    p: EmbeddingProfile,
     *,
     is_default: bool,
     secrets: Secrets,
-) -> LLMProfile:
+) -> EmbeddingProfile:
     """
     Mutate + return profile with env-based overrides.
-    - For the default profile, allow generic LLM_* env vars.
+
+    - For the default embedding profile, allow generic EMBED_* env vars
+      (and fall back to LLM_* for smoother migration).
     - For all profiles, fill missing base_url / api_key from provider-specific env.
     """
-    # 1) Generic overrides for DEFAULT profile (if user wants a quick global switch)
+    # 1) Generic overrides for DEFAULT embedding profile
     if is_default:
-        provider_env = os.getenv("LLM_PROVIDER")
-        model_env = os.getenv("LLM_MODEL")
-        base_env = os.getenv("LLM_BASE_URL")
-        timeout_env = os.getenv("LLM_TIMEOUT")
+        provider_env = os.getenv("EMBED_PROVIDER") or os.getenv("LLM_PROVIDER")
+        # MIGRATION: allow old LLM_EMBED_MODEL env to still work
+        model_env = os.getenv("EMBED_MODEL") or os.getenv("LLM_EMBED_MODEL")
+        base_env = os.getenv("EMBED_BASE_URL") or os.getenv("LLM_BASE_URL")
+        timeout_env = os.getenv("EMBED_TIMEOUT")
 
         if provider_env:
             p.provider = provider_env.lower()  # type: ignore[assignment]
@@ -68,7 +55,7 @@ def _apply_env_overrides_to_profile(
                 p.timeout = float(timeout_env)
             except ValueError:
                 logger = logging.getLogger("aethergraph.services.llm")
-                logger.warning(f"Invalid LLM_TIMEOUT value: {timeout_env}")
+                logger.warning(f"Invalid EMBED_TIMEOUT value: {timeout_env}")
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:
@@ -93,10 +80,7 @@ def _apply_env_overrides_to_profile(
         elif p.provider == "azure":
             api_key = os.getenv("AZURE_OPENAI_KEY")
 
-        # If we found one, and no api_key_ref was configured, we can
-        # optionally set api_key_ref so it's visible in config
         if api_key and not p.api_key_ref:
-            # Optional: record that this profile is using that env key
             p.api_key_ref = {
                 "openai": "OPENAI_API_KEY",
                 "anthropic": "ANTHROPIC_API_KEY",
@@ -105,52 +89,60 @@ def _apply_env_overrides_to_profile(
                 "azure": "AZURE_OPENAI_KEY",
             }.get(p.provider, None)  # type: ignore[index]
 
-    # Finally, store the resolved key back into api_key for the client factory
     if api_key:
         p.api_key = SecretStr(api_key)
 
     return p
 
 
-def client_from_profile(p: LLMProfile, secrets: Secrets) -> GenericLLMClient:
-    # At this point, _apply_env_overrides_to_profile has already filled
-    # p.base_url, p.api_key, etc. as much as possible.
+def embed_client_from_profile(
+    p: EmbeddingProfile,
+    secrets: Secrets,
+    *,
+    metering: MeteringService | None = None,
+) -> GenericEmbeddingClient:
     api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
 
-    return GenericLLMClient(
+    return GenericEmbeddingClient(
         provider=p.provider,
         model=p.model,
         base_url=p.base_url,
         api_key=api_key,
         azure_deployment=p.azure_deployment,
         timeout=p.timeout,
+        metering=metering,
     )
 
 
-def build_llm_clients(cfg: LLMSettings, secrets: Secrets) -> dict[str, GenericLLMClient]:
-    """Returns dict of {profile_name: client}, always includes 'default' if enabled."""
+def build_embedding_clients(
+    cfg: EmbeddingSettings,
+    secrets: Secrets,
+    *,
+    metering: MeteringService | None = None,
+) -> dict[str, GenericEmbeddingClient]:
+    """Returns dict of {profile_name: GenericEmbeddingClient}, always includes 'default' if enabled."""
     if not cfg.enabled:
         return {}
 
-    # Mutate cfg.llm.default in-place with env defaults
-    default_profile = _apply_env_overrides_to_profile(
+    # Default profile
+    default_profile = _apply_env_overrides_to_embed_profile(
         name="default",
         p=cfg.default,
         is_default=True,
         secrets=secrets,
     )
-    clients: dict[str, GenericLLMClient] = {
-        "default": client_from_profile(default_profile, secrets)
+    clients: dict[str, GenericEmbeddingClient] = {
+        "default": embed_client_from_profile(default_profile, secrets, metering=metering)
     }
 
     # Extra profiles
     for name, prof in (cfg.profiles or {}).items():
-        prof = _apply_env_overrides_to_profile(
+        prof = _apply_env_overrides_to_embed_profile(
             name=name,
             p=prof,
             is_default=False,
             secrets=secrets,
         )
-        clients[name] = client_from_profile(prof, secrets)
+        clients[name] = embed_client_from_profile(prof, secrets, metering=metering)
 
     return clients

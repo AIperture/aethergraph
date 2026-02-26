@@ -121,6 +121,7 @@ class CASArtifactStore(AsyncArtifactStore):
         node_id: str,
         tool_name: str,
         tool_version: str,
+        mime: str | None = None,
         suggested_uri: str | None = None,  # NOTE: only metadata / pretty; impl may ignore
         pin: bool = False,
         labels: dict | None = None,
@@ -162,7 +163,7 @@ class CASArtifactStore(AsyncArtifactStore):
             kind=kind,
             bytes=nbytes,
             sha256=sha,
-            mime=None,  # callers can fill in if desired
+            mime=mime,
             run_id=run_id,
             graph_id=graph_id,
             node_id=node_id,

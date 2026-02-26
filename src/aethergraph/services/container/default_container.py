@@ -10,8 +10,6 @@ from aethergraph.config.config import AppSettings
 from aethergraph.contracts.services.execution import ExecutionService
 
 # ---- optional services (not used by default) ----
-from aethergraph.contracts.services.llm import LLMClientProtocol
-
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.contracts.services.runs import RunStore
@@ -52,8 +50,9 @@ from aethergraph.services.knowledge.chunker import TextSplitter
 
 # ---- kv services ----
 from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBackend
+from aethergraph.services.llm.embed_factory import build_embedding_clients
+from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
-from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -181,8 +180,9 @@ class DefaultContainer:
     viz_service: VizService | None = None
 
     # optional llm service
-    llm: LLMClientProtocol | None = None
+    llm: LLMService | None = None
     mcp: MCPService | None = None
+    embed_service: EmbeddingService | None = None
 
     # run controls -- for http endpoints and run manager
     run_store: RunStore | None = None
@@ -312,13 +312,23 @@ def build_default_container(
 
     viz_service = VizService(event_log=eventlog)
 
+    # Metering service
+    # TODO: make metering service configurable
+    metering_store = EventLogMeteringStore(event_log=eventlog)
+    metering = EventLogMeteringService(store=metering_store)
+
     # optional services
     secrets = (
         EnvSecrets()
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     llm_clients = build_llm_clients(cfg.llm, secrets)  # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
-    embed_client = GenericEmbeddingClient(provider="openai", model="text-embedding-3-small")
+
+    embed_clients = build_embedding_clients(
+        cfg.embed, secrets, metering=metering
+    )  # return {profile: GenericEmbeddingClient}
+    embed_service = EmbeddingService(clients=embed_clients) if embed_clients else None
+    embed_client = embed_clients["default"] if embed_clients else None
 
     mcp = MCPService()  # empty MCP service; users can register clients as needed
 
@@ -345,11 +355,6 @@ def build_default_container(
         max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
     )
     session_store = build_session_store(cfg)
-
-    # Metering service
-    # TODO: make metering service configurable
-    metering_store = EventLogMeteringStore(event_log=eventlog)
-    metering = EventLogMeteringService(store=metering_store)
 
     # rate limiter
     rl_settings = cfg.rate_limit
@@ -450,6 +455,7 @@ def build_default_container(
         eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
+        embed_service=embed_service,
         mcp=mcp,
         run_store=run_store,
         run_manager=run_manager,

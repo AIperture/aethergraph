@@ -85,7 +85,6 @@ class GenericLLMClient(LLMClientProtocol):
         self,
         provider: str | None = None,
         model: str | None = None,
-        embed_model: str | None = None,
         *,
         base_url: str | None = None,
         api_key: str | None = None,
@@ -98,7 +97,7 @@ class GenericLLMClient(LLMClientProtocol):
     ):
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
-        self.embed_model = embed_model or os.getenv("EMBED_MODEL") or "text-embedding-3-small"
+        self.embed_model = None  # will be deprecated in favor of a separate EmbeddingsClient
         self._retry = _Retry()
         self._client = httpx.AsyncClient(timeout=timeout)
         self._bound_loop = None
@@ -1574,7 +1573,9 @@ class GenericLLMClient(LLMClientProtocol):
         # Anthropic: no embeddings endpoint
         raise NotImplementedError(f"Embeddings not supported for {self.provider}")
 
-    async def embed(self, texts: list[str], **kw) -> list[list[float]]:
+    async def embed_deprecated_use_embedding_client_instead(
+        self, texts: list[str], **kw
+    ) -> list[list[float]]:
         """
         Generate vector embeddings for a batch of texts using the configured LLM provider.
 

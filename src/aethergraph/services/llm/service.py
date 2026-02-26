@@ -34,7 +34,6 @@ class LLMService:
         *,
         provider: Provider | None = None,
         model: str | None = None,
-        embed_model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
         azure_deployment: str | None = None,
@@ -48,7 +47,6 @@ class LLMService:
             client = GenericLLMClient(
                 provider=provider,
                 model=model,
-                embed_model=embed_model,
                 base_url=base_url,
                 api_key=api_key,
                 azure_deployment=azure_deployment,
