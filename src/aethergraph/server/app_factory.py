@@ -27,7 +27,12 @@ from aethergraph.api.v1.viz import router as vis_router
 from aethergraph.config.config import AppSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-from aethergraph.core.runtime.runtime_services import install_services
+
+# register all skills in the builtin agent (this is optional but keeps them together for now)
+from aethergraph.core.runtime.runtime_services import (
+    install_services,
+    register_skills_from_path,
+)
 
 # import built-in agents and plugins to register them
 from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
@@ -38,6 +43,9 @@ from aethergraph.server.loading import GraphLoader, LoadSpec
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.utils.optdeps import require
+
+builtin_agent_skills_path = Path(__file__).parent.parent / "plugins" / "skills"
+
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +111,10 @@ def create_app(
             tg_runner = TelegramPollingRunner(container=container, settings=settings)
             app.state.telegram_polling_runner = tg_runner
             tg_task = asyncio.create_task(tg_runner.start())
+
+        # Register skills from the builtin path (optional, but keeps them together for now)
+        logger.debug(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
+        register_skills_from_path(builtin_agent_skills_path)
 
         try:
             # Hand control back to FastAPI / TestClient

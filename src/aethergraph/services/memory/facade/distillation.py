@@ -29,7 +29,7 @@ class DistillationMixin:
         fetch_limit = max(max_events * overfetch_mult, 200)
 
         try:
-            events = await self.recent_persisted(
+            events: list[Event] = await self.recent_persisted(
                 kinds=include_kinds,
                 tags=include_tags,
                 limit=fetch_limit,
@@ -458,7 +458,7 @@ class DistillationMixin:
         Returns:
             list[dict[str, Any]]: A list of summary dictionaries, ordered from oldest to newest.
         """
-        events = await self.recent_persisted(
+        events: list[Event] = await self.recent_persisted(
             kinds=[summary_kind],
             tags=["summary", summary_tag],
             limit=limit,
@@ -522,7 +522,7 @@ class DistillationMixin:
         Side Effects:
             Appends a hydrate event to HotLog and Persistence for the current timeline.
         """
-        summary = await self.load_last_summary(
+        summary: dict[str, Any] | None = await self.load_last_summary(
             summary_tag=summary_tag,
             summary_kind=summary_kind,
             level=level,
