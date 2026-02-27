@@ -18,6 +18,21 @@ class MeteringService(Protocol):
         """Record an LLM usage event."""
         ...
 
+    async def record_embedding(
+        self,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        run_id: str | None = None,
+        graph_id: str | None = None,
+        provider: str,
+        model: str,
+        num_texts: int,
+        tokens: int | None = None,
+    ) -> None:
+        """Record an embedding usage event."""
+        ...
+
     async def record_run(
         self,
         *,

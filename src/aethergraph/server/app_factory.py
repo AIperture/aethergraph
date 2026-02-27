@@ -33,6 +33,7 @@ from aethergraph.core.runtime.runtime_services import (
     install_services,
     register_skills_from_path,
 )
+from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
 
 # import built-in agents and plugins to register them
 from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403

@@ -10,8 +10,9 @@ from typing import Any
 import httpx
 
 from aethergraph.contracts.services.llm import EmbeddingClientProtocol
+from aethergraph.contracts.services.metering import MeteringService
+from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.services.llm.generic_client import _Retry
-from aethergraph.services.metering.eventlog_metering import MeteringService
 
 
 @dataclass
@@ -144,11 +145,21 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         else:  # pragma: no cover
             raise NotImplementedError(f"Unknown embedding provider: {self.provider}")
 
-        # ---- metering hook (placeholder) ----
-        if self.metering is not None:
+        # ---- metering hook (best effort) ----
+        metering = self.metering or current_metering()
+        if metering is not None:
+            ctx = current_meter_context.get()
             try:
                 # TODO: compute token estimates or bytes; for now just count inputs
-                await self.metering.record_embedding(
+                await metering.record_embedding(
+                    scope=kw.get("scope"),
+                    user_id=kw.get("user_id", ctx.get("user_id")),
+                    org_id=kw.get("org_id", ctx.get("org_id")),
+                    run_id=kw.get("run_id", ctx.get("run_id")),
+                    graph_id=kw.get("graph_id", ctx.get("graph_id")),
+                    client_id=kw.get("client_id"),
+                    app_id=kw.get("app_id"),
+                    session_id=kw.get("session_id"),
                     provider=self.provider,
                     model=model,
                     num_texts=len(texts),

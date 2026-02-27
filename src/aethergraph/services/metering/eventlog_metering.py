@@ -181,6 +181,50 @@ class EventLogMeteringService(MeteringService):
             }
         )
 
+    async def record_embedding(
+        self,
+        *,
+        scope: Scope | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        run_id: str | None = None,
+        graph_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+        session_id: str | None = None,
+        provider: str,
+        model: str,
+        num_texts: int,
+        tokens: int | None = None,
+    ) -> None:
+        dims = self._dims_from_scope(
+            scope,
+            user_id=user_id,
+            org_id=org_id,
+            run_id=run_id,
+            graph_id=graph_id,
+            client_id=client_id,
+            app_id=app_id,
+            session_id=session_id,
+        )
+        await self._append(
+            {
+                "kind": "meter.embedding",
+                "user_id": dims["user_id"],
+                "org_id": dims["org_id"],
+                "client_id": dims["client_id"],
+                "app_id": dims["app_id"],
+                "session_id": dims["session_id"],
+                "run_id": dims["run_id"],
+                "graph_id": dims["graph_id"],
+                "provider": provider,
+                "model": model,
+                "num_texts": int(num_texts),
+                "tokens": int(tokens) if tokens is not None else None,
+                "tags": ["meter.embedding"],
+            }
+        )
+
     async def record_run(
         self,
         *,
@@ -320,6 +364,13 @@ class EventLogMeteringService(MeteringService):
             org_id=org_id,
             run_ids=run_ids,
         )
+        embeddings = await self._query(
+            window=window,
+            kinds=["meter.embedding"],
+            user_id=user_id,
+            org_id=org_id,
+            run_ids=run_ids,
+        )
 
         runs = await self._query(
             window=window,
@@ -347,6 +398,9 @@ class EventLogMeteringService(MeteringService):
             "llm_calls": len(llm),
             "llm_prompt_tokens": sum(e.get("prompt_tokens", 0) for e in llm),
             "llm_completion_tokens": sum(e.get("completion_tokens", 0) for e in llm),
+            "embedding_calls": len(embeddings),
+            "embedding_texts": sum(e.get("num_texts", 0) for e in embeddings),
+            "embedding_tokens": sum(e.get("tokens", 0) for e in embeddings),
             "runs": len(runs),
             "runs_succeeded": sum(1 for e in runs if e.get("status") == "succeeded"),
             "runs_failed": sum(1 for e in runs if e.get("status") == "failed"),

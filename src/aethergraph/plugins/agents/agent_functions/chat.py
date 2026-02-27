@@ -78,7 +78,6 @@ def _compute_retrieval_plan(
     skill = skills.get(BUILTIN_AGENT_SKILL_ID)
     cfg = (skill.config or {}) if skill is not None else {}
     base = cfg.get("retrieval", {}).get("default", {})
-
     plan = RetrievalPlan()
 
     # --- 1) recent chat / session summary ---
@@ -213,6 +212,11 @@ async def gather_chat_context(
     if plan.memory.enabled:
         try:
             level = plan.memory.levels[0] if plan.memory.levels else "user"
+            logger.debug(
+                f"Performing memory search with level={level}, kinds={plan.memory.kinds}, tags={plan.memory.tags}"
+            )
+            logger.debug(f"Memory search query: {message}")
+
             search_events = await mem.search(
                 query=message,
                 kinds=plan.memory.kinds,
@@ -222,10 +226,13 @@ async def gather_chat_context(
                 level=level,
                 time_window=plan.memory.time_window,
             )
+            logger.debug(f"Memory search returned {len(search_events)} events")
+
             user_memory_snippets = _format_event_search_snippets(
                 search_events,
                 max_total=plan.memory.limit,
             )
+            logger.debug(f"Formatted memory snippets: {user_memory_snippets}")
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "gather_chat_context: mem.search failed",
@@ -314,7 +321,6 @@ async def basic_chat_handler(
     # 3) Build system prompt from skills
     skills = context.skills()
     try:
-        print("🍎 Compiling system prompt for builtin agent from skills...")
         system_prompt = skills.compile_prompt(
             BUILTIN_AGENT_SKILL_ID,
             "chat.system",
@@ -323,7 +329,6 @@ async def basic_chat_handler(
             separator="\n\n",
             fallback_keys=["chat.system"],
         )
-        print("🍎 Compiled system prompt for builtin agent:\n", system_prompt)
     except Exception as e:  # noqa: BLE001
         logger.error(
             "basic_chat_handler: failed to compile system prompt for %s",

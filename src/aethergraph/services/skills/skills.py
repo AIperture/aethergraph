@@ -187,8 +187,14 @@ class Skill:
     ) -> Skill:
         """
         Create a Skill from Python metadata + sections.
-        Useful for inline / programmatic skills.
+
+        Rules:
+          - `id` is required (or `name` as a fallback).
+          - Standard fields: id, title, description, tags, domain, modes, version.
+          - If `config` is present in meta and is a dict, it becomes the base config.
+          - Any other unknown keys in meta are merged into config at the top level.
         """
+        # --- core identity fields ---
         skill_id = str(meta.get("id") or meta.get("name") or "").strip()
         if not skill_id:
             raise ValueError("Skill metadata must include a non-empty 'id' field.")
@@ -201,9 +207,30 @@ class Skill:
         modes = list(meta.get("modes") or [])
         version = meta.get("version")
 
-        # Any extra fields in meta go into config
-        know_keys = {"id", "name", "title", "description", "tags", "domain", "modes", "version"}
-        config = {k: v for k, v in meta.items() if k not in know_keys}
+        # --- config extraction ---
+        # Known top-level meta fields that should NOT go into config directly
+        known_keys = {
+            "id",
+            "name",
+            "title",
+            "description",
+            "tags",
+            "domain",
+            "modes",
+            "version",
+            "config",
+        }
+
+        # Base config: the explicit `config:` block if present and dict-like
+        meta_cfg = meta.get("config")
+        base_cfg = dict(meta_cfg) if isinstance(meta_cfg, dict) else {}
+
+        # Extras: any unknown keys → also treated as config entries
+        extras = {k: v for k, v in meta.items() if k not in known_keys}
+
+        # Merge extras on top of base config (extras win only for new keys;
+        # if both define "retrieval", the explicit config.retrieval wins)
+        config = {**extras, **base_cfg}
 
         return cls(
             id=skill_id,

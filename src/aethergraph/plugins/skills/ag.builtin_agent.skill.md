@@ -25,7 +25,7 @@ config:
         use_embedding: true
         time_window: null
         kinds: null
-        tags: null
+        tags: ["chat"]
 
       kb:
         enabled: true

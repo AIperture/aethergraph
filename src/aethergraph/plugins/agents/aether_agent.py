@@ -4,6 +4,9 @@ from typing import Any
 
 from aethergraph import NodeContext, graph_fn
 from aethergraph.plugins.agents.agent_functions.chat import basic_chat_handler
+from aethergraph.plugins.agents.agent_functions.distillation import (
+    _maybe_distill_session,
+)
 from aethergraph.plugins.agents.types import ClassifiedIntent, SessionAgentState
 from aethergraph.plugins.agents.utils import parse_at_mention
 
@@ -14,6 +17,7 @@ from aethergraph.plugins.agents.utils import parse_at_mention
 
 async def _classify_intent(
     message: str,
+    identity: Any | None = None,
     session_state: SessionAgentState | None = None,
 ) -> ClassifiedIntent:
     """
@@ -87,7 +91,7 @@ async def _classify_intent(
 
 
 @graph_fn(
-    name="aether_agent",
+    name="default_chat_agent",
     inputs=["message", "files", "context_refs", "session_id", "user_meta"],
     outputs=["reply"],
     as_agent={
@@ -131,16 +135,10 @@ async def builtin_agent(
     raw_message = (message or "").strip()
     logger.debug("builtin_agent received message: %r (session_id=%s)", raw_message, session_id)
 
-    # skills = context.skills()
-    # print(skills.all())
+    print("🍎", mem.scope_id)
+    print("🍎", mem.scope_info())
 
-    # Record user turn in hotlog (short-term memory)
-    if raw_message:
-        await mem.record_chat_user(
-            text=raw_message,
-            tags=["ag.user_message"],
-        )
-
+    # return {"reply": "Sorry, I couldn't process your message."}  # placeholder until we implement the logic below
     if not raw_message:
         reply = "Hi! What would you like to do with Aether today?"
         await mem.record_chat_assistant(text=reply, tags=["ag.agent_reply"])
@@ -148,10 +146,12 @@ async def builtin_agent(
 
     # TODO (future): retrieve session_state from a dedicated state service
     session_state: SessionAgentState | None = None
+    identity: Any | None = None
 
     # Classify intent (command / route / chat)
     intent = await _classify_intent(
         message=raw_message,
+        identity=identity,
         session_state=session_state,
     )
     logger.debug("builtin_agent intent: %s", intent)
@@ -191,11 +191,20 @@ async def builtin_agent(
             context=context,
         )
 
+    # Record user turn in hotlog (short-term memory) -- Do it after retrieval to avoid contaminating memory with the new message before it's processed.
+    await mem.record_chat_user(
+        text=raw_message,
+        tags=["ag.user_message"],
+    )
+
     # Record assistant reply for non-ephemeral paths
     await mem.record_chat_assistant(
         text=reply,
         tags=["ag.agent_reply"],
     )
+
+    if intent.mode == "chat":
+        await _maybe_distill_session(mem=mem, logger=logger)
 
     return {"reply": reply}
 
