@@ -21,7 +21,7 @@ class WebSearchEngine(str, Enum):
 class WebSearchOptions:
     top_k: int = 5
     language: str | None = None
-    region: str
+    region: str | None = None
     freshness_days: int | None = None
     site_filter: str | None = None
     safe_search: bool = False

@@ -8,20 +8,55 @@ from aethergraph.services.scope.scope import ScopeLevel
 # Assuming this external util exists based on original imports
 
 if TYPE_CHECKING:
-    from .types import MemoryFacadeInterface
+    from aethergraph.contracts.services.memory import MemoryFacadeProtocol
 
 
 class DistillationMixin:
     """Methods for memory summarization and distillation."""
 
     async def _collect_events_for_distillation(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         include_kinds: list[str] | None,
         include_tags: list[str] | None,
         max_events: int,
         level: ScopeLevel = "scope",
     ) -> list[Event]:
+        """
+        Collect candidate events for distillation.
+
+        This helper prefers persisted history and falls back to hotlog when
+        persistence views are unavailable.
+
+        Examples:
+            Collect default candidates for distillation:
+            ```python
+            events = await context.memory()._collect_events_for_distillation(
+                include_kinds=None,
+                include_tags=None,
+                max_events=200,
+            )
+            ```
+
+            Collect only tagged chat events at user scope:
+            ```python
+            events = await context.memory()._collect_events_for_distillation(
+                include_kinds=["chat.turn"],
+                include_tags=["important"],
+                max_events=100,
+                level="user",
+            )
+            ```
+
+        Args:
+            include_kinds: Optional event kinds to include.
+            include_tags: Optional required tags.
+            max_events: Maximum number of events to return after filtering.
+            level: Scope level used for persisted/hotlog retrieval.
+
+        Returns:
+            list[Event]: Candidate events in chronological order.
+        """
         overfetch_mult = 2
         if include_tags:
             overfetch_mult = 8
@@ -48,7 +83,7 @@ class DistillationMixin:
         return events[-max_events:]
 
     async def distill_long_term(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         level: ScopeLevel | None = None,
         summary_tag: str = "session",
@@ -70,7 +105,6 @@ class DistillationMixin:
             Using the default summarizer:
             ```python
             result = await context.memory().distill_long_term(
-                scope_id="scope_123",
                 include_kinds=["note", "event"],
                 max_events=100
             )
@@ -78,7 +112,6 @@ class DistillationMixin:
             Using an LLM-based summarizer:
             ```python
             result = await context.memory().distill_long_term(
-                scope_id="scope_456",
                 use_llm=True,
                 summary_tag="custom_summary",
                 min_signal=0.5
@@ -230,7 +263,6 @@ class DistillationMixin:
             Using the default configuration:
             ```python
             result = await context.memory().distill_meta_summary(
-                scope_id="scope_123",
                 source_kind="long_term_summary",
                 source_tag="session",
             )
@@ -239,7 +271,6 @@ class DistillationMixin:
             Customizing the summary kind and tag:
             ```python
             result = await context.memory().distill_meta_summary(
-                scope_id="scope_456",
                 summary_kind="meta_summary",
                 summary_tag="weekly",
                 max_summaries=10,
@@ -247,8 +278,6 @@ class DistillationMixin:
             ```
 
         Args:
-            scope_id: The scope ID for the memory to summarize. If None,
-                defaults to the instance's `memory_scope_id`.
             source_kind: The kind of source summaries to process. Defaults to
                 `"long_term_summary"`.
             source_tag: A tag to filter the source summaries. Defaults to
@@ -361,6 +390,7 @@ class DistillationMixin:
         *,
         summary_tag: str = "session",
         summary_kind: str = "long_term_summary",
+        level: ScopeLevel | None = "scope",
     ) -> dict[str, Any] | None:
         """
         Load the most recent JSON summary for the specified memory scope and tag.
@@ -382,9 +412,11 @@ class DistillationMixin:
             ```
 
         Args:
-            scope_id: The memory scope ID. If None, defaults to the current memory scope.
+            scope_id: Optional scope identifier. If None, uses the facade scope.
             summary_tag: The tag used to filter summaries (e.g., "session", "project").
                 Defaults to "session".
+            summary_kind: Summary event kind to load.
+            level: Scope level used for persisted retrieval.
 
         Returns:
             dict[str, Any] | None: The most recent summary as a dictionary, or None if no summary is found.
@@ -395,7 +427,7 @@ class DistillationMixin:
             kinds=[summary_kind],
             tags=["summary", summary_tag],
             limit=1,
-            level="scope",
+            level=level,
         )
         if not events:
             return None
@@ -434,7 +466,6 @@ class DistillationMixin:
             Load the last three session summaries:
             ```python
             summaries = await context.memory().load_recent_summaries(
-                scope_id="user123",
                 summary_tag="session",
                 limit=3
             )
@@ -443,14 +474,12 @@ class DistillationMixin:
             Load the last two project summaries:
             ```python
             summaries = await context.memory().load_recent_summaries(
-                scope_id="project456",
                 summary_tag="project",
                 limit=2
             )
             ```
 
         Args:
-            scope_id: The memory scope ID. If None, defaults to the current memory scope.
             summary_tag: The tag used to filter summaries (e.g., "session", "project").
                 Defaults to "session".
             limit: The maximum number of summaries to return. Defaults to 3.
@@ -496,25 +525,24 @@ class DistillationMixin:
         """
         Load the most recent summary for the specified scope and tag, and log a hydrate event.
 
-        This method retrieves the latest summary document from the `DocStore` based on the
-        provided `scope_id` and `summary_tag`. If a summary is found, it logs a hydrate
-        event into the current run's HotLog and Persistence layers.
+        This method retrieves the latest summary document for the configured
+        memory scope and `summary_tag`. If a summary is found, it logs a hydrate
+        event into the current run's hotlog and persistence layers.
 
         Examples:
             Hydrate the last session summary:
             ```python
             summary = await context.memory().soft_hydrate_last_summary(
-                scope_id="user123",
                 summary_tag="session"
             )
             ```
 
         Args:
-            scope_id: The memory scope ID. If None, defaults to the current memory scope.
             summary_tag: The tag used to filter summaries (e.g., "session", "project").
                 Defaults to "session".
             summary_kind: The kind of summary (e.g., "long_term_summary", "project_summary").
                 Defaults to "long_term_summary".
+            level: Scope level used to locate the latest summary.
 
         Returns:
             dict[str, Any] | None: The loaded summary dictionary if found, otherwise None.

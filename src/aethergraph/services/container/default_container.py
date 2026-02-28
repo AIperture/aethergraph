@@ -82,6 +82,10 @@ from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
+from aethergraph.services.websearch.httpx_fetcher import HttpxWebPageFetcher
+from aethergraph.services.websearch.providers.default import DefaultWebSearchProvider
+from aethergraph.services.websearch.service import WebSearchService
+from aethergraph.services.websearch.types import WebSearchEngine
 
 # ---- storage builders ----
 from aethergraph.storage.factory import (
@@ -183,6 +187,7 @@ class DefaultContainer:
     llm: LLMService | None = None
     mcp: MCPService | None = None
     embed_service: EmbeddingService | None = None
+    web_search: WebSearchService | None = None
 
     # run controls -- for http endpoints and run manager
     run_store: RunStore | None = None
@@ -332,6 +337,15 @@ def build_default_container(
 
     mcp = MCPService()  # empty MCP service; users can register clients as needed
 
+    # web search service uses a provider-agnostic default no-op provider.
+    # This keeps `fetch` always available even when search providers are not configured.
+    default_web_provider = DefaultWebSearchProvider()
+    web_search: WebSearchService | None = WebSearchService(
+        providers={WebSearchEngine.custom: default_web_provider},
+        default_engine=WebSearchEngine.custom,
+        page_fetcher=HttpxWebPageFetcher(),
+    )
+
     # memory factory
     persistence = build_memory_persistence(cfg)
     hotlog = build_memory_hotlog(cfg)
@@ -456,6 +470,7 @@ def build_default_container(
         memory_factory=memory_factory,
         llm=llm_service,
         embed_service=embed_service,
+        web_search=web_search,
         mcp=mcp,
         run_store=run_store,
         run_manager=run_manager,

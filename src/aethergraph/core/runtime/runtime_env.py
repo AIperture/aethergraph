@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from aethergraph.api.v1.deps import RequestIdentity
@@ -24,11 +25,14 @@ from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
+from aethergraph.services.websearch.facade import WebSearchFacade
 
 from ..graph.task_node import TaskNodeRuntime
 from .bound_memory import BoundMemoryAdapter
 from .execution_context import ExecutionContext
 from .node_services import NodeServices
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -108,6 +112,10 @@ class RuntimeEnv:
     @property
     def mcp_service(self):
         return self.container.mcp
+
+    @property
+    def web_search_service(self):
+        return self.container.web_search
 
     @property
     def resume_router(self) -> ResumeRouter:
@@ -214,6 +222,10 @@ class RuntimeEnv:
             scope=trigger_scope,
         )
 
+        web_search = None
+        if self.web_search_service is not None:
+            web_search = WebSearchFacade(self.web_search_service)
+
         services = NodeServices(
             channels=self.channels,
             continuation_store=self.continuation_store,
@@ -236,6 +248,7 @@ class RuntimeEnv:
             skills=self.container.skills_registry,
             kb=kb,  # NodeKB
             triggers=triggers,  # TriggerFacade for this node
+            web_search=web_search,  # WebSearchFacade or None
         )
         return ExecutionContext(
             run_id=self.run_id,
@@ -317,8 +330,8 @@ class RuntimeEnv:
             # If we have an agent_id but no meta, still bias to session-level
             level = "session" if self.agent_id else "run"
 
-        print(
-            f"🍎 Resolved memory config: level={level}, custom_scope_id={custom_scope_id} (agent_id={self.agent_id}, app_id={self.app_id}, graph_id={self.graph_id})"
+        logger.debug(
+            f"Resolved memory config: level={level} custom_scope_id={custom_scope_id} from meta={meta}"
         )
 
         return level, custom_scope_id

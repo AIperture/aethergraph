@@ -364,7 +364,7 @@ class EventLogMeteringService(MeteringService):
             org_id=org_id,
             run_ids=run_ids,
         )
-        embeddings = await self._query(
+        embeddings = await self._query(  # noqa: F841
             window=window,
             kinds=["meter.embedding"],
             user_id=user_id,
@@ -398,9 +398,9 @@ class EventLogMeteringService(MeteringService):
             "llm_calls": len(llm),
             "llm_prompt_tokens": sum(e.get("prompt_tokens", 0) for e in llm),
             "llm_completion_tokens": sum(e.get("completion_tokens", 0) for e in llm),
-            "embedding_calls": len(embeddings),
-            "embedding_texts": sum(e.get("num_texts", 0) for e in embeddings),
-            "embedding_tokens": sum(e.get("tokens", 0) for e in embeddings),
+            # "embedding_calls": len(embeddings),
+            # "embedding_texts": sum(e.get("num_texts", 0) for e in embeddings),
+            # "embedding_tokens": sum(e.get("tokens", 0) for e in embeddings),
             "runs": len(runs),
             "runs_succeeded": sum(1 for e in runs if e.get("status") == "succeeded"),
             "runs_failed": sum(1 for e in runs if e.get("status") == "failed"),

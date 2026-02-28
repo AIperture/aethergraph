@@ -8,6 +8,7 @@ from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.planning.planner_service import PlannerService
 from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
+from aethergraph.services.websearch.facade import WebSearchFacade
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -45,3 +46,4 @@ class NodeServices:
     skills: SkillRegistry | None = None  # SkillRegistry
     kb: NodeKB | None = None  # NodeKB
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
+    web_search: WebSearchFacade | None = None  # Web search facade

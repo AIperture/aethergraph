@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
 from typing import Any
 
@@ -302,19 +301,19 @@ async def default_chat_agent(
     messages.append({"role": "user", "content": user_content})
 
     try:
-        # Mark the "reasoning" phase as active before calling the LLM
-        try:
-            await chan.send_phase(
-                phase="thinking",
-                status="active",
-                label="LLM call",
-                detail="Calling LLM (streaming response)...",
-            )
+        # # Mark the "reasoning" phase as active before calling the LLM
+        # try:
+        #     await chan.send_phase(
+        #         phase="thinking",
+        #         status="active",
+        #         label="LLM call",
+        #         detail="Calling LLM (streaming response)...",
+        #     )
 
-            await asyncio.sleep(0.5)  # slight delay to ensure phase event ordering
+        #     await asyncio.sleep(0.5)  # slight delay to ensure phase event ordering
 
-        except Exception:
-            logger.debug("Failed to send LLM phase(active) state", exc_info=True)
+        # except Exception:
+        #     logger.debug("Failed to send LLM phase(active) state", exc_info=True)
 
         async with chan.stream() as s:
             # Hook for streaming deltas into the same message

@@ -11,7 +11,8 @@ from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.memory.facade.introspection import IntrospectionMixin
-from aethergraph.services.scope.scope import Scope
+from aethergraph.services.memory.facade.normalization import EventNormalizationMixin
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 from .chat import ChatMixin
@@ -74,6 +75,7 @@ def derive_timeline_id(
 
 
 class MemoryFacade(
+    EventNormalizationMixin,
     ChatMixin,
     StateMixin,
     ResultMixin,
@@ -426,6 +428,7 @@ class MemoryFacade(
         tool_limit: int = 10,
         recent_chat_tags: list[str] | None = None,
         recent_tool_tags: list[str] | None = None,
+        level: ScopeLevel | None = None,
     ) -> dict[str, Any]:
         """
         Assemble memory context for prompts, including long-term summaries,
@@ -490,6 +493,7 @@ class MemoryFacade(
                 summaries = await self.load_recent_summaries(
                     summary_tag=summary_tag,
                     limit=max_summaries,
+                    level=level,
                 )
             except Exception:
                 summaries = []
@@ -506,6 +510,7 @@ class MemoryFacade(
         recent_chat = await self.recent_chat(
             limit=recent_chat_limit,
             tags=recent_chat_tags,
+            level=level,
         )
 
         # 2) Recent tools

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
+import warnings
 
 from aethergraph.contracts.services.memory import Event
 
 if TYPE_CHECKING:
-    from .types import MemoryFacadeInterface
+    from aethergraph.contracts.services.memory import MemoryFacadeProtocol
 
 
 class ChatMixin:
@@ -24,7 +25,7 @@ class ChatMixin:
     """
 
     async def record_chat(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         role: Literal["user", "assistant", "system", "tool"],
         text: str,
         *,
@@ -89,7 +90,7 @@ class ChatMixin:
         )
 
     async def record_chat_user(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         text: str,
         *,
         tags: list[str] | None = None,
@@ -143,7 +144,7 @@ class ChatMixin:
         )
 
     async def record_chat_assistant(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         text: str,
         *,
         tags: list[str] | None = None,
@@ -196,7 +197,7 @@ class ChatMixin:
         )
 
     async def record_chat_system(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         text: str,
         *,
         tags: list[str] | None = None,
@@ -249,14 +250,15 @@ class ChatMixin:
         )
 
     async def recent_chat(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         limit: int = 50,
         roles: Sequence[str] | None = None,
         tags: Sequence[str] | None = None,
         level: str | None = None,
         use_persistence: bool = False,
-    ) -> list[dict[str, Any]]:
+        return_event: bool = False,
+    ) -> list[Any]:
         """
         Retrieve the most recent chat turns as a normalized list.
 
@@ -286,9 +288,10 @@ class ChatMixin:
             tags: An optional sequence of tags to filter by. If provided, the method will over-fetch and filter results to include only those that have at least one of the specified tags.
             level: Optional scope level to filter events by (e.g., "session", "run", "user", "org"). If provided, the search will be constrained to events associated with the specified scope level.
             use_persistence: Whether to include events from the full persistence layer (True) or just the hotlog (False). Defaults to False.
+            return_event: If True, return `Event` objects; otherwise normalized chat dicts.
 
         Returns:
-            list[dict[str, Any]]: A list of chat events, each represented as a dictionary
+            list[Any]: Event list when `return_event=True`, else dictionaries
             with the following keys:
                 - "ts": The timestamp of the event.
                 - "role": The role of the speaker (e.g., "user", "assistant").
@@ -302,10 +305,25 @@ class ChatMixin:
             overfetch=5,
             level=level,
             use_persistence=use_persistence,
+            return_event=True,
         )
 
-        out: list[dict[str, Any]] = []
+        if return_event:
+            out_events = events
+            if roles is not None:
+                filtered: list[Event] = []
+                for e in out_events:
+                    role = (
+                        getattr(e, "stage", None)
+                        or ((e.data or {}).get("role") if getattr(e, "data", None) else None)
+                        or "user"
+                    )
+                    if role in roles:
+                        filtered.append(e)
+                out_events = filtered
+            return out_events[-limit:] if limit else []
 
+        out: list[dict[str, Any]] = []
         for e in events:
             role = (
                 getattr(e, "stage", None)
@@ -333,7 +351,7 @@ class ChatMixin:
         return out[-limit:] if limit else []
 
     async def chat_history_for_llm(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         limit: int = 20,
         include_system_summary: bool = True,
@@ -426,7 +444,7 @@ class ChatMixin:
         return {"summary": summary_text, "messages": messages}
 
     async def record_chat_tool(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         tool_name: str,
         text: str,
         *,
@@ -436,8 +454,36 @@ class ChatMixin:
         signal: float | None = None,
     ) -> Event:
         """
-        TODO: Consider if use this method or just use record_chat directly.
+        Deprecated helper to record a tool-role chat turn.
+
+        Prefer `record_chat(role="tool", ...)` directly.
+
+        Examples:
+            Legacy usage:
+            ```python
+            await context.memory().record_chat_tool(
+                tool_name="search",
+                text="Found 3 results.",
+            )
+            ```
+
+        Args:
+            tool_name: Tool identifier to attach as tag/payload.
+            text: Tool-role message text.
+            tags: Optional extra tags.
+            data: Optional additional payload fields.
+            severity: Event severity.
+            signal: Optional explicit signal override.
+
+        Returns:
+            Event: Persisted chat-turn event.
         """
+        warnings.warn(
+            "record_chat_tool() is deprecated and will be removed in a future version. "
+            "Use record_chat(role='tool', ...).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         tool_tags = list(tags or [])
         tool_tags.append(f"tool:{tool_name}")
         payload: dict[str, Any] = {"tool_name": tool_name}

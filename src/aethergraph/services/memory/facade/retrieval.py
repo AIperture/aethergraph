@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import TYPE_CHECKING, Any, NamedTuple
+import warnings
 
 from aethergraph.contracts.storage.search_backend import ScoredItem, SearchMode
 from aethergraph.services.indices.scoped_indices import ScopedIndices
@@ -9,9 +10,7 @@ from aethergraph.services.memory.facade.utils import event_matches_level
 from aethergraph.services.scope.scope import ScopeLevel
 
 if TYPE_CHECKING:
-    from aethergraph.contracts.services.memory import Event
-
-    from .types import MemoryFacadeInterface
+    from aethergraph.contracts.services.memory import Event, MemoryFacadeProtocol
 
 
 class EventSearchResult(NamedTuple):
@@ -20,6 +19,29 @@ class EventSearchResult(NamedTuple):
 
     @property
     def score(self) -> float:
+        """
+        Return the numeric search score from the backing scored item.
+
+        This property mirrors `item.score` for convenience when consuming
+        `EventSearchResult` rows.
+
+        Examples:
+            Read a score value:
+            ```python
+            score = result.score
+            ```
+
+            Sort by score descending:
+            ```python
+            ranked = sorted(results, key=lambda r: r.score, reverse=True)
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            float: Search score associated with this result row.
+        """
         return self.item.score
 
 
@@ -28,20 +50,29 @@ class RetrievalMixin:
 
     async def get_event(self, event_id: str) -> Event | None:
         """
-        Retrieve a specific event by its ID.
+        Retrieve a specific event by ID.
 
-        This method fetches an event corresponding to the provided event ID.
+        The lookup first checks hotlog, then falls back to persistence when
+        supported by the configured backend.
+
+        Examples:
+            Fetch a known event:
+            ```python
+            evt = await context.memory().get_event("evt_123")
+            ```
+
+            Handle missing events:
+            ```python
+            evt = await context.memory().get_event("evt_missing")
+            if evt is None:
+                ...
+            ```
 
         Args:
-            event_id: The unique identifier of the event to retrieve.
+            event_id: Unique event identifier to resolve.
 
         Returns:
-            Event | None: The event object if found; otherwise, None.
-
-        Notes:
-            This method interacts with the underlying Persistence service to fetch
-            the event associated with the current timeline. If no event is found
-            with the given ID, it returns None.
+            Event | None: The resolved event, or None when not found.
         """
         # 1) Try hotlog
         recent = await self.hotlog.recent(
@@ -62,24 +93,37 @@ class RetrievalMixin:
 
     # ------ Hotlog Retrieval ------
     async def recent(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         kinds: list[str] | None = None,
         limit: int = 50,
         level: ScopeLevel | None = None,
-    ) -> list[Event]:
+        return_event: bool = True,
+    ) -> list[Any]:
         """
         Retrieve recent events.
 
         This method fetches a list of recent events, optionally filtered by kinds.
 
+        Examples:
+            Return Event objects (default):
+            ```python
+            events = await context.memory().recent(limit=20)
+            ```
+
+            Return normalized dict payloads:
+            ```python
+            rows = await context.memory().recent(limit=20, return_event=False)
+            ```
+
         Args:
             kinds: A list of event kinds to filter by. Defaults to None.
             limit: The maximum number of events to retrieve. Defaults to 50.
             level: Optional scope level to filter events by. If provided, only events associated with the specified scope level will be returned.
+            return_event: If True return `Event` objects; otherwise normalized dictionaries.
 
         Returns:
-            list[Event]: A list of recent events.
+            list[Any]: List of Event objects or normalized dictionaries.
 
         Notes:
             This method interacts with the underlying HotLog service to fetch events
@@ -110,11 +154,11 @@ class RetrievalMixin:
             buf = [e for e in buf if event_matches_level(e, scope, level=level)]
 
         # 3) Take the last `limit` events (buf is already chronological)
-        return buf[-limit:]
+        return self.normalize_recent_output(buf[-limit:], return_event=return_event)
 
     # ------ Persistence Retrieval ------
     async def recent_persisted(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         kinds: list[str] | None = None,
         tags: list[str] | None = None,
@@ -123,15 +167,42 @@ class RetrievalMixin:
         since: str | None = None,
         until: str | None = None,
         offset: int = 0,
-    ) -> list[Event]:
+        return_event: bool = True,
+    ) -> list[Any]:
         """
         Retrieve events from the persistence layer (full history) for this timeline.
 
         This is a higher-latency, deeper history path than `recent()`.
+
+        Examples:
+            Query persisted events and return Event objects:
+            ```python
+            events = await context.memory().recent_persisted(limit=100)
+            ```
+
+            Query persisted events and return normalized dict payloads:
+            ```python
+            rows = await context.memory().recent_persisted(limit=100, return_event=False)
+            ```
+
+        Args:
+            kinds: Optional event kinds filter.
+            tags: Optional tag filter.
+            limit: Maximum rows to return.
+            level: Optional scope level filter.
+            since: Optional lower timestamp bound.
+            until: Optional upper timestamp bound.
+            offset: Offset for pagination.
+            return_event: If True return Event objects; otherwise dict payloads.
+
+        Returns:
+            list[Any]: Event rows or normalized dictionaries.
         """
         if not hasattr(self.persistence, "query_events_view"):
             # Fallback: no view API -> just use hotlog semantics as a degraded mode
-            return await self.recent(kinds=kinds, limit=limit, level=level)
+            return await self.recent(
+                kinds=kinds, limit=limit, level=level, return_event=return_event
+            )
 
         scope = getattr(self, "scope", None)
 
@@ -146,11 +217,11 @@ class RetrievalMixin:
             limit=limit,
             offset=offset,
         )
-        return rows
+        return self.normalize_recent_output(rows, return_event=return_event)
 
     # ------ Indices Search ------
     async def search(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         query: str | None = None,
         kinds: list[str] | None = None,
@@ -162,32 +233,39 @@ class RetrievalMixin:
         mode: SearchMode | None = None,
     ) -> list[Event]:
         """
-        Search for events based on a query.
+        Search events using scoped indices with hotlog fallback.
 
-        This method searches for events that match a query, optionally filtered by kinds and tags.
-        Note that this implementation currently performs a lexical search. Embedding-based search
-        is planned for future development.
+        This method uses index-backed retrieval when available, then falls back
+        to lexical filtering over recent events.
+
+        Examples:
+            Semantic search with default settings:
+            ```python
+            events = await context.memory().search(query="deployment failure", limit=10)
+            ```
+
+            Lexical-only search for tagged events:
+            ```python
+            events = await context.memory().search(
+                query="timeout",
+                tags=["tool", "error"],
+                use_embedding=False,
+                level="run",
+            )
+            ```
 
         Args:
-            query: The search query string.
-            kinds: A list of event kinds to filter by. Defaults to None.
-            tags: A list of tags to filter events by. Defaults to None.
-            limit: The maximum number of events to retrieve. Defaults to 100.
-            use_embedding: Whether to use embedding-based search. Defaults to True.
-            level: Optional scope level to filter events by (e.g., "session", "run", "user", "org"). If provided, the search will be constrained to events associated with the specified scope level.
-            time_window: Optional time window for the search (e.g., "last_7_days"). Defaults to None.
+            query: Optional query string. If None, returns filtered recent events.
+            kinds: Optional event kind filters.
+            tags: Optional required tags.
+            limit: Maximum number of events to return.
+            use_embedding: If True, prefer index-backed semantic/hybrid search.
+            level: Optional scope level constraint.
+            time_window: Optional backend time-window hint.
+            mode: Optional explicit backend search mode.
 
         Returns:
-            list[Event]: A list of events matching the query.
-
-        Notes:
-            This method retrieves recent events using the `recent()` method and filters them
-            based on the provided tags. It performs a simple lexical search on the event text.
-            Embedding-based search functionality is not yet implemented.
-
-            Memory out of the limit will be discarded in the HotLog layer (but persistent in the Persistence layer).
-            Memory in persistence cannot be retrieved via this method.
-
+            list[Event]: Matching events in relevance/fallback order.
         """
         # --- 1) Try index-backed search (ScopedIndices) ------------------
         if use_embedding and getattr(self, "scoped_indices", None) is not None:
@@ -246,7 +324,7 @@ class RetrievalMixin:
 
     # ------ Convenience Wrappers ------
     async def recent_events(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         kinds: list[str] | None = None,
         tags: list[str] | None = None,
@@ -254,12 +332,38 @@ class RetrievalMixin:
         overfetch: int = 5,
         level: ScopeLevel | None = None,
         use_persistence: bool = False,
-    ) -> list[Event]:
+        return_event: bool = True,
+    ) -> list[Any]:
         """
         Convenience wrapper to fetch recent events with tag filtering.
 
         - By default uses HotLog (`use_persistence=False`).
         - Can optionally use persistence for deeper history.
+
+        Examples:
+            Return Event objects:
+            ```python
+            events = await context.memory().recent_events(kinds=["chat.turn"], limit=30)
+            ```
+
+            Return normalized dict payloads:
+            ```python
+            rows = await context.memory().recent_events(
+                kinds=["chat.turn"], limit=30, return_event=False
+            )
+            ```
+
+        Args:
+            kinds: Optional event kinds filter.
+            tags: Optional tag filter.
+            limit: Final output size cap.
+            overfetch: Over-fetch factor used before post-filtering by tags.
+            level: Optional scope level filter.
+            use_persistence: If True use persistence query path.
+            return_event: If True return Event objects; otherwise dict payloads.
+
+        Returns:
+            list[Any]: Event rows or normalized dictionaries.
         """
         fetch_n = limit if not tags else max(limit * overfetch, 100)
 
@@ -269,22 +373,24 @@ class RetrievalMixin:
                 tags=None,  # we re-apply tags below for consistent semantics
                 limit=fetch_n,
                 level=level,
+                return_event=True,
             )
         else:
             evts = await self.recent(
                 kinds=kinds,
                 limit=fetch_n,
                 level=level,
+                return_event=True,
             )
 
         if tags:
             want = set(tags)
             evts = [e for e in evts if want.issubset(set(e.tags or []))]
 
-        return evts[-limit:]
+        return self.normalize_recent_output(evts[-limit:], return_event=return_event)
 
     async def recent_data(
-        self: MemoryFacadeInterface,
+        self: MemoryFacadeProtocol,
         *,
         kinds: list[str] | None = None,
         tags: list[str] | None = None,
@@ -292,34 +398,38 @@ class RetrievalMixin:
         level: ScopeLevel | None = None,
     ) -> list[Any]:
         """
-        Retrieve recent event data.
+        Deprecated helper returning recent event payloads (`data`/`text`).
 
-        This method fetches the data or text of recent events, optionally filtered by kinds and tags.
-        Unlike `recent()`, which returns full Event objects, this method extracts and returns only the
-        data or text content of the events. This is useful for scenarios where only the event payloads are needed.
+        Prefer `recent(..., return_event=False)` or `recent_events(..., return_event=False)`.
+
+        Examples:
+            Legacy data-only retrieval:
+            ```python
+            payloads = await context.memory().recent_data(kinds=["tool_result"], limit=20)
+            ```
 
         Args:
             kinds: A list of event kinds to filter by. Defaults to None.
             tags: A list of tags to filter events by. Defaults to None.
+            level: Optional scope level filter.
             limit: The maximum number of events to retrieve. Defaults to 50.
 
         Returns:
-            list[Any]: A list of event data or text.
-
-        Notes:
-            This method first retrieves recent events using the `recent()` method and then filters them
-            based on the provided tags. It extracts the `data` attribute if available; otherwise, it
-            attempts to parse the `text` attribute as JSON. If parsing fails, the raw text is returned.
-
-            Memory out of the limit will be discarded in the HotLog layer (but persistent in the Persistence layer).
-            Memory in persistence cannot be retrieved via this method.
+            list[Any]: Data payloads (fallback to parsed text / text string).
         """
+        warnings.warn(
+            "recent_data() is deprecated and will be removed in a future version. "
+            "Use recent(..., return_event=False) instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         evts = await self.recent_events(
             kinds=kinds,
             tags=tags,
             limit=limit,
             level=level,
             use_persistence=False,
+            return_event=True,
         )
 
         out: list[Any] = []
@@ -345,7 +455,32 @@ class RetrievalMixin:
         corpus: str = "event",
     ) -> list[EventSearchResult]:
         """
-        Given a list of ScoredItems from a search, fetch the corresponding Event objects.
+        Resolve scored search items into `EventSearchResult` rows.
+
+        This method filters items by corpus, resolves events from hotlog and
+        persistence, and preserves the original scoring metadata.
+
+        Examples:
+            Resolve event search results from an index query:
+            ```python
+            items = await context.memory().scoped_indices.search_events(query="policy")
+            rows = await context.memory().fetch_events_for_search_results(items)
+            ```
+
+            Resolve only a custom corpus:
+            ```python
+            rows = await context.memory().fetch_events_for_search_results(
+                scored_items,
+                corpus="event",
+            )
+            ```
+
+        Args:
+            scored_items: Scored items returned by the search backend.
+            corpus: Corpus name to resolve (defaults to `"event"`).
+
+        Returns:
+            list[EventSearchResult]: Scored rows with optional resolved events.
         """
 
         # Filter to event corpus

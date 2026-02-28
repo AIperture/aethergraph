@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from aethergraph import NodeContext, graph_fn
-from aethergraph.plugins.agents.agent_functions.chat import basic_chat_handler
+from aethergraph.plugins.agents.agent_functions.basic_chat import basic_chat_handler
 from aethergraph.plugins.agents.agent_functions.distillation import (
     _maybe_distill_session,
 )
@@ -91,7 +91,7 @@ async def _classify_intent(
 
 
 @graph_fn(
-    name="default_chat_agent",
+    name="builtin_agent",
     inputs=["message", "files", "context_refs", "session_id", "user_meta"],
     outputs=["reply"],
     as_agent={

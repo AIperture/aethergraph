@@ -244,10 +244,11 @@ class SqliteArtifactIndexSync:
 
         self._conn.commit()
 
-        cur = self._conn.execute(
-            "SELECT artifact_id, kind, run_id, org_id, user_id, labels_json FROM artifacts"
-        )
-        print(cur.fetchall())
+        # cur = self._conn.execute(
+        #     "SELECT artifact_id, kind, run_id, org_id, user_id, labels_json FROM artifacts"
+        # )
+        # for row in cur.fetchall():
+        #     print(f"Artifact in DB: id={row['artifact_id']} kind={row['kind']} run_id={row['run_id']} org_id={row['org_id']} user_id={row['user_id']} labels={row['labels_json']}")
 
     def list_for_run(self, run_id: str) -> list[Artifact]:
         cur = self._conn.execute(

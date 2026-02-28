@@ -29,8 +29,6 @@ class Event:
     user_id: str | None = None
     org_id: str | None = None
     client_id: str | None = None
-    app_id: str | None = None
-    agent_id: str | None = None
     session_id: str | None = None
 
     # --------- Core semantics ---------
@@ -53,12 +51,100 @@ class Event:
     inputs: list[Value] | None = None  # optional I/O values of the event
     outputs: list[Value] | None = None  # optional I/O values of the event
 
-    # --------- Advanced fields ---------
-    embedding: list[float] | None = None  # reserved for vector embeddings
-    pii_flags: dict[str, bool] | None = None
+    # --------- Reserved / seldom-used fields (kept for schema compatibility) ---------
+    app_id: str | None = None
+    agent_id: str | None = None
+    embedding: list[float] | None = None  # reserved for future vector payload usage
+    pii_flags: dict[str, bool] | None = None  # reserved for future pii marker usage
 
     # --------- Schema versioning ---------
     version: int = 2  # for schema evolution
+
+
+class MemoryFacadeProtocol(Protocol):
+    """
+    Structural protocol for MemoryFacade mixins.
+
+    Mixins type-hint against this protocol instead of a local facade-only type so
+    shared contracts live under `contracts.services`.
+    """
+
+    run_id: str
+    timeline_id: str
+    memory_scope_id: str
+
+    hotlog: HotLog
+    persistence: Persistence
+    scope: Any
+    scoped_indices: Any
+    llm: Any
+    logger: Any
+
+    hot_limit: int
+    hot_ttl_s: int
+    default_signal_threshold: float
+
+    async def record_raw(
+        self,
+        *,
+        base: dict[str, Any],
+        text: str | None = None,
+        metrics: dict[str, float] | None = None,
+    ) -> Event: ...
+
+    async def record(
+        self,
+        kind: str,
+        data: Any,
+        tags: list[str] | None = None,
+        severity: int = 2,
+        stage: str | None = None,
+        inputs_ref=None,
+        outputs_ref=None,
+        metrics: dict[str, float] | None = None,
+        signal: float | None = None,
+        text: str | None = None,
+    ) -> Event: ...
+
+    async def recent(
+        self,
+        *,
+        kinds: list[str] | None = None,
+        limit: int = 50,
+        level: str | None = None,
+        return_event: bool = True,
+    ) -> list[Any]: ...
+
+    async def recent_events(
+        self,
+        *,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int = 50,
+        level: str | None = None,
+        use_persistence: bool = False,
+        return_event: bool = True,
+    ) -> list[Any]: ...
+
+    async def record_tool_result(
+        self,
+        *,
+        tool: str,
+        inputs: list[dict[str, Any]] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        metrics: dict[str, float] | None = None,
+        message: str | None = None,
+        severity: int = 3,
+    ) -> Event: ...
+
+    async def recent_tool_results(
+        self,
+        *,
+        tool: str,
+        limit: int = 10,
+        return_event: bool = True,
+    ) -> list[Any]: ...
 
 
 class HotLog(Protocol):

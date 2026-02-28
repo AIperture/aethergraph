@@ -13,6 +13,7 @@ from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.planning.node_planner import NodePlanner
 from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
+from aethergraph.services.websearch.facade import WebSearchFacade
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -462,6 +463,11 @@ class NodeContext:
         if not self.services.kb:
             raise RuntimeError("NodeKB service not available")
         return self.services.kb
+
+    def web_search(self) -> WebSearchFacade:
+        if not self.services.web_search:
+            raise RuntimeError("Web search service not available")
+        return self.services.web_search
 
     def llm(
         self,

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .types import MemoryFacadeInterface
+    from aethergraph.contracts.services.memory import MemoryFacadeProtocol
 
 
 class IntrospectionMixin:
@@ -16,12 +16,29 @@ class IntrospectionMixin:
 
     # ----- Core ID helpers -----
 
-    def scope_id(self: MemoryFacadeInterface) -> str | None:
+    def scope_id(self: MemoryFacadeProtocol) -> str | None:
         """
-        Return the effective memory scope ID for this facade, if available.
+        Return the effective memory scope ID for this facade.
 
-        This is usually the same value passed to `derive_timeline_id`,
-        e.g. "session:...", "user:...", "run:...", "org:...", or a custom override.
+        This value usually matches the scope identifier used to derive the
+        timeline (for example `session:...`, `user:...`, or `run:...`).
+
+        Examples:
+            Read the scope ID:
+            ```python
+            scope_id = context.memory().scope_id()
+            ```
+
+            Handle missing scope IDs defensively:
+            ```python
+            scope_id = context.memory().scope_id() or "global"
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str | None: The effective memory scope ID, or None if unavailable.
         """
         # Prefer the facade-level attribute if present
         if hasattr(self, "memory_scope_id"):
@@ -35,27 +52,57 @@ class IntrospectionMixin:
                 pass
         return None
 
-    def memory_level(self: MemoryFacadeInterface) -> str | None:
+    def memory_level(self: MemoryFacadeProtocol) -> str | None:
         """
-        Logical memory level requested for this facade (run/session/user/org/scope),
-        if available from the Scope.
+        Return the logical memory level requested for this facade.
+
+        The value is read from the attached scope when available.
+
+        Examples:
+            Read the configured memory level:
+            ```python
+            level = context.memory().memory_level()
+            ```
+
+            Fallback to `"scope"` when unset:
+            ```python
+            level = context.memory().memory_level() or "scope"
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str | None: The memory level (`"scope"`, `"session"`, `"run"`, `"user"`, `"org"`) or None.
         """
         scope = getattr(self, "scope", None)
         if scope is not None and hasattr(scope, "memory_level"):
             return scope.memory_level
         return None
 
-    def bucket_level(self: MemoryFacadeInterface) -> str | None:
+    def bucket_level(self: MemoryFacadeProtocol) -> str | None:
         """
-        Infer the logical memory "bucket level" from the memory_scope_id.
+        Infer the bucket level from the current memory scope ID.
 
-        Expected values:
-          - "session"
-          - "user"
-          - "run"
-          - "org"
-          - "app"
-          - None (if unknown / global)
+        This inspects the prefix of `scope_id()` values such as
+        `session:...` or `user:...`.
+
+        Examples:
+            Infer the bucket level:
+            ```python
+            bucket = context.memory().bucket_level()
+            ```
+
+            Handle unknown/global buckets:
+            ```python
+            bucket = context.memory().bucket_level() or "unknown"
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str | None: Parsed bucket prefix (`"session"`, `"user"`, `"run"`, `"org"`, `"app"`) or None.
         """
         scope_id = self.scope_id()
         if not scope_id:
@@ -66,37 +113,59 @@ class IntrospectionMixin:
         # could be "global" or some custom key
         return None
 
-    def timeline(self: MemoryFacadeInterface) -> str | None:
+    def timeline(self: MemoryFacadeProtocol) -> str | None:
         """
-        Return the timeline ID for this memory facade.
+        Return the timeline ID used by this memory facade.
 
-        This is the primary key used for appending events.
+        This value is the primary partition key used when appending and
+        reading events from hotlog and persistence.
+
+        Examples:
+            Read the timeline ID:
+            ```python
+            timeline_id = context.memory().timeline()
+            ```
+
+            Fallback to a placeholder:
+            ```python
+            timeline_id = context.memory().timeline() or "<none>"
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str | None: The timeline identifier, or None if not initialized.
         """
         return getattr(self, "timeline_id", None)
 
     # ----- Structured info -----
 
-    def scope_info(self: MemoryFacadeInterface) -> dict[str, Any]:
+    def scope_info(self: MemoryFacadeProtocol) -> dict[str, Any]:
         """
-        Return a structured, debug-friendly description of the current memory scope.
+        Return a structured snapshot of current memory scope metadata.
 
-        Example shape:
-        {
-            "timeline_id": "...",
-            "memory_scope_id": "user:user-A",
-            "bucket_level": "user",
-            "run_id": "...",
-            "session_id": "...",
-            "graph_id": "...",
-            "node_id": "...",
-            "org_id": "...",
-            "user_id": "...",
-            "client_id": "...",
-            "app_id": "...",
-            "agent_id": "...",
-            "flow_id": "...",
-            "has_indices": True,
-        }
+        The returned dictionary is intended for diagnostics and observability.
+
+        Examples:
+            Retrieve structured scope information:
+            ```python
+            info = context.memory().scope_info()
+            ```
+
+            Access timeline and level fields:
+            ```python
+            info = context.memory().scope_info()
+            timeline = info.get("timeline_id")
+            level = info.get("memory_level")
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, Any]: Scope and runtime identifiers (timeline, memory scope,
+            level, and available scope attributes such as run/session/user/org IDs).
         """
         scope = getattr(self, "scope", None)
 
@@ -132,11 +201,29 @@ class IntrospectionMixin:
 
         return info
 
-    def debug_print_scope(self: MemoryFacadeInterface, prefix: str = "[MEM]") -> None:
+    def debug_print_scope(self: MemoryFacadeProtocol, prefix: str = "[MEM]") -> None:
         """
-        Convenience method to print the current scope info to stdout.
+        Print formatted scope diagnostics to stdout.
 
-        Useful inside quick scripts / demos / tests.
+        This is a convenience helper for scripts and tests where a quick text
+        view of memory scope fields is useful.
+
+        Examples:
+            Print with the default prefix:
+            ```python
+            context.memory().debug_print_scope()
+            ```
+
+            Print with a custom prefix:
+            ```python
+            context.memory().debug_print_scope(prefix="[DEBUG-MEM]")
+            ```
+
+        Args:
+            prefix: Prefix string prepended to each printed line.
+
+        Returns:
+            None: This method prints diagnostics and does not return data.
         """
         info = self.scope_info()
         print(

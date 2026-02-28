@@ -23,12 +23,44 @@ class StateMixin:
         stage: str | None = None,
     ) -> Event:
         """
-        Record a structured state snapshot.
+        Record a structured state snapshot event.
 
-        - key: logical name for the state (e.g. "optimizer", "session_config").
-        - value: arbitrary JSON-serializable structure (dataclass/dict/list/…).
-        - tags: extra tags; "state" and f"state:{key}" are always added.
-        - meta: additional metadata stored alongside the value.
+        This method normalizes the value into a serializable payload and
+        appends a state event tagged with both `state` and `state:{key}`.
+
+        Examples:
+            Record a basic state snapshot:
+            ```python
+            await context.memory().record_state(
+                key="planner",
+                value={"step": "draft", "attempt": 1},
+            )
+            ```
+
+            Record state with custom metadata:
+            ```python
+            await context.memory().record_state(
+                key="session_config",
+                value={"temperature": 0.2},
+                tags=["runtime"],
+                meta={"source": "bootstrap"},
+                severity=1,
+            )
+            ```
+
+        Args:
+            key: Logical state key (for example, `"planner"`).
+            value: Value to snapshot; converted to a serializable representation.
+            tags: Optional additional tags appended to default state tags.
+            meta: Optional metadata stored in the event payload.
+            severity: Event severity to store with the snapshot.
+            signal: Optional signal override for the event.
+            kind: Event kind. Defaults to `"state.snapshot"`.
+            stage: Optional event stage.
+
+        Returns:
+            Event: The persisted state snapshot event.
+
         """
 
         def _to_serializable(obj: Any) -> Any:
@@ -77,10 +109,35 @@ class StateMixin:
         kind: str = "state.snapshot",
     ) -> Any | None:
         """
-        Fetch the most recent state snapshot for a given key.
+        Fetch the most recent state value for a key.
 
-        - level: which scope to search within (None/"scope", "session", "run", "user", "org").
-        - use_persistence: whether to look into full history (True) or hotlog only (False).
+        This method finds the newest matching state snapshot and returns only
+        its `value` field from the stored payload.
+
+        Examples:
+            Read latest planner state:
+            ```python
+            latest = await context.memory().latest_state("planner")
+            ```
+
+            Read from persisted user-level history:
+            ```python
+            latest = await context.memory().latest_state(
+                "session_config",
+                level="user",
+                user_persistence=True,
+            )
+            ```
+
+        Args:
+            key: Logical state key to retrieve.
+            tags: Optional additional required tags.
+            level: Optional scope level filter.
+            user_persistence: If True, query persistence; otherwise use hotlog.
+            kind: Event kind used for state snapshots.
+
+        Returns:
+            Any | None: The latest stored state value, or None if unavailable.
         """
         base_tags = ["state", f"state:{key}"]
         if tags:
@@ -92,7 +149,7 @@ class StateMixin:
             limit=1,
             overfetch=5,
             level=level,
-            user_persistence=user_persistence,
+            use_persistence=user_persistence,
         )
         if not events:
             return None
@@ -115,7 +172,36 @@ class StateMixin:
         use_persistence: bool = False,
     ) -> list[Event]:
         """
-        Fetch a history of state snapshots for a given key.
+        Fetch state snapshot history for a key.
+
+        This method returns full `Event` rows so callers can inspect state
+        values, metadata, timestamps, and tags together.
+
+        Examples:
+            Load the latest 20 snapshots:
+            ```python
+            events = await context.memory().state_history("planner", limit=20)
+            ```
+
+            Load persisted user-level snapshots:
+            ```python
+            events = await context.memory().state_history(
+                "session_config",
+                level="user",
+                use_persistence=True,
+            )
+            ```
+
+        Args:
+            key: Logical state key to retrieve history for.
+            tags: Optional additional required tags.
+            limit: Maximum number of events to return.
+            level: Optional scope level filter.
+            kind: Event kind used for state snapshots.
+            use_persistence: If True, query persistence; otherwise use hotlog.
+
+        Returns:
+            list[Event]: Matching state snapshot events in chronological order.
         """
         base_tags = ["state", f"state:{key}"]
         if tags:
@@ -143,11 +229,37 @@ class StateMixin:
         created_at_max: float | None = None,
     ) -> list[EventSearchResult]:
         """
-        Full-text + metadata search over state snapshots.
+        Search indexed state snapshot events.
 
-        - query: free-text query ("" for pure metadata/time search).
-        - key: logical state key (adds tag "state:{key}").
-        - tags: extra tags to require.
+        This method applies state-specific filters and delegates search to the
+        scoped index backend. If no backend exists, it returns an empty list.
+
+        Examples:
+            Search all state snapshots:
+            ```python
+            results = await context.memory().search_state(query="temperature", top_k=5)
+            ```
+
+            Search a specific state key in a time window:
+            ```python
+            results = await context.memory().search_state(
+                query="planner",
+                key="session_config",
+                time_window="7d",
+            )
+            ```
+
+        Args:
+            query: Free-text query string.
+            key: Optional logical state key filter.
+            tags: Optional additional required tags.
+            top_k: Maximum number of scored results to return.
+            time_window: Optional relative time-window expression.
+            created_at_min: Optional lower timestamp bound.
+            created_at_max: Optional upper timestamp bound.
+
+        Returns:
+            list[EventSearchResult]: Scored search matches with resolved events.
         """
 
         # If we don't have indices, fall back gracefully.
