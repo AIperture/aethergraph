@@ -254,44 +254,32 @@ class ChannelSession:
     # -------- send --------
     async def send(self, event: OutEvent, *, channel: str | None = None):
         """
-        Send a single outbound event to the configured channel.
+        Publish one outbound event after channel/meta normalization.
 
-        This method ensures the event is associated with the correct channel,
-        merges context-derived metadata, and publishes the event via the channel bus.
-        This is the core low-level send method; higher-level convenience methods
-        (e.g., `send_text`, `send_rich`, etc.) build on top of this and are recommended
-        for common use cases.
+        Ensure `event.channel` is set when missing and merge context metadata
+        into `event.meta` before publishing through the channel bus.
 
         Examples:
-            Basic usage to send a pre-constructed event:
+            Publish a pre-constructed event:
             ```python
-
             event = OutEvent(type="agent.message", text="Hello!", channel=None)
             await context.channel().send(event)
             ```
 
-            Sending to a specific channel:
+            Resolve the channel when `event.channel` is empty:
             ```python
             await context.channel().send(event, channel="web:chat")
             ```
 
         Args:
-            event: The `OutEvent` instance to send. If `event.channel` is not set,
-                it will be resolved automatically.
-            channel: Optional explicit channel key to override the default or event's channel.
+            event: Event to publish.
+            channel: Optional fallback channel key used only when `event.channel` is unset.
 
         Returns:
-            None
+            None: Complete when the event is published.
 
         Notes:
-        for AG WebUI, you can set meta with
-        ```python
-            {
-                "agent_id": "agent-123",
-                "name": "Analyst",
-            }
-        ```
-        to override the sender's display name and avatar in the chat.
+            Existing `event.channel` is preserved and not overridden by `channel`.
         """
         event = self._ensure_channel(event, channel=channel)
 
@@ -311,17 +299,18 @@ class ChannelSession:
         key_suffix: str | None = None,
     ) -> None:
         """
-        This method constructs a normalized outbound event representing the current
-        phase and its status, merges context-derived metadata, and dispatches the
-        event via the channel bus.
+        Emit a phase-style progress update event.
+
+        Build a `rich` payload with phase metadata and publish it as
+        `agent.progress.update` with a stable upsert key for this run/node.
 
         Examples:
-            Sending a phase update with a "pending" status:
+            Send a pending phase update:
             ```python
             await context.channel().send_phase("routing", "pending")
             ```
 
-            Sending a phase update with additional details and a specific channel:
+            Send an active phase update with details:
             ```python
             await context.channel().send_phase(
                 "planning",
@@ -332,22 +321,20 @@ class ChannelSession:
             ```
 
         Args:
-            phase: The logical stage name (e.g., "routing", "planning", "reasoning").
-            status: The current state of the phase ("pending", "active", "done", "failed", "skipped").
-            label: Optional custom label for the phase (default: capitalized phase name).
-            detail: Optional detailed description of the phase (default: empty string).
-            code: Optional code identifier for the phase.
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            key_suffix: Optional suffix to customize the upsert key (default: "phase:{phase}").
+            phase: Logical phase identifier.
+            status: Phase status value. One of `"pending"`, `"active"`, `"done"`, `"failed"`, or `"skipped"`.
+            label: Optional display label. Defaults to `phase.title()`.
+            detail: Optional detail text. Defaults to an empty string.
+            code: Optional code string in the rich payload.
+            channel: Optional target channel key.
+            key_suffix: Optional upsert-key suffix. Defaults to `f"phase:{phase}"`.
 
         Returns:
-            None
+            None: Complete when the progress update is published.
 
         Notes:
-            - This method will show a phase block in AG WebUI's timeline view if the adapter supports it.
-            - Other adapters may choose to render this differently or ignore the rich payload.
-            - All stage, status, label, detail, code fields can be customized without a fixed schema; the UI will treat them as opaque strings for display and filtering.
-            - The `upsert_key` ensures stable updates for the same phase within a node/run.
+            - Payload shape is UI-oriented and adapters may render or ignore it differently.
+            - The AG UI will continue showing the phase block until a new message arrives or "done"/"failed"/"skipped" status is received for the same phase (identified by upsert key).
         """
         ch_key = self._resolve_key(channel)
         # Stable upsert per phase per node/run
@@ -389,18 +376,18 @@ class ChannelSession:
         memory_signal: float | None = None,
     ):
         """
-        Send a plain text message to the configured channel.
+        Send one plain-text message event and optionally log it to memory.
 
-        This method constructs a normalized outbound event, merges context-derived metadata,
-        and dispatches the message via the channel bus.
+        Log the text via memory facade when enabled, then publish
+        `OutEvent(type="agent.message")` with merged metadata.
 
         Examples:
-            Basic usage to send a text message:
+            Send a message:
             ```python
             await context.channel().send_text("Hello, world!")
             ```
 
-            Sending with additional metadata and to a specific channel:
+            Send to a specific channel with extra metadata:
             ```python
             await context.channel().send_text(
                 "Status update.",
@@ -410,27 +397,21 @@ class ChannelSession:
             ```
 
         Args:
-            text: The primary text content to send.
-            meta: Optional dictionary of metadata to include with the event.
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_log: Whether to log this message to memory (default: True).
-            memory_role: The role to use when logging to memory (default: "assistant").
-            memory_tags: Optional list of tags to associate with the memory log entry.
-            memory_data: Optional structured data to include with the memory log entry.
-            memory_severity: Severity level for the memory log entry (default: 2).
-            memory_signal: Optional signal value for the memory log entry.
+            text: Message body to send.
+            meta: Optional outbound event metadata.
+            channel: Optional target channel key.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured data for the memory record.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None
+            None: Complete when memory logging and publish steps finish.
 
         Notes:
-        for AG WebUI, you can set meta with
-        ```python
-            {
-                "agent_id": "agent-123",
-                "name": "Analyst",
-            }
-        ```
+            Set adapter-specific display hints in `meta` (for example `name` or `agent_id`).
         """
 
         await self._log_chat(
@@ -468,75 +449,49 @@ class ChannelSession:
         memory_signal: float | None = None,
     ):
         """
-        Send a rich UI message to the configured channel.
+        Send a message with an optional rich payload and optional memory logging.
 
-        This method constructs a normalized outbound event, merges context-derived metadata,
-        and dispatches the message with an optional `rich` payload for UI-aware adapters.
+        Publish `OutEvent(type="agent.message")` with both `text` and `rich`
+        fields, and record chat memory when enabled.
 
         Examples:
-            Sending a single rich block:
+            Send one rich block:
             ```python
             await context.channel().send_rich(
-            text="Here is the loss curve:",
-            rich={
-                "kind": "plot",
-                "title": "Training loss",
-                "payload": {
-                "engine": "vega-lite",
-                "spec": loss_vega_spec,
+                text="Here is the loss curve:",
+                rich={
+                    "kind": "plot",
+                    "title": "Training loss",
+                    "payload": {"engine": "vega-lite", "spec": loss_vega_spec},
                 },
-            },
             )
             ```
 
-            Sending multiple rich blocks:
+            Send multiple rich blocks:
             ```python
             await context.channel().send_rich(
-            text="Training summary:",
-            rich={
-                "blocks": [
-                {
-                    "kind": "plot",
-                    "title": "Loss",
-                    "payload": {
-                    "engine": "vega-lite",
-                    "spec": loss_vega_spec,
-                    },
-                },
-                {
-                    "kind": "metrics",
-                    "title": "Key metrics",
-                    "payload": {
-                    "items": [
-                        {"label": "Best val loss", "value": "0.023"},
-                        {"label": "Epochs", "value": "20"},
-                    ],
-                    },
-                },
-                ]
-            },
+                text="Training summary:",
+                rich={"blocks": [{"kind": "plot"}, {"kind": "metrics"}]},
             )
             ```
 
         Args:
-            text: Optional plain text content to send alongside the rich payload.
-            rich: A dictionary representing the structured rich payload. This can be a single block
-            or multiple blocks depending on the use case.
-            meta: Optional dictionary of metadata to include with the event.
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_log: Whether to log this message to memory (default: True).
-            memory_role: The role to use when logging to memory (default: "assistant").
-            memory_tags: Optional list of tags to associate with the memory log entry.
-            memory_data: Optional structured data to include with the memory log entry.
-            memory_severity: Severity level for the memory log entry (default: 2).
-            memory_signal: Optional signal value for the memory log entry.
+            text: Optional plain text content.
+            rich: Optional structured payload for UI-aware adapters.
+            meta: Optional outbound event metadata.
+            channel: Optional target channel key.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured data for the memory record.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None
+            None: Complete when memory logging and publish steps finish.
 
         Notes:
-            - For AG WebUI, the `rich` payload is passed through as-is and rendered as UI blocks.
-            - Other adapters may down-level these blocks to plain text or ignore them.
+            If `text` is `None`, memory logging records `"[rich message]"`.
         """
 
         # --- 1) Memory logging (log *something* even if text=None) ---
@@ -581,15 +536,13 @@ class ChannelSession:
         memory_signal: float | None = None,
     ):
         """
-        Send an image message to the configured channel.
+        Send an image attachment via `send_file()` with image defaults.
 
-        This method constructs a normalized outbound event, merges context-derived metadata,
-        and dispatches the image message via the channel bus. The image can be specified
-        using a URL or raw bytes, and additional metadata such as alternative text and title
-        can be provided.
+        Build image-oriented labels and filename, then delegate to `send_file`
+        using `artifact_kind="image"`.
 
         Examples:
-            Basic usage to send an image by URL:
+            Send by URL:
             ```python
             await context.channel().send_image(
                 url="https://example.com/image.png",
@@ -597,45 +550,34 @@ class ChannelSession:
             )
             ```
 
-            Sending an image with a custom title and to a specific channel:
+            Send generated bytes:
             ```python
             await context.channel().send_image(
-                url="https://example.com/photo.jpg",
-                alt="User profile photo",
-                title="Profile",
-                channel="web:chat"
-            )
-            ```
-
-            Sending an image from raw bytes:
-            ```python
-            await context.channel().send_image(
-                file_bytes=b"binaryimagedata...",
+                file_bytes=b"...",
                 alt="Generated image",
-                title="Generated Output"
+                title="Result"
             )
             ```
 
         Args:
-            url: The URL of the image to send. If None, raw bytes must be provided.
-            file_bytes: Optional raw bytes of the image to send.
-            alt: Alternative text describing the image (for accessibility).
-            title: Optional title to display with the image.
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            artifact_labels: Optional dictionary of labels to associate with the image artifact.
-            memory_log: Whether to log this message to memory (default: True).
-            memory_role: The role to use when logging to memory (default: "assistant").
-            memory_tags: Optional list of tags to associate with the memory log entry.
-            memory_data: Optional structured data to include with the memory log entry.
-            memory_severity: Severity level for the memory log entry (default: 2).
-            memory_signal: Optional signal value for the memory log entry.
+            url: Optional HTTP(S) URL or local path for the image source.
+            file_bytes: Optional image bytes. Preferred when both are provided.
+            alt: Alternate text used for fallback titling/filename.
+            title: Optional display title.
+            channel: Optional target channel key.
+            artifact_labels: Optional extra artifact labels.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured data for the memory record.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None
+            None: Complete when delegated file send finishes.
 
         Notes:
-            The capability to render images depends on the client adapter. If both `url` and
-            `file_bytes` are provided, both will be included in the event.
+            `artifact_labels` are merged with `{"renderer": "image"}`.
         """
 
         labels = {"renderer": "image"}
@@ -681,14 +623,13 @@ class ChannelSession:
         memory_signal: float | None = None,
     ):
         """
-        Send a file to the configured channel in a normalized format.
+        Send a file attachment message, optionally persisting it as an artifact.
 
-        This method constructs and dispatches an outbound event containing file metadata,
-        including the file URL, raw bytes, filename, and an optional title. Context-derived
-        metadata is automatically merged, and the event is published via the channel bus.
+        Prefer artifact-backed payloads for `file_bytes` or local-path inputs.
+        Fall back to a URL-only payload when artifact persistence is unavailable.
 
         Examples:
-            Basic usage to send a file by URL:
+            Send by URL:
             ```python
             await context.channel().send_file(
                 url="https://example.com/report.pdf",
@@ -697,7 +638,7 @@ class ChannelSession:
             )
             ```
 
-            Sending a file from bytes:
+            Send from bytes:
             ```python
             await context.channel().send_file(
                 file_bytes=b"binarydata...",
@@ -707,19 +648,25 @@ class ChannelSession:
             ```
 
         Args:
-            url: The URL of the file to send. If None, only file_bytes will be used.
-            file_bytes: Optional raw bytes of the file to send.
-            filename: The display name of the file (defaults to "file.bin").
-            title: Optional title to display with the file.
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_*: Parameters controlling logging to memory (see `send_text` for details).
+            url: Optional source URL or local filesystem path.
+            file_bytes: Optional raw file bytes.
+            filename: Display filename for the chat attachment.
+            title: Optional message text. Defaults to `filename`.
+            channel: Optional target channel key.
+            artifact_kind: Artifact kind when writing to artifact store.
+            artifact_labels: Optional labels attached to persisted artifacts.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured data for the memory record.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None
+            None: Complete when the outbound message event is published.
 
         Notes:
-            The capability to handle file uploads depends on the client adapter.
-            If both `url` and `file_bytes` are provided, both will be included in the event.
+            When both `file_bytes` and `url` are provided, bytes are attempted first.
         """
         # ------------------------------
         # 1) Maybe create an Artifact
@@ -836,12 +783,13 @@ class ChannelSession:
         memory_signal: float | None = None,
     ):
         """
-        Send a message with interactive buttons to the configured channel.
+        Send a button prompt event and optionally log prompt text to memory.
 
-        This method constructs and dispatches an outbound event containing a text prompt and a list of interactive buttons. Context-derived metadata is automatically merged, and the event is published via the channel bus.
+        Publish `OutEvent(type="link.buttons")` with button definitions and
+        merged metadata for the resolved channel.
 
         Examples:
-            Basic usage to send a button prompt:
+            Send a yes/no prompt:
             ```python
             from aethergraph import Button
             await context.channel().send_buttons(
@@ -850,7 +798,7 @@ class ChannelSession:
             )
             ```
 
-            Sending with additional metadata and to a specific channel:
+            Send with custom metadata:
             ```python
             await context.channel().send_buttons(
                 "Select your role:",
@@ -861,14 +809,22 @@ class ChannelSession:
             ```
 
         Args:
-            text: The primary text content to display above the buttons.
-            buttons: A list of `Button` objects representing the interactive options.
-            meta: Optional dictionary of metadata to include with the event.
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_*: Parameters controlling logging to memory (see `send_text` for details).
+            text: Prompt text displayed above the buttons.
+            buttons: Button definitions to send.
+            meta: Optional outbound event metadata.
+            channel: Optional target channel key.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured data for the memory record.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None
+            None: Complete when memory logging and publish steps finish.
+
+        Notes:
+            Button rendering/interaction semantics depend on the active adapter.
         """
         memory_tags = [*(memory_tags or []), "buttons"]
         await self._log_chat(
@@ -967,18 +923,18 @@ class ChannelSession:
         memory_tags: list[str] | None = None,
     ) -> str:
         """
-        Prompt the user for a text response in a normalized format.
+        Prompt for user text and return normalized reply text.
 
-        This method sends a prompt to the configured channel, waits for a user reply, and returns the text input.
-        It automatically handles context metadata, timeout, and channel resolution.
+        Optionally log prompt/reply to memory, then use the continuation flow to
+        await `kind="user_input"` and return `payload["text"]` as `str`.
 
         Examples:
-            Basic usage to prompt for user input:
+            Ask a question:
             ```python
             reply = await context.channel().ask_text("What is your name?")
             ```
 
-            Prompting with a custom timeout and silent mode:
+            Use timeout and silent mode:
             ```python
             reply = await context.channel().ask_text(
                 "Enter your feedback.",
@@ -988,16 +944,19 @@ class ChannelSession:
             ```
 
         Args:
-            prompt: The text prompt to display to the user. If None, a generic prompt may be shown.
-            timeout_s: Maximum time in seconds to wait for a response (default: 3600).
-            silent: If True, suppresses prompt display in some adapters (back-compat; default: False).
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_log_prompt: Whether to log the prompt to memory (default: True).
-            memory_log_reply: Whether to log the user's reply to memory (default: True).
-            memory_tags: Optional list of tags to associate with the memory log entries.
+            prompt: Prompt text. `None` means wait without showing a prompt.
+            timeout_s: Continuation deadline in seconds.
+            silent: Back-compat flag forwarded in continuation payload.
+            channel: Optional target channel key.
+            memory_log_prompt: Enable memory logging for the prompt.
+            memory_log_reply: Enable memory logging for non-empty reply text.
+            memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            str: The user's text response, or an empty string if no input was received.
+            str: User text reply, or `""` when absent.
+
+        Notes:
+            Reply memory logging occurs only when returned text is non-empty.
         """
         if prompt:
             await self._log_chat(
@@ -1087,20 +1046,20 @@ class ChannelSession:
         memory_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
-        Prompt the user for approval or rejection in a normalized format.
+        Prompt for a button-style approval choice and return normalized result.
 
-        This method sends an approval prompt with customizable options (buttons) to the configured channel,
-        waits for the user's selection, and returns a normalized result indicating approval status and choice.
-        Context metadata, timeout, and channel resolution are handled automatically.
+        Send an `approval` continuation with button labels, wait for the user's
+        selected choice, then derive `approved` from whether the first option
+        was selected (case-insensitive).
 
         Examples:
-            Basic usage to prompt for approval:
+            Use default approve/reject options:
             ```python
             result = await context.channel().ask_approval("Do you approve this action?")
             # result: { "approved": True/False, "choice": "Approve"/"Reject" }
             ```
 
-            Prompting with custom options and timeout:
+            Use custom options:
             ```python
             result = await context.channel().ask_approval(
                 "Proceed with deployment?",
@@ -1110,22 +1069,19 @@ class ChannelSession:
             ```
 
         Args:
-            prompt: The text prompt to display to the user.
-            options: Iterable of button labels for user choices (defaults to "Approve" and "Reject").
-            timeout_s: Maximum time in seconds to wait for a response (default: 3600).
-            channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_log_prompt: Whether to log the prompt to memory (default: True).
-            memory_log_reply: Whether to log the user's reply to memory (default: True).
-            memory_tags: Optional list of tags to associate with the memory log entries.
+            prompt: Prompt text shown to the user.
+            options: Ordered button labels. The first option maps to approved.
+            timeout_s: Continuation deadline in seconds.
+            channel: Optional target channel key.
+            memory_log_prompt: Enable memory logging for the prompt.
+            memory_log_reply: Enable memory logging for a selected choice.
+            memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            dict: A dictionary containing:
-                - "approved": bool indicating if the __first__ option was selected (True if approved, False otherwise).
-                - "choice": The label of the button selected by the user (str or None).
+            dict[str, Any]: `{"approved": bool, "choice": Any}`.
 
-        Warning:
-            The returned "choices" are determined by the external adapter and may vary. To be robust, make sure
-            to use `choices.lower()` and strip whitespace when comparing.
+        Notes:
+            If no choice is returned, or `options` is empty, `approved` is `False`.
         """
         if prompt:
             await self._log_chat(
@@ -1181,15 +1137,13 @@ class ChannelSession:
         memory_tags: list[str] | None = None,
     ) -> dict:
         """
-        Prompt the user to upload one or more files, optionally with a text comment.
+        Prompt for file upload and return normalized text/files payload.
 
-        This method sends a file upload request to the configured channel, allowing the user to select files
-        and optionally enter accompanying text. The `accept` parameter provides hints to the client UI about
-        which file types are preferred, but is not enforced server-side. The method waits for the user's response
-        and returns a normalized result containing both text and file references.
+        Send a `user_files` continuation prompt, wait for response, and return
+        a dictionary with text plus a list-valued `files` field.
 
         Examples:
-            Basic usage to prompt for file upload:
+            Ask for one or more files:
             ```python
             result = await context.channel().ask_files(
                 prompt="Please upload your report."
@@ -1197,7 +1151,7 @@ class ChannelSession:
             # result: { "text": "...", "files": [FileRef(...), ...] }
             ```
 
-            Restricting to images and allowing multiple files:
+            Provide type hints for upload UI:
             ```python
             result = await context.channel().ask_files(
                 prompt="Upload images for review.",
@@ -1207,20 +1161,20 @@ class ChannelSession:
             ```
 
         Args:
-            prompt: The text prompt to display to the user above the file picker.
-            accept: Optional list of MIME types or file extensions to suggest allowed file types (e.g., "image/png", ".pdf", ".jpg").
-            multiple: If True, allows the user to select multiple files (default: True).
-            timeout_s: Maximum time in seconds to wait for a response (default: 3600).
-            channel: Optional explicit channel key to override the default or session-bound channel.
+            prompt: Prompt text shown with the file picker.
+            accept: Optional MIME/extension hints for the adapter UI.
+            multiple: Allow multiple selections when `True`.
+            timeout_s: Continuation deadline in seconds.
+            channel: Optional target channel key.
+            memory_log_prompt: Enable memory logging for the prompt.
+            memory_log_reply: Enable memory logging for non-empty reply text.
+            memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            dict: A dictionary containing:
-                - "text": str, the user's comment or description (may be empty).
-                - "files": List[FileRef], references to the uploaded files (empty if none).
+            dict: `{"text": str, "files": list}`.
 
         Notes:
-            On console adapters, file upload is not supported; only text will be returned.
-            The `accept` parameter is a UI hint and does not guarantee file type enforcement.
+            `accept` is advisory and adapter-dependent, not strict server-side validation.
         """
         if prompt:
             await self._log_chat(
@@ -1264,12 +1218,38 @@ class ChannelSession:
         memory_tags: list[str] | None = None,
     ) -> dict:
         """
-        Prompt the user for either text input or file uploads in a normalized format.
-        This method sends a prompt to the configured channel, allowing the user to respond with
-        text, files, or both. It waits for the user's response and returns a normalized result
-        containing the text and file references.
+        Prompt for either text or files and return normalized payload.
 
-        Not used very often; prefer ask_text + get_latest_uploads or ask_files.
+        Send a `user_input_or_files` continuation request and return both `text`
+        and `files` fields after normalization.
+
+        Examples:
+            Prompt for either modality:
+            ```python
+            result = await context.channel().ask_text_or_files(prompt="Reply or upload files")
+            ```
+
+            Send to a specific channel:
+            ```python
+            result = await context.channel().ask_text_or_files(
+                prompt="Provide evidence",
+                channel="web:chat",
+            )
+            ```
+
+        Args:
+            prompt: Prompt text shown to the user.
+            timeout_s: Continuation deadline in seconds.
+            channel: Optional target channel key.
+            memory_log_prompt: Enable memory logging for the prompt.
+            memory_log_reply: Enable memory logging for non-empty reply text.
+            memory_tags: Optional tags applied to memory entries.
+
+        Returns:
+            dict: `{"text": str, "files": list}`.
+
+        Notes:
+            Prefer `ask_text` + `get_latest_uploads` or `ask_files` when modality is known.
         """
         if prompt:
             await self._log_chat(
@@ -1305,34 +1285,30 @@ class ChannelSession:
     # ---------- inbox helpers (platform-agnostic) ----------
     async def get_latest_uploads(self, *, clear: bool = True) -> list[FileRef]:
         """
-        Retrieve the latest uploaded files from this channel's inbox in a normalized format.
+        Read latest uploaded files from this channel inbox.
 
-        This method accesses the ephemeral KV store to fetch file uploads associated with the current channel.
-        By default, it clears the inbox after retrieval to prevent duplicate processing. If the KV service
-        is unavailable in the context, a RuntimeError is raised. This method allows the fetch the files user
-        uploaded __not__ from an ask_files prompt, but from any prior upload event.
+        Load files from the ephemeral KV inbox key for the resolved channel and
+        optionally clear the inbox after retrieval.
 
         Examples:
-            Basic usage to fetch and clear uploaded files:
+            Fetch and clear inbox files:
             ```python
             files = await context.channel().get_latest_uploads()
             ```
 
-            Fetching files without clearing the inbox:
+            Fetch without clearing:
             ```python
             files = await context.channel().get_latest_uploads(clear=False)
             ```
 
         Args:
-            clear: If True (default), removes files from the inbox after retrieval.
-                If False, files are returned but remain in the inbox.
+            clear: Pop files when `True`; read without removal when `False`.
 
         Returns:
-            List[FileRef]: A list of `FileRef` objects representing the uploaded files.
-                Returns an empty list if no files are present.
+            list[FileRef]: Uploaded files for this channel inbox.
 
-        Raises:
-            RuntimeError: If the ephemeral KV service is not available in the current context.
+        Notes:
+            This reads inbox uploads regardless of whether they came from `ask_files()`.
         """
         kv = getattr(self.ctx.services, "kv", None)
         if kv:
@@ -1456,14 +1432,14 @@ class ChannelSession:
     @asynccontextmanager
     async def stream(self, channel: str | None = None) -> AsyncIterator["_StreamSender"]:
         """
-        Stream a sequence of text deltas to the configured channel in a normalized format.
+        Create a stream sender context for incremental text output.
 
-        This method provides a context manager for streaming incremental message updates (such as LLM generation)
-        to the target channel. It automatically handles context metadata, upsert keys, and dispatches start, update,
-        and end events to the channel bus. The caller is responsible for sending deltas and ending the stream.
+        Yield a `_StreamSender` bound to the resolved channel. The sender emits
+        `agent.stream.start/delta/end` events when `start()`, `delta()`, and
+        `end()` are called.
 
         Examples:
-            Basic usage to stream texts:
+            Stream text deltas:
             ```python
             async with context.channel().stream() as s:
                 await s.delta("Hello, ")
@@ -1471,37 +1447,21 @@ class ChannelSession:
                 await s.end()
             ```
 
-            Streaming to a specific channel:
+            Stream to a specific channel:
             ```python
             async with context.channel().stream(channel="web:chat") as s:
                 await s.delta("Generating results...")
                 await s.end(full_text="Results complete.", memory_tags=["llm"])
             ```
 
-            Streaming with context.llm().stream_chat()
-            ```python
-            async with context.channel().stream() as s:
-                    # The `on_delta` callback sends each piece to the stream.
-                    async def on_delta(piece: str) -> None:
-                        await s.delta(piece)
-                    resp, usage = await llm.chat_stream(
-                        messages=messages,
-                        on_delta=on_delta, # send each delta to the stream as it arrives
-                    )
-                await s.end(full_text=resp)
-            ```
-
         Args:
-            channel: Optional explicit channel key to target a specific channel for this stream.
-                If None, uses the session-bound or default channel.
+            channel: Optional target channel key for this stream context.
 
         Returns:
-            AsyncIterator[_StreamSender]: An async context manager yielding a `_StreamSender` object
-                for sending deltas and ending the stream.
+            AsyncIterator[_StreamSender]: Context yielding the stream sender.
 
         Notes:
-            - The caller must explicitly call `end()` to finalize the stream. No auto-end is performed.
-            - The adapter may have specific behaviors for rendering streamed content (update vs. append).
+            Caller is responsible for calling `end()`. No auto-end is performed.
         """
         s = ChannelSession._StreamSender(self, channel_key=channel)
         try:
