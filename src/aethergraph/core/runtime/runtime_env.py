@@ -22,6 +22,7 @@ from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.resume.router import ResumeRouter
+from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
@@ -226,6 +227,14 @@ class RuntimeEnv:
         if self.web_search_service is not None:
             web_search = WebSearchFacade(self.web_search_service)
 
+        runner = RunFacade(
+            run_manager=self.container.run_manager,
+            identity=self.identity,
+            session_id=self.session_id,
+            agent_id=self.agent_id,
+            app_id=self.app_id,
+        )
+
         services = NodeServices(
             channels=self.channels,
             continuation_store=self.continuation_store,
@@ -239,7 +248,7 @@ class RuntimeEnv:
             viz=vis_facade,
             llm=self.llm_service,  # LLMService
             mcp=self.mcp_service,  # MCPService
-            run_manager=self.container.run_manager,  # RunManager
+            runner=runner,  # RunFacade
             indices=indices,  # ScopedIndices for this node
             execution=self.container.execution
             if self.container.execution is not None
