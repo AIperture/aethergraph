@@ -60,7 +60,22 @@ class GraphFunction:
         if env is None:
             from ..runtime.graph_runner import _build_env  # internal helper
 
-            env, retry, max_concurrency = await _build_env(self, inputs)
+            inherited_identity = None
+            parent_ctx = inputs.get("context")
+            if parent_ctx is not None:
+                inherited_identity = getattr(parent_ctx, "identity", None)
+
+            env_inputs = dict(inputs)
+            env_inputs.pop("context", None)
+            env, retry, max_concurrency = await _build_env(
+                self,
+                env_inputs,
+                identity=inherited_identity,
+                run_id=getattr(parent_ctx, "run_id", None),
+                session_id=getattr(parent_ctx, "session_id", None),
+                agent_id=getattr(parent_ctx, "agent_id", None),
+                app_id=getattr(parent_ctx, "app_id", None),
+            )
         if retry is None:
             retry = RetryPolicy()
 
@@ -83,7 +98,8 @@ class GraphFunction:
                 sig = inspect.signature(self.fn)
                 call_kwargs = dict(inputs)
                 if "context" in sig.parameters:
-                    call_kwargs["context"] = node_ctx
+                    # Preserve explicitly provided parent context for nested graph calls.
+                    call_kwargs["context"] = call_kwargs.get("context") or node_ctx
 
                 with interp.enter():
                     res = self.fn(**call_kwargs)
