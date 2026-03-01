@@ -202,6 +202,9 @@ temp/
 # local test and env files
 _local*
 
+# Coding agent skills and configs 
+.codex/
+
 
 # Built frontend bundle
 src/aethergraph/server/ui_static/

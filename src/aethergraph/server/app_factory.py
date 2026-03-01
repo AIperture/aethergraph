@@ -33,13 +33,13 @@ from aethergraph.core.runtime.runtime_services import (
     install_services,
     register_skills_from_path,
 )
-from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
 
 # from aethergraph.plugins.agents.agnet_buider_agent import *  # noqa: F403
 # import built-in agents and plugins to register them
 from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
-from aethergraph.plugins.agents.graph_builder.agent import *  # noqa: F403
 
+# from aethergraph.plugins.agents.graph_builder.agent import *  # noqa: F403
+# from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
 # from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec
@@ -81,7 +81,6 @@ def create_app(
 
         # Start trigger engine if trigger_service is present
         if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
-            logger.info("Starting TriggerEngine background task")
             trigger_engine: TriggerEngine = container.trigger_engine
             trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
             app.state.trigger_engine_task = trigger_engine_task

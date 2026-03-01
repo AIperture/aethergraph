@@ -73,12 +73,12 @@ def main(argv: list[str] | None = None) -> int:
     Examples:
         Basic usage with default workspace and port:
         ```bash
-        python -m aethergraph serve --workspace # only default agents/apps show up
+        python -m aethergraph serve # only default agents/apps show up
         ```
 
         load user graphs from a file and autoreload on changes:
         ```bash
-        python -m aethergraph serve --load-path ./graphs.py --reload
+        python -m aethergraph serve --load-path ./graphs.py --reload --reload-include 'src/**/*.py'
         ```
 
         Load multiple modules and set a custom project root:
@@ -114,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         - `strict-load`: Raise error if graph loading fails.
         - `reuse`: If server already running for workspace, print URL and exit.
         - `reload`: Enable auto-reload (dev mode).
+        - `reload-dir`: Additional directory to watch for auto-reload (repeatable). If not provided, defaults to project-root plus parents of --load-path.
+        - `reload-include`: Glob pattern to include for auto-reload (repeatable).
+        - `reload-exclude`: Glob pattern to exclude from auto-reload (repeatable).
 
     Returns:
         int: Exit code (0 for success, 2 for unknown command).
@@ -302,7 +305,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[AetherGraph] 📂 {'Workspace:':<18} {args.workspace}")
             print(f"[AetherGraph] 🧩 {'Log Path:':<18} {log_path}")
             print(f"[AetherGraph] ♻️  {'Auto-reload:':<18} enabled (uvicorn)")
-            print("=" * 50 + "\n")
 
             # --- reload dirs ---
             reload_dirs: list[str] = []
@@ -323,9 +325,11 @@ def main(argv: list[str] | None = None) -> int:
             # --- include/exclude globs (None = use uvicorn defaults) ---
             reload_includes = args.reload_include or None
             reload_excludes = args.reload_exclude or None
+
             print(f"👀 Watching for changes in dirs: {reload_dirs}")
             print(f"👀 Auto-reload include patterns: {reload_includes or 'uvicorn defaults'}")
             print(f"👀 Auto-reload exclude patterns: {reload_excludes or 'uvicorn defaults'}")
+            print("=" * 50 + "\n")
 
             uvicorn.run(
                 "aethergraph.server.app_factory:create_app_from_env",

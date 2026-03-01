@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aethergraph"
-version = "0.1.0a4"
+version = "0.1.0a5"
 description = "Python-first agentic DAG execution framework"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -23,7 +23,8 @@ dependencies = [
   "jsonschema>=4.18",
   "httpx>=0.27",
   "aiohttp>=3.9",
-  "croniter>=5.0.0"
+  "croniter>=5.0.0",
+  "pypdf>=6.7.3",
 ]
 
 keywords = [
