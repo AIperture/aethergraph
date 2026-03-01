@@ -1,0 +1,4 @@
+﻿version: 1
+display_name: AetherGraph Fastbuild
+short_description: Build AetherGraph agents and graphs quickly using source-accurate APIs.
+default_prompt: Build a working AetherGraph graph or agent quickly using @tool, @graph_fn, @graphify, run_async, and NodeContext service APIs.

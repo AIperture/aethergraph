@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.plugins.channel.mime_detect import detect_mime_for_path
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.channel.ingress import ChannelIngress, IncomingFile, IncomingMessage
 
@@ -174,15 +175,21 @@ async def _save_upload_as_artifact(
         scope=scope,
     )
 
+    # detect MIME type (best effort) and add to labels
+    det = detect_mime_for_path(tmp_path)
     artifact = await artifact_facade.save_file(
         path=tmp_path,
         kind="upload",
         suggested_uri=f"./sessions/{session_id}/uploads/{filename}",
+        mime=det.detected_mime or upload.content_type or "application/octet-stream",
         labels={
             "source": "web_chat",
             "original_name": filename,
             "session_id": session_id,
-            "content_type": upload.content_type or "",
+            "declared_content_type": upload.content_type or "",
+            "detected_mime": det.detected_mime,
+            "content_kind": det.content_kind,
+            "detect_reason": det.reason,
         },
     )
 
@@ -237,15 +244,16 @@ async def session_chat_incoming(
         artifact = await _save_upload_as_artifact(container, upload, session_id, identity)
         incoming_files.append(
             IncomingFile(
-                id=str(uuid.uuid4()),
+                id=artifact.artifact_id,
                 name=upload.filename,
-                mimetype=upload.content_type,
+                mimetype=artifact.mime,  # prefer detected MIME but fall back to declared
                 size=getattr(upload, "size", None),
                 url=f"/api/v1/artifacts/{artifact.artifact_id}/content",
-                uri=artifact.artifact_id,  # 👈 use artifact_id here
+                uri=artifact.uri,
                 extra={
                     "source": "web_upload",
                     "session_id": session_id,
+                    "content_kind": artifact.labels.get("content_kind"),
                 },
             )
         )

@@ -40,8 +40,6 @@ from aethergraph.core.runtime.runtime_services import (
     set_default_channel,
     # mcp service helpers
     set_mcp_service,
-    set_rag_index_backend,
-    set_rag_llm_client,
 )
 
 __all__ = [

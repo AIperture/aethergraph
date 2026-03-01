@@ -20,7 +20,18 @@ except Exception:
 class FAISSVectorIndex(VectorIndex):
     """
     Simple FAISS-backed index, one .index + .meta.pkl per corpus_id.
+
     Uses cosine similarity via normalized vectors (IndexFlatIP).
+
+    NOTES
+    -----
+    - This index has *no* notion of tags. It only sees whatever metadata
+      is stored alongside vectors and supports equality filters on those
+      metadata keys via the `where` argument in `search`.
+    - Which fields are treated as "promoted" is decided by higher layers
+      (SearchBackend / ScopedIndices). Typically these include org_id,
+      user_id, scope_id, session_id, run_id, graph_id, node_id, kind,
+      source, and created_at_ts.
     """
 
     def __init__(self, root: str, dim: int | None = None):
@@ -98,7 +109,7 @@ class FAISSVectorIndex(VectorIndex):
             return
 
         # Selective delete is tricky with plain FAISS; we’d need to rebuild.
-        # For now, keep explicit about limitations:
+        # For now, keep explicit about limitations.
         async def _delete_sync():
             index, metas = self._load_sync(corpus_id)
             if index is None:
@@ -117,7 +128,7 @@ class FAISSVectorIndex(VectorIndex):
                         logger.error(f"Failed to delete {p}: {e}")
                 return
 
-            # Rebuild index with kept vectors
+            # Rebuild index with kept vectors:
             # NOTE: we do NOT have original vectors here,
             # so in a minimal implementation we simply raise.
             raise NotImplementedError(
@@ -156,13 +167,12 @@ class FAISSVectorIndex(VectorIndex):
         """
         FAISS-backed search with compatibility to SQLiteVectorIndex:
 
+        - query_vec:
+            * non-empty => semantic similarity.
+            * empty     => structural search by recency + filters.
         - where: equality filters on metadata (e.g., org_id, user_id, scope_id, etc.)
-        - created_at_min / created_at_max: numeric UNIX timestamps for time-range filtering.
+        - created_at_min / created_at_max: numeric UNIX timestamps.
         - max_candidates: how many FAISS hits to retrieve before filtering.
-
-        Since FAISS doesn't support filtering natively, we:
-          1) Search across all vectors (or up to max_candidates).
-          2) Manually filter results by `where` and time bounds.
         """
 
         if faiss is None:
@@ -170,6 +180,61 @@ class FAISSVectorIndex(VectorIndex):
 
         where = where or {}
 
+        # --- no-query structural path -----------------------------------
+        if not query_vec:
+
+            def _search_no_query_sync() -> list[dict[str, Any]]:
+                index, metas = self._load_sync(corpus_id)
+                if not metas:
+                    return []
+
+                filtered: list[tuple[float, str, dict[str, Any]]] = []
+                for m in metas:
+                    cid = m["chunk_id"]
+                    meta = dict(m.get("meta") or {})
+
+                    # where filters
+                    match = True
+                    for key, val in where.items():
+                        if val is None:
+                            continue
+                        if meta.get(key) != val:
+                            match = False
+                            break
+                    if not match:
+                        continue
+
+                    # time filters
+                    cat = meta.get("created_at_ts")
+                    if created_at_min is not None and (
+                        cat is None or float(cat) < float(created_at_min)
+                    ):
+                        continue
+                    if created_at_max is not None and (
+                        cat is None or float(cat) > float(created_at_max)
+                    ):
+                        continue
+
+                    ts = float(cat or 0.0)
+                    filtered.append((ts, cid, meta))
+
+                # sort by recency
+                filtered.sort(key=lambda t: t[0], reverse=True)
+
+                out: list[dict[str, Any]] = []
+                for ts, cid, meta in filtered[:k]:
+                    out.append(
+                        {
+                            "chunk_id": cid,
+                            "score": ts,
+                            "meta": meta,
+                        }
+                    )
+                return out
+
+            return await asyncio.to_thread(_search_no_query_sync)
+
+        # --- semantic path ----------------------------------------------
         # Normalize query vector for cosine similarity
         q = np.asarray([query_vec], dtype=np.float32)
         q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-9)
@@ -183,17 +248,10 @@ class FAISSVectorIndex(VectorIndex):
             if n == 0:
                 return []
 
-            # How many neighbors to ask FAISS for:
-            # - k here is "raw_k" from SearchBackend (e.g., top_k * 3)
-            # - max_candidates is an outer cap (e.g., top_k * 50)
-            search_k = min(
-                n,
-                max_candidates or n,
-            )
+            search_k = min(n, max_candidates or n)
             if search_k <= 0:
                 return []
 
-            # Ask FAISS for the top search_k neighbors
             D, I = index.search(q, search_k)  # noqa: E741
             scores = D[0].tolist()
             idxs = I[0].tolist()
@@ -204,10 +262,10 @@ class FAISSVectorIndex(VectorIndex):
                 if idx < 0 or idx >= len(metas):
                     continue
 
-                m = metas[idx]  # {"chunk_id": ..., "meta": {...}}
+                m = metas[idx]
                 meta = dict(m.get("meta") or {})
 
-                # --- Apply `where` equality filters ----------------------
+                # where filters
                 match = True
                 for key, val in where.items():
                     if val is None:
@@ -218,9 +276,8 @@ class FAISSVectorIndex(VectorIndex):
                 if not match:
                     continue
 
-                # --- Apply time-window filters ---------------------------
+                # time filters
                 cat = meta.get("created_at_ts")
-                # If we have a time bound but no created_at_ts, we treat as non-match
                 if created_at_min is not None and (
                     cat is None or float(cat) < float(created_at_min)
                 ):
@@ -238,7 +295,6 @@ class FAISSVectorIndex(VectorIndex):
                     }
                 )
 
-                # Stop once we've collected k matches
                 if len(out) >= k:
                     break
 

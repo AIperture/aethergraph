@@ -4,13 +4,18 @@ import json
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
-from aethergraph.contracts.services.memory import Distiller, HotLog
-from aethergraph.contracts.storage.doc_store import DocStore
+from aethergraph.contracts.services.memory import Distiller, Event
 from aethergraph.services.memory.facade.utils import now_iso
-from aethergraph.services.memory.utils import _summary_doc_id, _summary_prefix
 
 
 class LLMMetaSummaryDistiller(Distiller):
+    """
+    LLM-based meta-summary distiller.
+
+    v2: no HotLog / DocStore. It receives a list of summary Events, each with
+    a summary payload in evt.data, and produces a higher-level summary dict.
+    """
+
     def __init__(
         self,
         *,
@@ -32,7 +37,10 @@ class LLMMetaSummaryDistiller(Distiller):
         self.min_signal = min_signal
         self.model = model
 
-    def _build_prompt_from_saved(self, summaries: list[dict[str, Any]]) -> list[dict[str, str]]:
+    def _build_prompt_from_saved(
+        self,
+        summaries: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
         lines: list[str] = []
         for idx, s in enumerate(summaries, start=1):
             tw = s.get("time_window") or {}
@@ -73,75 +81,81 @@ class LLMMetaSummaryDistiller(Distiller):
 
     async def distill(
         self,
-        run_id: str,
-        timeline_id: str,
-        scope_id: str | None = None,
         *,
-        hotlog: HotLog,
-        docs: DocStore,
-        **kw: Any,
+        events: list[Event],
     ) -> dict[str, Any]:
-        scope = scope_id or run_id
-        prefix = _summary_prefix(scope, self.source_tag)
+        """
+        Produce a meta-summary from a list of *summary* events.
 
-        # Load persisted long-term summaries from DocStore
-        try:
-            all_ids = await docs.list()
-        except Exception:
-            all_ids = []
-
-        candidates = sorted(d for d in all_ids if d.startswith(prefix))
-        if not candidates:
+        Caller responsibilities:
+        - Pass only relevant events (e.g. kind=long_term_summary, correct tags).
+        - Respect max_summaries / level outside, if desired.
+        """
+        if not events:
             return {}
 
-        chosen_ids = candidates[-self.max_summaries :]
-        loaded: list[dict[str, Any]] = []
-        for doc_id in chosen_ids:
-            try:
-                doc = await docs.get(doc_id)
-                if doc is not None:
-                    loaded.append(doc)  # type: ignore[arg-type]
-            except Exception:
+        # Enforce min_signal on the events themselves
+        kept_events: list[Event] = []
+        for e in events:
+            sig = getattr(e, "signal", None)
+            if isinstance(sig, (int, float)) and float(sig) < self.min_signal:  # noqa: UP038
                 continue
+            kept_events.append(e)
+
+        if not kept_events:
+            return {}
+
+        # Cap at max_summaries, keep most recent
+        kept_events = kept_events[-self.max_summaries :]
+
+        # Convert events -> summary dicts (what we will actually feed to LLM)
+        loaded: list[dict[str, Any]] = []
+        for e in kept_events:
+            # Prefer the payload written by the long-term summarizer
+            if isinstance(e.data, dict):  # noqa: SIM108
+                s = dict(e.data)
+            else:
+                s = {}
+
+            # Ensure some basic fields exist
+            s.setdefault("ts", e.ts)
+            s.setdefault("summary", e.text or s.get("summary") or "")
+            if "time_window" not in s:
+                # fall back to a degenerate window around ts
+                s["time_window"] = {"from": e.ts, "to": e.ts}
+
+            # Keep the event id for traceability
+            s.setdefault("source_event_id", e.event_id)
+
+            # Type / tag sanity (doesn't strictly need to match, but nice to keep)
+            s.setdefault("type", self.source_kind)
+            s.setdefault("summary_tag", self.source_tag)
+
+            loaded.append(s)
 
         if not loaded:
             return {}
 
-        # Enforce consistency + min_signal if present
-        kept: list[dict[str, Any]] = []
-        for s in loaded:
-            if s.get("type") != self.source_kind:
-                continue
-            if s.get("summary_tag") != self.source_tag:
-                continue
-
-            sig_val = s.get("signal", None)
-            if isinstance(sig_val, (int, float)) and float(sig_val) < self.min_signal:  # noqa: UP038
-                continue
-            kept.append(s)
-
-        if not kept:
-            return {}
-
-        # Derive aggregated time window safely
+        # Compute aggregated time window
         def _pick_time(s: dict[str, Any], key: str) -> str | None:
             tw = s.get("time_window") or {}
             return tw.get(key) or s.get("ts")
 
-        times_from = [t for t in (_pick_time(s, "from") for s in kept) if t]
-        times_to = [t for t in (_pick_time(s, "to") for s in kept) if t]
+        times_from = [t for t in (_pick_time(s, "from") for s in loaded) if t]
+        times_to = [t for t in (_pick_time(s, "to") for s in loaded) if t]
 
-        first_from = min(times_from) if times_from else (kept[0].get("ts") or now_iso())
-        last_to = max(times_to) if times_to else (kept[-1].get("ts") or now_iso())
+        first_from = min(times_from) if times_from else (loaded[0].get("ts") or now_iso())
+        last_to = max(times_to) if times_to else (loaded[-1].get("ts") or now_iso())
 
-        # Build prompt and call LLM (respect model override)
-        messages = self._build_prompt_from_saved(kept)
+        # Build prompt and call LLM
+        messages = self._build_prompt_from_saved(loaded)
         try:
             if self.model:
                 summary_json_str, usage = await self.llm.chat(messages, model=self.model)  # type: ignore[arg-type]
             else:
                 summary_json_str, usage = await self.llm.chat(messages)
         except TypeError:
+            # client doesn't accept model=...
             summary_json_str, usage = await self.llm.chat(messages)
 
         try:
@@ -150,19 +164,17 @@ class LLMMetaSummaryDistiller(Distiller):
             payload = {"summary": summary_json_str, "key_facts": [], "open_loops": []}
 
         ts = now_iso()
-        summary_obj = {
+
+        summary_obj: dict[str, Any] = {
             "type": self.summary_kind,
             "version": 1,
-            "run_id": run_id,
-            "scope_id": scope,
             "summary_tag": self.summary_tag,
             "source_summary_kind": self.source_kind,
             "source_summary_tag": self.source_tag,
             "ts": ts,
             "time_window": {"from": first_from, "to": last_to},
-            "num_source_summaries": len(kept),
-            # ✅ store doc_ids you actually read (truth)
-            "source_summary_doc_ids": chosen_ids[-len(kept) :],
+            "num_source_summaries": len(loaded),
+            "source_event_ids": [e.event_id for e in kept_events],
             "summary": payload.get("summary", ""),
             "key_facts": payload.get("key_facts", []),
             "open_loops": payload.get("open_loops", []),
@@ -172,18 +184,4 @@ class LLMMetaSummaryDistiller(Distiller):
             "min_signal": self.min_signal,
         }
 
-        doc_id = _summary_doc_id(scope, self.summary_tag, ts)
-        await docs.put(doc_id, summary_obj)
-
-        text = summary_obj["summary"] or ""
-        preview = text[:2000] + (" …[truncated]" if len(text) > 2000 else "")
-
-        return {
-            "summary_doc_id": doc_id,
-            "summary_kind": self.summary_kind,
-            "summary_tag": self.summary_tag,
-            "time_window": summary_obj["time_window"],
-            "num_source_summaries": summary_obj["num_source_summaries"],
-            "preview": preview,
-            "ts": ts,
-        }
+        return summary_obj

@@ -92,6 +92,8 @@ async def _build_env(
         container=container,
         agent_id=agent_id,
         app_id=app_id,
+        memory_level_override=rt_overrides.get("memory_level"),
+        memory_scope_override=rt_overrides.get("memory_scope"),
     )
 
     retry = rt_overrides.get("retry") or RetryPolicy()
@@ -329,10 +331,44 @@ async def run_async(
             - Despite this, you can still use `graph` without persistence features; just avoid resuming such graphs.
 
     """
+
     inputs = inputs or {}
     # GraphFunction path
     if isinstance(target, GraphFunction):
-        env, retry, max_conc = await _build_env(target, inputs, identity=identity, **rt_overrides)
+        inherited_identity = identity
+        inherited_overrides = dict(rt_overrides)
+
+        parent_ctx = inputs.get("context")
+        if parent_ctx is not None:
+            # Prefer explicit context overrides, but also attempt to inherit from parent_ctx if available (e.g. for nested graph_fn calls within a graph run)
+            if inherited_identity is None:
+                inherited_identity = getattr(parent_ctx, "identity", None)
+            for key in ("run_id", "session_id", "agent_id", "app_id"):
+                value = getattr(parent_ctx, key, None)
+                if value is not None:
+                    inherited_overrides.setdefault(key, value)
+        else:
+            # If no explicit context is provided, attempt to inherit from current interpreter's env if available (e.g. for nested graph_fn calls within a graph run)
+            from ..graph.interpreter import current_interpreter
+
+            interp = current_interpreter()
+            parent_env = getattr(interp, "env", None) if interp is not None else None
+            if parent_env is not None:
+                if inherited_identity is None:
+                    inherited_identity = getattr(parent_env, "identity", None)
+                for key in ("run_id", "session_id", "agent_id", "app_id"):
+                    value = getattr(parent_env, key, None)
+                    if value is not None:
+                        inherited_overrides.setdefault(key, value)
+
+        env_inputs = dict(inputs)
+        env_inputs.pop("context", None)
+        env, retry, max_conc = await _build_env(
+            target,
+            env_inputs,
+            identity=inherited_identity,
+            **inherited_overrides,
+        )
         token = _register_metering_context(env, target)  # set metering context
         try:
             return await target.run(env=env, max_concurrency=max_conc, **inputs)

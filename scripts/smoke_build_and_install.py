@@ -114,8 +114,8 @@ def smoke_test_server(venv_python: Path):
     """Basic server sanity checks: import entrypoint and run CLI help."""
     # 1) Import server entrypoint to ensure it’s packaged correctly
     code_import = r"""
-from aethergraph.server import server
-print("✅ server module imported OK:", server.__file__)
+from aethergraph import start_server
+print("✅ start_server imported OK:", start_server)
 """
     run([str(venv_python), "-c", code_import])
 

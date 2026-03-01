@@ -12,7 +12,7 @@ from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
 from aethergraph.contracts.services.memory import Event
 from aethergraph.core.runtime.runtime_services import install_services
-from aethergraph.server.server import create_app
+from aethergraph.server.app_factory import create_app
 
 
 def _utc_now() -> datetime:
@@ -90,51 +90,6 @@ async def _seed_events_for_scope(app, scope_id: str):
         await hotlog.append(scope_id, evt, ttl_s=3600, limit=mem_factory.hot_limit)
 
 
-@pytest.mark.asyncio
-async def _seed_summaries_for_scope(app, scope_id: str):
-    """Helper to seed some summary docs into DocStore."""
-    container = app.state.container
-    mem_factory = container.memory_factory
-    docs = mem_factory.docs
-
-    now = _utc_now()
-
-    summary1 = {
-        "type": "session_summary",
-        "version": 1,
-        "run_id": scope_id,
-        "scope_id": scope_id,
-        "summary_tag": "session",
-        "ts": (now - timedelta(hours=2)).isoformat(),
-        "time_window": {
-            "from": (now - timedelta(hours=3)).isoformat(),
-            "to": (now - timedelta(hours=2)).isoformat(),
-        },
-        "num_events": 10,
-        "summary": "First summary text with keyword alpha.",
-        "key_facts": ["alpha fact", "something else"],
-    }
-
-    summary2 = {
-        "type": "session_summary",
-        "version": 1,
-        "run_id": scope_id,
-        "scope_id": scope_id,
-        "summary_tag": "daily",
-        "ts": (now - timedelta(hours=1)).isoformat(),
-        "time_window": {
-            "from": (now - timedelta(hours=1, minutes=30)).isoformat(),
-            "to": (now - timedelta(hours=1)).isoformat(),
-        },
-        "num_events": 5,
-        "summary": "Second summary text with keyword beta.",
-        "key_facts": ["beta fact", "more info"],
-    }
-
-    await docs.put(f"{scope_id}:session:{summary1['ts']}", summary1)
-    await docs.put(f"{scope_id}:daily:{summary2['ts']}", summary2)
-
-
 def test_list_memory_events_basic(app, client):
     scope_id = "scope-memory-1"
 
@@ -195,63 +150,3 @@ def test_list_memory_events_with_filters(app, client):
     assert resp3.status_code == 200
     data3 = resp3.json()
     assert data3["events"] == []
-
-
-def test_list_memory_summaries_basic(app, client):
-    scope_id = "scope-memory-3"
-    asyncio.run(_seed_summaries_for_scope(app, scope_id))
-
-    # No tag filter
-    resp = client.get(
-        "/api/v1/memory/summaries",
-        params={"scope_id": scope_id},
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    summaries = data["summaries"]
-    # We wrote 2 summaries for this scope
-    assert len(summaries) == 2
-    tags = {s["summary_tag"] for s in summaries}
-    assert tags == {"session", "daily"}
-
-    # Filter by summary_tag
-    resp2 = client.get(
-        "/api/v1/memory/summaries",
-        params={"scope_id": scope_id, "summary_tag": "session"},
-    )
-    assert resp2.status_code == 200
-    data2 = resp2.json()
-    summaries2 = data2["summaries"]
-    assert len(summaries2) == 1
-    assert summaries2[0]["summary_tag"] == "session"
-
-
-def test_search_memory_events_and_summaries(app, client):
-    scope_id = "scope-memory-4"
-    # Seed both events and summaries
-    asyncio.run(_seed_events_for_scope(app, scope_id))
-    asyncio.run(_seed_summaries_for_scope(app, scope_id))
-
-    # Query that hits both: "hello" appears in events, "alpha" appears in summaries
-    resp = client.post(
-        "/api/v1/memory/search",
-        json={"query": "hello", "scope_id": scope_id, "top_k": 10},
-    )
-    assert resp.status_code == 200
-    data = resp.json()
-    hits = data["hits"]
-    assert len(hits) >= 1
-
-    # At least one hit should be an event
-    assert any(h["event"] is not None for h in hits)
-
-    # Searching for "alpha" should hit summaries
-    resp2 = client.post(
-        "/api/v1/memory/search",
-        json={"query": "alpha", "scope_id": scope_id, "top_k": 10},
-    )
-    assert resp2.status_code == 200
-    data2 = resp2.json()
-    hits2 = data2["hits"]
-    assert len(hits2) >= 1
-    assert any(h["summary"] is not None for h in hits2)

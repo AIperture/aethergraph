@@ -27,6 +27,9 @@ class IncomingFile:
     uri: str | None = None  # URI where the file is located
     extra: dict[str, Any] = None  # Any extra metadata
 
+    def __getitem__(self, item):
+        return getattr(self, item, None)
+
 
 @dataclass
 class IncomingMessage:

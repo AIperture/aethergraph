@@ -5,8 +5,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBackend
-from aethergraph.services.scope.scope import Scope
+from aethergraph.contracts.storage.search_backend import ScoredItem, SearchBackend, SearchMode
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
 @dataclass
@@ -43,6 +43,35 @@ class ScopedIndices:
         - user_id, org_id, (and scope_id if provided)
         """
         return self.scope.rag_filter(scope_id=self.scope_id)
+
+    def _filters_for_level(self, level: ScopeLevel | None) -> dict[str, Any]:
+        """
+        Derive default filters from scope + level.
+
+        - level=None or "scope": just the base rag_filter(scope_id=...)
+        - "session": constrain to this session_id
+        - "run":     constrain to this run_id
+        - "user":    constrain to this user/client
+        - "org":     constrain to this org_id
+        """
+        # base = self._base_filters()
+        base = self.scope.rag_filter(scope_id=self.scope.memory_scope_id())
+
+        if not level or level == "scope":
+            return {k: v for k, v in base.items() if v is not None}
+
+        if level == "session" and self.scope.session_id:
+            base["session_id"] = self.scope.session_id
+        elif level == "run" and self.scope.run_id:
+            base["run_id"] = self.scope.run_id
+        elif level == "user":
+            u = self.scope.user_id or self.scope.client_id
+            if u:
+                base["user_id"] = u
+        elif level == "org" and self.scope.org_id:
+            base["org_id"] = self.scope.org_id
+
+        return {k: v for k, v in base.items() if v is not None}
 
     # --- public APIs ------------------------------------------------------
 
@@ -90,12 +119,10 @@ class ScopedIndices:
         Notes:
             Metadata keys with None values are omitted before upserting to the backend.
         """
-
         base = self._base_metadata()
         merged: dict[str, Any] = {**base, **(metadata or {})}
         # strip None so backends can treat them as wildcards
         merged = {k: v for k, v in merged.items() if v is not None}
-
         await self.backend.upsert(
             corpus=corpus,
             item_id=item_id,
@@ -113,6 +140,8 @@ class ScopedIndices:
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
+        level: ScopeLevel | None = None,
+        mode: SearchMode = "auto",
     ) -> list[ScoredItem]:
         """
         Perform a search operation on the specified corpus.
@@ -144,6 +173,7 @@ class ScopedIndices:
             interpreted as [now - window, now] in created_at_ts. Ignored if `created_at_min` is provided.
             created_at_min: Optional minimum UNIX timestamp (float) for filtering results by creation time.
             created_at_max: Optional maximum UNIX timestamp (float) for filtering results by creation time.
+            level: Optional scope level to filter results by (e.g., "session", "run", "user", "org"). If provided, the search will be constrained to items associated with the specified scope level.
 
         Returns:
             A list of `ScoredItem` objects representing the search results.
@@ -152,7 +182,7 @@ class ScopedIndices:
             - If `time_window` is provided, it is used to calculate the time range unless `created_at_min` is explicitly set.
             - Filters with `None` values are automatically excluded from the search.
         """
-        base = self._base_filters()
+        base = self._filters_for_level(level=level)
         merged: dict[str, Any] = {**base, **(filters or {})}
         merged = {k: v for k, v in merged.items() if v is not None}
 
@@ -164,6 +194,7 @@ class ScopedIndices:
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            mode=mode,
         )
 
     # ergonomic helpers (optional but nice)
@@ -177,6 +208,8 @@ class ScopedIndices:
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
+        level: ScopeLevel | None = None,
+        mode: SearchMode | None = "semantic",
     ) -> list[ScoredItem]:
         """
         Perform a search for events based on the given query and optional filters.
@@ -208,6 +241,7 @@ class ScopedIndices:
             time_window: Optional time window for the search (e.g., "last_24_hours").
             created_at_min: Optional minimum creation timestamp for filtering results.
             created_at_max: Optional maximum creation timestamp for filtering results.
+            level: Optional scope level to filter results by (e.g., "session", "run", "user", "org"). If provided, the search will be constrained to events associated with the specified scope level.
 
         Returns:
             A list of `ScoredItem` objects representing the search results.
@@ -227,8 +261,9 @@ class ScopedIndices:
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            level=level,
+            mode=mode,
         )
-
         return items
 
     async def search_artifacts(
@@ -240,6 +275,7 @@ class ScopedIndices:
         time_window: str | None = None,
         created_at_min: float | None = None,
         created_at_max: float | None = None,
+        level: ScopeLevel | None = None,
     ) -> list[ScoredItem]:
         """
         Perform a search for artifacts based on the provided query and optional filters.
@@ -271,6 +307,7 @@ class ScopedIndices:
             time_window: Optional time window for the search (e.g., "last_7_days").
             created_at_min: Optional minimum creation timestamp for filtering results.
             created_at_max: Optional maximum creation timestamp for filtering results.
+            level: Optional scope level to filter results by (e.g., "session", "run", "user", "org"). If provided, the search will be constrained to artifacts associated with the specified scope level.
 
         Returns:
             A list of `ScoredItem` objects representing the search results.
@@ -289,4 +326,5 @@ class ScopedIndices:
             time_window=time_window,
             created_at_min=created_at_min,
             created_at_max=created_at_max,
+            level=level,
         )

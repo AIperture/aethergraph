@@ -120,7 +120,6 @@ def client_from_profile(p: LLMProfile, secrets: Secrets) -> GenericLLMClient:
     return GenericLLMClient(
         provider=p.provider,
         model=p.model,
-        embed_model=p.embed_model,
         base_url=p.base_url,
         api_key=api_key,
         azure_deployment=p.azure_deployment,

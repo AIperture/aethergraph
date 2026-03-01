@@ -3,6 +3,7 @@
 import mimetypes
 import os
 from typing import Annotated, Any
+import unicodedata
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
 from fastapi.responses import RedirectResponse
@@ -19,6 +20,19 @@ from .schemas import (
     ArtifactSearchRequest,
     ArtifactSearchResponse,
 )
+
+
+def _latin1_safe(s: str, fallback: str = "") -> str:
+    try:
+        s.encode("latin-1")
+        return s
+    except UnicodeEncodeError:
+        # Fallback: strip accents & non-ascii
+        ascii_guess = (
+            unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii") or fallback
+        )
+        return ascii_guess or "artifact"
+
 
 router = APIRouter(tags=["artifacts"])
 
@@ -136,26 +150,13 @@ async def list_artifacts(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
+    # print(f"list_artifacts called with scope_id={scope_id}, run_id={run_id}, session_id={session_id}, kind={kind}, tags={tags}, cursor={cursor}, limit={limit}, identity={identity}")
     container = current_services()
     index = getattr(container, "artifact_index", None)
     if index is None:
         return ArtifactListResponse(artifacts=[], next_cursor=None)
 
     offset = decode_cursor(cursor.strip() if cursor else None)
-
-    # label_filters: dict[str, Any] = {}
-
-    # if scope_id and scope_id.strip():
-    #     label_filters["scope_id"] = scope_id.strip()
-
-    # if tags and tags.strip():
-    #     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-    #     if tag_list:
-    #         label_filters["tags"] = tag_list
-
-    # # 🔹 Tenant scoping: org_id + user_id
-    # label_filters.update(_tenant_label_filters(identity))
-
     label_filters: dict[str, Any] = {}
 
     # execution scopes
@@ -246,7 +247,7 @@ async def get_artifact_content(
         media_type=media_type,
         headers={
             "Content-Length": str(len(data)),
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": f'attachment; filename="{_latin1_safe(filename)}"',
             "X-AetherGraph-Artifact-Id": artifact.artifact_id,
         },
     )

@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from aethergraph.api.v1.deps import RequestIdentity
@@ -18,16 +19,21 @@ from aethergraph.services.continuations.stores.fs_store import (
 
 # ---- memory services ----
 from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.rag.node_rag import NodeRAG
 from aethergraph.services.resume.router import ResumeRouter
+from aethergraph.services.runner.facade import RunFacade
+from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
+from aethergraph.services.websearch.facade import WebSearchFacade
 
 from ..graph.task_node import TaskNodeRuntime
 from .bound_memory import BoundMemoryAdapter
 from .execution_context import ExecutionContext
 from .node_services import NodeServices
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,6 +56,10 @@ class RuntimeEnv:
 
     # optional predicate to skip execution
     should_run_fn: Callable[[], bool] | None = None
+
+    # memory override (for testing/demo purposes)
+    memory_level_override: str | None = None
+    memory_scope_override: str | None = None
 
     # --- convenience projections of commonly used services ---
     @property
@@ -103,6 +113,10 @@ class RuntimeEnv:
     @property
     def mcp_service(self):
         return self.container.mcp
+
+    @property
+    def web_search_service(self):
+        return self.container.web_search
 
     @property
     def resume_router(self) -> ResumeRouter:
@@ -178,7 +192,7 @@ class RuntimeEnv:
             art_store=self.artifacts,
             art_index=self.artifact_index,
             scoped_indices=indices,
-            scope=node_scope,
+            scope=mem_scope,
         )
 
         # ------- Viz Service tied to this node/run -------'
@@ -193,14 +207,33 @@ class RuntimeEnv:
             scope=node_scope,
         )
 
-        # ------- RAG Facade in Memory tied to this node/run -------'
-        rag_for_node = None
-        if self.rag_facade is not None and node_scope is not None:
-            rag_for_node = NodeRAG(
-                rag=self.rag_facade,
-                scope=node_scope,
-                default_scope_id=(mem_scope.memory_scope_id() if mem_scope else None),
-            )
+        kb = NodeKB(
+            backend=self.container.kb_backend,
+            scope=mem_scope,
+        )
+
+        # ----- TriggerFacade tied to this node/run -----
+        # trigger_scope = self.container.scope_factory.for_trigger(identity=self.identity)
+        trigger_scope = (
+            mem_scope  # for now we need trigger to launch runs with the same session id etc
+        )
+        triggers = TriggerFacade(
+            trigger_service=self.container.trigger_service,
+            trigger_engine=self.container.trigger_engine,
+            scope=trigger_scope,
+        )
+
+        web_search = None
+        if self.web_search_service is not None:
+            web_search = WebSearchFacade(self.web_search_service)
+
+        runner = RunFacade(
+            run_manager=self.container.run_manager,
+            identity=self.identity,
+            session_id=self.session_id,
+            agent_id=self.agent_id,
+            app_id=self.app_id,
+        )
 
         services = NodeServices(
             channels=self.channels,
@@ -214,15 +247,17 @@ class RuntimeEnv:
             memory_facade=mem,  # bound memory for this run/node
             viz=vis_facade,
             llm=self.llm_service,  # LLMService
-            rag=rag_for_node,  # RAGService
             mcp=self.mcp_service,  # MCPService
-            run_manager=self.container.run_manager,  # RunManager
+            runner=runner,  # RunFacade
             indices=indices,  # ScopedIndices for this node
             execution=self.container.execution
             if self.container.execution is not None
             else None,  # ExecutionService
             planner_service=self.container.planner_service,
             skills=self.container.skills_registry,
+            kb=kb,  # NodeKB
+            triggers=triggers,  # TriggerFacade for this node
+            web_search=web_search,  # WebSearchFacade or None
         )
         return ExecutionContext(
             run_id=self.run_id,
@@ -256,6 +291,10 @@ class RuntimeEnv:
            - agent/app-backed runs -> "session"
            - plain graph runs      -> "run"
         """
+        # Explicit overrides from RuntimeEnv take highest precedence
+        if self.memory_level_override:
+            return self.memory_level_override, self.memory_scope_override
+
         registry = self.registry
         level: str = "session"  # safe default
         custom_scope_id: str | None = None
@@ -290,18 +329,18 @@ class RuntimeEnv:
                     or {}
                 )
 
+        # print(f"Resolved registry meta for memory config: {meta}")
         if meta:
             # Top-level keys from as_agent/as_app extras
-            if "memory_level" in meta:
-                level = meta["memory_level"]
-            else:
-                # Fallback by kind if not explicitly set
-                kind = meta.get("kind")
-                level = "session" if kind == "agent" else "run"
-
-            custom_scope_id = meta.get("memory_scope")
+            if "memory" in meta:
+                level = meta["memory"].get("level", level)
+                custom_scope_id = meta["memory"].get("scope")
         else:
             # If we have an agent_id but no meta, still bias to session-level
             level = "session" if self.agent_id else "run"
+
+        logger.debug(
+            f"Resolved memory config: level={level} custom_scope_id={custom_scope_id} from meta={meta}"
+        )
 
         return level, custom_scope_id

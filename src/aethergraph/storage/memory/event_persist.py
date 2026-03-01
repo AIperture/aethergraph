@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from dataclasses import asdict
 import hashlib
 from typing import Any
@@ -7,13 +5,15 @@ from typing import Any
 from aethergraph.contracts.services.memory import Event, Persistence
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.contracts.storage.event_log import EventLog
+from aethergraph.services.memory.facade.utils import event_matches_level
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
 class EventLogPersistence(Persistence):
     """
     Persistence built on top of generic EventLog + DocStore.
 
-    - append_event: logs Event rows into EventLog with scope_id=run_id, kind="memory".
+    - append_event: logs Event rows into EventLog with scope_id=<timeline_id>, kind="memory" (unless already set).
     - save_json / load_json: store arbitrary JSON in DocStore using memdoc:// URIs.
     """
 
@@ -48,10 +48,15 @@ class EventLogPersistence(Persistence):
 
     # --------- API ---------
     async def append_event(self, scope_id: str, evt: Event) -> None:
+        """
+        Append a memory Event to the underlying EventLog.
+
+        `scope_id` should be the logical timeline id (e.g., timeline_id derived
+        from memory_scope_id + org prefix). We preserve evt.kind if set.
+        """
         payload = asdict(evt)
         payload.setdefault("scope_id", scope_id)
         payload.setdefault("kind", "memory")
-        # you can add tags like ["mem"] if useful
         await self._log.append(payload)
 
     async def save_json(self, uri: str, obj: dict[str, Any]) -> str:
@@ -106,3 +111,80 @@ class EventLogPersistence(Persistence):
             if row is not None:
                 result.append(Event(**row))
         return result
+
+    async def query_events(
+        self,
+        scope_id: str,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Event]:
+        """
+        Query events for a given scope_id / timeline using the underlying EventLog.
+
+        - `since` / `until`: ISO timestamps or whatever EventLog.query expects.
+        - `kinds`: optional filter on event kinds.
+        - `tags`: optional filter on tags (handled by EventLog).
+        - `limit` / `offset`: paging.
+
+        Returns a list of Event objects.
+        """
+        rows = await self._log.query(
+            scope_id=scope_id,
+            since=since,
+            until=until,
+            kinds=kinds,
+            tags=tags,
+            limit=limit,
+            offset=offset,
+        )
+        return [Event(**row) for row in rows]
+
+    async def query_events_view(
+        self,
+        scope_id: str,
+        *,
+        scope: Scope | None = None,
+        level: ScopeLevel | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Event]:
+        """
+        Extended query_events that also filters by scope level (e.g., session, run).
+
+        If `level` is provided and not "scope", we will filter events to only include those that match the specified scope level based on the provided `scope` object.
+
+        This allows for more granular retrieval of events associated with specific sessions, runs, etc., within a broader timeline.
+        """
+        rows = await self._log.query(
+            scope_id=scope_id,
+            since=since,
+            until=until,
+            kinds=kinds,
+            tags=tags,
+            limit=None,  # fetch all and filter in Python for now
+            offset=0,
+        )
+
+        events = [Event(**row) for row in rows]
+
+        # This filter can partly be pushed down to Database later if needed,
+        # WHERE org_id = ... AND user_id = ... etc. based on level
+        if level and level != "scope":
+            events = [e for e in events if event_matches_level(e, scope, level=level)]
+
+        # Apply limit/offset after filtering
+        if offset:
+            events = events[offset:]
+        if limit is not None:
+            events = events[:limit]
+
+        return events

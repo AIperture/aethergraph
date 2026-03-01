@@ -41,11 +41,22 @@ class VectorIndex(Protocol):
         k: int,
         where: dict[str, Any] | None = None,
         max_candidates: int | None = None,
+        created_at_min: float | None = None,
+        created_at_max: float | None = None,
     ) -> list[dict[str, Any]]: ...
 
     """
-    where: equality filters on *promoted* fields (org_id, user_id, scope_id, etc.)
-    max_candidates: limit number of candidate rows to score (after SQL WHERE, before cosine).
+    query_vec:
+      - non-empty list => semantic similarity search.
+      - empty list     => *no semantic query*; backend should return items
+                          that satisfy `where` and time bounds, typically
+                          ordered by recency (created_at_ts DESC).
+
+    where:
+      equality filters on *promoted* fields (org_id, user_id, scope_id, etc.)
+
+    max_candidates:
+      limit on candidate rows to score/filter internally.
     """
 
     # Each dict MUST look like:
@@ -98,7 +109,7 @@ class IndexMeta:
     ts: str | None = None  # human-readable ISO
     created_at_ts: float | None = None  # numeric, for DB index
 
-    # free-form / extra labels
+    # free-form / extra labels (tags, stage, etc.)
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

@@ -92,18 +92,21 @@ class SQLiteVectorIndex(VectorIndex):
     """
     Simple SQLite-backed vector index.
 
-    Baseline path uses brute-force cosine similarity over SQL-limited candidates. :contentReference[oaicite:1]{index=1}
+    Baseline path uses brute-force cosine similarity over SQL-limited candidates.
 
     Optional FAISS acceleration:
       - If faiss is installed and enabled, maintains a per-corpus FAISS HNSW index on disk.
-      - Index is marked dirty on add/delete and rebuilt lazily on next search. NOTE: this can be slow for large corpora.
-      - This is a local index for small to medium workloads; for distributed or large-scale use cases, consider other backends.
+      - Index is marked dirty on add/delete and rebuilt lazily on next search.
+        (This can be slow for large corpora.)
 
-    Promoted fields you *may* pass in meta: :contentReference[oaicite:2]{index=2}
+    Promoted fields you *may* pass in meta:
       - scope_id, user_id, org_id, client_id, session_id
       - run_id, graph_id, node_id
       - kind, source
       - created_at_ts (float UNIX timestamp)
+
+    Tags are *not* promoted here. They live only in meta_json and are handled
+    by SearchBackend as Python-level filters.
     """
 
     def __init__(
@@ -152,11 +155,79 @@ class SQLiteVectorIndex(VectorIndex):
         return (self._faiss_dir / f"{safe}.index", self._faiss_dir / f"{safe}.meta.pkl")
 
     def _mark_dirty(self, corpus_id: str) -> None:
+        """
+        Mark a corpus as having un-flushed changes.
+
+        We keep the in-memory FAISS index (if any) usable for queries.
+        'Dirty' now means: 'disk copy may be stale and/or index may
+        benefit from compaction', not 'index is invalid'.
+        """
         if not self._faiss_enabled:
             return
         with self._faiss_lock:
             self._faiss_dirty.add(corpus_id)
-            self._faiss_cache.pop(corpus_id, None)
+            # NOTE: do NOT drop _faiss_cache here anymore
+            # We want to keep the in-memory index hot for queries.
+
+    def _faiss_add_vectors(
+        self,
+        corpus_id: str,
+        chunk_ids: list[str],
+        vectors: list[list[float]],
+    ) -> None:
+        """
+        Incrementally add new vectors to the in-memory FAISS index for a corpus.
+
+        - Only runs if FAISS is enabled and an index is already loaded in memory.
+        - Does NOT handle deletions; those are still cleaned up by a full rebuild.
+        """
+        if not self._faiss_enabled:
+            return
+
+        with self._faiss_lock:
+            cached = self._faiss_cache.get(corpus_id)
+            if cached is None:
+                # No in-memory index yet; we'll build from DB on first query.
+                return
+
+            index, id_to_chunk, dim = cached
+            if index is None or dim <= 0:
+                # Nothing usable
+                return
+
+            next_id = len(id_to_chunk)
+
+            new_ids: list[int] = []
+            new_vecs: list[np.ndarray] = []
+
+            for cid, vec in zip(chunk_ids, vectors, strict=True):
+                v = np.asarray(vec, dtype=np.float32)
+                if v.ndim != 1:
+                    v = v.reshape(-1)
+
+                # Dimension mismatch: skip to avoid corrupting the index.
+                if v.shape[0] != dim:
+                    # You may want to log a warning here instead of silently skipping.
+                    continue
+
+                v_norm = _l2_normalize_vec(v)
+                new_ids.append(next_id)
+                new_vecs.append(v_norm)
+                id_to_chunk.append(cid)
+                next_id += 1
+
+            if not new_ids:
+                # Nothing valid to add
+                return
+
+            xs = np.stack(new_vecs, axis=0).astype(np.float32, copy=False)
+            ids = np.asarray(new_ids, dtype=np.int64)
+
+            index.add_with_ids(xs, ids)
+
+            # Update cache entry and mark as dirty (needs flush/compact later)
+            self._faiss_cache[corpus_id] = (index, id_to_chunk, dim)
+            self._faiss_dirty.add(corpus_id)
 
     def _build_faiss_index_from_db(self, corpus_id: str) -> tuple[Any, list[str], int]:
         """
@@ -217,7 +288,9 @@ class SQLiteVectorIndex(VectorIndex):
 
         with self._faiss_lock:
             cached = self._faiss_cache.get(corpus_id)
-            if cached is not None and corpus_id not in self._faiss_dirty:
+            if cached is not None:
+                # Even if 'dirty', the in-memory index is usable; 'dirty'
+                # only means it may not be flushed to disk / compacted.
                 return cached
 
             index_path, meta_path = self._faiss_paths(corpus_id)
@@ -334,10 +407,16 @@ class SQLiteVectorIndex(VectorIndex):
             finally:
                 conn.close()
 
-            # Mark FAISS corpus index dirty (lazy rebuild on next search)
-            self._mark_dirty(corpus_id)
-
+        # 1) Write to SQLite (blocking in thread)
         await asyncio.to_thread(_add_sync)
+
+        # 2) Update in-memory FAISS index if present (incremental add).
+        #    This keeps queries fast without forcing a full rebuild.
+        self._faiss_add_vectors(corpus_id, chunk_ids, vectors)
+
+        # 3) Mark corpus as 'dirty' so a future maintenance pass can
+        #    compact/flush indices to disk if desired.
+        self._mark_dirty(corpus_id)
 
     async def delete(self, corpus_id: str, chunk_ids: list[str] | None = None) -> None:
         def _delete_sync():
@@ -429,6 +508,87 @@ class SQLiteVectorIndex(VectorIndex):
             cur.execute(sql, [corpus_id, *b])
             for cid, meta_json, created_at_ts in cur.fetchall():
                 out[str(cid)] = (str(meta_json), created_at_ts)
+        return out
+
+    def _search_bruteforce_no_query(
+        self,
+        corpus_id: str,
+        k: int,
+        where: dict[str, Any],
+        max_candidates: int | None,
+        created_at_min: float | None,
+        created_at_max: float | None,
+    ) -> list[dict[str, Any]]:
+        """
+        Structural search with *no* semantic query:
+
+        - Filter by promoted fields + time bounds.
+        - Order by created_at_ts DESC.
+        - Return up to k items as {chunk_id, score, meta} where score encodes recency.
+        """
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+
+            sql = """
+                SELECT e.chunk_id, c.meta_json, e.created_at_ts
+                FROM embeddings e
+                JOIN chunks c
+                ON e.corpus_id = c.corpus_id AND e.chunk_id = c.chunk_id
+                WHERE e.corpus_id=?
+            """
+            params: list[Any] = [corpus_id]
+
+            promoted_cols = {
+                "scope_id",
+                "user_id",
+                "org_id",
+                "client_id",
+                "session_id",
+                "run_id",
+                "graph_id",
+                "node_id",
+                "kind",
+                "source",
+            }
+
+            for key, val in where.items():
+                if val is None:
+                    continue
+                if key in promoted_cols:
+                    sql += f" AND e.{key} = ?"
+                    params.append(val)
+
+            if created_at_min is not None:
+                sql += " AND e.created_at_ts >= ?"
+                params.append(created_at_min)
+            if created_at_max is not None:
+                sql += " AND e.created_at_ts <= ?"
+                params.append(created_at_max)
+
+            candidate_limit = max_candidates or self._brute_force_candidate_limit
+            sql += " ORDER BY e.created_at_ts DESC"
+            sql += " LIMIT ?"
+            params.append(candidate_limit)
+
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        out: list[dict[str, Any]] = []
+        for chunk_id, meta_json, created_at_ts in rows:
+            meta = json.loads(meta_json)
+            ts = float(created_at_ts or 0.0)
+            out.append(
+                {
+                    "chunk_id": str(chunk_id),
+                    "score": ts,  # recency-based score
+                    "meta": meta,
+                }
+            )
+            if len(out) >= k:
+                break
         return out
 
     def _search_bruteforce_sync(
@@ -629,8 +789,24 @@ class SQLiteVectorIndex(VectorIndex):
         created_at_min: float | None = None,
         created_at_max: float | None = None,
     ) -> list[dict[str, Any]]:
-        q = np.asarray(query_vec, dtype=np.float32)
         where = where or {}
+        # --- no-query structural path -----------------------------------
+        if not query_vec:
+
+            def _search_no_query_sync() -> list[dict[str, Any]]:
+                return self._search_bruteforce_no_query(
+                    corpus_id=corpus_id,
+                    k=k,
+                    where=where,
+                    max_candidates=max_candidates,
+                    created_at_min=created_at_min,
+                    created_at_max=created_at_max,
+                )
+
+            return await asyncio.to_thread(_search_no_query_sync)
+
+        # --- normal semantic path ---------------------------------------
+        q = np.asarray(query_vec, dtype=np.float32)
 
         def _search_sync() -> list[dict[str, Any]]:
             if self._faiss_enabled:

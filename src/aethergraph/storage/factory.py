@@ -4,7 +4,7 @@ from pathlib import Path
 from aethergraph.config.config import AppSettings, ContinuationStoreSettings
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.kv import AsyncKV
-from aethergraph.contracts.services.memory import HotLog, Indices, Persistence
+from aethergraph.contracts.services.memory import HotLog, Persistence
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
@@ -62,6 +62,9 @@ def build_event_log(cfg: AppSettings, service_name: str | None = None) -> EventL
         # but lose global querying and may have more files to manage.
         # If you use a single DB file, all services share the same event log table(s).
         path = root / ec.sqlite_path  # You could do: root / f"{service_name}_{ec.sqlite_path}"
+        path = (
+            root / f"{service_name}_{ec.sqlite_path}" if service_name else path
+        )  # to make sure memory persistence has its own event log if needed
         path.parent.mkdir(parents=True, exist_ok=True)
         return SqliteEventLog(path=str(path))
 
@@ -406,7 +409,7 @@ def build_memory_persistence(cfg: AppSettings) -> Persistence:
         from aethergraph.storage.memory.event_persist import EventLogPersistence
 
         docs = build_doc_store(cfg)
-        log = build_event_log(cfg)
+        log = build_event_log(cfg, service_name="memory")
         if log is None:
             raise ValueError("memory.persistence.backend=eventlog requires a non-none EventLog")
         return EventLogPersistence(
@@ -423,10 +426,3 @@ def build_memory_hotlog(cfg: AppSettings) -> HotLog:
 
     kv = build_kv_store(cfg, extra_prefix="mem:hot:")
     return KVHotLog(kv=kv)
-
-
-def build_memory_indices(cfg: AppSettings) -> Indices:
-    from aethergraph.storage.memory.indices import KVIndices
-
-    kv = build_kv_store(cfg, extra_prefix="mem:idx:")
-    return KVIndices(kv=kv, hot_ttl_s=cfg.storage.memory.indices.ttl_s)

@@ -1,20 +1,13 @@
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
+import warnings
 
 from aethergraph.contracts.services.execution import (
     CodeExecutionRequest,
     CodeExecutionResult,
     ExecutionService,
 )
-from aethergraph.services.artifacts.facade import ArtifactFacade
-from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.planning.node_planner import NodePlanner
-from aethergraph.services.skills.skill_registry import SkillRegistry
-
-if TYPE_CHECKING:
-    from aethergraph.core.runtime.run_manager import RunManager
-
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.run_types import (
     RunImportance,
@@ -23,12 +16,20 @@ from aethergraph.core.runtime.run_types import (
     RunVisibility,
 )
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
+from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.planning.node_planner import NodePlanner
+from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.scope.scope import Scope
+from aethergraph.services.skills.skill_registry import SkillRegistry
+from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
+from aethergraph.services.websearch.facade import WebSearchFacade
 
 from .base_service import _ServiceHandle
 from .bound_memory import BoundMemoryAdapter
@@ -95,76 +96,57 @@ class NodeContext:
         run_id: str | None = None,
     ) -> str:
         """
-        Launch a new run from within the current node or graph context.
+        Deprecated wrapper for `context.runner().spawn_run(...)`.
 
-         This method creates and schedules a new run for the specified graph, using the provided inputs and optional metadata.
-        It does not wait for the run to complete; instead, it returns immediately with the new run's ID.
-        The run is managed asynchronously in the background, and is tracked and persisted via the configured RunManager.
+        This method is kept for backward compatibility and forwards all arguments
+        to the centralized runner facade.
 
         Examples:
-            Basic usage to spawn a run for a graph:
+            Spawn through legacy context API:
             ```python
-            run_id = await context.spawn_run(
-                "my-graph-id",
-                inputs={"x": 1, "y": 2}
-            )
+            run_id = await context.spawn_run("my-graph-id", inputs={"x": 1})
             ```
 
-            Spawning a run with custom tags and agent context:
+            Preferred equivalent:
             ```python
-            from aethergraph.runtime import RunVisibility
-            run_id = await context.spawn_run(
-                "my-graph-id",
-                inputs={"foo": "bar"},
-                tags=["experiment", "priority"],
-                agent_id="agent-123",    # associate with an agent if applicable
-                visibility=RunVisibility.inline, # not shown in UI
-            )
+            run_id = await context.runner().spawn_run("my-graph-id", inputs={"x": 1})
             ```
 
         Args:
-            graph_id: The unique identifier of the graph to execute. i.e. the `name` field of a registered graph.
-            inputs: Dictionary of input values to pass to the graph.
-            session_id: Optional session identifier. Defaults to the current context's session if not provided.
-            tags: Optional list of string tags for categorization and tracking.
-            visibility: Optional visibility setting for the run (e.g., public, private, normal).
-            origin: Optional indicator of the run's origin (e.g., agent, app). Defaults based on agent_id.
-            importance: Optional importance level for the run (e.g., normal, high).
-            agent_id: Optional agent identifier if the run is associated with an agent.
-            app_id: Optional application identifier if the run is associated with an app.
-            run_id: Optional explicit run identifier. If not provided, one is generated.
+            graph_id: Registered graph identifier to execute.
+            inputs: Input payload passed to the child graph.
+            session_id: Optional session id override.
+            tags: Optional run tags.
+            visibility: Optional visibility override.
+            origin: Optional origin override.
+            importance: Optional importance override.
+            agent_id: Optional agent id override.
+            app_id: Optional app id override.
+            run_id: Optional explicit run id.
 
         Returns:
-            str: The unique run_id of the newly created run.
-
-        Raises:
-            RuntimeError: If the RunManager service is not configured in the context.
+            str: Created child run id.
 
         Notes:
-            - The spawned run inherits the context's identity for provenance tracking.
-            - Metadata `tags`, `visibility`, `origin`, `importance`, `agent_id`, `app_id`, help manage and monitor the run in AG UI,
-                but do not affect the execution logic of the graph itself. If you are not using AG UI, these fields can be omitted.
+            Prefer `context.runner().spawn_run(...)` for new code.
         """
-        rm: RunManager | None = getattr(self.services, "run_manager", None)
-        if rm is None:
-            raise RuntimeError("NodeContext.services.run_manager is not configured")
-        effective_session_id = session_id or self.session_id
-
-        record = await rm.submit_run(
-            graph_id=graph_id,
+        warnings.warn(
+            "NodeContext.spawn_run() is deprecated; use context.runner().spawn_run().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.runner().spawn_run(
+            graph_id,
             inputs=inputs,
-            run_id=run_id,
-            session_id=effective_session_id,
+            session_id=session_id,
             tags=tags,
-            visibility=visibility or RunVisibility.normal,
-            origin=origin or (RunOrigin.agent if agent_id is not None else RunOrigin.app),
-            importance=importance or RunImportance.normal,
+            visibility=visibility,
+            origin=origin,
+            importance=importance,
             agent_id=agent_id,
             app_id=app_id,
-            identity=self.identity,  # internal spawn; not coming from HTTP directly
+            run_id=run_id,
         )
-
-        return record.run_id
 
     async def run_and_wait(
         self,
@@ -181,86 +163,64 @@ class NodeContext:
         run_id: str | None = None,
     ) -> tuple[str, dict[str, Any] | None, bool, list[dict[str, Any]]]:
         """
-        Run a child graph as a first-class RunManager run and wait for completion.
+        Deprecated wrapper for `context.runner().run_and_wait(...)`.
 
-        This method launches a new run for the specified graph, waits for it to finish,
-        and returns its outputs and metadata. The run is tracked and visualized in the UI,
-        and all status updates are persisted via the RunManager.
+        This method is kept for backward compatibility and delegates to the
+        centralized runner facade.
 
         Examples:
-            Basic usage to run and wait for a graph:
+            Run synchronously through legacy API:
             ```python
             run_id, outputs, has_waits, continuations = await context.run_and_wait(
                 "my-graph-id",
-                inputs={"x": 1, "y": 2}
+                inputs={"x": 1},
             )
             ```
 
-            Running with custom tags and agent context:
+            Preferred equivalent:
             ```python
-            run_id, outputs, has_waits, continuations = await context.run_and_wait(
+            run_id, outputs, has_waits, continuations = await context.runner().run_and_wait(
                 "my-graph-id",
-                inputs={"foo": "bar"},
-                tags=["experiment", "priority"],
-                agent_id="agent-123",
-                visibility=RunVisibility.inline,
+                inputs={"x": 1},
             )
             ```
 
         Args:
-            graph_id: The unique identifier of the graph to execute.
-            inputs: Dictionary of input values to pass to the graph.
-            session_id: Optional session identifier. Defaults to the current context's session.
-            tags: Optional list of string tags for categorization and tracking.
-            visibility: Optional visibility setting for the run (e.g., public, private, normal).
-            origin: Optional indicator of the run's origin (e.g., agent, app).
-            importance: Optional importance level for the run (e.g., normal, high).
-            agent_id: Optional agent identifier if the run is associated with an agent.
-            app_id: Optional application identifier if the run is associated with an app.
-            run_id: Optional explicit run identifier. If not provided, one is generated.
+            graph_id: Registered graph identifier to execute.
+            inputs: Input payload passed to the child graph.
+            session_id: Optional session id override.
+            tags: Optional run tags.
+            visibility: Optional visibility override.
+            origin: Optional origin override.
+            importance: Optional importance override.
+            agent_id: Optional agent id override.
+            app_id: Optional app id override.
+            run_id: Optional explicit run id.
 
         Returns:
-            run_id (str): The unique run ID of the completed run.
-            outputs (dict | None): The outputs returned by the graph.
-            has_waits (bool): True if the run contained any wait nodes. [Not currently used]
-            continuations (list[dict]): List of continuation metadata, if any. [Not currently used]
-
-        Raises:
-            RuntimeError: If the RunManager service is not configured in the context.
+            tuple[str, dict[str, Any] | None, bool, list[dict[str, Any]]]:
+                `(run_id, outputs, has_waits, continuations)`.
 
         Notes:
-            - The run is fully tracked and visualized in the AG UI.
-            - Use this method for orchestration patterns where you need to await child runs.
-            - Metadata fields help with monitoring and provenance, but do not affect graph logic.
-
-        Warning:
-            - This method blocks until the child run completes.
-            - This method will not honor the concurrency limits of the parent run, and may lead to deadlocks if the parent run is waiting on resources held by the child run.
-            - Avoid using this method in high-concurrency scenarios to prevent deadlocks.
-              For such cases, consider using `spawn_run` followed by `wait_run` instead.
+            Prefer `context.runner().run_and_wait(...)` for new code.
         """
-        rm: RunManager | None = getattr(self.services, "run_manager", None)
-        if rm is None:
-            raise RuntimeError("NodeContext.services.run_manager is not configured")
-
-        effective_session_id = session_id or self.session_id
-
-        record, outputs, has_waits, continuations = await rm.run_and_wait(
+        warnings.warn(
+            "NodeContext.run_and_wait() is deprecated; use context.runner().run_and_wait().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.runner().run_and_wait(
             graph_id,
             inputs=inputs,
-            run_id=run_id,
-            session_id=effective_session_id,
+            session_id=session_id,
             tags=tags,
-            visibility=visibility or RunVisibility.normal,
-            origin=origin or (RunOrigin.agent if agent_id is not None else RunOrigin.app),
-            importance=importance or RunImportance.normal,
+            visibility=visibility,
+            origin=origin,
+            importance=importance,
             agent_id=agent_id,
             app_id=app_id,
-            identity=self.identity,  # keep provenance consistent with spawn_run
-            count_slot=False,  # nested orchestration: avoid deadlock
+            run_id=run_id,
         )
-
-        return record.run_id, outputs, has_waits, continuations
 
     async def wait_run(
         self,
@@ -268,90 +228,80 @@ class NodeContext:
         *,
         timeout_s: float | None = None,
         return_outputs: bool = False,
-    ) -> RunRecord:
+    ) -> RunRecord | tuple[RunRecord, dict[str, Any] | None]:
         """
-        Wait for a run to complete and retrieve its final record.
+        Deprecated wrapper for `context.runner().wait_run(...)`.
 
-        This method waits the RunManager for the specified run until it finishes,
-        then returns the completed RunRecord. Optionally, a timeout (in seconds)
-        can be set to limit how long to wait.
+        This method is kept for backward compatibility and delegates to the
+        centralized runner facade.
 
         Examples:
-            Basic usage to wait for a run:
+            Wait through legacy API:
             ```python
-            run_id = await context.spawn_run("my-graph-id", inputs={"x": 1})
             record = await context.wait_run(run_id)
             ```
 
-            Waiting with a timeout:
+            Preferred equivalent:
             ```python
-            record, outputs = await context.wait_run(run_id, timeout_s=30, return_outputs=True)
+            record, outputs = await context.runner().wait_run(run_id, return_outputs=True)
             ```
 
         Args:
-            run_id: The unique identifier of the run to wait for.
-            timeout_s: Optional timeout in seconds. If set, the method will raise
-                a TimeoutError if the run does not complete in time.
-            return_outputs: If True, also return the run's outputs along with the record.
+            run_id: Run identifier to wait on.
+            timeout_s: Optional timeout in seconds.
+            return_outputs: If true, return `(record, outputs)`.
 
         Returns:
-            RunRecord: The final record of the completed run.
-            Output: If `return_outputs` is True, returns a tuple of (RunRecord, outputs dict).
-
-        Raises:
-            RuntimeError: If the RunManager service is not configured in the context.
-            TimeoutError: If the run does not complete within the specified timeout.
+            RunRecord | tuple[RunRecord, dict[str, Any] | None]:
+                Final run record, or tuple when `return_outputs=True`.
 
         Notes:
-            - This method is useful for orchestration patterns where you need to
-              synchronize on the completion of child runs.
-            - For high-concurrency scenarios, prefer using `spawn_run` and `wait_run`
-              in combination rather than `run_and_wait`.
+            Prefer `context.runner().wait_run(...)` for new code.
         """
-        rm: RunManager | None = getattr(self.services, "run_manager", None)
-        if rm is None:
-            raise RuntimeError("NodeContext.services.run_manager is not configured")
-        return await rm.wait_run(run_id, timeout_s=timeout_s, return_outputs=return_outputs)
+        warnings.warn(
+            "NodeContext.wait_run() is deprecated; use context.runner().wait_run().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.runner().wait_run(
+            run_id,
+            timeout_s=timeout_s,
+            return_outputs=return_outputs,
+        )
 
     async def cancel_run(self, run_id: str) -> None:
         """
-        Cancel a scheduled or running child run by its unique ID.
+        Deprecated wrapper for `context.runner().cancel_run(...)`.
 
-        This method requests cancellation of a run managed by the RunManager.
-        The cancellation is propagated to the run's execution context, and any
-        in-progress tasks will be interrupted if possible.
+        This method is kept for backward compatibility and delegates to the
+        centralized runner facade.
 
         Examples:
-            Basic usage to cancel a spawned run:
+            Cancel through legacy API:
             ```python
-            run_id = await context.spawn_run("my-graph-id", inputs={"x": 1})
             await context.cancel_run(run_id)
             ```
 
-            Cancel a run after waiting for a condition:
+            Preferred equivalent:
             ```python
-            if should_abort:
-                await context.cancel_run(run_id)
+            await context.runner().cancel_run(run_id)
             ```
 
         Args:
-            run_id: The unique identifier of the run to cancel.
+            run_id: Run identifier to cancel.
 
         Returns:
-            None. The cancellation request is dispatched to the RunManager.
-
-        Raises:
-            RuntimeError: If the RunManager service is not configured in the context.
+            None: Cancellation is requested asynchronously.
 
         Notes:
-            - Cancellation is best-effort and may not immediately terminate all tasks.
-            - Use this method for orchestration patterns where you need to abort child runs.
-            - The run's status will be updated to "cancelled" in the UI and persistence layer.
+            Prefer `context.runner().cancel_run(...)` for new code.
         """
-        rm: RunManager | None = getattr(self.services, "run_manager", None)
-        if rm is None:
-            raise RuntimeError("NodeContext.services.run_manager is not configured")
-        await rm.cancel_run(run_id)
+        warnings.warn(
+            "NodeContext.cancel_run() is deprecated; use context.runner().cancel_run().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        await self.runner().cancel_run(run_id)
 
     def planner(self) -> "NodePlanner":
         if self._planner_facade is None:
@@ -393,6 +343,11 @@ class NodeContext:
             ChannelSession: The channel session associated with the current run.
         """
         return ChannelSession(self, f"ui:run/{self.run_id}")
+
+    def triggers(self) -> TriggerFacade:
+        if not self.services.triggers:
+            raise RuntimeError("NodeContext.services.triggers is not configured")
+        return self.services.triggers
 
     def skills(self) -> SkillRegistry:
         if not self.services.skills:
@@ -450,6 +405,47 @@ class NodeContext:
         if not self.services.viz:
             raise RuntimeError("Viz service (facade) not available")
         return self.services.viz
+
+    def kb(self) -> NodeKB:
+        if not self.services.kb:
+            raise RuntimeError("NodeKB service not available")
+        return self.services.kb
+
+    def web_search(self) -> WebSearchFacade:
+        if not self.services.web_search:
+            raise RuntimeError("Web search service not available")
+        return self.services.web_search
+
+    def runner(self) -> RunFacade:
+        """
+        Get the centralized run management facade for this node context.
+
+        This accessor returns the bound `RunFacade` created during runtime wiring.
+
+        Examples:
+            Spawn a child run:
+            ```python
+            run_id = await context.runner().spawn_run("my-graph-id", inputs={"x": 1})
+            ```
+
+            Wait for completion:
+            ```python
+            record = await context.runner().wait_run(run_id)
+            ```
+
+        Args:
+            None: This accessor takes no arguments.
+
+        Returns:
+            RunFacade: Run management facade for spawn/wait/cancel operations.
+
+        Notes:
+            This is the preferred API over legacy `context.spawn_run()` style
+            helpers.
+        """
+        if not self.services.runner:
+            raise RuntimeError("Run facade service not available")
+        return self.services.runner
 
     def llm(
         self,
@@ -564,11 +560,6 @@ class NodeContext:
         svc = self.services.llm
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
 
-    def rag(self):
-        if not self.services.rag:
-            raise RuntimeError("RAGService not available")
-        return self.services.rag
-
     def mcp(self, name):
         if not self.services.mcp:
             raise RuntimeError("MCPService not available")
@@ -579,10 +570,9 @@ class NodeContext:
             raise RuntimeError("ScopedIndices not available")
         return self.services.indices
 
-    # def run_manager(self) -> RunManager:
-    #     if not self.services.run_manager:
-    #         raise RuntimeError("RunManager not available")
-    #     return self.services.run_manager
+    # def run_manager(self):
+    #     # Deprecated legacy accessor; use context.runner() instead.
+    #     return self.runner()
 
     def continuations(self):
         return self.services.continuation_store

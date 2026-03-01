@@ -9,17 +9,18 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
+import warnings
 
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
-from aethergraph.contracts.storage.search_backend import ScoredItem
+from aethergraph.contracts.storage.search_backend import ScoredItem, SearchMode
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.artifacts.paths import _from_uri_or_path
-from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearchResult, ArtifactView
+from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearchResult
 from aethergraph.services.artifacts.utils import _infer_content_mode
 from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.scope.scope import Scope
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 
@@ -45,6 +46,40 @@ class ArtifactFacade:
         scoped_indices: ScopedIndices | None = None,
         scope: Scope | None = None,
     ) -> None:
+        """
+        Initialize an artifact facade bound to the current execution context.
+
+        The facade binds run/graph/node identity and service handles so all
+        artifact writes and lookups can be scoped consistently.
+
+        Examples:
+            Constructing the facade inside runtime wiring:
+            ```python
+            facade = ArtifactFacade(
+                run_id=run_id,
+                graph_id=graph_id,
+                node_id=node_id,
+                tool_name="my_tool",
+                tool_version="0.1.0",
+                art_store=store,
+                art_index=index,
+            )
+            ```
+
+        Args:
+            run_id: Current run identifier.
+            graph_id: Current graph identifier.
+            node_id: Current node identifier.
+            tool_name: Logical tool name associated with artifact writes.
+            tool_version: Tool version associated with artifact writes.
+            art_store: Artifact store implementation for blob persistence.
+            art_index: Artifact index implementation for metadata search/list.
+            scoped_indices: Optional semantic/lexical search backend wrapper.
+            scope: Optional scope object carrying tenant/run/session labels.
+
+        Returns:
+            None: Initializes instance state.
+        """
         self.run_id = run_id
         self.graph_id = graph_id
         self.node_id = node_id
@@ -62,7 +97,24 @@ class ArtifactFacade:
 
     # ---------- Helpers for scopes ----------
     def _with_scope_labels(self, labels: dict[str, Any] | None) -> dict[str, Any]:
-        """Merge given labels with scope labels."""
+        """
+        Merge caller labels with scope-derived artifact labels.
+
+        Scope labels are appended so downstream indexing/search can apply tenant
+        and scope boundaries consistently.
+
+        Examples:
+            Merge user labels with runtime scope labels:
+            ```python
+            merged = facade._with_scope_labels({"kind": "report"})
+            ```
+
+        Args:
+            labels: Optional user-provided labels dictionary.
+
+        Returns:
+            dict[str, Any]: Effective labels including scope labels when available.
+        """
         out: dict[str, Any] = dict(labels or {})
         if self.scope:
             out.update(self.scope.artifact_scope_labels())
@@ -70,9 +122,22 @@ class ArtifactFacade:
 
     def _tenant_labels_for_search(self) -> dict[str, Any]:
         """
-        Tenant filter for search/list.
-        In cloud/demo mode, we AND these on.
-        In local mode, these are no-ops.
+        Build tenant labels used by search/list filters.
+
+        In non-local mode this includes available org/user/client identifiers.
+        In local mode this returns an empty dict.
+
+        Examples:
+            Derive tenant labels for index filtering:
+            ```python
+            tenant = facade._tenant_labels_for_search()
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, Any]: Tenant labels to AND into structured filters.
         """
         if self.scope is None:
             return {}
@@ -89,33 +154,67 @@ class ArtifactFacade:
             labels["client_id"] = self.scope.client_id
         return labels
 
-    def _view_labels(self, view: ArtifactView) -> dict[str, Any]:
-        """Labels to filter by for a given ArtifactView.
-        view options:
-          - "node": filter by (run_id, graph_id, node_id)
-          - "graph": filter by (run_id, graph_id)
-          - "run": filter by (run_id)   [default]
-          - "all": no implicit filters
-
-          In cloud/demo mode, we AND tenant filters on.
-          In local mode, tenants are no-ops.
+    def _filters_for_level(self, level: ScopeLevel) -> dict[str, Any]:
         """
-        base: dict[str, Any] = {}
+        Build scope filters for a given scope level.
 
-        if view == "node":
-            base = {"run_id": self.run_id, "graph_id": self.graph_id, "node_id": self.node_id}
-        elif view == "graph":
-            base = {"run_id": self.run_id, "graph_id": self.graph_id}
-        elif view == "run":
-            base = {"run_id": self.run_id}
-        # "all" => no run/graph/node filter
+        This normalizes scope-derived labels for `scope/session/run/user/org`
+        so query methods can apply consistent boundaries.
 
-        base.update(self._tenant_labels_for_search())
-        return base
+        Examples:
+            Build run-level filters:
+            ```python
+            where = facade._filters_for_level("run")
+            ```
+
+        Args:
+            level: Requested scope level.
+
+        Returns:
+            dict[str, Any]: Normalized filter dictionary with non-null values only.
+        """
+        if self.scope is None:
+            return {}
+
+        base = self.scope.rag_filter(scope_id=self.scope.memory_scope_id())
+
+        if not level or level == "scope":
+            return {k: v for k, v in base.items() if v is not None}
+
+        if level == "session" and self.scope.session_id:
+            base["session_id"] = self.scope.session_id
+        elif level == "run" and self.scope.run_id:
+            base["run_id"] = self.scope.run_id
+        elif level == "user":
+            u = self.scope.user_id or self.scope.client_id
+            if u:
+                base["user_id"] = u
+        elif level == "org" and self.scope.org_id:
+            base["org_id"] = self.scope.org_id
+
+        return {k: v for k, v in base.items() if v is not None}
 
     # Metering-enhanced record
     async def _record(self, a: Artifact) -> None:
-        """Record artifact in index, occurrence log, and update run/session stats."""
+        """
+        Record a persisted artifact across indexing, search, and metering layers.
+
+        This method normalizes timestamps/labels, writes index records, syncs
+        scoped search indices, records metering, and updates run/session stores.
+
+        Examples:
+            Record an artifact returned by store.save_file:
+            ```python
+            artifact = await facade.store.save_file(...)
+            await facade._record(artifact)
+            ```
+
+        Args:
+            a: Artifact object to record.
+
+        Returns:
+            None: Persists side effects in index, metering, and runtime stores.
+        """
         # 1) Sync canonical tenant fields from labels/scope into artifact
         if self.scope is not None:
             scope_labels = self.scope.artifact_scope_labels()
@@ -173,6 +272,8 @@ class ArtifactFacade:
                 parts: list[str] = []
                 if a.kind:
                     parts.append(str(a.kind))
+                if a.tags:
+                    parts.extend(a.tags)
                 if a.labels:
                     parts.append("; ".join(f"{k}: {v}" for k, v in a.labels.items()))
                 if a.metrics:
@@ -186,6 +287,7 @@ class ArtifactFacade:
                     "tool_name": a.tool_name,
                     "tool_version": a.tool_version,
                     "pinned": a.pinned,
+                    "tags": a.tags or [],
                 }
 
                 # Add artifact kind as explicit metadata field
@@ -328,6 +430,7 @@ class ArtifactFacade:
         staged_path: str,
         *,
         kind: str,
+        tags: list[str] | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         suggested_uri: str | None = None,
@@ -363,6 +466,7 @@ class ArtifactFacade:
         Args:
             staged_path: The local path to the staged file.
             kind: The artifact type (e.g., "model", "dataset").
+            tags: Optional list of tags to associate with the artifact.
             labels: Optional dictionary of metadata labels.
             metrics: Optional dictionary of numeric metrics.
             suggested_uri: Optional logical URI for the artifact.
@@ -376,7 +480,16 @@ class ArtifactFacade:
             cleanup of the staged file if configured in the underlying store.
             If you already have a file at a specific URI (e.g. "s3://bucket/file" or local file path), consider using `save_file` instead.
         """
-        labels = self._with_scope_labels(labels)
+        # Start with user labels
+        eff_labels: dict[str, Any] = dict(labels or {})
+
+        # Mirror tags into labels for structured search/back-compat
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        # Add scope identity + scope_id
+        scoped_labels = self._with_scope_labels(eff_labels)
+
         a = await self.store.ingest_staged_file(
             staged_path=staged_path,
             kind=kind,
@@ -385,7 +498,8 @@ class ArtifactFacade:
             node_id=self.node_id,
             tool_name=self.tool_name,
             tool_version=self.tool_version,
-            labels=labels,
+            tags=tags,
+            labels=scoped_labels,
             metrics=metrics,
             suggested_uri=suggested_uri,
             pin=pin,
@@ -433,8 +547,22 @@ class ArtifactFacade:
             Artifact: The fully persisted `Artifact` object with metadata and identifiers.
 
         """
-        labels = self._with_scope_labels(kwargs.pop("labels", None))
-        kwargs["labels"] = labels
+
+        # Extract user labels/tags from kwargs
+        raw_labels = kwargs.pop("labels", None)
+        tags = kwargs.pop("tags", None)
+
+        eff_labels: dict[str, Any] = dict(raw_labels or {})
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        # Inject scope identity + scope_id
+        scoped_labels = self._with_scope_labels(eff_labels)
+
+        # Put back into kwargs for the store
+        kwargs["labels"] = scoped_labels
+        kwargs["tags"] = tags
+
         a = await self.store.ingest_directory(
             staged_dir=staged_dir,
             run_id=self.run_id,
@@ -453,6 +581,8 @@ class ArtifactFacade:
         path: str,
         *,
         kind: str,
+        tags: list[str] | None = None,
+        mime: str | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         suggested_uri: str | None = None,
@@ -508,6 +638,9 @@ class ArtifactFacade:
         # Start with user labels
         eff_labels: dict[str, Any] = dict(labels or {})
 
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
         # If caller passed an explicit name, prefer that as filename label
         if name:
             eff_labels.setdefault("filename", name)
@@ -527,6 +660,8 @@ class ArtifactFacade:
             node_id=self.node_id,
             tool_name=self.tool_name,
             tool_version=self.tool_version,
+            mime=mime,
+            tags=tags,
             labels=labels,
             metrics=metrics,
             suggested_uri=suggested_uri,
@@ -543,6 +678,7 @@ class ArtifactFacade:
         suggested_uri: str | None = None,
         name: str | None = None,
         kind: str = "text",
+        tags: list[str] | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         pin: bool = False,
@@ -598,7 +734,9 @@ class ArtifactFacade:
         return await self.save_file(
             path=staged,
             kind=kind,
+            tags=tags,
             labels=labels,
+            mime="text/plain",
             metrics=metrics,
             suggested_uri=suggested_uri,
             name=name,
@@ -612,6 +750,7 @@ class ArtifactFacade:
         suggested_uri: str | None = None,
         name: str | None = None,
         kind: str = "json",
+        tags: list[str] | None = None,
         labels: dict | None = None,
         metrics: dict | None = None,
         pin: bool = False,
@@ -670,6 +809,8 @@ class ArtifactFacade:
         return await self.save_file(
             path=staged,
             kind=kind,
+            tags=tags,
+            mime="application/json",
             labels=labels,
             metrics=metrics,
             suggested_uri=suggested_uri,
@@ -724,6 +865,10 @@ class ArtifactFacade:
 
         Returns:
             AsyncIterator[Any]: Yields a writer object for streaming data and metadata.
+
+        Notes:
+            - Scope labels are added during `_record` after the context exits, so they are not available during the write phase.
+            - If you want tags, call `w.add_labels({"tags": [...]})` inside the context
         """
         # 1) Delegate to the store's async context manager
         async with self.store.open_writer(
@@ -908,19 +1053,32 @@ class ArtifactFacade:
         max_bytes: int | None = None,
     ) -> ArtifactContent:
         """
-        Docstring for load_content
+        Load artifact content by ID with type-aware decoding.
 
-        :param self: Description
-        :param artifact_id: Description
-        :type artifact_id: str
-        :param encoding: Description
-        :type encoding: str
-        :param errors: Description
-        :type errors: str
-        :param max_bytes: Description
-        :type max_bytes: int | None
-        :return: Description
-        :rtype: ArtifactContent
+        Behavior:
+        - For JSON artifacts, returns `ArtifactContent(mode="json", json=...)`.
+        - For text-like artifacts, returns `ArtifactContent(mode="text", text=...)`.
+        - Otherwise returns raw bytes in `ArtifactContent(mode="bytes", data=...)`.
+
+        Examples:
+            Load typed content for downstream branching:
+            ```python
+            content = await context.artifacts().load_content("artifact_123")
+            if content.mode == "json":
+                print(content.json)
+            ```
+
+        Args:
+            artifact_id: Artifact identifier from the artifact index.
+            encoding: Text decoding encoding used for text/json paths.
+            errors: Decode error strategy used for text/json paths.
+            max_bytes: Optional byte cap applied only to raw-bytes mode.
+
+        Returns:
+            ArtifactContent: Normalized typed content wrapper for the artifact.
+
+        Raises:
+            FileNotFoundError: If `artifact_id` is not found in the index.
         """
         art = await self.get_by_id(artifact_id=artifact_id)
         if art is None:
@@ -952,6 +1110,25 @@ class ArtifactFacade:
         *,
         must_exist: bool = True,
     ) -> str:
+        """
+        Resolve an artifact ID to a local file path.
+
+        This resolves the artifact metadata by ID and then delegates to
+        `as_local_file(...)` for backend-agnostic local file materialization.
+
+        Examples:
+            Resolve by artifact ID:
+            ```python
+            path = await context.artifacts().as_local_file_by_id("artifact_123")
+            ```
+
+        Args:
+            artifact_id: Artifact identifier from the artifact index.
+            must_exist: If True, validates local path existence/type.
+
+        Returns:
+            str: Absolute local file path.
+        """
         art = await self.get_by_id(artifact_id)
         if art is None or not art.uri:
             raise FileNotFoundError(f"Artifact {artifact_id} not found or missing uri")
@@ -963,6 +1140,25 @@ class ArtifactFacade:
         *,
         must_exist: bool = True,
     ) -> str:
+        """
+        Resolve an artifact ID to a local directory path.
+
+        This resolves the artifact metadata by ID and then delegates to
+        `as_local_dir(...)` for backend-agnostic local directory materialization.
+
+        Examples:
+            Resolve directory by artifact ID:
+            ```python
+            path = await context.artifacts().as_local_dir_by_id("artifact_456")
+            ```
+
+        Args:
+            artifact_id: Artifact identifier from the artifact index.
+            must_exist: If True, validates local directory existence.
+
+        Returns:
+            str: Absolute local directory path.
+        """
         art = await self.get_by_id(artifact_id)
         if art is None or not art.uri:
             raise FileNotFoundError(f"Artifact {artifact_id} not found or missing uri")
@@ -1073,18 +1269,84 @@ class ArtifactFacade:
         return json.loads(text)
 
     async def load_artifact(self, uri: str) -> Any:
-        """Compatibility helper: returns bytes or directory path depending on implementation."""
+        """
+        Compatibility loader for artifact URI.
+
+        This method is retained for backward compatibility and may return bytes
+        or a directory path depending on store implementation.
+
+        Examples:
+            Load using legacy compatibility API:
+            ```python
+            value = await context.artifacts().load_artifact(uri)
+            ```
+
+        Args:
+            uri: Artifact URI.
+
+        Returns:
+            Any: Backend-dependent artifact payload.
+        """
+        warnings.warn(
+            "ArtifactFacade.load_artifact() is a compatibility API and will be removed "
+            "in a future version. Use explicit load_* methods instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.store.load_artifact(uri)
 
     async def load_artifact_bytes(self, uri: str) -> bytes:
+        """
+        Compatibility byte loader for artifact URI.
+
+        This method is retained for backward compatibility and should be replaced
+        with `load_bytes(...)` in new code.
+
+        Examples:
+            Load bytes using legacy API:
+            ```python
+            data = await context.artifacts().load_artifact_bytes(uri)
+            ```
+
+        Args:
+            uri: Artifact URI.
+
+        Returns:
+            bytes: Raw artifact bytes.
+        """
+        warnings.warn(
+            "ArtifactFacade.load_artifact_bytes() is a compatibility API and will be removed "
+            "in a future version. Use load_bytes() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.store.load_artifact_bytes(uri)
 
     async def load_artifact_dir(self, uri: str) -> str:
         """
-        Backend-agnostic: ensure a directory artifact is available as a local dir path.
+        Compatibility directory loader for artifact URI.
 
-        FS backend can just return its CAS dir; S3 backend might download to a temp dir.
+        This method is retained for backward compatibility and should be replaced
+        with `as_local_dir(...)` in new code.
+
+        Examples:
+            Resolve directory using legacy API:
+            ```python
+            path = await context.artifacts().load_artifact_dir(uri)
+            ```
+
+        Args:
+            uri: Artifact URI.
+
+        Returns:
+            str: Local directory path for the artifact.
         """
+        warnings.warn(
+            "ArtifactFacade.load_artifact_dir() is a compatibility API and will be removed "
+            "in a future version. Use as_local_dir() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.store.load_artifact_dir(uri)
 
     # ---------- as local helpers ----------
@@ -1139,8 +1401,10 @@ class ArtifactFacade:
         must_exist: bool = True,
     ) -> str:
         """
-        This method transparently handles local and remote artifact URIs, downloading remote files
-        to a staging location if necessary. It is typically accessed via `context.artifacts().as_local_file(...)`.
+        Resolve an artifact to a local file path.
+
+        This method transparently handles local and remote artifact URIs, downloading
+        remote file artifacts to a staging path when needed.
 
         Examples:
             Using a local file path:
@@ -1190,17 +1454,20 @@ class ArtifactFacade:
         return path
 
     # ---------- indexing helpers ----------
-    async def list(self, *, view: ArtifactView = "run") -> list[Artifact]:
+    async def list(
+        self,
+        *,
+        level: ScopeLevel | None = "run",
+        include_node: bool = True,
+        tags: list[str] | None = None,
+        filters: dict[str, str] | None = None,
+        limit: int | None = None,
+    ) -> list[Artifact]:
         """
-        List artifacts scoped to the current run, graph, or node.
+        List artifacts using structured index filters.
 
-        This method provides a quick way to enumerate artifacts associated with the current
-        execution context. The `view` parameter controls the scope of the listing:
-
-        - `"node"`: artifacts for the current run, graph, and node
-        - `"graph"`: artifacts for the current run and graph
-        - `"run"`: artifacts for the current run (default)
-        - `"all"`: all artifacts (tenant-scoped if applicable)
+        Scoping is controlled by `level` (`scope`, `session`, `run`, `user`, `org`)
+        and optional node narrowing (`include_node=True` by default).
 
         Examples:
             List all artifacts for the current run:
@@ -1210,118 +1477,182 @@ class ArtifactFacade:
                 print(a.artifact_id, a.kind)
             ```
 
-            List artifacts for the current node:
+            List artifacts for the current graph regardless of node:
             ```python
-            node_artifacts = await context.artifacts().list(view="node")
+            graph_artifacts = await context.artifacts().list(include_node=False)
             ```
 
-            List all tenant-visible artifacts:
+            List artifacts filtered by tags:
             ```python
-            all_artifacts = await context.artifacts().list(view="all")
+            tagged = await context.artifacts().list(tags=["report"])
             ```
 
         Args:
-            view: The scope for listing artifacts. Must be one of:
-                `"node"`, `"graph"`, `"run"`, or `"all"`.
+            level: Scope level used to derive tenant/scope/run/session filters.
+            include_node: When True, constrain results to current `graph_id` and `node_id`.
+            tags: Optional tag filter.
+            filters: Extra label filters merged with scope filters.
+            limit: Maximum number of rows to return.
 
         Returns:
-            list[Artifact]: A list of `Artifact` objects matching the specified scope.
+            list[Artifact]: Matching artifacts.
         """
-        if view == "all":
-            # still tenant-scoped
-            labels = self._tenant_labels_for_search()
-            return await self.index.search(labels=labels or None)
-        labels = self._view_labels(view)
-        return await self.index.search(labels=labels or None)
+        base_labels = self._filters_for_level(level=level)
+
+        # Constrain to this graph/node by default
+        if include_node:
+            if self.graph_id:
+                base_labels.setdefault("graph_id", self.graph_id)
+            if self.node_id:
+                base_labels.setdefault("node_id", self.node_id)
+
+        eff_labels: dict[str, Any] = dict(filters or {})
+        eff_labels.update(base_labels)
+
+        # Tag filter, represented as labels["tags"] for ArtifactIndex
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        return await self.index.search(
+            labels=eff_labels or None,
+            limit=limit,
+        )
 
     async def search(
         self,
         *,
+        query: str | None = None,
         kind: str | None = None,
+        tags: list[str] | None = None,
         labels: dict[str, str] | None = None,
         metric: str | None = None,
-        mode: Literal["max", "min"] | None = None,
-        view: ArtifactView = "run",
+        metric_mode: Literal["max", "min"] | None = None,
+        level: ScopeLevel | None = "run",
         extra_scope_labels: dict[str, str] | None = None,
         limit: int | None = None,
+        include_graph: bool = False,
+        include_node: bool = False,
+        time_window: str | None = None,
+        mode: SearchMode | None = None,
     ) -> list[Artifact]:
         """
-        Search for artifacts with flexible scoping and filtering.
+        Search artifacts with structured and optional semantic/lexical retrieval.
 
-        This method allows you to query artifacts by type, labels, metrics, and other
-        criteria. It automatically applies view-based scoping and merges any additional
-        scope labels provided. The search is dispatched to the underlying index.
+        Behavior:
+            - If query is None/empty: structured search via ArtifactIndex.
+            - If query is non-empty: SearchBackend via ScopedIndices (corpus="artifact"),
+              with semantic/lexical/hybrid selected by `mode`.
 
         Examples:
-            Basic usage to find all artifacts of a given kind:
+            Structured search by kind and tags:
             ```python
-            results = await context.artifacts().search(kind="model")
+            rows = await context.artifacts().search(kind="report", tags=["weekly"])
             ```
 
-            Searching with specific labels and metric optimization:
+            Semantic search across artifact index text:
             ```python
-            results = await context.artifacts().search(
-                kind="dataset",
-                labels={"domain": "finance"},
-                metric="accuracy",
-                mode="max",
+            rows = await context.artifacts().search(
+                query="model with highest f1",
+                mode="semantic",
                 limit=10,
-            )
-            ```
-            Extending scope with extra labels:
-            ```python
-            results = await context.artifacts().search(
-                extra_scope_labels={"project": "alpha"}
             )
             ```
 
         Args:
-            kind: The type of artifact to search for (e.g., "model", "dataset").
-            labels: Dictionary of label key-value pairs to filter artifacts.
-            metric: Name of a metric to optimize (e.g., "accuracy").
-            mode: Optimization mode for the metric, either "max" or "min".
-            view: The artifact view context, which determines default scoping.
-            extra_scope_labels: Additional labels to further scope the search.
-            limit: Maximum number of results to return.
+            query: Optional free text query for semantic/lexical/hybrid search.
+            kind: Optional artifact kind to filter on (structured path only).
+            tags: Optional list of tag strings for filtering.
+            labels: Extra label filters to apply.
+            metric: Optional metric name to optimize (structured path).
+            metric_mode: "max" or "min" for structured metric ranking.
+            level: Scope level controlling tenant/scope filtering.
+            extra_scope_labels: Additional scope labels to merge on top of level filters.
+            limit: Maximum number of results (top_k for semantic; limit for structured).
+            include_graph: When True, constrain to current graph in addition to `level`.
+            include_node: When True, constrain to current node in addition to `level`.
+            time_window: Optional time window for created_at_ts filtering (SearchBackend).
+            mode: Search mode for the query path ("semantic", "lexical", "hybrid", etc.).
 
         Returns:
-            list[Artifact]: A list of matching `Artifact` objects.
-
-        Notes:
-            - The `view` parameter controls the base scoping of the search. Additional labels provided
-                in `extra_scope_labels` are merged on top of the view-based labels.
-            - If both `labels` and `extra_scope_labels` are provided, they are combined for filtering.
-
+            list[Artifact]: Matching artifacts, preserving search-order for query mode.
         """
 
-        eff_labels: dict[str, str] = dict(labels or {})
-        eff_labels.update(self._view_labels(view))
+        # 1) Build base labels from scope + level (org/user/scope_id/run/session)
+        base_labels = self._filters_for_level(level)
+
+        # Optionally constrain by graph/node for structured path
+        if include_graph and self.graph_id:
+            base_labels.setdefault("graph_id", self.graph_id)
+        if include_node and self.node_id:
+            base_labels.setdefault("node_id", self.node_id)
+
+        # 2) Merge in user-provided labels and extra scope labels
+        eff_labels: dict[str, Any] = dict(labels or {})
+        eff_labels.update(base_labels)
         if extra_scope_labels:
             eff_labels.update(extra_scope_labels)
 
-        return await self.index.search(
-            kind=kind,
-            labels=eff_labels or None,
-            metric=metric,
-            mode=mode,
-            limit=limit,
+        # 3) Tag filter (stored in labels["tags"] and handled downstream)
+        if tags:
+            eff_labels.setdefault("tags", tags)
+
+        # --- Structured path: no query or empty query ---------------------
+        if not query:
+            return await self.index.search(
+                kind=kind,
+                labels=eff_labels or None,
+                metric=metric,
+                mode=metric_mode,  # metric ranking mode: "max"/"min"
+                limit=limit,
+            )
+
+        # --- Semantic / lexical / hybrid path via ScopedIndices ----------
+        if self.scoped_indices is None:
+            # Fallback: if no SearchBackend is available, degrade to structured search
+            return await self.index.search(
+                kind=kind,
+                labels=eff_labels or None,
+                metric=metric,
+                mode=metric_mode,
+                limit=limit,
+            )
+
+        top_k = limit or 20
+        eff_mode: SearchMode = mode or "semantic"
+
+        scored = await self.scoped_indices.search(
+            corpus="artifact",
+            query=query,
+            top_k=top_k,
+            filters=eff_labels,
+            level=None,  # level already applied via eff_labels
+            time_window=time_window,
+            mode=eff_mode,  # SearchMode, not metric mode
         )
+
+        ids = [s.item_id for s in scored]
+        if not ids:
+            return []
+
+        arts: list[Artifact] = []
+        for art_id in ids:
+            art = await self.get_by_id(art_id)
+            if art:
+                arts.append(art)
+        return arts
 
     async def best(
         self,
         *,
         kind: str,
         metric: str,
-        mode: Literal["max", "min"],
-        view: ArtifactView = "run",
+        metric_mode: Literal["max", "min"],
+        level: ScopeLevel | None = "run",
+        tags: list[str] | None = None,
         filters: dict[str, str] | None = None,
     ) -> Artifact | None:
         """
-        Retrieve the best artifact by optimizing a specified metric.
-
-        This method searches for artifacts of a given kind and returns the one that
-        maximizes or minimizes the specified metric, scoped by the provided view and filters.
-        It is accessed via `context.artifacts().best(...)`.
+        Return the best artifact for a kind by metric optimization.
 
         Examples:
             Find the best model by accuracy for the current run:
@@ -1329,17 +1660,17 @@ class ArtifactFacade:
             best_model = await context.artifacts().best(
                 kind="model",
                 metric="accuracy",
-                mode="max"
+                metric_mode="max"
             )
             ```
 
-            Find the lowest-loss dataset for the current graph:
+            Find the lowest-loss dataset:
             ```python
             best_dataset = await context.artifacts().best(
                 kind="dataset",
                 metric="loss",
-                mode="min",
-                view="graph"
+                metric_mode="min",
+                level="run"
             )
             ```
 
@@ -1348,7 +1679,7 @@ class ArtifactFacade:
             best_artifact = await context.artifacts().best(
                 kind="model",
                 metric="f1_score",
-                mode="max",
+                metric_mode="max",
                 filters={"domain": "finance"}
             )
             ```
@@ -1356,21 +1687,23 @@ class ArtifactFacade:
         Args:
             kind: The type of artifact to search for (e.g., "model", "dataset").
             metric: The metric name to optimize (e.g., "accuracy", "loss").
-            mode: Optimization mode, either `"max"` for highest or `"min"` for lowest value.
-            view: The artifact view context, which determines default scoping.
-                Must be one of `"node"`, `"graph"`, `"run"`, or `"all"`.
+            metric_mode: Optimization mode, either `"max"` or `"min"`.
+            level: Scope level controlling tenant/run/session filters.
+            tags: Optional tag filter.
             filters: Additional label filters to further restrict the search.
 
         Returns:
             Artifact | None: The best matching `Artifact` object, or `None` if no match is found.
         """
         eff_filters: dict[str, str] = dict(filters or {})
-        eff_filters.update(self._view_labels(view))
+        eff_filters.update(self._filters_for_level(level))
+        if tags:
+            eff_filters["tags"] = tags
 
         return await self.index.best(
             kind=kind,
             metric=metric,
-            mode=mode,
+            mode=metric_mode,  # still the metric ranking mode for the index
             filters=eff_filters or None,
         )
 
@@ -1408,6 +1741,25 @@ class ArtifactFacade:
         scored_items: list[ScoredItem],
         corpus: str = "artifact",
     ) -> list[ArtifactSearchResult]:
+        """
+        Hydrate scored search hits into typed artifact search results.
+
+        This converts generic `ScoredItem` entries into `ArtifactSearchResult`
+        objects by loading artifact metadata for matching corpus items.
+
+        Examples:
+            Hydrate scoped-indices search output:
+            ```python
+            hydrated = await context.artifacts().fetch_artifacts_for_search_results(scored)
+            ```
+
+        Args:
+            scored_items: Raw scored search rows from search backend.
+            corpus: Corpus name to include (default: `"artifact"`).
+
+        Returns:
+            list[ArtifactSearchResult]: Hydrated artifact search result objects.
+        """
         artifact_items = [it for it in scored_items if it.corpus == corpus]
         results: list[ArtifactSearchResult] = []
         for it in artifact_items:
@@ -1417,23 +1769,53 @@ class ArtifactFacade:
 
     # ---------- internal helpers ----------
     async def _record_simple(self, a: Artifact) -> None:
-        """Record artifact in index and occurrence log."""
+        """
+        Record artifact metadata in index without extra side effects.
+
+        This is an internal lightweight variant of `_record(...)` that only
+        updates index and occurrence log.
+
+        Examples:
+            Record minimal index state:
+            ```python
+            await facade._record_simple(artifact)
+            ```
+
+        Args:
+            a: Artifact to upsert.
+
+        Returns:
+            None: Updates index/occurrence state.
+        """
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
         self.last_artifact = a
 
-    def _scope_labels(self, scope: Scope) -> dict[str, Any]:
-        if scope == "node":
-            return {"run_id": self.run_id, "graph_id": self.graph_id, "node_id": self.node_id}
-        if scope == "graph":
-            return {"run_id": self.run_id, "graph_id": self.graph_id}
-        if scope == "run":
-            return {"run_id": self.run_id}
-        return {}  # "all"
-
     # ---------- deprecated / compatibility ----------
     async def stage(self, ext: str = "") -> str:
-        """DEPRECATED: use stage_path()."""
+        """
+        Deprecated compatibility alias for `stage_path()`.
+
+        This method will be removed in a future version.
+
+        Examples:
+            Legacy usage:
+            ```python
+            staged = await context.artifacts().stage(".txt")
+            ```
+
+        Args:
+            ext: Optional extension passed to `stage_path(...)`.
+
+        Returns:
+            str: Planned staging file path.
+        """
+        warnings.warn(
+            "ArtifactFacade.stage() is deprecated and will be removed in a future version. "
+            "Use stage_path().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.stage_path(ext=ext)
 
     async def ingest(
@@ -1446,6 +1828,34 @@ class ArtifactFacade:
         suggested_uri: str | None = None,
         pin: bool = False,
     ):  # DEPRECATED: use ingest_file()
+        """
+        Deprecated compatibility alias for `ingest_file()`.
+
+        This method will be removed in a future version.
+
+        Examples:
+            Legacy usage:
+            ```python
+            a = await context.artifacts().ingest("/tmp/file", kind="text")
+            ```
+
+        Args:
+            staged_path: Staged local file path.
+            kind: Artifact kind.
+            labels: Optional labels dictionary.
+            metrics: Optional metrics dictionary.
+            suggested_uri: Optional suggested URI/name.
+            pin: Whether to pin artifact.
+
+        Returns:
+            Artifact: Persisted artifact record.
+        """
+        warnings.warn(
+            "ArtifactFacade.ingest() is deprecated and will be removed in a future version. "
+            "Use ingest_file().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.ingest_file(
             staged_path,
             kind=kind,
@@ -1465,6 +1875,34 @@ class ArtifactFacade:
         suggested_uri: str | None = None,
         pin: bool = False,
     ):  # DEPRECATED: use save_file()
+        """
+        Deprecated compatibility alias for `save_file()`.
+
+        This method will be removed in a future version.
+
+        Examples:
+            Legacy usage:
+            ```python
+            a = await context.artifacts().save("/tmp/file", kind="text")
+            ```
+
+        Args:
+            path: Source file path.
+            kind: Artifact kind.
+            labels: Optional labels dictionary.
+            metrics: Optional metrics dictionary.
+            suggested_uri: Optional suggested URI/name.
+            pin: Whether to pin artifact.
+
+        Returns:
+            Artifact: Persisted artifact record.
+        """
+        warnings.warn(
+            "ArtifactFacade.save() is deprecated and will be removed in a future version. "
+            "Use save_file().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.save_file(
             path,
             kind=kind,
@@ -1475,6 +1913,29 @@ class ArtifactFacade:
         )
 
     async def tmp_path(self, suffix: str = "") -> str:  # DEPRECATED: use stage_path()
+        """
+        Deprecated compatibility alias for `stage_path()`.
+
+        This method will be removed in a future version.
+
+        Examples:
+            Legacy usage:
+            ```python
+            staged = await context.artifacts().tmp_path(".txt")
+            ```
+
+        Args:
+            suffix: Suffix/extension forwarded to `stage_path(...)`.
+
+        Returns:
+            str: Planned staging file path.
+        """
+        warnings.warn(
+            "ArtifactFacade.tmp_path() is deprecated and will be removed in a future version. "
+            "Use stage_path().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return await self.stage_path(suffix)
 
     # FS-only, legacy helpers — prefer as_local_dir/as_local_file for new code
@@ -1485,11 +1946,30 @@ class ArtifactFacade:
         must_exist: bool = True,
     ) -> str:
         """
-        DEPRECATED (FS-only):
+        Deprecated FS-only path resolver.
 
-        This assumes file:// or plain local paths; will not work correctly with s3://.
-        Use `await as_local_dir(...)` or `await as_local_file(...)` instead.
+        This assumes local filesystem paths and does not correctly materialize
+        remote backends. Use `as_local_file(...)` / `as_local_dir(...)` instead.
+
+        Examples:
+            Legacy local path resolution:
+            ```python
+            p = context.artifacts().to_local_path("file:///tmp/a.txt")
+            ```
+
+        Args:
+            uri_or_path: Local path/URI or Artifact.
+            must_exist: Validate local existence when True.
+
+        Returns:
+            str: Local path string (or raw URI for non-file schemes).
         """
+        warnings.warn(
+            "ArtifactFacade.to_local_path() is deprecated and will be removed in a future version. "
+            "Use as_local_file()/as_local_dir().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         s = uri_or_path.uri if isinstance(uri_or_path, Artifact) else str(uri_or_path)
         p = _from_uri_or_path(s).resolve()
 
@@ -1508,7 +1988,30 @@ class ArtifactFacade:
         *,
         must_exist: bool = True,
     ) -> str:
-        """DEPRECATED: FS-only; use `await as_local_file(...)` instead."""
+        """
+        Deprecated FS-only file resolver.
+
+        Use `await as_local_file(...)` for backend-agnostic behavior.
+
+        Examples:
+            Legacy local file resolution:
+            ```python
+            p = context.artifacts().to_local_file("/tmp/a.txt")
+            ```
+
+        Args:
+            uri_or_path: Local path/URI or Artifact.
+            must_exist: Validate local existence/type when True.
+
+        Returns:
+            str: Local file path.
+        """
+        warnings.warn(
+            "ArtifactFacade.to_local_file() is deprecated and will be removed in a future version. "
+            "Use as_local_file().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         p = Path(self.to_local_path(uri_or_path, must_exist=must_exist))
         if must_exist and not p.is_file():
             raise IsADirectoryError(f"Expected file, got directory: {p}")
@@ -1520,7 +2023,30 @@ class ArtifactFacade:
         *,
         must_exist: bool = True,
     ) -> str:
-        """DEPRECATED: FS-only; use `await as_local_dir(...)` instead."""
+        """
+        Deprecated FS-only directory resolver.
+
+        Use `await as_local_dir(...)` for backend-agnostic behavior.
+
+        Examples:
+            Legacy local directory resolution:
+            ```python
+            p = context.artifacts().to_local_dir("/tmp/mydir")
+            ```
+
+        Args:
+            uri_or_path: Local path/URI or Artifact.
+            must_exist: Validate local existence/type when True.
+
+        Returns:
+            str: Local directory path.
+        """
+        warnings.warn(
+            "ArtifactFacade.to_local_dir() is deprecated and will be removed in a future version. "
+            "Use as_local_dir().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         p = Path(self.to_local_path(uri_or_path, must_exist=must_exist))
         if must_exist and not p.is_dir():
             raise NotADirectoryError(f"Expected directory, got file: {p}")

@@ -20,22 +20,35 @@ from aethergraph.api.v1.misc import router as misc_router
 from aethergraph.api.v1.runs import router as runs_router
 from aethergraph.api.v1.session import router as session_router
 from aethergraph.api.v1.stats import router as stats_router
+from aethergraph.api.v1.triggers import router as triggers_router
 from aethergraph.api.v1.viz import router as vis_router
 
 # include apis
 from aethergraph.config.config import AppSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-from aethergraph.core.runtime.runtime_services import install_services
 
+# register all skills in the builtin agent (this is optional but keeps them together for now)
+from aethergraph.core.runtime.runtime_services import (
+    install_services,
+    register_skills_from_path,
+)
+
+# from aethergraph.plugins.agents.agnet_buider_agent import *  # noqa: F403
 # import built-in agents and plugins to register them
 from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
 
+# from aethergraph.plugins.agents.graph_builder.agent import *  # noqa: F403
+# from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
 # from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec
 from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.utils.optdeps import require
+
+builtin_agent_skills_path = Path(__file__).parent.parent / "plugins" / "skills"
+
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +66,8 @@ def create_app(
 
     # Resolve settings and container up front so lifespan can capture them
     settings = cfg or AppSettings()
-    settings.logging.level = log_level
+    if settings.logging.console_level is None:
+        settings.logging.console_level = log_level
 
     container = build_default_container(root=workspace, cfg=settings)
 
@@ -62,6 +76,15 @@ def create_app(
         # --- Startup: attach settings/container and start external transports ---
         app.state.settings = settings
         app.state.container = container
+
+        trigger_engine_task = None
+
+        # Start trigger engine if trigger_service is present
+        if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
+            trigger_engine: TriggerEngine = container.trigger_engine
+            trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
+            app.state.trigger_engine_task = trigger_engine_task
+            logger.info("TriggerEngine background task started")
 
         slack_task = None
         tg_task = None
@@ -91,15 +114,33 @@ def create_app(
             app.state.telegram_polling_runner = tg_runner
             tg_task = asyncio.create_task(tg_runner.start())
 
+        # Register skills from the builtin path (optional, but keeps them together for now)
+        logger.debug(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
+        register_skills_from_path(builtin_agent_skills_path)
+
         try:
             # Hand control back to FastAPI / TestClient
             yield
         finally:
             # --- Shutdown: best-effort cleanup of background tasks ---
+            # 1) Stop TriggerEngine gracefully
+            if trigger_engine_task is not None:
+                trigger_engine: TriggerEngine = container.trigger_engine
+                try:
+                    await trigger_engine.stop()
+                except Exception:
+                    logger.exception("Error stopping TriggerEngine")
+
+                if not trigger_engine_task.done():
+                    # In case it's still waiting on the poll sleep
+                    trigger_engine_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await trigger_engine_task
+
+            # 2) Stop Slack / Telegram tasks
             for task in (slack_task, tg_task):
                 if task is not None and not task.done():
                     task.cancel()
-                    # swallow cancellation errors
                     with suppress(asyncio.CancelledError):
                         await task
 
@@ -172,6 +213,7 @@ def create_app(
     app.include_router(router=session_router, prefix="/api/v1")
     app.include_router(router=apps_router, prefix="/api/v1")
     app.include_router(router=agents_router, prefix="/api/v1")
+    app.include_router(router=triggers_router, prefix="/api/v1")
 
     # Webui router
     from aethergraph.plugins.channel.routes.webui_routes import router as webui_router

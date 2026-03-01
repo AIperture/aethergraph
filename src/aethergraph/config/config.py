@@ -4,8 +4,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .llm import LLMSettings
-from .search import SearchBackendSettings
+from .llm import EmbeddingSettings, LLMSettings
+from .search import KnowledgeSettings, SearchBackendSettings
 from .storage import StorageSettings
 
 
@@ -31,6 +31,8 @@ class RateLimitSettings(BaseSettings):
 class LoggingSettings(BaseModel):
     nspace: str = Field("aethergraph", description="Root logger namespace")
     level: str = Field("INFO", description="Root log level")
+    console_level: str | None = Field(None, description="Console log level")
+    file_level: str | None = Field("INFO", description="File log level")
     json_logs: bool = Field(False, description="Emit JSON logs")
     enable_queue: bool = Field(default=False, description="Enable async logging via queue")
 
@@ -132,12 +134,14 @@ class AppSettings(BaseSettings):
     slack: SlackSettings = SlackSettings()
     telegram: TelegramSettings = TelegramSettings()
     llm: LLMSettings = LLMSettings()
+    embed: EmbeddingSettings = EmbeddingSettings()
     cont: ContinuationStoreSettings = ContinuationStoreSettings()
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
     rag: RAGSettings = RAGSettings()
     storage: StorageSettings = StorageSettings()
     search: SearchBackendSettings = SearchBackendSettings()
+    knowledge: KnowledgeSettings = KnowledgeSettings()
 
     # Future fields:
     # authn: ...

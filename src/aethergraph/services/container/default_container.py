@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,16 +10,18 @@ from aethergraph.config.config import AppSettings
 from aethergraph.contracts.services.execution import ExecutionService
 
 # ---- optional services (not used by default) ----
-from aethergraph.contracts.services.llm import LLMClientProtocol
-
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
+
+# ---- trigger services ----
+from aethergraph.contracts.services.trigger import TriggerService
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.event_log import EventLog
+from aethergraph.contracts.storage.trigger_store import TriggerStore
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
@@ -43,10 +46,13 @@ from aethergraph.services.execution.local_python import LocalPythonExecutionServ
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
+from aethergraph.services.knowledge.chunker import TextSplitter
 
 # ---- kv services ----
+from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBackend
+from aethergraph.services.llm.embed_factory import build_embedding_clients
+from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
-from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -59,8 +65,6 @@ from aethergraph.services.metering.eventlog_metering import EventLogMeteringServ
 from aethergraph.services.planning.action_catalog import ActionCatalog
 from aethergraph.services.planning.flow_validator import FlowValidator
 from aethergraph.services.planning.planner_service import PlannerService
-from aethergraph.services.rag.chunker import TextSplitter
-from aethergraph.services.rag.facade import RAGFacade
 
 # ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
@@ -73,9 +77,15 @@ from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.tracing.noop import NoopTracer
+from aethergraph.services.triggers.engine import TriggerEngine
+from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
+from aethergraph.services.websearch.httpx_fetcher import HttpxWebPageFetcher
+from aethergraph.services.websearch.providers.default import DefaultWebSearchProvider
+from aethergraph.services.websearch.service import WebSearchService
+from aethergraph.services.websearch.types import WebSearchEngine
 
 # ---- storage builders ----
 from aethergraph.storage.factory import (
@@ -86,15 +96,14 @@ from aethergraph.storage.factory import (
     build_event_log,
     build_graph_state_store,
     build_memory_hotlog,
-    build_memory_indices,
     build_memory_persistence,
     build_run_store,
     build_session_store,
-    build_vector_index,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
-from aethergraph.storage.search_factory import build_search_backend
+from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
+from aethergraph.storage.triggers.trigger_docstore import DocTriggerStore
 
 SERVICE_KEYS = [
     # core
@@ -156,6 +165,9 @@ class DefaultContainer:
     resume_router: ResumeRouter
     wakeup_queue: ThreadSafeWakeupQueue
     state_store: GraphStateStore
+    trigger_engine: TriggerEngine
+    trigger_service: TriggerService
+    trigger_store: TriggerStore
 
     # storage and artifacts
     kv_hot: EphemeralKV
@@ -163,6 +175,7 @@ class DefaultContainer:
     artifact_index: AsyncArtifactIndex
     eventlog: EventLog
     global_indices: GlobalIndices
+    kb_backend: LocalFSKnowledgeBackend  # for now just use the local FS backend as the default; in the future, we can make this swappable like the global indices backend, and add auto-indexing to the NodeKB facade
 
     # memory
     memory_factory: MemoryFactory
@@ -171,9 +184,10 @@ class DefaultContainer:
     viz_service: VizService | None = None
 
     # optional llm service
-    llm: LLMClientProtocol | None = None
-    rag: RAGFacade | None = None
+    llm: LLMService | None = None
     mcp: MCPService | None = None
+    embed_service: EmbeddingService | None = None
+    web_search: WebSearchService | None = None
 
     # run controls -- for http endpoints and run manager
     run_store: RunStore | None = None
@@ -245,6 +259,7 @@ def build_default_container(
     logger_factory = StdLoggerService.build(
         LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs"))
     )
+
     clock = SystemClock()
     # registry = UnifiedRegistry()
     registry: UnifiedRegistry = current_registry()
@@ -256,12 +271,14 @@ def build_default_container(
     sched_registry = SchedulerRegistry()
     wait_registry = WaitRegistry()
     resume_bus = MultiSchedulerResumeBus(
-        registry=sched_registry, store=cont_store, logger=logger_factory.for_run()
+        registry=sched_registry,
+        store=cont_store,
+        logger=logger_factory.for_service(ns="resume_bus"),
     )
     resume_router = ResumeRouter(
         store=cont_store,
         runner=resume_bus,
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_service(ns="resume_router"),
         wait_registry=wait_registry,
     )
     wakeup_queue = ThreadSafeWakeupQueue()  # TODO: this is a placeholder, not fully implemented
@@ -287,7 +304,7 @@ def build_default_container(
     channels = build_bus(
         channel_adapters,
         default="console:stdin",
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_channel(),
         resume_router=resume_router,
         cont_store=cont_store,
     )
@@ -300,44 +317,47 @@ def build_default_container(
 
     viz_service = VizService(event_log=eventlog)
 
+    # Metering service
+    # TODO: make metering service configurable
+    metering_store = EventLogMeteringStore(event_log=eventlog)
+    metering = EventLogMeteringService(store=metering_store)
+
     # optional services
     secrets = (
         EnvSecrets()
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     llm_clients = build_llm_clients(cfg.llm, secrets)  # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
-    embed_client = GenericEmbeddingClient(provider="openai", model="text-embedding-3-small")
 
-    # RAG facade
-    vec_index = build_vector_index(cfg)
-    rag_facade = RAGFacade(
-        corpus_root=str(root_p / "rag" / "rag_corpora"),
-        artifacts=artifacts,
-        embed_client=llm_service.get("default"),
-        llm_client=llm_service.get("default"),
-        index_backend=vec_index,
-        chunker=TextSplitter(),
-        logger=logger_factory.for_run(),
-    )
+    embed_clients = build_embedding_clients(
+        cfg.embed, secrets, metering=metering
+    )  # return {profile: GenericEmbeddingClient}
+    embed_service = EmbeddingService(clients=embed_clients) if embed_clients else None
+    embed_client = embed_clients["default"] if embed_clients else None
+
     mcp = MCPService()  # empty MCP service; users can register clients as needed
+
+    # web search service uses a provider-agnostic default no-op provider.
+    # This keeps `fetch` always available even when search providers are not configured.
+    default_web_provider = DefaultWebSearchProvider()
+    web_search: WebSearchService | None = WebSearchService(
+        providers={WebSearchEngine.custom: default_web_provider},
+        default_engine=WebSearchEngine.custom,
+        page_fetcher=HttpxWebPageFetcher(),
+    )
 
     # memory factory
     persistence = build_memory_persistence(cfg)
     hotlog = build_memory_hotlog(cfg)
-    memory_indices = build_memory_indices(cfg)
-    docs = build_doc_store(cfg)
     memory_factory = MemoryFactory(
         hotlog=hotlog,
         persistence=persistence,
-        indices=memory_indices,
         artifacts=artifacts,
-        docs=docs,
         hot_limit=int(cfg.memory.hot_limit),
         hot_ttl_s=int(cfg.memory.hot_ttl_s),
         default_signal_threshold=float(cfg.memory.signal_threshold),
-        logger=logger_factory.for_run(),
+        logger=logger_factory.for_service(ns="memory"),
         llm_service=llm_service.get("default") if llm_service else None,
-        rag_facade=rag_facade,
     )
 
     # run store and manager
@@ -349,11 +369,6 @@ def build_default_container(
         max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
     )
     session_store = build_session_store(cfg)
-
-    # Metering service
-    # TODO: make metering service configurable
-    metering_store = EventLogMeteringStore(event_log=eventlog)
-    metering = EventLogMeteringService(store=metering_store)
 
     # rate limiter
     rl_settings = cfg.rate_limit
@@ -374,8 +389,19 @@ def build_default_container(
     #     embedder=embed_client,
     # )
 
-    search_backend = build_search_backend(cfg=cfg, embedder=embed_client)
-    global_indices = GlobalIndices(backend=search_backend)  # to be set up later as needed
+    global_indices_backend = build_search_backend(cfg=cfg, embedder=embed_client)
+    global_indices = GlobalIndices(backend=global_indices_backend)  # to be set up later as needed
+
+    kb_search_backend = build_kb_search_backend(cfg, embedder=embed_client)
+    kb_backend = LocalFSKnowledgeBackend(
+        corpus_root=os.path.join(os.path.abspath(cfg.root), cfg.knowledge.corpus_root),
+        artifacts=artifacts,  # this is store, not Facade with auto-indexing, long doc has its own indexing method
+        search_backend=kb_search_backend,
+        embed_client=embed_client,
+        llm_client=llm_clients.get("default") if llm_clients else None,
+        chunker=TextSplitter(),
+        logger=logger_factory.for_service(ns="kb_backend"),
+    )
 
     # Execution service
     execution = (
@@ -395,6 +421,23 @@ def build_default_container(
     # skills registry
     skills_registry = SkillRegistry()
 
+    # trigger services
+    trigger_store = DocTriggerStore(
+        doc_store=build_doc_store(cfg)
+    )  # for simplicity, we use the event log as the backing store for triggers; in the future, we can make this swappable like other storage services
+    trigger_service = TriggerServiceImpl(
+        store=trigger_store,
+        event_log=eventlog,
+        logger=logger_factory.for_service(ns="trigger_service"),
+    )
+    trigger_engine = TriggerEngine(
+        store=trigger_store,
+        run_manager=run_manager,
+        event_log=eventlog,
+        run_store=run_store,
+        logger=logger_factory.for_service(ns="trigger_engine"),
+    )
+
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
@@ -411,6 +454,9 @@ def build_default_container(
         resume_bus=resume_bus,
         resume_router=resume_router,
         wakeup_queue=wakeup_queue,
+        trigger_store=trigger_store,
+        trigger_engine=trigger_engine,
+        trigger_service=trigger_service,
         execution=execution,
         planner_service=planner_service,
         kv_hot=kv_hot,
@@ -418,11 +464,13 @@ def build_default_container(
         artifacts=artifacts,
         artifact_index=artifact_index,
         global_indices=global_indices,
+        kb_backend=kb_backend,
         viz_service=viz_service,
         eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
-        rag=rag_facade,
+        embed_service=embed_service,
+        web_search=web_search,
         mcp=mcp,
         run_store=run_store,
         run_manager=run_manager,

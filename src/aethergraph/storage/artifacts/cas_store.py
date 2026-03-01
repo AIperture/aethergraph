@@ -75,6 +75,26 @@ class CASArtifactStore(AsyncArtifactStore):
 
         return out
 
+    def _normalize_tags(self, tags: Any) -> list[str] | None:
+        """
+        Normalize tags into a clean list[str] or None.
+        Accepts list[str], list[Any], or a single string.
+        """
+        if not tags:
+            return None
+        if isinstance(tags, str):
+            tags = [tags]
+        if isinstance(tags, (list, tuple)):  # noqa: UP038
+            out: list[str] = []
+            for t in tags:
+                if t is None:
+                    continue
+                s = str(t).strip()
+                if s:
+                    out.append(s)
+            return out or None
+        return None
+
     # ---------- staging utils ----------
     async def plan_staging_path(self, planned_ext: str = "") -> str:
         def _mk():
@@ -101,12 +121,14 @@ class CASArtifactStore(AsyncArtifactStore):
         node_id: str,
         tool_name: str,
         tool_version: str,
+        mime: str | None = None,
         suggested_uri: str | None = None,  # NOTE: only metadata / pretty; impl may ignore
         pin: bool = False,
         labels: dict | None = None,
         metrics: dict | None = None,
         preview_uri: str | None = None,  # NOTE: only metadata / pretty; impl may ignore
         cleanup: bool = True,
+        tags: list[str] | None = None,
     ) -> Artifact:
         sha, nbytes = await to_thread(_sha256_file, path)
         ext = os.path.splitext(path)[1]
@@ -114,11 +136,26 @@ class CASArtifactStore(AsyncArtifactStore):
 
         blob_uri = await self._blob.put_file(path, key=key, mime=None, keep_source=not cleanup)
 
+        norm_tags = self._normalize_tags(tags)
+
         eff_labels = self._augment_labels_with_filename(
             labels,
             suggested_uri=suggested_uri,
             path=path,
         )
+
+        # Merge tags into labels["tags"] without stomping existing ones
+        if norm_tags:
+            existing = eff_labels.get("tags")
+            if isinstance(existing, list):
+                # merge + dedupe, preserve order
+                combined = list(dict.fromkeys([str(t) for t in existing] + norm_tags))
+                eff_labels["tags"] = combined
+            elif isinstance(existing, str):
+                combined = list(dict.fromkeys([existing] + norm_tags))
+                eff_labels["tags"] = combined
+            else:
+                eff_labels["tags"] = norm_tags
 
         a = Artifact(
             artifact_id=sha,
@@ -126,13 +163,14 @@ class CASArtifactStore(AsyncArtifactStore):
             kind=kind,
             bytes=nbytes,
             sha256=sha,
-            mime=None,  # callers can fill in if desired
+            mime=mime,
             run_id=run_id,
             graph_id=graph_id,
             node_id=node_id,
             tool_name=tool_name,
             tool_version=tool_version,
             created_at=_now_iso(),
+            tags=norm_tags,  # <- assuming Artifact has `tags: list[str] | None`
             labels=eff_labels,
             metrics=metrics or {},
             preview_uri=preview_uri,
@@ -226,6 +264,7 @@ class CASArtifactStore(AsyncArtifactStore):
         metrics: dict | None = None,
         preview_uri: str | None = None,
         suggested_uri: str | None = None,
+        tags: list[str] | None = None,
     ) -> Artifact:
         # just delegate to save_file (same semantics)
         a = await self.save_file(
@@ -241,6 +280,8 @@ class CASArtifactStore(AsyncArtifactStore):
             labels=labels,
             metrics=metrics,
             preview_uri=preview_uri,
+            cleanup=True,
+            tags=tags,
         )
         try:
             os.remove(staged_path)
@@ -269,6 +310,7 @@ class CASArtifactStore(AsyncArtifactStore):
         archive_name: str = "bundle.tar.gz",
         cleanup: bool = True,
         store: str | None = None,  # "archive" | "manifest"
+        tags: list[str] | None = None,
     ) -> Artifact:
         if not os.path.isdir(staged_dir):
             raise ValueError(f"ingest_directory: not a directory: {staged_dir}")
@@ -338,12 +380,24 @@ class CASArtifactStore(AsyncArtifactStore):
         dir_uri = self.base_uri.rstrip("/") + "/" + dir_prefix.replace(os.sep, "/")
 
         total_bytes = sum(e["bytes"] for e in manifest_entries)
+        norm_tags = self._normalize_tags(tags)
 
         eff_labels = self._augment_labels_with_filename(
             labels,
             suggested_uri=suggested_uri or archive_name,
             path=staged_dir,
         )
+
+        if norm_tags:
+            existing = eff_labels.get("tags")
+            if isinstance(existing, list):
+                combined = list(dict.fromkeys([str(t) for t in existing] + norm_tags))
+                eff_labels["tags"] = combined
+            elif isinstance(existing, str):
+                combined = list(dict.fromkeys([existing] + norm_tags))
+                eff_labels["tags"] = combined
+            else:
+                eff_labels["tags"] = norm_tags
 
         a = Artifact(
             artifact_id=tree_sha,

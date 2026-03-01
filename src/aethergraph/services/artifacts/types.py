@@ -6,8 +6,6 @@ from aethergraph.contracts.storage.search_backend import ScoredItem
 
 ContentMode = Literal["json", "text", "bytes"]
 
-ArtifactView = Literal["node", "graph", "run", "all"]
-
 
 class ArtifactSearchResult(NamedTuple):
     item: ScoredItem  # raw search result (score, metadata, etc.)

@@ -73,12 +73,12 @@ def main(argv: list[str] | None = None) -> int:
     Examples:
         Basic usage with default workspace and port:
         ```bash
-        python -m aethergraph serve --workspace # only default agents/apps show up
+        python -m aethergraph serve # only default agents/apps show up
         ```
 
         load user graphs from a file and autoreload on changes:
         ```bash
-        python -m aethergraph serve --load-path ./graphs.py --reload
+        python -m aethergraph serve --load-path ./graphs.py --reload --reload-include 'src/**/*.py'
         ```
 
         Load multiple modules and set a custom project root:
@@ -114,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         - `strict-load`: Raise error if graph loading fails.
         - `reuse`: If server already running for workspace, print URL and exit.
         - `reload`: Enable auto-reload (dev mode).
+        - `reload-dir`: Additional directory to watch for auto-reload (repeatable). If not provided, defaults to project-root plus parents of --load-path.
+        - `reload-include`: Glob pattern to include for auto-reload (repeatable).
+        - `reload-exclude`: Glob pattern to exclude from auto-reload (repeatable).
 
     Returns:
         int: Exit code (0 for success, 2 for unknown command).
@@ -160,6 +163,34 @@ def main(argv: list[str] | None = None) -> int:
         "--reload",
         action="store_true",
         help="Enable auto-reload on code changes (dev only).",
+    )
+
+    serve.add_argument(
+        "--reload-dir",
+        action="append",
+        default=[],
+        help=(
+            "Additional directory to watch for auto-reload (repeatable). "
+            "If not provided, defaults to project-root plus parents of --load-path."
+        ),
+    )
+    serve.add_argument(
+        "--reload-include",
+        action="append",
+        default=[],
+        help=(
+            "Glob pattern of files/dirs to include for auto-reload (repeatable). "
+            "Example: --reload-include 'src/**/*.py'"
+        ),
+    )
+    serve.add_argument(
+        "--reload-exclude",
+        action="append",
+        default=[],
+        help=(
+            "Glob pattern of files/dirs to exclude from auto-reload (repeatable). "
+            "Example: --reload-exclude 'aethergraph_data/**/*' --reload-exclude '*/__pycache__/*'"
+        ),
     )
 
     args = parser.parse_args(argv)
@@ -244,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
                 },
             )
 
+        log_path = Path(args.workspace) / "logs" / "aethergraph.log"
         if not args.reload:
             # Run blocking server (lock released so others can read server.json)
             print("\n" + "=" * 50)
@@ -254,6 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             )  # strangly, this needs two spaces unlike the rest
             print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
             print(f"[AetherGraph] 📂 {'Workspace:':<18} {args.workspace}")
+            print(f"[AetherGraph] 🧩 {'Log Path:':<18} {log_path}")
             print("=" * 50 + "\n")
             uvicorn.run(
                 app,
@@ -270,14 +303,34 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[AetherGraph] 🖥️  {'UI:':<18} {url}/ui   (if built)")
             print(f"[AetherGraph] 📡 {'API:':<18} {url}/api/v1/")
             print(f"[AetherGraph] 📂 {'Workspace:':<18} {args.workspace}")
+            print(f"[AetherGraph] 🧩 {'Log Path:':<18} {log_path}")
             print(f"[AetherGraph] ♻️  {'Auto-reload:':<18} enabled (uvicorn)")
+
+            # --- reload dirs ---
+            reload_dirs: list[str] = []
+
+            if args.reload_dir:
+                # User explicitly requested reload dirs -> trust them
+                reload_dirs.extend(args.reload_dir)
+            else:
+                # Default behavior: project_root + parents of load-paths
+                reload_dirs.append(str(project_root))
+                for p in paths:
+                    reload_dirs.append(str(Path(p).parent))
+
+            # De-duplicate while preserving order
+            seen = set()
+            reload_dirs = [d for d in reload_dirs if not (d in seen or seen.add(d))]
+
+            # --- include/exclude globs (None = use uvicorn defaults) ---
+            reload_includes = args.reload_include or None
+            reload_excludes = args.reload_exclude or None
+
+            print(f"👀 Watching for changes in dirs: {reload_dirs}")
+            print(f"👀 Auto-reload include patterns: {reload_includes or 'uvicorn defaults'}")
+            print(f"👀 Auto-reload exclude patterns: {reload_excludes or 'uvicorn defaults'}")
             print("=" * 50 + "\n")
 
-            reload_dirs: list[str] = [str(project_root)]
-            for p in paths:
-                reload_dirs.append(str(Path(p).parent))
-
-            # Use import string + factory=True here
             uvicorn.run(
                 "aethergraph.server.app_factory:create_app_from_env",
                 host=args.host,
@@ -285,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
                 log_level=args.uvicorn_log_level,
                 reload=True,
                 reload_dirs=reload_dirs,
+                reload_includes=reload_includes,
+                reload_excludes=reload_excludes,
                 factory=True,
             )
             return 0
