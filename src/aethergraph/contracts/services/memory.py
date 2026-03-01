@@ -17,7 +17,40 @@ EventKind = Literal[
 
 @dataclass
 class Event:
-    """A structured event log entry in memory."""
+    """
+    A structured event log entry stored in memory.
+    This dataclass represents a single event in the system's event log, capturing
+    execution context, semantic information, and optional metadata about the event.
+
+    Attributes:
+        event_id (str): Unique identifier for this event.
+        ts (str): Timestamp when the event occurred.
+        run_id (str): Identifier for the execution run containing this event.
+        scope_id (str): Identifier for the execution scope.
+        user_id (str | None): Optional identifier for the user associated with the event.
+        org_id (str | None): Optional identifier for the organization.
+        client_id (str | None): Optional identifier for the client.
+        session_id (str | None): Optional identifier for the session.
+        kind (EventKind): Logical type of the event (e.g., "chat_user", "tool_start").
+        stage (str | None): Optional phase indicator (e.g., "user", "assistant", "system", "tool").
+        text (str | None): Primary human-readable content of the event (short, may be truncated).
+        tags (list[str] | None): Low-cardinality labels for filtering and searching.
+        data (dict[str, Any] | None): Arbitrary JSON payload containing event-specific data.
+        metrics (dict[str, float] | None): Numeric metrics associated with the event.
+        graph_id (str | None): Optional identifier for the graph context.
+        node_id (str | None): Optional identifier for the node context.
+        tool (str | None): Tool topic associated with the event. Deprecated: use topic instead.
+        topic (str | None): Topic classification for the event.
+        severity (int): Severity level of the event (1=low, 2=medium, 3=high). Defaults to 2.
+        signal (float): Signal strength indicating estimated importance or relevance. Defaults to 0.0.
+        inputs (list[Value] | None): Optional input values associated with the event.
+        outputs (list[Value] | None): Optional output values associated with the event.
+        app_id (str | None): Reserved for schema compatibility.
+        agent_id (str | None): Reserved for schema compatibility.
+        embedding (list[float] | None): Reserved for future vector payload usage.
+        pii_flags (dict[str, bool] | None): Reserved for future PII marker usage.
+        version (int): Schema version for tracking schema evolution. Defaults to 2.
+    """
 
     # --------- Core fields ---------
     event_id: str

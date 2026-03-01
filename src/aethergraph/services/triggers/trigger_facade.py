@@ -48,7 +48,7 @@ class TriggerFacade:
     Examples:
         Create a cron trigger from node code:
         ```python
-        trig = await context.triggers.cron(
+        trig = await context.triggers().cron(
             graph_id="daily-report",
             default_inputs={"channel": "ops"},
             cron_expr="0 9 * * 1-5",
@@ -58,8 +58,8 @@ class TriggerFacade:
         ```
 
         Fire an event trigger manually:
-        ```python
-        await context.triggers.fire_event(
+            ```python
+            await context.triggers().fire_event(
             "invoice.paid",
             payload={"invoice_id": "inv_123"},
         )
@@ -101,7 +101,7 @@ class TriggerFacade:
         Examples:
             Create a one-shot trigger:
             ```python
-            trig = await context.triggers.create(
+            trig = await context.triggers().create(
                 graph_id="reminder-graph",
                 default_inputs={"message": "Ping me"},
                 config=TriggerConfig(kind="one_shot", run_at=run_at_utc),
@@ -111,7 +111,7 @@ class TriggerFacade:
 
             Create an event trigger:
             ```python
-            trig = await context.triggers.create(
+            trig = await context.triggers().create(
                 graph_id="billing-graph",
                 default_inputs={"source": "billing"},
                 config=TriggerConfig(kind="event", event_key="invoice.paid"),
@@ -167,7 +167,7 @@ class TriggerFacade:
         Examples:
             Weekday 9AM local trigger:
             ```python
-            trig = await context.triggers.cron(
+            trig = await context.triggers().cron(
                 graph_id="daily-report",
                 default_inputs={"team": "ops"},
                 cron_expr="0 9 * * 1-5",
@@ -177,7 +177,7 @@ class TriggerFacade:
 
             Hourly trigger in UTC:
             ```python
-            trig = await context.triggers.cron(
+            trig = await context.triggers().cron(
                 graph_id="sync-graph",
                 default_inputs={},
                 cron_expr="0 * * * *",
@@ -229,7 +229,7 @@ class TriggerFacade:
         Examples:
             Schedule with timezone-aware UTC datetime:
             ```python
-            trig = await context.triggers.at(
+            trig = await context.triggers().at(
                 graph_id="notify-graph",
                 default_inputs={"message": "check deployment"},
                 run_at=run_at_utc,
@@ -239,7 +239,7 @@ class TriggerFacade:
 
             Schedule with explicit timezone label:
             ```python
-            trig = await context.triggers.at(
+            trig = await context.triggers().at(
                 graph_id="reminder-graph",
                 default_inputs={"message": "standup"},
                 run_at=run_at_local,
@@ -293,7 +293,7 @@ class TriggerFacade:
         Examples:
             Fire after 5 minutes:
             ```python
-            trig = await context.triggers.after(
+            trig = await context.triggers().after(
                 graph_id="cleanup-graph",
                 default_inputs={"job": "stale-cache"},
                 delay_seconds=300,
@@ -302,7 +302,7 @@ class TriggerFacade:
 
             Request immediate scheduling:
             ```python
-            trig = await context.triggers.after(
+            trig = await context.triggers().after(
                 graph_id="notify-graph",
                 default_inputs={"message": "run now"},
                 delay_seconds=0,
@@ -357,7 +357,7 @@ class TriggerFacade:
         Examples:
             Run every minute:
             ```python
-            trig = await context.triggers.interval(
+            trig = await context.triggers().interval(
                 graph_id="heartbeat-graph",
                 default_inputs={"source": "scheduler"},
                 interval_seconds=60,
@@ -366,7 +366,7 @@ class TriggerFacade:
 
             Run every 10 minutes with a name:
             ```python
-            trig = await context.triggers.interval(
+            trig = await context.triggers().interval(
                 graph_id="sync-graph",
                 default_inputs={"full": False},
                 interval_seconds=600,
@@ -419,7 +419,7 @@ class TriggerFacade:
         Examples:
             Create a billing event trigger:
             ```python
-            trig = await context.triggers.event(
+            trig = await context.triggers().event(
                 graph_id="billing-graph",
                 default_inputs={"origin": "webhook"},
                 event_key="invoice.paid",
@@ -428,7 +428,7 @@ class TriggerFacade:
 
             Create with explicit label:
             ```python
-            trig = await context.triggers.event(
+            trig = await context.triggers().event(
                 graph_id="audit-graph",
                 default_inputs={},
                 event_key="user.deleted",
@@ -472,14 +472,14 @@ class TriggerFacade:
         Examples:
             Cancel a known trigger:
             ```python
-            await context.triggers.cancel("trig-ab12cd34")
+            await context.triggers().cancel("trig-ab12cd34")
             ```
 
             Cancel after fetching:
             ```python
-            trig = await context.triggers.get("trig-ab12cd34")
+            trig = await context.triggers().get("trig-ab12cd34")
             if trig:
-                await context.triggers.cancel(trig.trigger_id)
+                await context.triggers().cancel(trig.trigger_id)
             ```
 
         Args:
@@ -502,12 +502,12 @@ class TriggerFacade:
         Examples:
             Read a trigger record:
             ```python
-            trig = await context.triggers.get("trig-ab12cd34")
+            trig = await context.triggers().get("trig-ab12cd34")
             ```
 
             Branch if missing:
             ```python
-            trig = await context.triggers.get("trig-missing")
+            trig = await context.triggers().get("trig-missing")
             if trig is None:
                 ...
             ```
@@ -538,12 +538,12 @@ class TriggerFacade:
         Examples:
             Fire event without payload:
             ```python
-            await context.triggers.fire_event("invoice.paid")
+            await context.triggers().fire_event("invoice.paid")
             ```
 
             Fire event with payload:
             ```python
-            await context.triggers.fire_event(
+            await context.triggers().fire_event(
                 "invoice.paid",
                 payload={"invoice_id": "inv_123", "amount": 1999},
             )

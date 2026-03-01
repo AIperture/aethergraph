@@ -27,7 +27,7 @@ class NodeKB:
         ```python
         kb = kb_factory.for_identity(request_identity)
         # Uses kb.scope internally when forwarding to kb.backend.
-        hits = await kb.search(
+        hits = await context.kb().search(
             corpus_id="product_docs",
             query="refund policy",
             top_k=5,
@@ -38,12 +38,12 @@ class NodeKB:
         Direct construction for tests with explicit attrs:
         ```python
         kb = NodeKB(backend=knowledge_backend, scope=test_scope)
-        await kb.upsert_docs(
+        await context.kb().upsert_docs(
             corpus_id="runbook",
             docs=[{"text": "Restart by rotating token", "labels": {"source": "ops"}}],
             kb_namespace="infra",
         )
-        answer = await kb.answer(
+        answer = await context.kb().answer(
             corpus_id="runbook",
             question="How do I restart safely?",
             style="concise",
@@ -87,7 +87,7 @@ class NodeKB:
         Examples:
             Ingest inline text:
             ```python
-            result = await kb.upsert_docs(
+            result = await context.kb().upsert_docs(
                 corpus_id="product_docs",
                 docs=[{"text": "Returns accepted for 30 days.", "labels": {"topic": "policy"}}],
                 kb_namespace="support",
@@ -96,7 +96,7 @@ class NodeKB:
 
             Ingest from file path with title:
             ```python
-            result = await kb.upsert_docs(
+            result = await context.kb().upsert_docs(
                 corpus_id="product_docs",
                 docs=[{"path": "C:/docs/refund.md", "title": "Refund Policy"}],
             )
@@ -149,7 +149,7 @@ class NodeKB:
         Examples:
             Basic semantic retrieval:
             ```python
-            hits = await kb.search(
+            hits = await context.kb().search(
                 corpus_id="product_docs",
                 query="refund timeline",
                 top_k=5,
@@ -159,7 +159,7 @@ class NodeKB:
 
             Retrieval with filters and explicit mode:
             ```python
-            hits = await kb.search(
+            hits = await context.kb().search(
                 corpus_id="engineering_runbook",
                 query="how to rotate credentials",
                 filters={"labels.env": "prod"},
@@ -233,7 +233,7 @@ class NodeKB:
         Examples:
             Concise QA response:
             ```python
-            result = await kb.answer(
+            result = await context.kb().answer(
                 corpus_id="product_docs",
                 question="What is the refund window?",
                 style="concise",
@@ -243,7 +243,7 @@ class NodeKB:
 
             Detailed QA with metadata filtering:
             ```python
-            result = await kb.answer(
+            result = await context.kb().answer(
                 corpus_id="engineering_runbook",
                 question="How should I recover from token leak?",
                 style="detailed",
@@ -303,12 +303,12 @@ class NodeKB:
         Examples:
             List corpora for the current identity:
             ```python
-            corpora = await kb.list_corpora()
+            corpora = await context.kb().list_corpora()
             ```
 
             Extract corpus ids for UI options:
             ```python
-            corpus_ids = [row["corpus_id"] for row in await kb.list_corpora()]
+            corpus_ids = [row["corpus_id"] for row in await context.kb().list_corpora()]
             ```
 
         Args:
@@ -339,12 +339,12 @@ class NodeKB:
         Examples:
             First page of docs:
             ```python
-            docs = await kb.list_docs(corpus_id="product_docs", limit=50)
+            docs = await context.kb().list_docs(corpus_id="product_docs", limit=50)
             ```
 
             Continue after a known document id:
             ```python
-            next_docs = await kb.list_docs(
+            next_docs = await context.kb().list_docs(
                 corpus_id="product_docs",
                 limit=50,
                 after="doc_abc123",
@@ -384,7 +384,7 @@ class NodeKB:
         Examples:
             Delete a single document:
             ```python
-            result = await kb.delete_docs(
+            result = await context.kb().delete_docs(
                 corpus_id="product_docs",
                 doc_ids=["doc_abc123"],
             )
@@ -392,7 +392,7 @@ class NodeKB:
 
             Delete a batch:
             ```python
-            result = await kb.delete_docs(
+            result = await context.kb().delete_docs(
                 corpus_id="engineering_runbook",
                 doc_ids=["doc_1", "doc_2", "doc_3"],
             )
@@ -431,12 +431,12 @@ class NodeKB:
         Examples:
             Re-embed all docs in a corpus:
             ```python
-            result = await kb.reembed(corpus_id="product_docs")
+            result = await context.kb().reembed(corpus_id="product_docs")
             ```
 
             Re-embed selected docs with smaller batch size:
             ```python
-            result = await kb.reembed(
+            result = await context.kb().reembed(
                 corpus_id="engineering_runbook",
                 doc_ids=["doc_abc123", "doc_def456"],
                 batch=16,
@@ -471,12 +471,12 @@ class NodeKB:
         Examples:
             Fetch high-level stats:
             ```python
-            stats = await kb.stats(corpus_id="product_docs")
+            stats = await context.kb().stats(corpus_id="product_docs")
             ```
 
             Read document and chunk counts:
             ```python
-            stats = await kb.stats(corpus_id="engineering_runbook")
+            stats = await context.kb().stats(corpus_id="engineering_runbook")
             docs = stats.get("docs", 0)
             chunks = stats.get("chunks", 0)
             ```

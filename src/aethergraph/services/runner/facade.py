@@ -86,7 +86,7 @@ class RunFacade:
         Examples:
             Spawn with default context identity/session:
             ```python
-            run_id = await runner.spawn_run(
+            run_id = await runner().spawn_run(
                 "my-graph",
                 inputs={"prompt": "hello"},
             )
@@ -94,7 +94,7 @@ class RunFacade:
 
             Spawn with explicit metadata overrides:
             ```python
-            run_id = await runner.spawn_run(
+            run_id = await runner().spawn_run(
                 "my-graph",
                 inputs={"payload": {"a": 1}},
                 tags=["batch", "priority"],
@@ -164,7 +164,7 @@ class RunFacade:
         Examples:
             Wait for a child graph:
             ```python
-            run_id, outputs, has_waits, continuations = await runner.run_and_wait(
+            run_id, outputs, has_waits, continuations = await runner().run_and_wait(
                 "my-graph",
                 inputs={"x": 1},
             )
@@ -172,7 +172,7 @@ class RunFacade:
 
             Wait with explicit run metadata:
             ```python
-            run_id, outputs, has_waits, continuations = await runner.run_and_wait(
+            run_id, outputs, has_waits, continuations = await runner().run_and_wait(
                 "my-graph",
                 inputs={"x": 1},
                 tags=["child"],
@@ -236,12 +236,12 @@ class RunFacade:
         Examples:
             Wait for a run record:
             ```python
-            record = await runner.wait_run(run_id)
+            record = await runner().wait_run(run_id)
             ```
 
             Wait and also collect outputs:
             ```python
-            record, outputs = await runner.wait_run(
+            record, outputs = await runner().wait_run(
                 run_id,
                 timeout_s=30,
                 return_outputs=True,
@@ -275,13 +275,13 @@ class RunFacade:
         Examples:
             Cancel a spawned run:
             ```python
-            await runner.cancel_run(run_id)
+            await runner().cancel_run(run_id)
             ```
 
             Cancel based on condition:
             ```python
             if should_abort:
-                await runner.cancel_run(run_id)
+                await runner().cancel_run(run_id)
             ```
 
         Args:

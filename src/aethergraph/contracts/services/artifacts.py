@@ -7,6 +7,40 @@ from typing import Any, Protocol
 
 @dataclass
 class Artifact:
+    """Represents an artifact with metadata and optional tracking information.
+    This dataclass encapsulates artifact data including identification, versioning,
+    content information, and tenant-level metadata. It provides serialization
+    capabilities and supports both 'mime' and 'mimetype' nomenclature.
+
+    Attributes:
+        artifact_id (str): Unique identifier for the artifact.
+        run_id (str | None): Associated run identifier. Defaults to None.
+        graph_id (str | None): Associated graph identifier. Defaults to None.
+        node_id (str | None): Associated node identifier. Defaults to None.
+        tool_name (str | None): Name of the tool that created the artifact. Defaults to None.
+        tool_version (str | None): Version of the tool that created the artifact. Defaults to None.
+        kind (str | None): Type or category of the artifact. Defaults to None.
+        sha256 (str | None): SHA256 hash of the artifact content. Defaults to None.
+        bytes (int | None): Size of the artifact in bytes. Defaults to None.
+        mime (str | None): MIME type of the artifact content. Defaults to None.
+        created_at (str | None): Timestamp when the artifact was created. Defaults to None.
+        tags (list[str] | None): List of tags associated with the artifact. Defaults to None.
+        labels (dict[str, Any] | None): Dictionary of labels for the artifact. Defaults to None.
+        metrics (dict[str, Any] | None): Dictionary of metrics associated with the artifact. Defaults to None.
+        pinned (bool): Whether the artifact is pinned. Defaults to False.
+        uri (str | None): URI or path to the artifact. Defaults to None.
+        preview_uri (str | None): URI for previewing the artifact. Defaults to None.
+        org_id (str | None): Organization identifier for multi-tenant support. Defaults to None.
+        user_id (str | None): User identifier for multi-tenant support. Defaults to None.
+        client_id (str | None): Client identifier for multi-tenant support. Defaults to None.
+        app_id (str | None): Application identifier for multi-tenant support. Defaults to None.
+        session_id (str | None): Session identifier for multi-tenant support. Defaults to None.
+
+    Properties:
+        mimetype (str | None): Alias property for accessing and setting the 'mime' attribute.
+            Provides backward compatibility with alternative naming conventions.
+    """
+
     artifact_id: str
     run_id: str | None = None
     graph_id: str | None = None
