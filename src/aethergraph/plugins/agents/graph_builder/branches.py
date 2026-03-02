@@ -18,7 +18,7 @@ from .types import (
 NODE_API_SKILL_ID = "ag-graph-builder-context-node-api"
 CHANNEL_API_SKILL_ID = "ag-graph-builder-channel-api"
 ARTIFACT_API_SKILL_ID = "ag-graph-builder-artifact-api"
-GRAPHIFY_STYLE_SKILL_ID = "ag-graph-builder-graphiy-style"
+GRAPHIFY_STYLE_SKILL_ID = "ag-graph-builder-graphify-style"
 CHECKPOINT_SKILL_ID = "ag-graph-builder-checkpoint-pattern"
 
 
@@ -89,7 +89,7 @@ def _compile_branch_prompt(*, context: NodeContext, branch: GraphBuilderBranch) 
         node_api = skills.compile_prompt(NODE_API_SKILL_ID, separator="\n\n")
         return base + "\n\n----- NODECONTEXT API (CURATED) -----\n\n" + node_api
 
-    # Codegen needs the full batteries: NodeContext + channel + artifacts + graphify style + checkpoint pattern.
+    # Codegen needs the full batteries: NodeContext + channel + artifacts + graphfiy style + checkpoint pattern.
     if branch == GraphBuilderBranch.GENERATE:
         node_api = skills.compile_prompt(NODE_API_SKILL_ID, separator="\n\n")
         chan_api = skills.compile_prompt(CHANNEL_API_SKILL_ID, separator="\n\n")
@@ -187,6 +187,7 @@ async def _handle_generate(
     state: GraphBuilderState,
     context: NodeContext,
 ) -> tuple[str, dict[str, Any] | None]:
+    print("🍎 Graph Builder: starting _handle_generate with message:", message)
     llm: GenericLLMClient = context.llm()
     chan = context.ui_session_channel()
 
@@ -235,6 +236,10 @@ async def _handle_generate(
         )
 
     print(f"Graph Builder: sending {len(messages)} messages to LLM for code generation...")
+
+    await chan.send_phase(
+        phase="thinking", status="active", label="Graph Builder is generating code..."
+    )
 
     # Stream to UI
     async with chan.stream() as s:

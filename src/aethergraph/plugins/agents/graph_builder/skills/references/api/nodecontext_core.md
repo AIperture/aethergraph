@@ -16,4 +16,6 @@ Use only the APIs below unless the user explicitly enables advanced services.
 ## Rules
 
 - If a tool calls `channel()` or `artifacts()`, it MUST include `*, context: NodeContext`.
+- Tool signatures should be `async def ...(*, context: NodeContext)` when using channel/artifacts.
+- In `@graphify`, never pass `context=` explicitly. Runtime injects it at node execution time.
 - Prefer async tools only when needed (I/O, artifact access, interactive channel calls).

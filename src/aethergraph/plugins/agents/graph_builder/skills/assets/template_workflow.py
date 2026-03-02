@@ -26,24 +26,31 @@ async def _save_ckpt(*, ckpt_key: str, payload: dict, context: NodeContext) -> N
     )
 
 
+@tool(name="announce", outputs=["ok"])
+async def announce(step: str, *, context: NodeContext) -> dict:
+    await context.channel().send_text(f"starting {step}")
+    return {"ok": True}
+
+
 @tool(name=TOOL_NAME, outputs=["result"])
 async def expensive_step(x: str, *, context: NodeContext) -> dict:
     ckpt_key = f"{TOOL_NAME}:{x}"
     cached = await _try_load_ckpt(ckpt_key=ckpt_key, context=context)
     if cached is not None:
-        await context.channel().send_text("✅ Loaded checkpoint for expensive_step")
+        await context.channel().send_text("loaded checkpoint for expensive_step")
         return {"result": cached["result"]}
 
-    await context.channel().send_text("⏳ Running expensive_step...")
-    # TODO: replace with real expensive call
+    await context.channel().send_text("running expensive_step")
     result = x.upper()
 
     await _save_ckpt(ckpt_key=ckpt_key, payload={"result": result}, context=context)
-    await context.channel().send_text("💾 Saved checkpoint for expensive_step")
+    await context.channel().send_text("saved checkpoint for expensive_step")
     return {"result": result}
 
 
 @graphify(name="my_workflow", inputs=["x"], outputs=["result"])
 def my_workflow(x):
-    out = expensive_step(x=x)
+    # One tool invocation is one node. Use _after for non-data ordering.
+    start = announce(step=TOOL_NAME)
+    out = expensive_step(x=x, _after=[start])
     return {"result": out.result}

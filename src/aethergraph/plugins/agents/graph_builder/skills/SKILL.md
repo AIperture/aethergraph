@@ -16,6 +16,26 @@ It targets **OSS reliability**:
 - Minimal runtime dependencies: `context.channel()` and `context.artifacts()` (optional).
 - Follow strict output formats so generated code is easy to review and run.
 
+## Graph Construction Invariants (must follow)
+
+- `@graphify` function must be `def`, not `async def`. It builds a graph spec; it does not execute tool bodies.
+- Every `@tool` call inside `@graphify` creates one graph node.
+- Never "hide" graph steps by calling other `@tool`s inside a tool body. Keep orchestration in `@graphify`.
+- Do not `await` tool calls inside `@graphify`.
+- Use `NodeHandle` outputs (`node.out_key`) to wire data dependencies.
+- For non-data ordering, use `_after=` (for example `_after=[node_a, node_b]`).
+- Do not pass `context` from `@graphify`; runtime injects `context` into tools automatically.
+- If a tool uses `context.channel()` or `context.artifacts()`, it must be `async def` and include `*, context: NodeContext`.
+- Bare decorators are forbidden:
+  - Never emit `@tool` without args.
+  - Never emit `@graphify` without args.
+- Required decorator forms:
+  - `@tool(name="...", outputs=[...])`
+  - `@graphify(name="...", inputs=[...], outputs=[...])`
+- Return-shape contract:
+  - Tool returns must be `dict` and contain declared output keys.
+  - Graph returns must be `dict` and contain declared graph output keys.
+
 ## graph_builder.system
 
 You are the **AetherGraph Graph Builder**.
@@ -33,6 +53,9 @@ Hard constraints:
   - `references/api/channel.md`
   - `references/api/artifacts.md`
 - If runtime services are used, tool signature must include `*, context: NodeContext` (and be `async def` if calling channel/artifacts).
+- The `@graphify` function itself must stay synchronous (`def`).
+- Each tool invocation in `@graphify` is a node; never nest tool orchestration inside another tool.
+- Use `_after` only for ordering constraints when there is no data edge.
 
 ---
 
@@ -141,10 +164,15 @@ When generating code:
 Codegen rules:
 - Tools:
   - Each tool MUST have a stable `name=` and explicit `outputs=[...]`.
+  - Always emit decorator in full form: `@tool(name="...", outputs=[...])`.
   - Tools return dict keys matching outputs.
+  - Do not compose tool orchestration inside tool bodies.
 - Graphify:
-  - `@graphify(name=..., inputs=[...], outputs=[...])`
+  - Always emit decorator in full form: `@graphify(name="...", inputs=[...], outputs=[...])`.
+  - Use `def my_graph(...):`, not `async def`.
   - Make wiring explicit and readable.
+  - One tool call = one node.
+  - Use `_after` for non-data ordering dependencies.
   - You MAY use list comprehensions for fan-out/fan-in patterns.
 - When you emit a plan JSON block, it SHOULD match the same shape as in `graph_builder.plan` (top-level {"explanation": ..., "plan": {...}}), so the agent can re-use it for state tracking.
 
@@ -159,6 +187,14 @@ Checkpointing rules (if enabled):
 Channel rules:
 - Use `await context.channel().send_text("...")` to report major phase transitions.
 - Avoid noisy per-iteration logs unless the user requests.
+
+Pre-output validation checklist (must pass before final answer):
+- No bare `@tool` decorator exists.
+- No bare `@graphify` decorator exists.
+- Every `@tool` has `name=` and `outputs=[...]`.
+- Every `@graphify` has `name=`, `inputs=[...]`, and `outputs=[...]`.
+- Tool functions return dicts (not raw string/list/tuple).
+- Graph function returns a dict keyed by declared graph outputs.
 
 ## graph_builder.register
 

@@ -106,6 +106,7 @@ async def graph_builder(
         notes=notes,
     )
 
+    print("🍎 Graph Builder: files_summary:\n", files_summary)
     await chan.send_phase(
         phase="thinking", status="active", label="Graph Builder is analyzing your input..."
     )
@@ -120,13 +121,15 @@ async def graph_builder(
         context=context,
     )
 
+    print("🍎 Graph Builder: routing decision:\n", decision)
+
     await chan.send_phase(
         phase="thinking",
         status="done",
         label=f"Graph Builder decided to {decision['branch'].value}...",
     )
 
-    logger.debug("graph_builder route: %s (%s)", decision["branch"].value, decision["reason"])
+    logger.info("graph_builder route: %s (%s)", decision["branch"].value, decision["reason"])
 
     # Execute branch
     if decision["branch"] == GraphBuilderBranch.PLAN:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import dataclasses
+import json
 from typing import Any
 
 from aethergraph.contracts.services.memory import Event
@@ -66,16 +67,18 @@ class StateMixin:
         def _to_serializable(obj: Any) -> Any:
             # TODO: make this more sophisticated later (pydantic, etc.)
             if dataclasses.is_dataclass(obj):
-                return dataclasses.asdict(obj)
+                return _to_serializable(dataclasses.asdict(obj))
             if hasattr(obj, "model_dump"):
                 try:
-                    return obj.model_dump()
+                    return _to_serializable(obj.model_dump())
                 except Exception:
                     pass
             if isinstance(obj, (str, int, float, bool)) or obj is None:  # noqa: UP038
                 return obj
-            if isinstance(obj, (dict, list, tuple)):  # noqa: UP038
-                return obj
+            if isinstance(obj, dict):
+                return {str(k): _to_serializable(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple, set)):  # noqa: UP038
+                return [_to_serializable(v) for v in obj]
             # Fallback: repr; or later, put into DocStore and store a URI.
             return {"__repr__": repr(obj)}
 
@@ -88,10 +91,15 @@ class StateMixin:
             "value": _to_serializable(value),
             "meta": meta or {},
         }
+        index_text = f"state:{key} "
+        try:
+            index_text += json.dumps(payload["value"], ensure_ascii=False, sort_keys=True)
+        except Exception:
+            index_text += repr(payload["value"])
 
         return await self.record(
             kind=kind,
-            text="",  # optional; we keep state in data
+            text=index_text,
             data=payload,
             tags=extra_tags,
             severity=severity,

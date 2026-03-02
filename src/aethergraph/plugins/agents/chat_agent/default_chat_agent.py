@@ -151,6 +151,10 @@ async def default_chat_agent(
     mem = context.memory()
     indices = context.indices()  # ScopedIndices
 
+    # test save state
+    state_key = "test_state_key"
+    await mem.record_state(state_key, {"foo": "bar"})
+
     # ------------------------------------------------------------------
     # 1) Layer 1 + 2: recency + long-term summaries
     # ------------------------------------------------------------------
