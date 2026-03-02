@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ChatOutputFormat = Literal[
-    "text", "json_object", "json_schema", "raw"
+    "text", "json_object", "json_schema", "raw", "json"
 ]  # text: plain text; json_object: dict; json_schema: validate against schema; json_schema: validate against schema; raw: provider-specific raw response
 
 ImageFormat = Literal["png", "jpeg", "webp"]

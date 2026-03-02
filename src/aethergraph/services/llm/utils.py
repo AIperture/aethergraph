@@ -107,8 +107,18 @@ def _strip_code_fences(s: str) -> str:
     return s.strip()
 
 
+def _strip_schema_enforced_json_fence(text: str) -> str:
+    """
+    Remove a full Markdown code fence around JSON content when schema-mode output is expected.
+    Leaves text unchanged if it is not a single fenced block.
+    """
+    t = text.strip()
+    m = re.match(r"^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$", t, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else t
+
+
 def _extract_json_text(text: str) -> str:
-    t = _strip_code_fences(text)
+    t = text.strip()
     if not t:
         return t
     if t[0] in "{[":
