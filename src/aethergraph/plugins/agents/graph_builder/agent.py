@@ -5,24 +5,16 @@ from typing import Any
 
 from aethergraph import graph_fn
 from aethergraph.core.runtime.node_context import NodeContext
-from aethergraph.plugins.agents.graph_builder.branches import (
-    _handle_chat,
-    _handle_generate,
-    _handle_plan,
-    _handle_register_app,
+from aethergraph.plugins.agents.graph_builder.branches_v2 import (
+    _handle_chat_v2,
+    _handle_generate_v2,
+    _handle_plan_v2,
+    _handle_register_app_v2,
 )
-from aethergraph.plugins.agents.graph_builder.router import (
-    _heuristic_route,
-    _llm_route_if_needed,
-)
+from aethergraph.plugins.agents.graph_builder.router_v2 import route_v2
 from aethergraph.plugins.agents.graph_builder.types import (
     GraphBuilderBranch,
-    _hash_contract,
-    _load_state,
-    _save_state,
 )
-
-# adjust import path to wherever you placed these:
 from aethergraph.plugins.agents.graph_builder.utils import (
     _process_builder_files,
     _summarize_builder_files_for_llm,
@@ -63,10 +55,10 @@ async def graph_builder(
     raw_message = (message or "").strip()
     if not raw_message and not (files or []):
         reply = (
-            "Hi — I’m the Graph Builder.\n\n"
+            "Hi - I am the Graph Builder.\n\n"
             "- Describe the workflow you want, or\n"
             "- Upload Python scripts and tell me what to wrap.\n\n"
-            "I’ll produce a plan + @tool/@graphify code, and add checkpoints for expensive steps."
+            "I will produce a plan plus @tool/@graphify code, and add checkpoints for expensive steps."
         )
         await mem.record_chat_assistant(
             text=reply,
@@ -83,10 +75,6 @@ async def graph_builder(
         tags=["ag.graph_builder.user"],
     )
 
-    # Load state (user level usually makes sense for a builder)
-    state = await _load_state(context=context, level="user")
-
-    # Summarize files/context_refs using your helpers
     try:
         code_files, text_files, other_files, notes = await _process_builder_files(
             files=files,
@@ -94,7 +82,7 @@ async def graph_builder(
             context=context,
         )
     except Exception as e:
-        await chan.send_phase(phase="thinking", status="error", label="Error processing files")
+        await chan.send_phase(phase="thinking", status="failed", label="Error processing files")
         await chan.send_text(f"Sorry, I had trouble processing the files you provided: {e}")
         logger.error("Error processing builder files: %s", e, exc_info=True)
         return {"reply": f"Sorry, I had trouble processing the files you provided: {e}"}
@@ -110,12 +98,8 @@ async def graph_builder(
         phase="thinking", status="active", label="Graph Builder is analyzing your input..."
     )
 
-    # Route
-    decision = _heuristic_route(message=raw_message, files=files, state=state)
-    decision = await _llm_route_if_needed(
-        decision=decision,
+    decision = await route_v2(
         message=raw_message,
-        state=state,
         files_summary=files_summary,
         context=context,
     )
@@ -126,50 +110,32 @@ async def graph_builder(
         label=f"Graph Builder decided to {decision['branch'].value}...",
     )
 
-    logger.debug("graph_builder route: %s (%s)", decision["branch"].value, decision["reason"])
+    logger.info("graph_builder route: %s (%s)", decision["branch"].value, decision["reason"])
 
-    # Execute branch
     if decision["branch"] == GraphBuilderBranch.PLAN:
-        reply, plan = await _handle_plan(
+        reply, _plan = await _handle_plan_v2(
             message=raw_message,
             files_summary=files_summary,
-            state=state,
             context=context,
         )
-        if plan:
-            state.plan_ver += 1
-            state.last_plan_json = plan
-            state.last_graph_name = (plan.get("graph") or {}).get("name")
-            state.last_contract_hash = _hash_contract(plan)
-            await _save_state(context=context, state=state)
 
     elif decision["branch"] == GraphBuilderBranch.GENERATE:
-        reply, plan = await _handle_generate(
+        reply, _plan, _generated_code, _generated_filename = await _handle_generate_v2(
             message=raw_message,
             files_summary=files_summary,
             files=[*code_files, *text_files, *other_files],
-            state=state,
             context=context,
         )
-        if plan:
-            state.plan_ver = max(state.plan_ver, 1)  # ensure nonzero if generating
-            state.graph_ver += 1
-            state.last_plan_json = plan
-            state.last_graph_name = (plan.get("graph") or {}).get("name")
-            state.last_contract_hash = _hash_contract(plan)
-            await _save_state(context=context, state=state)
 
     elif decision["branch"] == GraphBuilderBranch.REGISTER_APP:
-        reply = await _handle_register_app(
+        reply = await _handle_register_app_v2(
             message=raw_message,
-            state=state,
             context=context,
         )
 
     else:
-        reply = await _handle_chat(message=raw_message, context=context)
+        reply = await _handle_chat_v2(message=raw_message, context=context)
 
-    # Record assistant turn
     await mem.record_chat_assistant(
         text=reply,
         tags=["ag.graph_builder.reply"],

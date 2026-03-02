@@ -5,8 +5,9 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
 import json
-from typing import Any, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
+from aethergraph.contracts.services.memory import Event
 from aethergraph.core.runtime.node_context import NodeContext
 
 GRAPH_BUILDER_SKILL_ID = "aethergraph-graph-builder"
@@ -25,6 +26,27 @@ class RouterDecision(TypedDict):
     reason: str
 
 
+ApprovalIntent = Literal["approve", "revise", "decline", "unknown"]
+
+
+def _detect_approval_intent(message: str) -> ApprovalIntent:
+    msg = (message or "").strip().lower()
+    if not msg:
+        return "unknown"
+
+    approve_terms = {"proceed", "generate", "yes", "ok", "approve", "ship it"}
+    revise_terms = {"replan", "revise", "change", "update", "modify"}
+    decline_terms = {"skip", "no", "decline", "cancel", "reject"}
+
+    if any(term in msg for term in approve_terms):
+        return "approve"
+    if any(term in msg for term in revise_terms):
+        return "revise"
+    if any(term in msg for term in decline_terms):
+        return "decline"
+    return "unknown"
+
+
 @dataclass
 class GraphBuilderState:
     # simple versioning
@@ -38,6 +60,14 @@ class GraphBuilderState:
 
     # small contract hash to detect plan changes
     last_contract_hash: str | None = None
+
+    # v2 pending interaction state
+    pending_action: str | None = None  # awaiting_plan_approval | awaiting_register_decision
+    pending_plan_json: dict[str, Any] | None = None
+
+    # latest generated code metadata
+    last_generated_code: str | None = None
+    last_generated_filename: str | None = None
 
 
 STATE_KEY = "ag.graph_builder.state"  # stable key for memory state snapshots
@@ -55,6 +85,31 @@ async def _load_state(
     we also enable user_persistence so it survives process restarts.
     """
     mem = context.memory()
+    tag = f"state:{STATE_KEY}"
+    recent_events: list[Event] = []
+    try:
+        recent_events = await mem.recent(
+            kinds=["state.snapshot"],
+            limit=80,
+            level=level,
+            return_event=True,
+        )
+    except Exception:
+        context.logger().exception("graph_builder: recent() failed while loading state")
+
+    for event in reversed(recent_events):
+        tags = event.tags or []
+        if tag not in tags:
+            continue
+        payload = event.data or {}
+        raw = payload.get("value")
+        if raw is None:
+            continue
+        try:
+            return GraphBuilderState(**cast(dict[str, Any], raw))
+        except Exception:
+            context.logger().warning("graph_builder: invalid state payload in recent(); skipping")
+
     try:
         raw = await mem.latest_state(
             STATE_KEY,

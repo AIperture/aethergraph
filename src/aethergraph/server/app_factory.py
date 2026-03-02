@@ -36,9 +36,9 @@ from aethergraph.core.runtime.runtime_services import (
 
 # from aethergraph.plugins.agents.agnet_buider_agent import *  # noqa: F403
 # import built-in agents and plugins to register them
-from aethergraph.plugins.agents.default_chat_agent import *  # noqa: F403
+from aethergraph.plugins.agents.chat_agent.default_chat_agent import *  # noqa: F403
+from aethergraph.plugins.agents.graph_builder.agent import *  # noqa: F403
 
-# from aethergraph.plugins.agents.graph_builder.agent import *  # noqa: F403
 # from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
 # from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 # channel routes
@@ -47,7 +47,9 @@ from aethergraph.services.container.default_container import build_default_conta
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.utils.optdeps import require
 
-builtin_agent_skills_path = Path(__file__).parent.parent / "plugins" / "skills"
+builtin_agent_skills_path = (
+    Path(__file__).parent.parent / "plugins" / "agents" / "graph_builder" / "skills"
+)
 
 
 logger = logging.getLogger(__name__)
@@ -115,7 +117,7 @@ def create_app(
             tg_task = asyncio.create_task(tg_runner.start())
 
         # Register skills from the builtin path (optional, but keeps them together for now)
-        logger.debug(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
+        logger.info(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
         register_skills_from_path(builtin_agent_skills_path)
 
         try:

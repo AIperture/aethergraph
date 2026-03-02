@@ -33,6 +33,7 @@ from aethergraph.services.llm.utils import (
     _is_data_url,
     _normalize_base_url_no_trailing_slash,
     _normalize_openai_responses_input,
+    _strip_schema_enforced_json_fence,
     _to_anthropic_blocks,
     _to_gemini_parts,
     _validate_json_schema,
@@ -696,13 +697,16 @@ class GenericLLMClient(LLMClientProtocol):
         strict_schema: bool,
         validate_json: bool,
     ) -> str:
-        if output_format not in ("json_object", "json_schema"):
+        if output_format not in ("json", "json_object", "json_schema"):
             return text
 
         if not validate_json:
             return text
 
-        json_text = _extract_json_text(text)
+        candidate = (
+            _strip_schema_enforced_json_fence(text) if output_format == "json_schema" else text
+        )
+        json_text = _extract_json_text(candidate)
         try:
             obj = json.loads(json_text)
         except Exception as e:
