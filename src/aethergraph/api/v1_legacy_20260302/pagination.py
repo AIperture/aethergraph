@@ -1,4 +1,4 @@
-from fastapi import HTTPException  # type: ignore
+from fastapi import HTTPException
 
 
 def decode_cursor(cursor: str | None) -> int:

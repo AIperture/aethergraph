@@ -3,10 +3,10 @@
 
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect  # type: ignore
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from .deps import RequestIdentity, get_identity
-from .schemas.channels import (
+from .schemas import (
     ChannelEvent,
     ChannelEventListResponse,
     ChannelIngressRequest,

@@ -5,10 +5,38 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
-from aethergraph.api.v1.registry_helpers import ensure_delete_identity, scoped_registry
-from aethergraph.api.v1.schemas.registry import AppDescriptor
+from aethergraph.api.v1.schemas import AppDescriptor
+from aethergraph.core.runtime.runtime_registry import current_registry
+from aethergraph.services.registry.facade import RegistryFacade
+from aethergraph.services.scope.scope import Scope
 
 router = APIRouter(tags=["apps"])
+
+
+def _scoped_registry(identity: RequestIdentity) -> RegistryFacade:
+    reg = current_registry()
+    return RegistryFacade(
+        registry=reg,
+        scope=Scope(
+            org_id=identity.org_id,
+            user_id=identity.user_id,
+            client_id=identity.client_id,
+            mode=identity.mode,
+        ),
+    )
+
+
+def _ensure_delete_identity(identity: RequestIdentity) -> None:
+    if identity.mode == "local":
+        raise HTTPException(
+            status_code=403,
+            detail="Deleting apps requires authenticated tenant identity.",
+        )
+    if not (identity.org_id or identity.user_id or identity.client_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing tenant identity. Cannot delete app.",
+        )
 
 
 @router.get("/apps", response_model=list[AppDescriptor])
@@ -20,7 +48,7 @@ async def list_apps(
 
     Each app is a graph (or graphfn) that has been decorated with `as_app={...}`.
     """
-    reg = scoped_registry(identity)
+    reg = _scoped_registry(identity)
     if reg is None:
         raise HTTPException(status_code=500, detail="Registry not available")
 
@@ -66,7 +94,7 @@ async def get_app(
     app_id: str,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> AppDescriptor:
-    reg = scoped_registry(identity)
+    reg = _scoped_registry(identity)
     if reg is None:
         raise HTTPException(status_code=500, detail="Registry not available")
 
@@ -93,8 +121,8 @@ async def delete_app(
     app_id: str,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> dict[str, str | bool]:
-    ensure_delete_identity(identity, "apps")
-    reg = scoped_registry(identity)
+    _ensure_delete_identity(identity)
+    reg = _scoped_registry(identity)
 
     scoped_meta = reg.get_meta(
         nspace="app",

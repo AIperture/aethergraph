@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status  # type: ignore
-from pydantic import BaseModel, Field  # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.contracts.services.trigger import TriggerKind

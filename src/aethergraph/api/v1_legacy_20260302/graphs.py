@@ -3,7 +3,7 @@
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from aethergraph.core.graph.graph_fn import GraphFunction
 from aethergraph.core.graph.task_graph import TaskGraph
@@ -11,7 +11,7 @@ from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
 from .deps import RequestIdentity, get_identity
-from .schemas.graphs import GraphDetail, GraphListItem
+from .schemas import GraphDetail, GraphListItem
 
 router = APIRouter(tags=["graphs"])
 

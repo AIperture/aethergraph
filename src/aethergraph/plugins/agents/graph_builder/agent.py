@@ -37,6 +37,12 @@ from aethergraph.plugins.agents.graph_builder.utils import (
         "color": "orange",
         "mode": "chat_v1",
         "memory_level": "user",
+        "slash_commands": [
+            {"name": "/plan", "description": "Draft or revise a build plan (no code)."},
+            {"name": "/gen", "description": "Generate code from the current plan."},
+            {"name": "/register", "description": "Register the generated graph as an app."},
+            {"name": "/chat", "description": "Just chat about the builder without changing state."},
+        ],
     },
 )
 async def graph_builder(

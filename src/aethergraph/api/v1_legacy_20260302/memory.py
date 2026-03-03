@@ -4,14 +4,14 @@ from contextlib import suppress
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query  # type: ignore
+from fastapi import APIRouter, Depends, Query
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.contracts.services.memory import Event
 from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, get_identity
-from .schemas.memory import (
+from .schemas import (
     MemoryEvent,
     MemoryEventListResponse,
     MemorySearchHit,

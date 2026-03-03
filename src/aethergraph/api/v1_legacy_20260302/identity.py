@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends  # type: ignore
-from pydantic import BaseModel  # type: ignore
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 

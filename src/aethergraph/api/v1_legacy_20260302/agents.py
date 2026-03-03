@@ -5,10 +5,38 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
-from aethergraph.api.v1.registry_helpers import ensure_delete_identity, scoped_registry
-from aethergraph.api.v1.schemas.registry import AgentDescriptor
+from aethergraph.api.v1.schemas import AgentDescriptor
+from aethergraph.core.runtime.runtime_registry import current_registry
+from aethergraph.services.registry.facade import RegistryFacade
+from aethergraph.services.scope.scope import Scope
 
 router = APIRouter(tags=["agents"])
+
+
+def _scoped_registry(identity: RequestIdentity) -> RegistryFacade:
+    reg = current_registry()
+    return RegistryFacade(
+        registry=reg,
+        scope=Scope(
+            org_id=identity.org_id,
+            user_id=identity.user_id,
+            client_id=identity.client_id,
+            mode=identity.mode,
+        ),
+    )
+
+
+def _ensure_delete_identity(identity: RequestIdentity) -> None:
+    if identity.mode == "local":
+        raise HTTPException(
+            status_code=403,
+            detail="Deleting agents requires authenticated tenant identity.",
+        )
+    if not (identity.org_id or identity.user_id or identity.client_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Missing tenant identity. Cannot delete agent.",
+        )
 
 
 @router.get("/agents", response_model=list[AgentDescriptor])
@@ -20,7 +48,7 @@ async def list_agents(
 
     These come from `as_agent={...}` (or legacy `agent="..."`) in your decorators.
     """
-    reg = scoped_registry(identity)
+    reg = _scoped_registry(identity)
     if reg is None:
         raise HTTPException(status_code=500, detail="Registry not available")
 
@@ -56,7 +84,7 @@ async def get_agent(
     agent_id: str,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> AgentDescriptor:
-    reg = scoped_registry(identity)
+    reg = _scoped_registry(identity)
     if reg is None:
         raise HTTPException(status_code=500, detail="Registry not available")
 
@@ -81,8 +109,8 @@ async def delete_agent(
     agent_id: str,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> dict[str, str | bool]:
-    ensure_delete_identity(identity, "agents")
-    reg = scoped_registry(identity)
+    _ensure_delete_identity(identity)
+    reg = _scoped_registry(identity)
 
     scoped_meta = reg.get_meta(
         nspace="agent",
