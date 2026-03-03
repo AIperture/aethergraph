@@ -4,7 +4,12 @@ import inspect
 from typing import Any, get_origin, get_type_hints
 
 from aethergraph.core.graph.action_spec import _map_py_type_to_json_type
-from aethergraph.services.registry.agent_app_meta import build_agent_meta, build_app_meta
+from aethergraph.services.registry.agent_app_meta import (
+    AgentConfig,
+    AppConfig,
+    build_agent_meta,
+    build_app_meta,
+)
 
 from ..runtime.runtime_registry import current_registry
 from .task_graph import TaskGraph
@@ -49,8 +54,8 @@ def graphify(
     entrypoint: bool = False,
     flow_id: str | None = None,
     tags: list[str] | None = None,
-    as_agent: dict[str, Any] | None = None,
-    as_app: dict[str, Any] | None = None,
+    as_agent: AgentConfig | None = None,
+    as_app: AppConfig | None = None,
     description: str | None = None,
 ):
     """

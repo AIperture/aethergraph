@@ -68,6 +68,7 @@ async def list_agents(
             AgentDescriptor(
                 id=agent_id,
                 graph_id=meta.get("graph_id", name),
+                slash_commands=meta.get("slash_commands") or [],
                 meta=meta,
             )
         )
@@ -89,7 +90,12 @@ async def get_agent(
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", agent_id))
-    return AgentDescriptor(id=meta.get("id", agent_id), graph_id=graph_id, meta=meta)
+    return AgentDescriptor(
+        id=meta.get("id", agent_id),
+        graph_id=graph_id,
+        slash_commands=meta.get("slash_commands") or [],
+        meta=meta,
+    )
 
 
 @router.delete("/agents/{agent_id}")

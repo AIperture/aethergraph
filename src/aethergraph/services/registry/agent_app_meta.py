@@ -13,6 +13,19 @@ from aethergraph.core.runtime.run_types import RunImportance, RunVisibility
 SUPPORTED_AGENT_MODES = {"chat_v1"}
 
 
+class SlashCommandConfig(TypedDict, total=False):
+    """
+    Optional slash-command hint for command palettes.
+
+    Attributes:
+        name (str): Slash command literal (e.g. "/plan").
+        description (str): Human-readable description shown in UI.
+    """
+
+    name: str
+    description: str
+
+
 class AgentConfig(TypedDict, total=False):
     """
     Configuration metadata for an agent. Register an agent with `as_agent`
@@ -37,6 +50,7 @@ class AgentConfig(TypedDict, total=False):
         tags (list[str]): Tags used for search / grouping.
         tool_graphs (list[str]): Related tool graph identifiers.
         features (list[str]): Optional feature bullets for UI.
+        slash_commands (list[SlashCommandConfig]): Optional slash command metadata for UI.
         run_visibility (RunVisibility): "normal" | "inline" | ...
         run_importance (RunImportance): "normal" | "high" | ...
         memory_level (Literal["user","session","run"]): Memory scope level.
@@ -63,6 +77,7 @@ class AgentConfig(TypedDict, total=False):
     tags: list[str]
     tool_graphs: list[str]
     features: list[str]
+    slash_commands: list[SlashCommandConfig]
 
     # Runtime behavior
     run_visibility: RunVisibility
@@ -94,6 +109,7 @@ class AppConfig(TypedDict, total=False):
         mode (str): App mode, e.g. "no_input_v1". Defaults to "no_input_v1".
         tags (list[str]): Tags for search / grouping.
         features (list[str]): Notable features for the app.
+        slash_commands (list[SlashCommandConfig]): Optional slash command metadata for UI.
         run_visibility (RunVisibility): "normal" | "inline" | ...
         run_importance (RunImportance): "normal" | "high" | ...
         flow_id (str): Flow identifier. Defaults to graph name.
@@ -115,6 +131,7 @@ class AppConfig(TypedDict, total=False):
 
     # UX hints
     features: list[str]
+    slash_commands: list[SlashCommandConfig]
 
     # Runtime behavior
     run_visibility: RunVisibility
@@ -141,6 +158,7 @@ AGENT_CORE_KEYS = {
     "tags",
     "tool_graphs",
     "features",
+    "slash_commands",
     "run_visibility",
     "run_importance",
     "memory_level",
@@ -161,6 +179,7 @@ APP_CORE_KEYS = {
     "mode",
     "tags",
     "features",
+    "slash_commands",
     "run_visibility",
     "run_importance",
     "flow_id",
@@ -235,6 +254,25 @@ def validate_agent_signature(
     return mode, inputs
 
 
+def _normalize_slash_commands(raw: Any) -> list[dict[str, str]]:
+    """
+    Coerce slash-command metadata into a clean list of {name, description}.
+    """
+    if not isinstance(raw, list):
+        return []
+
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(item.get("description") or "").strip()
+        out.append({"name": name, "description": description})
+    return out
+
+
 # ---------------------------------------------------------------------
 # Normalization helpers used by decorators & other runtime code
 # ---------------------------------------------------------------------
@@ -275,6 +313,7 @@ def build_agent_meta(
     # Text fields
     description = cfg.get("description")
     short_description = cfg.get("short_description") or description
+    slash_commands = _normalize_slash_commands(cfg.get("slash_commands"))
 
     # Visuals
     icon_key = cfg.get("icon_key")
@@ -302,6 +341,7 @@ def build_agent_meta(
         "tags": agent_tags,
         "tool_graphs": cfg.get("tool_graphs", []),
         "features": cfg.get("features", []),
+        "slash_commands": slash_commands,
         "run_visibility": cfg.get("run_visibility", "inline"),
         "run_importance": cfg.get("run_importance", "normal"),
         "memory": {
@@ -332,6 +372,7 @@ def build_agent_meta(
         "accent_color": accent_color,
         "tags": agent_tags,
         "github_url": cfg.get("github_url"),
+        "slash_commands": slash_commands,
         "flow_id": agent_flow_id,
         "backing": meta["backing"],
         "extra": extra,
@@ -369,6 +410,7 @@ def build_app_meta(
 
     short_description = cfg.get("short_description") or cfg.get("description")
     description = cfg.get("description")
+    slash_commands = _normalize_slash_commands(cfg.get("slash_commands"))
 
     icon_key = cfg.get("icon_key")
     accent_color = cfg.get("color")
@@ -390,6 +432,7 @@ def build_app_meta(
         "mode": app_mode,
         "tags": app_tags,
         "features": cfg.get("features", []),
+        "slash_commands": slash_commands,
         "run_visibility": cfg.get("run_visibility", "normal"),
         "run_importance": cfg.get("run_importance", "normal"),
         "github_url": cfg.get("github_url"),
@@ -416,6 +459,7 @@ def build_app_meta(
         "accent_color": accent_color,
         "tags": app_tags,
         "github_url": cfg.get("github_url"),
+        "slash_commands": slash_commands,
         "flow_id": app_flow_id,
         "backing": meta["backing"],
         "extra": extra,

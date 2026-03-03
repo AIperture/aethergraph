@@ -517,6 +517,11 @@ class SessionUpdateRequest(BaseModel):
 
 
 # ------ Agent and App Schemas ------
+class SlashCommandDescriptor(BaseModel):
+    name: str
+    description: str = ""
+
+
 class AgentDescriptor(BaseModel):
     """
     Lightweight wrapper for an agent's registry metadata.
@@ -527,6 +532,7 @@ class AgentDescriptor(BaseModel):
 
     id: str
     graph_id: str
+    slash_commands: list[SlashCommandDescriptor] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -540,4 +546,5 @@ class AppDescriptor(BaseModel):
 
     id: str
     graph_id: str
+    slash_commands: list[SlashCommandDescriptor] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)

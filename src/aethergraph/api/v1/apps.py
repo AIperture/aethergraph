@@ -72,6 +72,7 @@ async def list_apps(
             AppDescriptor(
                 id=app_id,
                 graph_id=graph_id,
+                slash_commands=meta.get("slash_commands") or [],
                 meta=meta,
             )
         )
@@ -95,7 +96,12 @@ async def get_app(
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", app_id))
 
-    return AppDescriptor(id=meta.get("id", app_id), graph_id=graph_id, meta=meta)
+    return AppDescriptor(
+        id=meta.get("id", app_id),
+        graph_id=graph_id,
+        slash_commands=meta.get("slash_commands") or [],
+        meta=meta,
+    )
 
 
 @router.delete("/apps/{app_id}")
