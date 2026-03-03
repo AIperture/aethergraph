@@ -62,12 +62,14 @@ async def list_agents(
             continue
 
         meta = reg.get_meta(nspace="agent", name=name, include_global=True) or {}
+        scoped_meta = reg.get_meta(nspace="agent", name=name, include_global=False)
         agent_id = meta.get("id", name)
 
         out.append(
             AgentDescriptor(
                 id=agent_id,
                 graph_id=meta.get("graph_id", name),
+                deletable=bool(scoped_meta),
                 slash_commands=meta.get("slash_commands") or [],
                 meta=meta,
             )
@@ -90,9 +92,11 @@ async def get_agent(
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", agent_id))
+    scoped_meta = reg.get_meta(nspace="agent", name=agent_id, include_global=False)
     return AgentDescriptor(
         id=meta.get("id", agent_id),
         graph_id=graph_id,
+        deletable=bool(scoped_meta),
         slash_commands=meta.get("slash_commands") or [],
         meta=meta,
     )

@@ -51,7 +51,7 @@ class GraphFunction:
         *,
         env: RuntimeEnv | None = None,
         retry: RetryPolicy | None = None,
-        max_concurrency: int | None = None,
+        max_concurrency: int = 1,
         **inputs,
     ):
         """

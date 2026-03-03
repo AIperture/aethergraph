@@ -532,6 +532,7 @@ class AgentDescriptor(BaseModel):
 
     id: str
     graph_id: str
+    deletable: bool = False
     slash_commands: list[SlashCommandDescriptor] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
 
@@ -546,5 +547,6 @@ class AppDescriptor(BaseModel):
 
     id: str
     graph_id: str
+    deletable: bool = False
     slash_commands: list[SlashCommandDescriptor] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)

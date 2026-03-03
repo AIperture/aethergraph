@@ -65,6 +65,7 @@ async def list_apps(
             continue
 
         meta = reg.get_meta(nspace="app", name=name, include_global=True) or {}
+        scoped_meta = reg.get_meta(nspace="app", name=name, include_global=False)
         app_id = meta.get("id", name)
         graph_id = meta.get("graph_id", name)
 
@@ -72,6 +73,7 @@ async def list_apps(
             AppDescriptor(
                 id=app_id,
                 graph_id=graph_id,
+                deletable=bool(scoped_meta),
                 slash_commands=meta.get("slash_commands") or [],
                 meta=meta,
             )
@@ -95,10 +97,12 @@ async def get_app(
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", app_id))
+    scoped_meta = reg.get_meta(nspace="app", name=app_id, include_global=False)
 
     return AppDescriptor(
         id=meta.get("id", app_id),
         graph_id=graph_id,
+        deletable=bool(scoped_meta),
         slash_commands=meta.get("slash_commands") or [],
         meta=meta,
     )

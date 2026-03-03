@@ -21,6 +21,7 @@ from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
+from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.planning.node_planner import NodePlanner
@@ -31,7 +32,6 @@ from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.websearch.facade import WebSearchFacade
-from aethergraph.src.aethergraph.services.llm.generic_client import GenericLLMClient
 
 from .base_service import _ServiceHandle
 from .bound_memory import BoundMemoryAdapter
