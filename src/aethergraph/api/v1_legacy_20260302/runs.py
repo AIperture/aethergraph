@@ -402,9 +402,14 @@ async def get_run_snapshot(
         raw_edges = snap.state.get("edges") or []
         if isinstance(raw_edges, list):
             snapshot_edges = [
-                {"source": e.get("from"), "target": e.get("to")}
+                {
+                    "source": e.get("from", e.get("source")),
+                    "target": e.get("to", e.get("target")),
+                }
                 for e in raw_edges
-                if isinstance(e, dict) and "from" in e and "to" in e
+                if isinstance(e, dict)
+                and (e.get("from") or e.get("source"))
+                and (e.get("to") or e.get("target"))
             ]
 
     # --- Load static TaskGraph spec when snapshot does not include explicit edges ---

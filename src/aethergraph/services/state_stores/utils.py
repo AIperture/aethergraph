@@ -17,6 +17,7 @@ async def snapshot_from_graph(
     spec_hash: str,
     state_obj,
     *,
+    graph_obj=None,
     artifacts=None,  # AsyncArtifactStore or None
     allow_externalize: bool = False,
     include_wait_spec: bool = True,
@@ -25,6 +26,7 @@ async def snapshot_from_graph(
         state_obj,
         run_id=run_id,
         graph_id=graph_id,
+        graph_obj=graph_obj,
         artifacts=artifacts,
         allow_externalize=allow_externalize,
         include_wait_spec=include_wait_spec,

@@ -474,6 +474,7 @@ async def run_async(
                         rev=graph.state.rev,
                         spec_hash=hash_spec(spec),
                         state_obj=graph.state,
+                        graph_obj=graph,
                         artifacts=artifacts,
                         allow_externalize=False,  # FIXME: artifact writer async loop error; set False to *avoid* writing artifacts during snapshot
                         include_wait_spec=True,

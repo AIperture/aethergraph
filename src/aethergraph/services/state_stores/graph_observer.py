@@ -123,6 +123,7 @@ class PersistenceObserver:
                 rev=graph.state.rev,
                 spec_hash=self.spec_hash,
                 state_obj=graph.state,
+                graph_obj=graph,
                 artifacts=self.artifact_store,
                 allow_externalize=False,  # keep snapshots JSON-only (opaque refs)
                 include_wait_spec=True,
