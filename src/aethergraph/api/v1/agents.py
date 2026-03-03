@@ -62,6 +62,7 @@ async def list_agents(
             continue
 
         meta = reg.get_meta(nspace="agent", name=name, include_global=True) or {}
+        # Only scope-owned (non-global) entries are deletable for this caller.
         scoped_meta = reg.get_meta(nspace="agent", name=name, include_global=False)
         agent_id = meta.get("id", name)
 
@@ -92,6 +93,7 @@ async def get_agent(
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", agent_id))
+    # If metadata exists in caller scope (not just global), allow delete UI.
     scoped_meta = reg.get_meta(nspace="agent", name=agent_id, include_global=False)
     return AgentDescriptor(
         id=meta.get("id", agent_id),

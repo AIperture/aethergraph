@@ -64,7 +64,14 @@ async def list_apps(
             # Defensive: ignore malformed keys
             continue
 
+        # `include_global=True` returns metadata from either:
+        # - caller scope, or
+        # - global scope (including built-ins)
+        # Use this for display data.
         meta = reg.get_meta(nspace="app", name=name, include_global=True) or {}
+
+        # `include_global=False` returns metadata only from caller scope.
+        # If present, this app is caller-owned and can be deleted.
         scoped_meta = reg.get_meta(nspace="app", name=name, include_global=False)
         app_id = meta.get("id", name)
         graph_id = meta.get("graph_id", name)
@@ -97,6 +104,7 @@ async def get_app(
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", app_id))
+    # If metadata exists in caller scope (not just global), allow delete UI.
     scoped_meta = reg.get_meta(nspace="app", name=app_id, include_global=False)
 
     return AppDescriptor(
