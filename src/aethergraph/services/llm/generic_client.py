@@ -243,7 +243,7 @@ class GenericLLMClient(LLMClientProtocol):
         loop = asyncio.get_running_loop()
 
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = httpx.AsyncClient(timeout=self._timeout)
             self._bound_loop = loop
             return
 
@@ -769,8 +769,19 @@ class GenericLLMClient(LLMClientProtocol):
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
 
+        request_timeout = kw.get("request_timeout_s")
+        if request_timeout is None:
+            request_timeout = kw.get("timeout")
+        if request_timeout is None and max_output_tokens is not None and max_output_tokens >= 2048:
+            request_timeout = max(float(self._timeout), 180.0)
+
         async def _call():
-            r = await self._client.post(url, headers=headers, json=body)
+            r = await self._client.post(
+                url,
+                headers=headers,
+                json=body,
+                timeout=request_timeout,
+            )
             try:
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:

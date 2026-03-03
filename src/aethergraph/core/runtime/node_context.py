@@ -7,6 +7,7 @@ from aethergraph.contracts.services.execution import (
     CodeExecutionRequest,
     CodeExecutionResult,
     ExecutionService,
+    Language,
 )
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.run_types import (
@@ -24,6 +25,7 @@ from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.planning.node_planner import NodePlanner
+from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.scope.scope import Scope
 from aethergraph.services.skills.skill_registry import SkillRegistry
@@ -60,7 +62,7 @@ class NodeContext:
         self,
         code: str,
         *,
-        language: str = "python",
+        language: Language = "python",
         timeout_s: float = 30.0,
         args: list[str] | None = None,
         workdir: str | None = None,
@@ -314,6 +316,8 @@ class NodeContext:
         return self._planner_facade
 
     def logger(self):
+        if not self.services.logger:
+            raise RuntimeError("Logger service not available")
         return self.services.logger.for_node_ctx(
             run_id=self.run_id, node_id=self.node_id, graph_id=self.graph_id
         )
@@ -353,6 +357,11 @@ class NodeContext:
         if not self.services.skills:
             raise RuntimeError("NodeContext.services.skills is not configured")
         return self.services.skills
+
+    def registry(self) -> RegistryFacade:
+        if not self.services.registry:
+            raise RuntimeError("NodeContext.services.registry is not configured")
+        return self.services.registry
 
     def channel(self, channel_key: str | None = None):
         """
@@ -499,6 +508,9 @@ class NodeContext:
         """
         svc = self.services.llm
 
+        if svc is None:
+            raise RuntimeError("LLM service not available")
+
         if (
             provider is None
             and model is None
@@ -558,6 +570,8 @@ class NodeContext:
             to `context.llm(profile=...)`.
         """
         svc = self.services.llm
+        if svc is None:
+            raise RuntimeError("LLM service not available")
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
 
     def mcp(self, name):
@@ -579,6 +593,8 @@ class NodeContext:
 
     def prepare_wait_for_resume(self, token: str):
         # creates and registers a Future for this token without awaiting
+        if not self.services.wait_registry:
+            raise RuntimeError("WaitRegistry missing on context/runtime")
         return self.services.wait_registry.register(token)
 
     def clock(self):

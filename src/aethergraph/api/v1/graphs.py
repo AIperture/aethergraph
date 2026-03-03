@@ -56,18 +56,37 @@ async def list_graphs(
         if ns != GRAPH_NS:
             continue
 
-        graph_obj = reg.get_graph(name=name, version=version)
-        spec = getattr(graph_obj, "spec", None)
-
         meta = reg.get_meta(nspace=GRAPH_NS, name=name, version=version) or {}
         meta_flow_id: str | None = meta.get("flow_id")
         meta_entrypoint: bool = bool(meta.get("entrypoint", False))
         meta_tags = list(meta.get("tags", []))
+        meta_inputs = meta.get("inputs")
+        meta_outputs = meta.get("outputs")
 
         # flow filter
         if flow_id is not None and meta_flow_id != flow_id:
             continue
 
+        if meta_inputs is not None or meta_outputs is not None:
+            inputs = list(meta_inputs or [])
+            outputs = list(meta_outputs or [])
+            items.append(
+                GraphListItem(
+                    graph_id=name,
+                    name=name,
+                    description=None,
+                    inputs=inputs,
+                    outputs=outputs,
+                    tags=meta_tags or ["graph"],
+                    kind="graph",
+                    flow_id=meta_flow_id,
+                    entrypoint=meta_entrypoint,
+                )
+            )
+            continue
+
+        graph_obj = reg.get_graph(name=name, version=version)
+        spec = getattr(graph_obj, "spec", None)
         if spec is None:
             items.append(
                 GraphListItem(

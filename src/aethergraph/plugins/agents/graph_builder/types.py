@@ -69,6 +69,10 @@ class GraphBuilderState:
     last_generated_code: str | None = None
     last_generated_filename: str | None = None
 
+    # last registered app metadata
+    last_registered_app_id: str | None = None
+    last_registered_app_version: str | None = None
+
 
 STATE_KEY = "ag.graph_builder.state"  # stable key for memory state snapshots
 

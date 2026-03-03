@@ -102,33 +102,55 @@ async def _build_env(
 
 
 # ---------- materialization ----------
-def _materialize_task_graph(target) -> Any:
+def _materialize_target(target) -> Any:
     """
     Accept:
-      - TaskGraph instance (has io_signature attr)
-      - graph builder object with .build()
-      - a callable builder that returns a TaskGraph when invoked with no args
+      - TaskGraph instance
+      - GraphFunction instance
+      - graph/graphfn builders marked with __ag_builder__
+      - builder object with .build()
+      - a callable builder that returns a TaskGraph/GraphFunction when invoked with no args
     """
-    # already a TaskGraph
-    if hasattr(target, "io_signature"):
+    if isinstance(target, (TaskGraph, GraphFunction)):  # noqa: UP038
         return target
 
-    # builder pattern with .build()
+    # explicit lazy builder marker used by registry entries
+    if getattr(target, "__ag_builder__", False) and callable(target):
+        built = target()
+        if isinstance(built, (TaskGraph, GraphFunction)):  # noqa: UP038
+            return built
+
+    # already graph-like by duck typing
+    if hasattr(target, "io_signature") and hasattr(target, "spec"):
+        return target
+
+    # builder pattern with .build() - expected for TaskGraph builders
     if hasattr(target, "build") and callable(target.build):
         g = target.build()
-        if hasattr(g, "io_signature"):
+        if isinstance(g, (TaskGraph, GraphFunction)):  # noqa: UP038
+            return g
+        if hasattr(g, "io_signature") and hasattr(g, "spec"):
             return g
 
-    # callable builder that returns a TaskGraph
+    # callable builder that returns a TaskGraph or GraphFunction
     if callable(target):
         g = target()
-        if hasattr(g, "io_signature"):
+        if isinstance(g, (TaskGraph, GraphFunction)):  # noqa: UP038
+            return g
+        if hasattr(g, "io_signature") and hasattr(g, "spec"):
             return g
 
     raise TypeError(
-        "run_async: target must be a TaskGraph instance, a TaskGraph builder, "
-        "or a callable returning a TaskGraph."
+        "run_async: target must be a TaskGraph/GraphFunction instance, "
+        "a graph builder, or a callable returning one."
     )
+
+
+def _materialize_task_graph(target) -> TaskGraph:
+    graph = _materialize_target(target)
+    if isinstance(graph, TaskGraph):  # noqa: UP038
+        return graph
+    raise TypeError("run_async: target resolved to GraphFunction where TaskGraph was required.")
 
 
 def _resolve_graph_outputs(
@@ -333,6 +355,8 @@ async def run_async(
     """
 
     inputs = inputs or {}
+    target = _materialize_target(target)
+
     # GraphFunction path
     if isinstance(target, GraphFunction):
         inherited_identity = identity

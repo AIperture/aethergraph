@@ -372,15 +372,20 @@ def graph_fn(
     def decorator(fn: Callable) -> GraphFunction:
         agent_id = as_agent.get("id") if as_agent else None
         app_id = as_app.get("id") if as_app else None
-        gf = GraphFunction(
-            name=name,
-            fn=fn,
-            inputs=inputs,
-            outputs=outputs,
-            version=version,
-            agent_id=agent_id,
-            app_id=app_id,
-        )
+
+        def _build_graph_fn() -> GraphFunction:
+            return GraphFunction(
+                name=name,
+                fn=fn,
+                inputs=inputs,
+                outputs=outputs,
+                version=version,
+                agent_id=agent_id,
+                app_id=app_id,
+            )
+
+        _build_graph_fn.__ag_builder__ = True
+        gf = _build_graph_fn()
         registry = current_registry()
 
         if registry is None:
@@ -407,7 +412,7 @@ def graph_fn(
             nspace="graphfn",
             name=name,
             version=version,
-            obj=gf,
+            obj=_build_graph_fn,
             meta=graph_meta,
         )
 
@@ -424,7 +429,7 @@ def graph_fn(
                 nspace="agent",
                 name=agent_meta["id"],
                 version=version,
-                obj=gf,
+                obj=_build_graph_fn,
                 meta=agent_meta,
             )
 
@@ -440,7 +445,7 @@ def graph_fn(
                 nspace="app",
                 name=app_meta["id"],
                 version=version,
-                obj=gf,
+                obj=_build_graph_fn,
                 meta=app_meta,
             )
 

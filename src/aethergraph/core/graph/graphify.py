@@ -204,6 +204,7 @@ def graphify(
                         )
             return g
 
+        _build.__ag_builder__ = True
         _build.__name__ = fn.__name__
         _build.build = _build  # alias
         _build.graph_name = name
@@ -278,7 +279,7 @@ def graphify(
             nspace="graph",
             name=name,
             version=version,
-            obj=_build(),
+            obj=_build,
             meta=graph_meta,
         )
 
@@ -294,7 +295,7 @@ def graphify(
                 nspace="agent",
                 name=agent_meta["id"],
                 version=version,
-                obj=_build(),
+                obj=_build,
                 meta=agent_meta,
             )
 
@@ -310,7 +311,7 @@ def graphify(
                 nspace="app",
                 name=app_meta["id"],
                 version=version,
-                obj=_build(),
+                obj=_build,
                 meta=app_meta,
             )
 

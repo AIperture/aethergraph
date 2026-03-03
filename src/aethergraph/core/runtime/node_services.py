@@ -13,6 +13,7 @@ from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.mcp.service import MCPService
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.planning.planner_service import PlannerService
+from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
@@ -45,3 +46,4 @@ class NodeServices:
     kb: NodeKB | None = None  # NodeKB
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
     web_search: WebSearchFacade | None = None  # Web search facade
+    registry: RegistryFacade | None = None  # Scope-bound runtime registry facade

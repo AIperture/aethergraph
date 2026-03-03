@@ -182,7 +182,7 @@ CHAT_V1_REQUIRED_INPUTS = [
 
 def normalize_agent_mode(agent_cfg: AgentConfig) -> str:
     # Default behavior: if user doesn't specify, it's chat_v1
-    mode = (agent_cfg.mode or "chat_v1").strip()
+    mode = (agent_cfg.get("mode") or "chat_v1").strip()
 
     if mode not in SUPPORTED_AGENT_MODES:
         # this will be caught and turned into status="error" for now
@@ -198,7 +198,7 @@ SUPPORTED_APP_MODES = {"no_input_v1"}
 
 
 def normalize_app_mode(app_cfg: AppConfig) -> str:
-    mode = (app_cfg.mode or "no_input_v1").strip()
+    mode = (app_cfg.get("mode") or "no_input_v1").strip()
     if mode not in SUPPORTED_APP_MODES:
         raise ValueError(
             f"Unsupported app mode '{mode}'. "

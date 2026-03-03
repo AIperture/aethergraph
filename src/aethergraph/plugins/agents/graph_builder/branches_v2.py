@@ -6,6 +6,11 @@ from typing import Any
 
 from aethergraph.contracts.services.channel import Button
 from aethergraph.core.runtime.node_context import NodeContext
+from aethergraph.plugins.agents.graph_builder.registration_utils import (
+    _ensure_graph_registered_from_code,
+    _propose_app_config_via_llm,
+    _resolve_registration_target,
+)
 from aethergraph.services.llm.generic_client import GenericLLMClient
 
 from .types import (
@@ -268,7 +273,11 @@ async def _handle_generate_v2(
 
     await chan.send_phase(phase="thinking", status="active", label="Generating code artifact...")
     try:
-        resp_text, _usage = await llm.chat(messages=messages, max_output_tokens=4096)
+        resp_text, _usage = await llm.chat(
+            messages=messages,
+            max_output_tokens=4096,
+            request_timeout_s=240,
+        )
     except Exception:
         await chan.send_phase(phase="thinking", status="failed", label="Code generation failed.")
         raise
@@ -341,15 +350,109 @@ async def _handle_generate_v2(
     )
 
 
-async def _handle_register_app_v2(*, message: str, context: NodeContext) -> str:
-    msg = (message or "").strip()
+async def _handle_register_app_v2(
+    *,
+    message: str,
+    files: list[Any] | None,
+    context: NodeContext,
+) -> str:
+    """
+    Register the selected graph as an app so the UI can discover it.
+
+    - Chooses a graph (files → last generated).
+    - Ensures the graph is actually registered (by executing its code if needed).
+    - Uses LLM to propose an AppConfig-like dict.
+    - Registers it in the UnifiedRegistry under nspace='app'.
+    - Stores last_registered_app info in builder state.
+    """
+    logger = context.logger()
+    chan = context.ui_session_channel()
+
     state = await _load_state(context=context, level="user")
+
+    # Clear pending action if we were waiting for registration decision
     if state.pending_action == "awaiting_register_decision":
         state.pending_action = None
+
+    graph_name, code_text = await _resolve_registration_target(
+        context=context,
+        files=files,
+    )
+
+    if not graph_name:
         await _save_state(context=context, state=state)
-    if msg:
-        return f"I have registered the generated app flow. Request noted: {msg}"
-    return "I have registered..."
+        msg = (
+            "I couldn't find a graph to register.\n\n"
+            "- Provide a file containing a @graphify/@graph_fn, or\n"
+            "- Re-run generation so I have a recent graph to register."
+        )
+        return msg
+
+    # 🔑 Make sure the graph actually exists in the registry
+    await _ensure_graph_registered_from_code(
+        context=context,
+        graph_name=graph_name,
+        code_text=code_text,
+    )
+
+    plan = state.last_plan_json or state.pending_plan_json or {}
+    app_config = await _propose_app_config_via_llm(
+        context=context,
+        graph_name=graph_name,
+        plan=plan,
+        user_message=message or "",
+    )
+
+    app_id = app_config.get("id") or graph_name
+    app_version = "0.1.0"  # you can evolve this to be smarter later
+
+    # ---- register in UnifiedRegistry ----
+    registry = context.registry()
+
+    meta: dict[str, Any] = {
+        "flow_id": app_config.get("flow_id") or graph_name,
+        "graph_name": graph_name,
+        "builder": "graph_builder_v2",
+    }
+    if state.last_generated_filename:
+        meta["filename"] = state.last_generated_filename
+    if state.last_generated_files:
+        meta["generated_files"] = state.last_generated_files
+
+    registry.register(
+        nspace="app",
+        name=app_id,
+        version=app_version,
+        obj=app_config,
+        meta=meta,
+    )
+
+    # Optional: tag a 'stable' alias on first registration
+    try:
+        registry.alias(nspace="app", name=app_id, tag="stable", to_version=app_version)
+    except Exception:
+        logger.debug(
+            "graph_builder_v2: could not alias app %s@%s as 'stable'",
+            app_id,
+            app_version,
+        )
+
+    # Update builder state for future convenience
+    state.last_registered_app_id = app_id
+    state.last_registered_app_version = app_version
+    await _save_state(context=context, state=state)
+
+    await chan.send_text(
+        f"Registered app **{app_config.get('name', app_id)}** "
+        f"(id=`{app_id}`, flow_id=`{app_config.get('flow_id', graph_name)}`).\n\n"
+        "You can now run it from the App Gallery."
+    )
+
+    return (
+        f"I've registered the app **{app_config.get('name', app_id)}** "
+        f"with id `{app_id}`. You should now see it in the App Gallery, "
+        f"backed by flow_id `{app_config.get('flow_id', graph_name)}`."
+    )
 
 
 async def _handle_chat_v2(*, message: str, context: NodeContext) -> str:

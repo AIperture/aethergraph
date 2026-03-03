@@ -384,20 +384,13 @@ async def get_run_snapshot(
         flow_id = meta.get("flow_id")
         entrypoint = bool(meta.get("entrypoint", False))
 
-    # --- Load static TaskGraph spec if it exists ---
-    spec = None
-    if reg is not None:
-        try:
-            graph_obj = reg.get_graph(name=graph_id, version=None)
-            spec = getattr(graph_obj, "spec", None)
-        except KeyError:
-            spec = None
-
     # --- Load latest GraphSnapshot (if we have a state store) ---
     snap = None
     if state_store is not None:
         snap = await state_store.load_latest_snapshot(run_id)
 
+    # print(f"Run {run_id} snapshot: record status={rec.status}, graph_id={graph_id}, graph_kind={graph_kind}, flow_id={flow_id}, entrypoint={entrypoint}")
+    # print(snap)
     nodes_state: dict[str, dict[str, Any]] = {}
     snapshot_edges: list[dict[str, str]] = []
 
@@ -413,6 +406,15 @@ async def get_run_snapshot(
                 for e in raw_edges
                 if isinstance(e, dict) and "from" in e and "to" in e
             ]
+
+    # --- Load static TaskGraph spec when snapshot does not include explicit edges ---
+    spec = None
+    if not snapshot_edges and graph_kind == "taskgraph" and reg is not None:
+        try:
+            graph_obj = reg.get_graph(name=graph_id, version=None)
+            spec = getattr(graph_obj, "spec", None)
+        except KeyError:
+            spec = None
 
     # --- Build edges ---
     edges: list[dict[str, str]] = []

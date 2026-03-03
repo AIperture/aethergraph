@@ -130,6 +130,7 @@ async def graph_builder(
     elif decision["branch"] == GraphBuilderBranch.REGISTER_APP:
         reply = await _handle_register_app_v2(
             message=raw_message,
+            files=[*code_files, *text_files, *other_files],
             context=context,
         )
 

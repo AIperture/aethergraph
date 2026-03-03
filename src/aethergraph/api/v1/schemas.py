@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field, RootModel  # type: ignore
 
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility, SessionKind
 
