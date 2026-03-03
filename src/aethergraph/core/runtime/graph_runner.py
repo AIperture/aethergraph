@@ -34,7 +34,7 @@ def _get_container():
     return ensure_services_installed(build_default_container)
 
 
-async def _attach_persistence(graph, env, spec, snapshot_every=1) -> PersistenceObserver:
+async def _attach_persistence(graph, env, spec, snapshot_every=1) -> PersistenceObserver | None:
     """
     Wire the centralized state_store to the graph via PersistenceObserver.
     Returns the observer instance so caller can optionally force a final snapshot.
@@ -46,7 +46,7 @@ async def _attach_persistence(graph, env, spec, snapshot_every=1) -> Persistence
 
     obs = PersistenceObserver(
         store=store,
-        artifact_store=getattr(env.container, "artifacts", None),
+        artifact_store=env.container.artifacts,
         spec_hash=hash_spec(spec),
         snapshot_every=snapshot_every,
     )
@@ -153,7 +153,7 @@ def _materialize_task_graph(target) -> TaskGraph:
     raise TypeError("run_async: target resolved to GraphFunction where TaskGraph was required.")
 
 
-def _resolve_graph_outputs(
+async def _resolve_graph_outputs(
     graph,
     inputs: dict[str, Any],
     env: RuntimeEnv,
@@ -173,8 +173,10 @@ def _resolve_graph_outputs(
         ]
         continuations = []
         if env.continuation_store and hasattr(env.continuation_store, "get"):
-            for nid in waiting:
-                cont = env.continuation_store.get(run_id=env.run_id, node_id=nid)
+            conts = await asyncio.gather(
+                *[env.continuation_store.get(run_id=env.run_id, node_id=nid) for nid in waiting]
+            )
+            for nid, cont in zip(waiting, conts, strict=False):
                 if cont:
                     continuations.append(
                         {
@@ -194,9 +196,9 @@ def _resolve_graph_outputs(
     return result
 
 
-def _resolve_graph_outputs_or_waits(graph, inputs, env, *, raise_on_waits: bool = True):
+async def _resolve_graph_outputs_or_waits(graph, inputs, env, *, raise_on_waits: bool = True):
     try:
-        return _resolve_graph_outputs(graph, inputs, env)
+        return await _resolve_graph_outputs(graph, inputs, env)
     except GraphHasPendingWaits as e:
         if raise_on_waits:
             raise
@@ -249,9 +251,7 @@ async def load_latest_snapshot_json(store, run_id: str) -> dict[str, Any] | None
     }
 
 
-def _register_metering_context(
-    env: RuntimeEnv, target: GraphFunction | TaskGraph | Any
-) -> dict[str, Any]:
+def _register_metering_context(env: RuntimeEnv, target: GraphFunction | TaskGraph | Any):
     """
     Build a metering context dict from the RuntimeEnv.
     """
@@ -428,7 +428,7 @@ async def run_async(
             if snap:
                 _seed_outputs_from_snapshot(env, snap)
                 if _is_graph_complete(snap):
-                    return _resolve_graph_outputs(graph, inputs, env)
+                    return await _resolve_graph_outputs(graph, inputs, env)
 
             # strict policy: block resume if any non-JSON / __aether_ref__ is present
             assert_snapshot_json_only(env.run_id, snap_json, mode="reuse_only")
@@ -481,7 +481,7 @@ async def run_async(
                     await store.save_snapshot(snap)
 
         # Resolve graph-level outputs (will raise  if waits)
-        return _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
+        return await _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
     finally:
         # reset metering context
         current_meter_context.reset(token)
@@ -512,7 +512,7 @@ class _LoopThread:
     def __init__(self):
         self._ev = threading.Event()
         self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._loop = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._thread.start()
         self._ev.wait()
 
@@ -525,12 +525,18 @@ class _LoopThread:
 
     def submit_old(self, coro):
         # this will block terminal until coro is done
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("Event loop not initialized")
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
         return fut.result()
 
     def submit(self, coro):
         # this will allow KeyboardInterrupt to propagate -> still not perfect. Use async main if possible.
-        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("Event loop not initialized")
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
         try:
             return fut.result()
         except KeyboardInterrupt:
@@ -538,10 +544,10 @@ class _LoopThread:
             fut.cancel()
 
             def _cancel_all():
-                for t in asyncio.all_tasks(self._loop):
+                for t in asyncio.all_tasks(loop):
                     t.cancel()
 
-            self._loop.call_soon_threadsafe(_cancel_all)
+            loop.call_soon_threadsafe(_cancel_all)
             raise
 
 

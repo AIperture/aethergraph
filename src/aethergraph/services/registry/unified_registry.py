@@ -7,7 +7,7 @@ from typing import Any
 
 try:
     # Prefer packaging for correct PEP 440 / pre-release ordering
-    from packaging.version import Version
+    from packaging.version import Version  # type: ignore
 
     _has_packaging = True
 except Exception:
