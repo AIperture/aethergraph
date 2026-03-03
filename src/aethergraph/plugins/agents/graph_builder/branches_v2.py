@@ -32,7 +32,7 @@ CHECKPOINT_SKILL_ID = "ag-graph-builder-checkpoint-pattern"
 
 async def _recent_chat_for_llm(*, context: NodeContext, limit: int = 20) -> list[dict[str, str]]:
     mem = context.memory()
-    rows = await mem.recent_chat(limit=limit)
+    rows = await mem.recent_chat(limit=limit)  # type: ignore
     msgs: list[dict[str, str]] = []
     for r in rows:
         role = (r.get("role") or "user").lower()

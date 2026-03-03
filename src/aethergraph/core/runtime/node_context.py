@@ -9,7 +9,6 @@ from aethergraph.contracts.services.execution import (
     ExecutionService,
     Language,
 )
-from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
@@ -32,6 +31,7 @@ from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.websearch.facade import WebSearchFacade
+from aethergraph.src.aethergraph.services.llm.generic_client import GenericLLMClient
 
 from .base_service import _ServiceHandle
 from .bound_memory import BoundMemoryAdapter
@@ -466,7 +466,7 @@ class NodeContext:
         api_key: str | None = None,
         azure_deployment: str | None = None,
         timeout: float | None = None,
-    ) -> LLMClientProtocol:
+    ) -> GenericLLMClient:
         """
         Retrieve or configure an LLM client for this context.
 
