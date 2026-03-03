@@ -108,10 +108,6 @@ class RuntimeEnv:
         return self.container.llm
 
     @property
-    def rag_facade(self):
-        return self.container.rag
-
-    @property
     def mcp_service(self):
         return self.container.mcp
 
@@ -262,6 +258,7 @@ class RuntimeEnv:
             registry=RegistryFacade(
                 registry=self.registry,
                 scope=mem_scope or node_scope,
+                registration_service=getattr(self.container, "registration_service", None),
             ),
         )
         return ExecutionContext(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
@@ -22,6 +23,7 @@ from .types import (
     _load_state,
     _save_state,
 )
+from .utils import BuilderFileRef, _classify_builder_file
 
 NODE_API_SKILL_ID = "ag-graph-builder-context-node-api"
 CHANNEL_API_SKILL_ID = "ag-graph-builder-channel-api"
@@ -329,6 +331,10 @@ async def _handle_generate_v2(
 
     latest_state = await _load_state(context=context, level="user")
     merged_plan = new_plan or plan
+    last_artifact = getattr(context.artifacts(), "last_artifact", None)
+    generated_artifact_id = getattr(last_artifact, "artifact_id", None) if last_artifact else None
+    generated_artifact_uri = getattr(last_artifact, "uri", None) if last_artifact else None
+    generated_code_sha256 = hashlib.sha256(code.encode("utf-8")).hexdigest()
     if merged_plan:
         latest_state.plan_ver = max(latest_state.plan_ver, 1)
         latest_state.graph_ver += 1
@@ -339,6 +345,9 @@ async def _handle_generate_v2(
         latest_state.pending_action = "awaiting_register_decision"
         latest_state.last_generated_code = code
         latest_state.last_generated_filename = filename
+        latest_state.last_generated_artifact_id = generated_artifact_id
+        latest_state.last_generated_artifact_uri = generated_artifact_uri
+        latest_state.last_generated_code_sha256 = generated_code_sha256
         latest_state.last_generated_files = [{"name": filename, "kind": "python"}]
         await _save_state(context=context, state=latest_state)
 
@@ -350,34 +359,191 @@ async def _handle_generate_v2(
     )
 
 
+def _to_builder_file_ref(file_obj: Any) -> BuilderFileRef | None:
+    if isinstance(file_obj, BuilderFileRef):
+        return file_obj
+
+    if isinstance(file_obj, dict):
+        name = file_obj.get("name") or file_obj.get("filename")
+        mimetype = file_obj.get("mimetype") or file_obj.get("type") or file_obj.get("content_type")
+        source = file_obj.get("source")
+        artifact_id = file_obj.get("artifact_id")
+        uri = file_obj.get("uri")
+        kind = file_obj.get("kind")
+    else:
+        name = getattr(file_obj, "name", None) or getattr(file_obj, "filename", None)
+        mimetype = (
+            getattr(file_obj, "mimetype", None)
+            or getattr(file_obj, "type", None)
+            or getattr(file_obj, "content_type", None)
+        )
+        source = getattr(file_obj, "source", None)
+        artifact_id = getattr(file_obj, "artifact_id", None)
+        uri = getattr(file_obj, "uri", None)
+        kind = getattr(file_obj, "kind", None)
+
+    if source not in {"upload", "artifact"}:
+        source = "artifact" if artifact_id else "upload"
+    if kind not in {"code", "notebook", "text", "other"}:
+        kind = _classify_builder_file(name=name, mimetype=mimetype)
+
+    return BuilderFileRef(
+        name=name,
+        mimetype=mimetype,
+        source=source,
+        artifact_id=artifact_id,
+        uri=uri,
+        kind=kind,
+    )
+
+
+def _normalize_builder_file_refs(files: list[Any] | None) -> list[BuilderFileRef]:
+    out: list[BuilderFileRef] = []
+    for f in files or []:
+        ref = _to_builder_file_ref(f)
+        if ref is not None:
+            out.append(ref)
+    return out
+
+
+def _register_candidate_score(f: BuilderFileRef) -> tuple[int, int, int]:
+    return (
+        2 if f.source == "artifact" else 0,
+        10 if f.kind == "code" else (5 if f.kind == "notebook" else (2 if f.kind == "text" else 0)),
+        1 if (f.artifact_id or f.uri) else 0,
+    )
+
+
+async def _load_registration_source_text(
+    *, context: NodeContext, file_ref: BuilderFileRef
+) -> tuple[str | None, str | None]:
+    artifacts = context.artifacts()
+    if file_ref.artifact_id:
+        try:
+            return await artifacts.load_text_by_id(file_ref.artifact_id), None
+        except Exception as e:
+            return None, f"artifact_id `{file_ref.artifact_id}`: {e!r}"
+    if file_ref.uri:
+        try:
+            return await artifacts.load_text(uri=file_ref.uri), None
+        except Exception as e:
+            return None, f"uri `{file_ref.uri}`: {e!r}"
+    return None, "missing artifact_id and uri"
+
+
+def _format_validation_issues(issues: list[Any]) -> str:
+    lines: list[str] = []
+    for issue in issues:
+        code = getattr(issue, "code", "validation_issue")
+        message = getattr(issue, "message", str(issue))
+        lines.append(f"- {code}: {message}")
+    return "\n".join(lines)
+
+
 async def _handle_register_app_v2(
     *,
     message: str,
-    files: list[Any] | None,
+    files: list[BuilderFileRef] | None,
     context: NodeContext,
 ) -> str:
     """
     Register the selected graph as an app so the UI can discover it.
 
-    - Chooses a graph (files → last generated).
-    - Ensures the graph is actually registered (by executing its code if needed).
-    - Uses LLM to propose an AppConfig-like dict.
-    - Registers it in the UnifiedRegistry under nspace='app'.
-    - Stores last_registered_app info in builder state.
+    The registration path is:
+    1) Normalize all file inputs into BuilderFileRef.
+    2) Validate source before registration.
+    3) Prefer register_by_artifact(..., app_config=...) when artifact/uri is available.
+    4) Fall back to in-memory registration if only generated source exists.
     """
     logger = context.logger()
     chan = context.ui_session_channel()
+    registry = context.registry()
 
     state = await _load_state(context=context, level="user")
-
-    # Clear pending action if we were waiting for registration decision
     if state.pending_action == "awaiting_register_decision":
         state.pending_action = None
 
-    graph_name, code_text = await _resolve_registration_target(
-        context=context,
-        files=files,
-    )
+    normalized_files = _normalize_builder_file_refs(files)
+    if state.last_generated_artifact_id or state.last_generated_artifact_uri:
+        normalized_files.append(
+            BuilderFileRef(
+                name=state.last_generated_filename,
+                mimetype="text/x-python",
+                source="artifact",
+                artifact_id=state.last_generated_artifact_id,
+                uri=state.last_generated_artifact_uri,
+                kind="code",
+            )
+        )
+
+    graph_name: str | None = None
+    code_text: str | None = None
+    selected_ref: BuilderFileRef | None = None
+    validation_notes: list[str] = []
+
+    prioritized_files = sorted(normalized_files, key=_register_candidate_score, reverse=True)
+    for file_ref in prioritized_files:
+        if not (file_ref.artifact_id or file_ref.uri):
+            continue
+
+        source_text, load_error = await _load_registration_source_text(
+            context=context,
+            file_ref=file_ref,
+        )
+        if not source_text:
+            validation_notes.append(
+                f"- Could not load source from `{file_ref.name or '<unnamed>'}` ({load_error})."
+            )
+            continue
+
+        vr = registry.validate_graphify_source(
+            source_text,
+            filename=file_ref.name or "artifact.py",
+            strict=False,
+        )
+        if not vr.ok:
+            validation_notes.append(
+                f"- Source in `{file_ref.name or '<unnamed>'}` is not a valid @graphify/@graph_fn module:\n"
+                f"{_format_validation_issues(vr.issues)}"
+            )
+            continue
+
+        probe = await registry.register_by_artifact(
+            artifact_id=file_ref.artifact_id,
+            uri=file_ref.uri,
+            persist=False,
+            strict=False,
+        )
+        if not probe.success or not probe.graph_name:
+            validation_notes.append(
+                f"- Source in `{file_ref.name or '<unnamed>'}` could not be registered: "
+                f"{'; '.join(probe.errors) if probe.errors else 'unknown error'}"
+            )
+            continue
+
+        graph_name = probe.graph_name
+        code_text = source_text
+        selected_ref = file_ref
+        break
+
+    if not graph_name:
+        graph_name, code_text = await _resolve_registration_target(
+            context=context,
+            files=normalized_files,
+        )
+        if code_text:
+            vr = registry.validate_graphify_source(
+                code_text,
+                filename=(state.last_generated_filename or "generated.py"),
+                strict=False,
+            )
+            if not vr.ok:
+                await _save_state(context=context, state=state)
+                return (
+                    "Registration failed because the candidate source is not a valid "
+                    "@graphify/@graph_fn module.\n\n"
+                    f"{_format_validation_issues(vr.issues)}"
+                )
 
     if not graph_name:
         await _save_state(context=context, state=state)
@@ -386,14 +552,16 @@ async def _handle_register_app_v2(
             "- Provide a file containing a @graphify/@graph_fn, or\n"
             "- Re-run generation so I have a recent graph to register."
         )
+        if validation_notes:
+            msg += "\n\nValidation details:\n" + "\n".join(validation_notes)
         return msg
 
-    # 🔑 Make sure the graph actually exists in the registry
-    await _ensure_graph_registered_from_code(
-        context=context,
-        graph_name=graph_name,
-        code_text=code_text,
-    )
+    if code_text:
+        await _ensure_graph_registered_from_code(
+            context=context,
+            graph_name=graph_name,
+            code_text=code_text,
+        )
 
     plan = state.last_plan_json or state.pending_plan_json or {}
     app_config = await _propose_app_config_via_llm(
@@ -404,30 +572,39 @@ async def _handle_register_app_v2(
     )
 
     app_id = app_config.get("id") or graph_name
-    app_version = "0.1.0"  # you can evolve this to be smarter later
+    app_version = "0.1.0"
+    flow_id = app_config.get("flow_id") or graph_name
 
-    # ---- register in UnifiedRegistry ----
-    registry = context.registry()
+    if selected_ref and (selected_ref.artifact_id or selected_ref.uri):
+        reg_result = await registry.register_by_artifact(
+            artifact_id=selected_ref.artifact_id,
+            uri=selected_ref.uri,
+            app_config=app_config,
+            persist=True,
+            strict=False,
+        )
+        if not reg_result.success:
+            await _save_state(context=context, state=state)
+            return (
+                "I validated the source but registration failed.\n\n"
+                f"Errors:\n- {'; '.join(reg_result.errors) if reg_result.errors else 'unknown error'}"
+            )
+        app_id = reg_result.app_id or app_id
+        app_version = reg_result.version or app_version
+        flow_id = app_config.get("flow_id") or reg_result.graph_name or graph_name
+    else:
+        registry.register(
+            nspace="app",
+            name=app_id,
+            version=app_version,
+            obj=app_config,
+            meta={
+                "flow_id": flow_id,
+                "graph_name": graph_name,
+                "builder": "graph_builder_v2",
+            },
+        )
 
-    meta: dict[str, Any] = {
-        "flow_id": app_config.get("flow_id") or graph_name,
-        "graph_name": graph_name,
-        "builder": "graph_builder_v2",
-    }
-    if state.last_generated_filename:
-        meta["filename"] = state.last_generated_filename
-    if state.last_generated_files:
-        meta["generated_files"] = state.last_generated_files
-
-    registry.register(
-        nspace="app",
-        name=app_id,
-        version=app_version,
-        obj=app_config,
-        meta=meta,
-    )
-
-    # Optional: tag a 'stable' alias on first registration
     try:
         registry.alias(nspace="app", name=app_id, tag="stable", to_version=app_version)
     except Exception:
@@ -437,21 +614,20 @@ async def _handle_register_app_v2(
             app_version,
         )
 
-    # Update builder state for future convenience
     state.last_registered_app_id = app_id
     state.last_registered_app_version = app_version
     await _save_state(context=context, state=state)
 
     await chan.send_text(
         f"Registered app **{app_config.get('name', app_id)}** "
-        f"(id=`{app_id}`, flow_id=`{app_config.get('flow_id', graph_name)}`).\n\n"
+        f"(id=`{app_id}`, flow_id=`{flow_id}`).\n\n"
         "You can now run it from the App Gallery."
     )
 
     return (
         f"I've registered the app **{app_config.get('name', app_id)}** "
         f"with id `{app_id}`. You should now see it in the App Gallery, "
-        f"backed by flow_id `{app_config.get('flow_id', graph_name)}`."
+        f"backed by flow_id `{flow_id}`."
     )
 
 

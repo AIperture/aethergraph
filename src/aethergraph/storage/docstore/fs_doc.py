@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import threading
 from typing import Any
+from urllib.parse import quote, unquote
 
 from aethergraph.contracts.storage.doc_store import DocStore
 
@@ -14,8 +15,19 @@ class FSDocStore(DocStore):
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _encode_doc_id(doc_id: str) -> str:
+        normalized = str(doc_id).replace("\\", "/")
+        return "/".join(quote(part, safe="._-") for part in normalized.split("/"))
+
+    @staticmethod
+    def _decode_doc_id(path_id: str) -> str:
+        normalized = str(path_id).replace("\\", "/")
+        return "/".join(unquote(part) for part in normalized.split("/"))
+
     def _path_for(self, doc_id: str) -> Path:
-        p = self.root / f"{doc_id}.json"
+        encoded = self._encode_doc_id(doc_id)
+        p = self.root / f"{encoded}.json"
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -56,7 +68,7 @@ class FSDocStore(DocStore):
             out = []
             for p in self.root.rglob("*.json"):
                 rel = p.relative_to(self.root)
-                doc_id = str(rel.with_suffix("").as_posix())
+                doc_id = self._decode_doc_id(str(rel.with_suffix("").as_posix()))
                 out.append(doc_id)
             return out
 

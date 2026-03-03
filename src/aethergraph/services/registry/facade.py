@@ -5,6 +5,13 @@ from typing import Any
 
 from aethergraph.services.scope.scope import Scope
 
+from .registration_service import (
+    DeletionResult,
+    RegistrationResult,
+    RegistrationService,
+    ReplayReport,
+    ValidationResult,
+)
 from .registry_key import Key
 from .unified_registry import TenantIdentity, UnifiedRegistry
 
@@ -15,6 +22,7 @@ class RegistryFacade:
 
     registry: UnifiedRegistry
     scope: Scope | None = None
+    registration_service: RegistrationService | None = None
 
     def tenant(self) -> dict[str, str | None] | None:
         if self.scope is None:
@@ -224,4 +232,127 @@ class RegistryFacade:
         return self.registry.list_apps(
             tenant=self._effective_tenant(tenant),
             include_global=include_global,
+        )
+
+    async def register_by_file(
+        self,
+        path: str,
+        *,
+        app_config: dict[str, Any] | None = None,
+        agent_config: dict[str, Any] | None = None,
+        tenant: TenantIdentity = None,
+        persist: bool = True,
+        strict: bool = True,
+    ) -> RegistrationResult:
+        if self.registration_service is None:
+            raise RuntimeError("RegistryFacade.registration_service is not configured")
+        return await self.registration_service.register_by_file(
+            path,
+            app_config=app_config,
+            agent_config=agent_config,
+            tenant=self._effective_tenant(tenant),
+            persist=persist,
+            strict=strict,
+        )
+
+    async def register_by_artifact(
+        self,
+        artifact_id: str | None = None,
+        uri: str | None = None,
+        *,
+        app_config: dict[str, Any] | None = None,
+        agent_config: dict[str, Any] | None = None,
+        tenant: TenantIdentity = None,
+        persist: bool = True,
+        strict: bool = True,
+    ) -> RegistrationResult:
+        if self.registration_service is None:
+            raise RuntimeError("RegistryFacade.registration_service is not configured")
+        return await self.registration_service.register_by_artifact(
+            artifact_id=artifact_id,
+            uri=uri,
+            app_config=app_config,
+            agent_config=agent_config,
+            tenant=self._effective_tenant(tenant),
+            persist=persist,
+            strict=strict,
+        )
+
+    async def register_by_folder(
+        self,
+        folder: str,
+        *,
+        pattern: str = "*.py",
+        recursive: bool = True,
+        tenant: TenantIdentity = None,
+        persist: bool = True,
+        strict: bool = False,
+    ) -> list[RegistrationResult]:
+        if self.registration_service is None:
+            raise RuntimeError("RegistryFacade.registration_service is not configured")
+        return await self.registration_service.register_by_folder(
+            folder,
+            pattern=pattern,
+            recursive=recursive,
+            tenant=self._effective_tenant(tenant),
+            persist=persist,
+            strict=strict,
+        )
+
+    def validate_graphify_source(
+        self,
+        source: str,
+        *,
+        filename: str | None = None,
+        strict: bool = True,
+    ) -> ValidationResult:
+        if self.registration_service is None:
+            raise RuntimeError("RegistryFacade.registration_service is not configured")
+        return self.registration_service.validate_graphify_source(
+            source,
+            filename=filename,
+            strict=strict,
+        )
+
+    async def replay_registered_sources(
+        self,
+        *,
+        tenant: TenantIdentity = None,
+        strict: bool = False,
+    ) -> ReplayReport:
+        if self.registration_service is None:
+            raise RuntimeError("RegistryFacade.registration_service is not configured")
+        return await self.registration_service.replay_registered_sources(
+            tenant=self._effective_tenant(tenant),
+            strict=strict,
+        )
+
+    async def delete_registered_app(
+        self,
+        *,
+        app_id: str,
+        tenant: TenantIdentity = None,
+        keep_runtime_registration: bool = False,
+    ) -> DeletionResult:
+        if self.registration_service is None:
+            raise RuntimeError("RegistryFacade.registration_service is not configured")
+        return await self.registration_service.delete_registered_app(
+            app_id=app_id,
+            tenant=self._effective_tenant(tenant),
+            keep_runtime_registration=keep_runtime_registration,
+        )
+
+    async def delete_registered_agent(
+        self,
+        *,
+        agent_id: str,
+        tenant: TenantIdentity = None,
+        keep_runtime_registration: bool = False,
+    ) -> DeletionResult:
+        if self.registration_service is None:
+            raise RuntimeError("RegistryFacade.registration_service is not configured")
+        return await self.registration_service.delete_registered_agent(
+            agent_id=agent_id,
+            tenant=self._effective_tenant(tenant),
+            keep_runtime_registration=keep_runtime_registration,
         )

@@ -109,6 +109,24 @@ def create_app(
         logger.info(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
         register_skills_from_path(builtin_agent_skills_path)
 
+        # Replay persisted source registrations (tenant/global manifests).
+        replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        replay_report = await container.registration_service.replay_registered_sources(
+            strict=replay_strict
+        )
+        logger.info(
+            "Registry replay complete: total=%s loaded=%s failed=%s",
+            replay_report.total,
+            replay_report.loaded,
+            replay_report.failed,
+        )
+        if replay_report.errors:
+            for err in replay_report.errors:
+                logger.warning("Registry replay error: %s", err)
         try:
             # Hand control back to FastAPI / TestClient
             yield

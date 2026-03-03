@@ -28,6 +28,7 @@ async def list_apps(
     entries = reg.list_apps(include_global=True)
     out: list[AppDescriptor] = []
 
+    print(f"🍎 Found {len(entries)} registered apps for tenant={identity} (including global)")
     for ref, _version in entries.items():
         # ref is "app:<name>"
         try:
@@ -92,7 +93,7 @@ async def get_app(
 async def delete_app(
     app_id: str,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | int]:
     ensure_delete_identity(identity, "apps")
     reg = scoped_registry(identity)
 
@@ -111,5 +112,13 @@ async def delete_app(
             )
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
-    reg.unregister(nspace="app", name=app_id)
-    return {"ok": True, "id": app_id}
+    result = await reg.delete_registered_app(app_id=app_id)
+    if not result.success:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to delete app '{app_id}': "
+                + ("; ".join(result.errors) if result.errors else "unknown error")
+            ),
+        )
+    return {"ok": True, "id": app_id, "removed_entries": result.removed_entries}

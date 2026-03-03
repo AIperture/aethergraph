@@ -20,6 +20,7 @@ from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.services.trigger import TriggerService
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.contracts.storage.trigger_store import TriggerStore
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
@@ -69,6 +70,7 @@ from aethergraph.services.planning.planner_service import PlannerService
 # ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
 from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
+from aethergraph.services.registry.registration_service import RegistrationService
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
 from aethergraph.services.resume.router import ResumeRouter
@@ -102,6 +104,7 @@ from aethergraph.storage.factory import (
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
+from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
 from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
 from aethergraph.storage.triggers.trigger_docstore import DocTriggerStore
 
@@ -170,9 +173,12 @@ class DefaultContainer:
     trigger_store: TriggerStore
 
     # storage and artifacts
+    doc_store: DocStore
     kv_hot: EphemeralKV
     artifacts: AsyncArtifactStore
     artifact_index: AsyncArtifactIndex
+    registration_manifest_store: RegistrationManifestStore
+    registration_service: RegistrationService
     eventlog: EventLog
     global_indices: GlobalIndices
     kb_backend: LocalFSKnowledgeBackend  # for now just use the local FS backend as the default; in the future, we can make this swappable like the global indices backend, and add auto-indexing to the NodeKB facade
@@ -422,8 +428,16 @@ def build_default_container(
     skills_registry = SkillRegistry()
 
     # trigger services
+    doc_store = build_doc_store(cfg)
+    registration_manifest_store = RegistrationManifestStore(doc_store=doc_store)
+    registration_service = RegistrationService(
+        registry=registry,
+        manifest_store=registration_manifest_store,
+        artifact_store=artifacts,
+        artifact_index=artifact_index,
+    )
     trigger_store = DocTriggerStore(
-        doc_store=build_doc_store(cfg)
+        doc_store=doc_store
     )  # for simplicity, we use the event log as the backing store for triggers; in the future, we can make this swappable like other storage services
     trigger_service = TriggerServiceImpl(
         store=trigger_store,
@@ -459,10 +473,13 @@ def build_default_container(
         trigger_service=trigger_service,
         execution=execution,
         planner_service=planner_service,
+        doc_store=doc_store,
         kv_hot=kv_hot,
         state_store=state_store,
         artifacts=artifacts,
         artifact_index=artifact_index,
+        registration_manifest_store=registration_manifest_store,
+        registration_service=registration_service,
         global_indices=global_indices,
         kb_backend=kb_backend,
         viz_service=viz_service,

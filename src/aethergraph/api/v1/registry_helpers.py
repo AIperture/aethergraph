@@ -2,11 +2,18 @@ from fastapi import HTTPException  # type: ignore
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.core.runtime.runtime_registry import current_registry
+from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.scope.scope import Scope
 
 
 def scoped_registry(identity: RequestIdentity) -> RegistryFacade:
+    registration_service = None
+    try:
+        registration_service = getattr(current_services(), "registration_service", None)
+    except Exception:
+        registration_service = None
+
     return RegistryFacade(
         registry=current_registry(),
         scope=Scope(
@@ -15,6 +22,7 @@ def scoped_registry(identity: RequestIdentity) -> RegistryFacade:
             client_id=identity.client_id,
             mode=identity.mode,
         ),
+        registration_service=registration_service,
     )
 
 

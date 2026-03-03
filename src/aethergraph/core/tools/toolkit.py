@@ -359,8 +359,10 @@ def call_tool(fn_or_path, **kwargs):
 
     after_ids = [_id_of(a) for a in _ensure_list(after_raw)]
 
-    # ---------- Interpreter (reactive) mode ----------
-    if interp is not None:
+    # ---------- Static build mode (inside graph(...)) ----------
+    # Builder context must win even if an interpreter context is active in the parent
+    # runtime (e.g. graph registration invoked from inside another running graph).
+    if builder is not None:
         if isinstance(fn_or_path, str):
             logic = fn_or_path
             logic_name = logic.rsplit(".", 1)[-1]
@@ -383,11 +385,6 @@ def call_tool(fn_or_path, **kwargs):
                 fn_or_path, "__aether_inputs__", _infer_inputs_from_signature(impl)
             )
             outputs_decl = getattr(fn_or_path, "__aether_outputs__", ["result"])
-
-        if builder is None:
-            raise RuntimeError(
-                "Interpreter expects a TaskGraph builder context; missing `with graph(...)`"
-            )
 
         # node_id selection
         if node_id_kw:
@@ -413,12 +410,6 @@ def call_tool(fn_or_path, **kwargs):
             tool_version=logic_version,
         )
 
-        # ✅ flush (reify) incrementally instead of calling __post_init__ directly
-        if hasattr(builder, "flush"):
-            builder.flush()
-        else:
-            builder.graph.__post_init__()  # fallback
-
         builder.register_logic_name(logic_name, node_id)
         builder.register_labels(labels, node_id)
         if alias:
@@ -432,20 +423,18 @@ def call_tool(fn_or_path, **kwargs):
             }
         )
 
-        async def _runner():
-            outs = await interp.run_one(node=builder.graph.node(node_id))
-            return SimpleNS(outs, node_id=node_id)  # ✅ include node_id
+        return NodeHandle(
+            node_id=node_id, output_keys=outputs_decl
+        )  # or SimpleNS({}, node_id=node_id)
 
-        return AwaitableResult(_runner, node_id=node_id)
-
-    # ---------- Static build mode (no interpreter, inside graph(...)) ----------
-    if builder is not None:
+    # ---------- Interpreter (reactive) mode ----------
+    if interp is not None:
         if isinstance(fn_or_path, str):
             logic = fn_or_path
             logic_name = logic.rsplit(".", 1)[-1]
             inputs_decl = list(kwargs.keys())
             outputs_decl = ["result"]
-            logic_version = None  # ✅ ensure defined
+            logic_version = None
         else:
             impl = getattr(fn_or_path, "__aether_impl__", fn_or_path)
             reg_key = getattr(fn_or_path, "__aether_registry_key__", None)
@@ -457,51 +446,15 @@ def call_tool(fn_or_path, **kwargs):
                 logic = f"{impl.__module__}.{getattr(impl, '__name__', 'tool')}"
                 logic_name = getattr(impl, "__name__", "tool")
                 logic_version = getattr(impl, "__version__", None)
-
             inputs_decl = getattr(
                 fn_or_path, "__aether_inputs__", _infer_inputs_from_signature(impl)
             )
             outputs_decl = getattr(fn_or_path, "__aether_outputs__", ["result"])
 
-        if node_id_kw:
-            node_id = node_id_kw
-        elif alias:
-            node_id = alias
-        else:
-            node_id = builder.next_id(logic_name=logic_name)
-
-        if node_id in builder.spec.nodes:
-            raise ValueError(
-                f"Node ID '{node_id}' already exists in graph '{builder.spec.graph_id}'"
-            )
-
-        builder.add_tool_node(
-            node_id=node_id,
-            logic=logic,
-            inputs=kwargs,
-            expected_input_keys=inputs_decl,
-            expected_output_keys=outputs_decl,
-            after=after_ids,
-            tool_name=logic_name,
-            tool_version=logic_version,
+        raise RuntimeError(
+            "Reactive interpreter tool calls require graph builder context in current implementation. "
+            "Call tools from graph() build mode or from immediate mode."
         )
-        builder.register_logic_name(logic_name, node_id)
-        builder.register_labels(labels, node_id)
-        if alias:
-            builder.register_alias(alias, node_id)
-
-        builder.spec.nodes[node_id].metadata.update(
-            {
-                "alias": alias,
-                "labels": labels,
-                "display_name": name_hint or logic_name,
-            }
-        )
-
-        # Return a build-time handle; ensure it carries node_id
-        return NodeHandle(
-            node_id=node_id, output_keys=outputs_decl
-        )  # or SimpleNS({}, node_id=node_id)
 
     # ---------- Immediate mode (outside graph & interpreter) ----------
     fn = resolve_dotted(fn_or_path) if isinstance(fn_or_path, str) else fn_or_path

@@ -80,7 +80,7 @@ async def get_agent(
 async def delete_agent(
     agent_id: str,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
-) -> dict[str, str | bool]:
+) -> dict[str, str | bool | int]:
     ensure_delete_identity(identity, "agents")
     reg = scoped_registry(identity)
 
@@ -99,5 +99,13 @@ async def delete_agent(
             )
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
 
-    reg.unregister(nspace="agent", name=agent_id)
-    return {"ok": True, "id": agent_id}
+    result = await reg.delete_registered_agent(agent_id=agent_id)
+    if not result.success:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Failed to delete agent '{agent_id}': "
+                + ("; ".join(result.errors) if result.errors else "unknown error")
+            ),
+        )
+    return {"ok": True, "id": agent_id, "removed_entries": result.removed_entries}

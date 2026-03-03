@@ -68,6 +68,9 @@ class GraphBuilderState:
     # latest generated code metadata
     last_generated_code: str | None = None
     last_generated_filename: str | None = None
+    last_generated_artifact_id: str | None = None
+    last_generated_artifact_uri: str | None = None
+    last_generated_code_sha256: str | None = None
 
     # last registered app metadata
     last_registered_app_id: str | None = None

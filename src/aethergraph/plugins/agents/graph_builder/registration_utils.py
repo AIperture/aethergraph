@@ -79,7 +79,8 @@ async def _resolve_registration_target(
         #   uri: str | None
         #   kind: Literal["code", "notebook", "text", "other"]
         uri = getattr(f, "uri", None)
-        if not uri:
+        artifact_id = getattr(f, "artifact_id", None)
+        if not uri and not artifact_id:
             continue
 
         kind = getattr(f, "kind", None)
@@ -100,9 +101,12 @@ async def _resolve_registration_target(
 
     for _score, f, uri in prioritized:  # noqa: B007
         try:
-            text = await artifacts.load_text(uri=uri)
+            if uri:
+                text = await artifacts.load_text(uri=uri)
+            else:
+                text = await artifacts.load_text_by_id(f.artifact_id)
         except Exception:
-            # skip non-text or invalid URIs
+            # skip non-text or invalid references
             continue
 
         graph_name = _discover_graph_name_from_source(text)
