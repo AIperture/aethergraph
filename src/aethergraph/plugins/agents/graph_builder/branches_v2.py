@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import importlib.util
 import json
 import re
 from typing import Any
@@ -116,27 +118,88 @@ def _plan_card(plan: dict[str, Any]) -> dict[str, Any]:
     tools = plan.get("tools") or []
     checkpoints = plan.get("checkpointing") or []
     needs = plan.get("needs") or {}
+    checkpoint_labels: list[str] = []
+    for c in checkpoints[:6]:
+        if isinstance(c, dict):
+            checkpoint_labels.append(str(c.get("tool") or c.get("ckpt_key") or "unknown_tool"))
+        else:
+            checkpoint_labels.append(str(c or "unknown_tool"))
+    tool_list = [
+        {
+            "primary": str(t.get("name") or "unnamed_tool"),
+            "secondary": f"{t.get('kind') or 'generated'} | {t.get('source') or 'inline'}",
+            "status": "pending",
+        }
+        for t in tools[:8]
+    ]
+    needs_summary = ", ".join([k for k, v in needs.items() if bool(v)]) or "none"
+    sections: list[dict[str, Any]] = [
+        {
+            "type": "kv",
+            "columns": 2,
+            "items": [
+                {"label": "Graph Type", "value": str(graph.get("type") or "graphify")},
+                {
+                    "label": "I/O",
+                    "value": f"in={len(graph.get('inputs') or [])} | out={len(graph.get('outputs') or [])}",
+                    "mono": True,
+                },
+                {
+                    "label": "Inputs",
+                    "value": ", ".join([str(x) for x in (graph.get("inputs") or [])]) or "(none)",
+                },
+                {
+                    "label": "Outputs",
+                    "value": ", ".join([str(x) for x in (graph.get("outputs") or [])]) or "(none)",
+                },
+            ],
+        },
+        {
+            "type": "metrics",
+            "items": [
+                {"label": "Tools", "value": str(len(tools))},
+                {"label": "Checkpoints", "value": str(len(checkpoints))},
+                {"label": "Needs", "value": needs_summary},
+            ],
+        },
+        {
+            "type": "list",
+            "items": tool_list
+            or [
+                {
+                    "primary": "No tools proposed yet",
+                    "secondary": "Add requirements to enrich the workflow",
+                    "status": "pending",
+                }
+            ],
+        },
+    ]
+    if checkpoints:
+        sections.append(
+            {
+                "type": "callout",
+                "tone": "info",
+                "title": "Checkpointing",
+                "message": ", ".join(checkpoint_labels),
+                "details": "Checkpointing is enabled for expensive or resumable steps.",
+            }
+        )
     return {
-        "kind": "card",
-        "title": f"Plan: {graph.get('name') or 'proposed_graph'}",
-        "sections": [
-            {"label": "Type", "value": str(graph.get("type") or "graphify")},
-            {
-                "label": "I/O",
-                "value": f"in={graph.get('inputs') or []} | out={graph.get('outputs') or []}",
+        "kind": "component",
+        "payload": {
+            "component_type": "ag.ui.card.v1",
+            "props": {
+                "version": "card.v1",
+                "header": {
+                    "title": f"Plan: {graph.get('name') or 'proposed_graph'}",
+                    "subtitle": str(graph.get("description") or "Proposed graph workflow"),
+                    "tone": "info",
+                    "right_text": "PLAN READY",
+                },
+                "sections": sections,
+                "footer": {"left": "Review and proceed", "right": "Graph Builder"},
             },
-            {"label": "Tools", "value": f"{len(tools)} planned"},
-            {"label": "Checkpointing", "value": f"{len(checkpoints)} step(s)"},
-            {"label": "Needs", "value": json.dumps(needs, ensure_ascii=False)},
-            {
-                "label": "Tool List",
-                "value": [str(t.get("name") or "unnamed_tool") for t in tools] or ["(none)"],
-            },
-            {
-                "label": "Checkpoint List",
-                "value": [str(c.get("tool") or "unknown_tool") for c in checkpoints] or ["(none)"],
-            },
-        ],
+        },
     }
 
 
@@ -250,7 +313,12 @@ async def _handle_plan_v2(
         f"Files summary:\n{files_summary}\n"
     )
 
-    await chan.send_phase(phase="thinking", status="active", label="Building plan...")
+    await chan.send_phase(
+        phase="planning",
+        status="active",
+        label="Planning workflow",
+        detail="LLM is drafting a structured graph plan.",
+    )
     try:
         resp, _usage = await llm.chat(
             messages=[
@@ -266,7 +334,12 @@ async def _handle_plan_v2(
             max_output_tokens=2048,
         )
     except Exception:
-        await chan.send_phase(phase="thinking", status="failed", label="Planning failed.")
+        await chan.send_phase(
+            phase="planning",
+            status="failed",
+            label="Planning failed",
+            detail="LLM plan generation failed.",
+        )
         raise
 
     obj = json.loads(resp) if isinstance(resp, str) else resp
@@ -292,7 +365,12 @@ async def _handle_plan_v2(
             "I drafted a plan from current context and will continue directly to generation.",
             memory_log=False,
         )
-    await chan.send_phase(phase="thinking", status="done", label="Plan is ready.")
+    await chan.send_phase(
+        phase="planning",
+        status="done",
+        label="Plan ready",
+        detail="Plan card and decision buttons were sent.",
+    )
 
     if plan:
         state = await _load_state(context=context, level="user")
@@ -321,9 +399,10 @@ async def _handle_generate_v2(
     plan = state.pending_plan_json or state.last_plan_json
     if not plan:
         await chan.send_phase(
-            phase="thinking",
+            phase="planning",
             status="active",
-            label="No plan found. Drafting a plan first...",
+            label="Planning required",
+            detail="No plan found. Drafting one before code generation.",
         )
         plan_message = (message or "").strip()
         if plan_message.lower().startswith("/gen"):
@@ -353,8 +432,9 @@ async def _handle_generate_v2(
 
     user_prompt = (
         "Generate implementation code from the approved plan.\n"
-        "Do not stream output instructions.\n"
-        "Return Markdown with: brief explanation, plan JSON block, python code block, file manifest.\n\n"
+        "Return ONLY one complete Python fenced block (```python ... ```).\n"
+        "Do not include explanation, JSON, or file manifest.\n"
+        "If output would be long, reduce comments/docstrings but NEVER truncate code.\n\n"
         f"User message:\n{message}\n\n"
         f"Approved plan:\n{json.dumps(plan, indent=2, ensure_ascii=False)}\n\n"
         f"Files summary:\n{files_summary}\n"
@@ -374,15 +454,25 @@ async def _handle_generate_v2(
             continue
         messages.append({"role": "system", "content": f"\n--- Relevant file: {f.name} ---\n{text}"})
 
-    await chan.send_phase(phase="thinking", status="active", label="Generating code artifact...")
+    await chan.send_phase(
+        phase="coding",
+        status="active",
+        label="Generating code",
+        detail="LLM is generating Python workflow code from the approved plan.",
+    )
     try:
         resp_text, _usage = await llm.chat(
             messages=messages,
-            max_output_tokens=4096,
+            max_output_tokens=8192,
             request_timeout_s=240,
         )
     except Exception:
-        await chan.send_phase(phase="thinking", status="failed", label="Code generation failed.")
+        await chan.send_phase(
+            phase="coding",
+            status="failed",
+            label="Code generation failed",
+            detail="LLM code generation failed.",
+        )
         raise
     print("🍎 Graph Builder: Code generation LLM response:\n", resp_text)
 
@@ -391,7 +481,10 @@ async def _handle_generate_v2(
     code = _extract_python_code(resp_text)
     if not code:
         await chan.send_phase(
-            phase="thinking", status="failed", label="No Python code block found."
+            phase="coding",
+            status="failed",
+            label="Code extraction failed",
+            detail="No Python code block found in model output.",
         )
         await chan.send_text(
             "I expected a Python code block in the generation output but couldn't find one. "
@@ -416,15 +509,12 @@ async def _handle_generate_v2(
         title=f"Generated code: {filename}",
         memory_log=False,
     )
-    await chan.send_buttons(
-        text="Code generated. Do you want to register it as an app?",
-        buttons=[
-            Button(label="Register App", value="register"),
-            Button(label="Skip", value="skip"),
-        ],
-        memory_log=False,
+    await chan.send_phase(
+        phase="coding",
+        status="done",
+        label="Code generated",
+        detail=f"Sent generated file `{filename}`.",
     )
-    await chan.send_phase(phase="thinking", status="done", label="Code generation complete.")
 
     latest_state = await _load_state(context=context, level="user")
     merged_plan = new_plan or plan
@@ -432,24 +522,82 @@ async def _handle_generate_v2(
     generated_artifact_id = getattr(last_artifact, "artifact_id", None) if last_artifact else None
     generated_artifact_uri = getattr(last_artifact, "uri", None) if last_artifact else None
     generated_code_sha256 = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    latest_state.graph_ver += 1
+    latest_state.last_generated_code = code
+    latest_state.last_generated_filename = filename
+    latest_state.last_generated_artifact_id = generated_artifact_id
+    latest_state.last_generated_artifact_uri = generated_artifact_uri
+    latest_state.last_generated_code_sha256 = generated_code_sha256
+    latest_state.last_generated_files = [{"name": filename, "kind": "python"}]
     if merged_plan:
         latest_state.plan_ver = max(latest_state.plan_ver, 1)
-        latest_state.graph_ver += 1
         latest_state.last_plan_json = merged_plan
         latest_state.pending_plan_json = None
         latest_state.last_graph_name = (merged_plan.get("graph") or {}).get("name")
         latest_state.last_contract_hash = _hash_contract(merged_plan)
-        latest_state.pending_action = "awaiting_register_decision"
-        latest_state.last_generated_code = code
-        latest_state.last_generated_filename = filename
-        latest_state.last_generated_artifact_id = generated_artifact_id
-        latest_state.last_generated_artifact_uri = generated_artifact_uri
-        latest_state.last_generated_code_sha256 = generated_code_sha256
-        latest_state.last_generated_files = [{"name": filename, "kind": "python"}]
+    await chan.send_phase(
+        phase="validation",
+        status="active",
+        label="Validating generated code",
+        detail="Running syntax/decorator checks, import checks, and registry probe.",
+    )
+    validation_ok, validation_report = await _validate_generated_source(
+        context=context,
+        source=code,
+        filename=filename,
+        artifact_id=generated_artifact_id,
+        artifact_uri=generated_artifact_uri,
+    )
+
+    if not validation_ok:
+        issue_count = len([line for line in validation_report.splitlines() if line.strip()])
+        await chan.send_phase(
+            phase="validation",
+            status="failed",
+            label="Validation failed",
+            detail=f"Found {issue_count} issue(s).",
+        )
+        await chan.send_text(
+            "Generated code did not pass validation. I can regenerate or replan.\n\n"
+            f"Validation details:\n{validation_report}",
+            memory_log=False,
+        )
+        await chan.send_buttons(
+            text="Choose next step:",
+            buttons=[
+                Button(label="Regenerate", value="regenerate"),
+                Button(label="Replan", value="replan"),
+            ],
+            memory_log=False,
+        )
+        latest_state.pending_action = "awaiting_regeneration_decision"
         await _save_state(context=context, state=latest_state)
+        return (
+            "I generated code, but validation failed. Click Regenerate to retry codegen or Replan to adjust requirements.",
+            merged_plan,
+            code,
+            filename,
+        )
+
+    await chan.send_phase(
+        phase="validation",
+        status="done",
+        label="Validation passed",
+        detail="Generated source passed syntax/import/registry checks.",
+    )
+    await chan.send_buttons(
+        text="Code generated and validated. Do you want to register it as an app?",
+        buttons=[
+            Button(label="Register App", value="register"),
+            Button(label="Skip", value="skip"),
+        ],
+        memory_log=False,
+    )
+    latest_state.pending_action = "awaiting_register_decision"
+    await _save_state(context=context, state=latest_state)
 
     return (
-        "I generated the code and sent it as a file.",
+        "I generated and validated the code, and sent it as a file.",
         merged_plan,
         code,
         filename,
@@ -537,6 +685,70 @@ def _format_validation_issues(issues: list[Any]) -> str:
     return "\n".join(lines)
 
 
+def _static_import_issues(source: str) -> list[str]:
+    issues: list[str] = []
+    modules: set[str] = set()
+    try:
+        tree = ast.parse(source)
+    except Exception:
+        return issues
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = (alias.name or "").strip()
+                if mod:
+                    modules.add(mod)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:
+                continue
+            mod = (node.module or "").strip()
+            if mod:
+                modules.add(mod)
+
+    for mod in sorted(modules):
+        try:
+            spec = importlib.util.find_spec(mod)
+        except Exception:
+            spec = None
+        if spec is None:
+            issues.append(f"- missing_import: `{mod}` is not available in runtime")
+    return issues
+
+
+async def _validate_generated_source(
+    *,
+    context: NodeContext,
+    source: str,
+    filename: str,
+    artifact_id: str | None,
+    artifact_uri: str | None,
+) -> tuple[bool, str]:
+    registry = context.registry()
+    issues: list[str] = []
+
+    vr = registry.validate_graphify_source(source, filename=filename, strict=False)
+    if not vr.ok:
+        issues.extend(_format_validation_issues(vr.issues).splitlines())
+
+    issues.extend(_static_import_issues(source))
+
+    if artifact_id or artifact_uri:
+        probe = await registry.register_by_artifact(
+            artifact_id=artifact_id,
+            uri=artifact_uri,
+            persist=False,
+            strict=False,
+        )
+        if not probe.success:
+            err_msg = "; ".join(probe.errors) if probe.errors else "unknown error"
+            issues.append(f"- registry_probe_failed: {err_msg}")
+
+    if not issues:
+        return True, ""
+    return False, "\n".join(issues)
+
+
 async def _handle_register_app_v2(
     *,
     message: str,
@@ -559,6 +771,12 @@ async def _handle_register_app_v2(
     state = await _load_state(context=context, level="user")
     if state.pending_action == "awaiting_register_decision":
         state.pending_action = None
+    await chan.send_phase(
+        phase="registration",
+        status="active",
+        label="Registering app",
+        detail="Validating and registering generated graph as an app.",
+    )
 
     normalized_files = _normalize_builder_file_refs(files)
     if state.last_generated_artifact_id or state.last_generated_artifact_uri:
@@ -636,6 +854,12 @@ async def _handle_register_app_v2(
             )
             if not vr.ok:
                 await _save_state(context=context, state=state)
+                await chan.send_phase(
+                    phase="registration",
+                    status="failed",
+                    label="Registration failed",
+                    detail="Candidate source failed graph validation.",
+                )
                 return (
                     "Registration failed because the candidate source is not a valid "
                     "@graphify/@graph_fn module.\n\n"
@@ -644,6 +868,12 @@ async def _handle_register_app_v2(
 
     if not graph_name:
         await _save_state(context=context, state=state)
+        await chan.send_phase(
+            phase="registration",
+            status="failed",
+            label="Registration failed",
+            detail="No valid graph candidate found to register.",
+        )
         msg = (
             "I couldn't find a graph to register.\n\n"
             "- Provide a file containing a @graphify/@graph_fn, or\n"
@@ -683,6 +913,12 @@ async def _handle_register_app_v2(
         )
         if not reg_result.success:
             await _save_state(context=context, state=state)
+            await chan.send_phase(
+                phase="registration",
+                status="failed",
+                label="Registration failed",
+                detail="Registry rejected app registration.",
+            )
             return (
                 "I validated the source but registration failed.\n\n"
                 f"Errors:\n- {'; '.join(reg_result.errors) if reg_result.errors else 'unknown error'}"
@@ -721,6 +957,17 @@ async def _handle_register_app_v2(
         f"(id=`{app_id}`, flow_id=`{flow_id}`).\n\n"
         "You can now run it from the App Gallery."
     )
+    await chan.send_buttons(
+        text="Open the app list to run it:",
+        buttons=[Button(label="Open App Gallery", url="/ui/apps")],
+        memory_log=False,
+    )
+    await chan.send_phase(
+        phase="registration",
+        status="done",
+        label="Registration complete",
+        detail=f"Registered app `{app_id}` for flow `{flow_id}`.",
+    )
 
     return (
         f"I've registered the app **{app_config.get('name', app_id)}** "
@@ -733,6 +980,7 @@ async def _handle_chat_v2(*, message: str, context: NodeContext) -> str:
     msg = (message or "").strip().lower()
     intent = _detect_approval_intent(msg)
     state = await _load_state(context=context, level="user")
+    chan = context.ui_session_channel()
     has_plan = bool(state.pending_plan_json or state.last_plan_json)
     if intent == "approve" and not has_plan:
         return (
@@ -741,6 +989,17 @@ async def _handle_chat_v2(*, message: str, context: NodeContext) -> str:
         )
     if state.pending_action == "awaiting_plan_approval":
         return "If you want changes, tell me what to adjust and I will replan. If ready, click Proceed."
+    if state.pending_action == "awaiting_regeneration_decision":
+        if intent == "approve":
+            return (
+                "Click Regenerate to retry code generation, or share revisions and I will replan."
+            )
+        if intent == "revise":
+            return "Tell me what to change and I will replan before generating again."
+        if intent == "decline":
+            state.pending_action = None
+            await _save_state(context=context, state=state)
+            return "Okay, I will pause regeneration for now."
     if state.pending_action == "awaiting_register_decision" and intent == "decline":
         state.pending_action = None
         await _save_state(context=context, state=state)
@@ -749,12 +1008,27 @@ async def _handle_chat_v2(*, message: str, context: NodeContext) -> str:
     llm = context.llm()
     system_prompt = _compile_branch_prompt(context=context, branch=GraphBuilderBranch.CHAT)
     history = await _recent_chat_for_llm(context=context, limit=18)
-    text, _ = await llm.chat(
+    await chan.send_phase(
+        phase="thinking",
+        status="active",
+        label="LLM is processing",
+        detail="Generating a response to your chat request.",
+    )
+    text, _usage, _thinking = await chan.chat_and_stream(
+        llm=llm,
         messages=[
             {"role": "system", "content": system_prompt},
             *history,
             {"role": "user", "content": message},
         ],
         max_output_tokens=2048,
+        emit_thinking_phase=False,
+        memory_log=False,
+    )
+    await chan.send_phase(
+        phase="thinking",
+        status="done",
+        label="Chat response ready",
+        detail="Completed response generation.",
     )
     return text

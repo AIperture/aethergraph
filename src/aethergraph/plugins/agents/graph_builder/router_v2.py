@@ -52,6 +52,27 @@ def _fallback_route(*, message: str, state: GraphBuilderState) -> RouterDecision
             return {"branch": GraphBuilderBranch.CHAT, "reason": "fallback_register_declined"}
         return {"branch": GraphBuilderBranch.REGISTER_APP, "reason": "fallback_register_pending"}
 
+    if state.pending_action == "awaiting_regeneration_decision":
+        if intent == "approve":
+            return {
+                "branch": GraphBuilderBranch.GENERATE,
+                "reason": "fallback_pending_regeneration_approved",
+            }
+        if intent == "revise":
+            return {
+                "branch": GraphBuilderBranch.PLAN,
+                "reason": "fallback_pending_regeneration_revise",
+            }
+        if intent == "decline":
+            return {
+                "branch": GraphBuilderBranch.CHAT,
+                "reason": "fallback_pending_regeneration_declined",
+            }
+        return {
+            "branch": GraphBuilderBranch.GENERATE,
+            "reason": "fallback_pending_regeneration_default_generate",
+        }
+
     return {"branch": GraphBuilderBranch.CHAT, "reason": "fallback_default_chat"}
 
 
@@ -69,6 +90,22 @@ def _state_override(*, message: str, state: GraphBuilderState) -> RouterDecision
             return {
                 "branch": GraphBuilderBranch.REGISTER_APP,
                 "reason": "state_override_register_approve",
+            }
+    if state.pending_action == "awaiting_regeneration_decision":
+        if intent == "approve":
+            return {
+                "branch": GraphBuilderBranch.GENERATE,
+                "reason": "state_override_regeneration_approve",
+            }
+        if intent == "revise":
+            return {
+                "branch": GraphBuilderBranch.PLAN,
+                "reason": "state_override_regeneration_revise",
+            }
+        if intent == "decline":
+            return {
+                "branch": GraphBuilderBranch.CHAT,
+                "reason": "state_override_regeneration_decline",
             }
     return None
 
@@ -103,7 +140,9 @@ async def _llm_route(
         "Route the user message for AG Graph Builder.\n"
         "Choose one branch: chat | plan | generate | register_app.\n"
         "Use user intent + state. If awaiting plan approval and user agrees, route generate. "
-        "If awaiting plan approval and user revises scope, route plan.\n\n"
+        "If awaiting plan approval and user revises scope, route plan. "
+        "If awaiting regeneration decision and user wants retry/regenerate, route generate. "
+        "If awaiting regeneration decision and user requests scope changes, route plan.\n\n"
         f"Message:\n{message}\n\n"
         f"State summary:\n{state_summary}\n\n"
         f"Files summary:\n{files_summary}\n\n"

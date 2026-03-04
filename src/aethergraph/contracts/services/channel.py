@@ -25,6 +25,10 @@ class PhaseRich(TypedDict, total=False):
     label: str | None  # short human label
     detail: str | None  # optional extra text
     code: str | None  # internal code like "routing.planning"
+    phase_group_id: str | None
+    phase_seq: int | None
+    phase_event_id: str | None
+    phase_updated_at: float | None
 
 
 class ProgressRich(TypedDict, total=False):

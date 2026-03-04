@@ -89,6 +89,9 @@ class ChannelSession:
     def __init__(self, context, channel_key: str | None = None):
         self.ctx = context
         self._override_key = channel_key  # optional strong binding
+        self._phase_group_id: str | None = None
+        self._phase_seq: int = 0
+        self._phase_group_counter: int = 0
 
     @property
     def _memory_facade(self):
@@ -123,6 +126,19 @@ class ChannelSession:
     @property
     def _session_id(self):
         return self.ctx.session_id
+
+    def _begin_reply_lifecycle(self) -> str:
+        self._phase_group_counter += 1
+        self._phase_seq = 0
+        self._phase_group_id = f"{self._run_id}:{self._node_id}:phase-group:{self._phase_group_counter}:{uuid.uuid4().hex[:8]}"
+        return self._phase_group_id
+
+    def _ensure_reply_lifecycle(self) -> str:
+        return self._phase_group_id or self._begin_reply_lifecycle()
+
+    def _close_reply_lifecycle(self) -> None:
+        self._phase_group_id = None
+        self._phase_seq = 0
 
     def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         """
@@ -342,15 +358,37 @@ class ChannelSession:
         suffix = key_suffix or f"phase:{phase}"
         upsert_key = f"{self._run_id}:{self._node_id}:{suffix}"
 
+        phase_group_id = self._ensure_reply_lifecycle()
+        self._phase_seq += 1
+        phase_seq = self._phase_seq
+        phase_updated_at = time.time()
+        phase_event_id = f"{upsert_key}:{phase_seq}"
+
         rich = {
             "kind": "phase",
             "phase": phase,
             "status": status,
             "label": label or phase.title(),
             "detail": detail or "",
+            "phase_group_id": phase_group_id,
+            "phase_seq": phase_seq,
+            "phase_event_id": phase_event_id,
+            "phase_updated_at": phase_updated_at,
         }
         if code:
             rich["code"] = code
+
+        phase_meta = {
+            "kind": "phase",
+            "phase": phase,
+            "status": status,
+            "label": label or phase.title(),
+            "detail": detail or "",
+            "phase_group_id": phase_group_id,
+            "phase_seq": phase_seq,
+            "phase_event_id": phase_event_id,
+            "phase_updated_at": phase_updated_at,
+        }
 
         await self._bus.publish(
             OutEvent(
@@ -358,7 +396,7 @@ class ChannelSession:
                 channel=ch_key,
                 upsert_key=upsert_key,
                 rich=rich,
-                meta=self._inject_context_meta(None),
+                meta=self._inject_context_meta(phase_meta),
             )
         )
 
@@ -430,9 +468,15 @@ class ChannelSession:
             type="agent.message",
             channel=self._resolve_key(channel),
             text=text,
-            meta=self._inject_context_meta(meta),
+            meta=self._inject_context_meta(
+                {
+                    **(meta or {}),
+                    "phase_group_id": self._ensure_reply_lifecycle(),
+                }
+            ),
         )
         await self._bus.publish(event)
+        self._close_reply_lifecycle()
 
     async def send_rich(
         self,
@@ -515,9 +559,15 @@ class ChannelSession:
                 channel=self._resolve_key(channel),
                 text=text,
                 rich=rich,
-                meta=self._inject_context_meta(meta),
+                meta=self._inject_context_meta(
+                    {
+                        **(meta or {}),
+                        "phase_group_id": self._ensure_reply_lifecycle(),
+                    }
+                ),
             )
         )
+        self._close_reply_lifecycle()
 
     async def send_image(
         self,
@@ -1333,9 +1383,15 @@ class ChannelSession:
             self._channel_key = outer._resolve_key(channel_key)
             # Unique per stream so multiple streams from same node don’t collide
             self._upsert_key = f"{outer._run_id}:{outer._node_id}:stream:{uuid.uuid4().hex}"
+            self._phase_group_id = outer._ensure_reply_lifecycle()
 
         def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
             return self._outer._inject_context_meta(meta)
+
+        def _stream_meta(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+            base = dict(extra or {})
+            base.setdefault("phase_group_id", self._phase_group_id)
+            return self._inject_context_meta(base)
 
         def _buf(self):
             return getattr(self, "__buf", None)
@@ -1353,7 +1409,7 @@ class ChannelSession:
                         type="agent.stream.start",
                         channel=self._channel_key,
                         upsert_key=self._upsert_key,
-                        meta=self._inject_context_meta(None),
+                        meta=self._stream_meta(None),
                     )
                 )
 
@@ -1378,7 +1434,7 @@ class ChannelSession:
                     channel=self._channel_key,
                     text=text_piece,
                     upsert_key=self._upsert_key,
-                    meta=self._inject_context_meta(None),
+                    meta=self._stream_meta(None),
                 )
             )
 
@@ -1426,9 +1482,10 @@ class ChannelSession:
                     channel=self._channel_key,
                     text=full_text,
                     upsert_key=self._upsert_key,
-                    meta=self._inject_context_meta(None),
+                    meta=self._stream_meta(None),
                 )
             )
+            self._outer._close_reply_lifecycle()
 
     @asynccontextmanager
     async def stream(self, channel: str | None = None) -> AsyncIterator["_StreamSender"]:

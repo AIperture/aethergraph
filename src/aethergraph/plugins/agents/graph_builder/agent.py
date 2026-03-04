@@ -36,7 +36,7 @@ from aethergraph.plugins.agents.graph_builder.utils import (
         "icon_key": "workflow",
         "color": "orange",
         "mode": "chat_v1",
-        "memory_level": "user",
+        "memory_level": "session",
         "slash_commands": [
             {"name": "/plan", "description": "Draft or revise a build plan (no code)."},
             {"name": "/gen", "description": "Generate code from the current plan."},
@@ -73,7 +73,10 @@ async def graph_builder(
         return {"reply": reply}
 
     await chan.send_phase(
-        phase="thinking", status="active", label="Graph Builder is working on it..."
+        phase="routing",
+        status="active",
+        label="Routing request",
+        detail="Processing files and conversation context.",
     )
 
     await mem.record_chat_user(
@@ -88,7 +91,12 @@ async def graph_builder(
             context=context,
         )
     except Exception as e:
-        await chan.send_phase(phase="thinking", status="failed", label="Error processing files")
+        await chan.send_phase(
+            phase="routing",
+            status="failed",
+            label="Routing failed",
+            detail="Failed while processing input files.",
+        )
         await chan.send_text(f"Sorry, I had trouble processing the files you provided: {e}")
         logger.error("Error processing builder files: %s", e, exc_info=True)
         return {"reply": f"Sorry, I had trouble processing the files you provided: {e}"}
@@ -101,7 +109,10 @@ async def graph_builder(
     )
 
     await chan.send_phase(
-        phase="thinking", status="active", label="Graph Builder is analyzing your input..."
+        phase="routing",
+        status="active",
+        label="Selecting branch",
+        detail="Analyzing intent and current builder state.",
     )
 
     decision = await route_v2(
@@ -111,9 +122,10 @@ async def graph_builder(
     )
 
     await chan.send_phase(
-        phase="thinking",
+        phase="routing",
         status="done",
-        label=f"Graph Builder decided to {decision['branch'].value}...",
+        label="Route selected",
+        detail=f"Selected branch: {decision['branch'].value}",
     )
 
     logger.info("graph_builder route: %s (%s)", decision["branch"].value, decision["reason"])
@@ -143,8 +155,20 @@ async def graph_builder(
     else:
         reply = await _handle_chat_v2(message=raw_message, context=context)
 
+    await chan.send_phase(
+        phase="finishing",
+        status="active",
+        label="Finalizing response",
+        detail="Saving assistant output to memory.",
+    )
     await mem.record_chat_assistant(
         text=reply,
         tags=["ag.graph_builder.reply"],
+    )
+    await chan.send_phase(
+        phase="finishing",
+        status="done",
+        label="Response ready",
+        detail="Handing response back to the session.",
     )
     return {"reply": reply}

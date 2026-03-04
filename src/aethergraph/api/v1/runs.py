@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request  #     type: ignore
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
-from aethergraph.core.runtime.run_manager import RunManager
+from aethergraph.core.runtime.run_manager import DuplicateRunIdError, RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
@@ -53,18 +53,21 @@ async def create_run(
             app_vis = RunVisibility(app_vis) if app_vis else None
             app_imp = RunImportance(app_imp) if app_imp else None
 
-    record = await rm.submit_run(
-        graph_id=graph_id,
-        inputs=body.inputs or {},
-        run_id=body.run_id,
-        tags=body.tags,
-        identity=identity,
-        origin=body.origin or RunOrigin.app,
-        visibility=body.visibility or app_vis or RunVisibility.normal,
-        importance=body.importance or app_imp or RunImportance.normal,
-        agent_id=body.agent_id or None,
-        app_id=body.app_id or None,
-    )
+    try:
+        record = await rm.submit_run(
+            graph_id=graph_id,
+            inputs=body.inputs or {},
+            run_id=body.run_id,
+            tags=body.tags,
+            identity=identity,
+            origin=body.origin or RunOrigin.app,
+            visibility=body.visibility or app_vis or RunVisibility.normal,
+            importance=body.importance or app_imp or RunImportance.normal,
+            agent_id=body.agent_id or None,
+            app_id=body.app_id or None,
+        )
+    except DuplicateRunIdError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     return RunCreateResponse(
         run_id=record.run_id,

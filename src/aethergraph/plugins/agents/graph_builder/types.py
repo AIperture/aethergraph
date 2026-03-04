@@ -34,7 +34,16 @@ def _detect_approval_intent(message: str) -> ApprovalIntent:
     if not msg:
         return "unknown"
 
-    approve_terms = {"proceed", "generate", "yes", "ok", "approve", "ship it"}
+    approve_terms = {
+        "proceed",
+        "generate",
+        "yes",
+        "ok",
+        "approve",
+        "ship it",
+        "regenerate",
+        "retry",
+    }
     revise_terms = {"replan", "revise", "change", "update", "modify"}
     decline_terms = {"skip", "no", "decline", "cancel", "reject"}
 
@@ -62,7 +71,9 @@ class GraphBuilderState:
     last_contract_hash: str | None = None
 
     # v2 pending interaction state
-    pending_action: str | None = None  # awaiting_plan_approval | awaiting_register_decision
+    pending_action: str | None = (
+        None  # awaiting_plan_approval | awaiting_regeneration_decision | awaiting_register_decision
+    )
     pending_plan_json: dict[str, Any] | None = None
 
     # latest generated code metadata
