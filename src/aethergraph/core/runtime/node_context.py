@@ -332,9 +332,12 @@ class NodeContext:
         Returns:
             ChannelSession: The channel session associated with the current session.
         """
-        if not self.session_id:
-            raise RuntimeError("NodeContext.session_id is not set")
-        return ChannelSession(self, f"ui:session/{self.session_id}")
+        warnings.warn(
+            "NodeContext.ui_session_channel() is deprecated; use context.channel('ui:session').",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.channel("ui:session")
 
     def ui_run_channel(self) -> "ChannelSession":
         """
@@ -346,7 +349,12 @@ class NodeContext:
         Returns:
             ChannelSession: The channel session associated with the current run.
         """
-        return ChannelSession(self, f"ui:run/{self.run_id}")
+        warnings.warn(
+            "NodeContext.ui_run_channel() is deprecated; use context.channel('ui:run').",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.channel("ui:run")
 
     def triggers(self) -> TriggerFacade:
         if not self.services.triggers:
@@ -370,6 +378,9 @@ class NodeContext:
         Args:
             channel_key (str | None): An optional key to specify a particular channel.
             If not provided, the default channel will be used.
+            Special shorthand values are supported:
+            - `ui:session` -> `ui:session/<current_session_id>`
+            - `ui:run` -> `ui:run/<current_run_id>`
 
         Returns:
             ChannelSession: An instance representing the session for the specified channel.
@@ -383,11 +394,19 @@ class NodeContext:
             | Slack                | `slack:team/{team_id}:chan/{channel_id}`      | Needs additional configuration        |
             | Telegram             | `tg:chat/{chat_id}`                           | Needs additional configuration        |
             | UI Session           | `ui:session/{session_id}`                     | Requires AG web UI                    |
+            | UI Session (current) | `ui:session`                                  | Expands to current `session_id`       |
             | UI Run               | `ui:run/{run_id}`                             | Requires AG web UI                    |
+            | UI Run (current)     | `ui:run`                                      | Expands to current `run_id`           |
             | Webhook              | `webhook:{unique_identifier}`                 | For Slack, Discord, Zapier, etc.      |
             | File-based channel   | `file:path/to/directory`                      | File system based channels            |
         """
-        return ChannelSession(self, channel_key)
+        resolved_key = channel_key
+        if channel_key == "ui:session":
+            resolved_key = f"ui:session/{self.session_id}"
+        elif channel_key == "ui:run":
+            resolved_key = f"ui:run/{self.run_id}"
+
+        return ChannelSession(self, resolved_key)
 
     # New way: prefer memory_facade directly
     def memory(self) -> MemoryFacade:

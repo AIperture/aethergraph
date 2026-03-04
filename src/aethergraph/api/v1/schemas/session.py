@@ -40,6 +40,8 @@ class SessionRunsResponse(BaseModel):
 
 
 class SessionChatFile(BaseModel):
+    artifact_id: str | None = None
+    id: str | None = None
     url: str | None = None
     name: str | None = None
     mimetype: str | None = None

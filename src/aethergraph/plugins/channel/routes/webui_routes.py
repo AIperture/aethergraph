@@ -257,11 +257,16 @@ async def session_chat_incoming(
                 },
             )
         )
-
     # 4. Log event (with files + context_refs in meta)
     if text or incoming_files:
         now_ts = datetime.now(timezone.utc).timestamp()
-        files_payload = [dataclasses.asdict(f) for f in incoming_files]
+        files_payload = []
+        for f in incoming_files:
+            payload_file = dataclasses.asdict(f)
+            # Standardize chat payload with artifact identity; keep legacy "id" for compatibility.
+            if payload_file.get("id") and not payload_file.get("artifact_id"):
+                payload_file["artifact_id"] = payload_file["id"]
+            files_payload.append(payload_file)
 
         log_meta = {
             **meta,
