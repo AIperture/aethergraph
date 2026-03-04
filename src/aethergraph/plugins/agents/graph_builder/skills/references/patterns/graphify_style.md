@@ -14,6 +14,7 @@ title: Graphy Style
 - Use `_after=` only when you need ordering without passing data.
 - Do not pass `context` from graph code. `context` is injected at runtime for tool functions.
 - Bare decorators are invalid. Always include explicit attributes.
+- Graph inputs should be typed via function annotations so runtime/UI can infer schemas.
 
 ## Tool rules
 
@@ -42,7 +43,7 @@ def expensive_step(clean_text: str) -> dict:
     return {"result": clean_text.upper()}
 
 @graphify(name="text_pipeline", inputs=["text"], outputs=["result"])
-def text_pipeline(text):
+def text_pipeline(text: str):
     start = announce_start(step="expensive_step")
     parsed = read_input(text=text)
     final = expensive_step(clean_text=parsed.clean_text, _after=[start])
@@ -80,7 +81,7 @@ async def create_video(..., *, context: NodeContext) -> dict:
     return {"video_output": "file.mp4"}
 
 @graphify(name="workflow", inputs=["args"], outputs=["final_lens_json", "video_output"])
-def workflow(args):
+def workflow(args: dict):
     ...
     return {"final_lens_json": final.final_lens_json, "video_output": video.video_output}
 ```

@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field  # type: ignore
 
+from .input_schema import InputFieldSpec
+
 
 class GraphListItem(BaseModel):
     graph_id: str
@@ -7,6 +9,7 @@ class GraphListItem(BaseModel):
     description: str | None = None
     inputs: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
+    input_schema: list[InputFieldSpec] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     kind: str | None = None
     flow_id: str | None = None
@@ -34,6 +37,7 @@ class GraphDetail(BaseModel):
     description: str | None = None
     inputs: list[str]
     outputs: list[str]
+    input_schema: list[InputFieldSpec] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     kind: str | None = None
     flow_id: str | None = None

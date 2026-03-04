@@ -5,6 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
+from aethergraph.api.v1.input_schema import merge_input_schema_overrides, resolve_graph_input_schema
 from aethergraph.api.v1.registry_helpers import ensure_delete_identity, scoped_registry
 from aethergraph.api.v1.schemas.registry import AppDescriptor
 
@@ -48,6 +49,10 @@ async def list_apps(
         scoped_meta = reg.get_meta(nspace="app", name=name, include_global=False)
         app_id = meta.get("id", name)
         graph_id = meta.get("graph_id", name)
+        input_schema = merge_input_schema_overrides(
+            resolve_graph_input_schema(reg, graph_id=graph_id),
+            app_meta=meta,
+        )
 
         out.append(
             AppDescriptor(
@@ -55,6 +60,7 @@ async def list_apps(
                 graph_id=graph_id,
                 deletable=bool(scoped_meta),
                 slash_commands=meta.get("slash_commands") or [],
+                input_schema=input_schema,
                 meta=meta,
             )
         )
@@ -77,6 +83,10 @@ async def get_app(
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", app_id))
+    input_schema = merge_input_schema_overrides(
+        resolve_graph_input_schema(reg, graph_id=graph_id),
+        app_meta=meta,
+    )
     # If metadata exists in caller scope (not just global), allow delete UI.
     scoped_meta = reg.get_meta(nspace="app", name=app_id, include_global=False)
 
@@ -85,6 +95,7 @@ async def get_app(
         graph_id=graph_id,
         deletable=bool(scoped_meta),
         slash_commands=meta.get("slash_commands") or [],
+        input_schema=input_schema,
         meta=meta,
     )
 

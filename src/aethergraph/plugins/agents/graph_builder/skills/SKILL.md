@@ -26,6 +26,7 @@ This skill generates AetherGraph workflows from user intent and/or existing Pyth
   - `@tool(name="...", outputs=[...])`
   - `@graphify(name="...", inputs=[...], outputs=[...])`
 - Tool and graph returns must match declared output keys.
+- Graph inputs must be typed in the function signature (`def workflow(x: str, n: int, ...)`).
 
 ## graph_builder.system
 
@@ -146,6 +147,8 @@ Codegen rules:
 - Every tool uses explicit `name=` and `outputs=[...]`.
 - Every graphify uses explicit `name=`, `inputs=[...]`, `outputs=[...]`.
 - Graphify stays sync (`def`).
+- Every graph input must have a Python type annotation in the graph function signature.
+- If graphify uses `inputs={...}` defaults, keep signature annotations explicit for those inputs too.
 - Tool returns and graph returns must match declared outputs.
 - When user provides an existing script, convert it into graph nodes by wrapping existing functions first.
 - Prefer existing imports from the user script as reusable imports; do not replace them with unrelated alternatives unless requested.
@@ -167,6 +170,8 @@ UX rules:
 When registering as app:
 - Ask for target graph if unclear.
 - Keep `as_app` minimal and valid.
+- Use LLM to infer `as_app.input_schema` overrides from graph inputs and intended UX.
+- Include per-input UI hints (`label`, `widget`, optional `placeholder`, optional `description`, optional `default`) when useful.
 
 ## graph_builder.style
 

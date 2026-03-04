@@ -4,6 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field  # type: ignore
 
+from .input_schema import InputFieldSpec
+
 
 class SlashCommandDescriptor(BaseModel):
     name: str
@@ -23,4 +25,5 @@ class AppDescriptor(BaseModel):
     graph_id: str
     deletable: bool = False
     slash_commands: list[SlashCommandDescriptor] = Field(default_factory=list)
+    input_schema: list[InputFieldSpec] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)

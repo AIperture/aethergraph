@@ -124,6 +124,7 @@ def _fallback_app_config(
     *,
     graph_name: str,
     plan: dict[str, Any] | None,
+    input_schema: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Very defensive fallback if the LLM fails to produce JSON.
@@ -156,7 +157,85 @@ def _fallback_app_config(
         "run_importance": "normal",
         "flow_id": graph_name,
         "github_url": "",
+        "input_schema": input_schema or [],
     }
+
+
+def _infer_input_schema_overrides(
+    *,
+    inputs: list[Any],
+    type_hints: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    hints = type_hints or {}
+    out: list[dict[str, Any]] = []
+    for raw in inputs:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        t = str(hints.get(name) or "any").strip().lower()
+        widget = "text"
+        if t == "number":
+            widget = "number"
+        elif t == "boolean":
+            widget = "switch"
+        elif t in {"object", "array"}:
+            widget = "json"
+        out.append(
+            {
+                "name": name,
+                "type": t,
+                "label": name.replace("_", " ").title(),
+                "widget": widget,
+            }
+        )
+    return out
+
+
+def _graph_input_type_hints(
+    *,
+    context: NodeContext,
+    graph_name: str,
+    inputs: list[Any],
+) -> dict[str, str]:
+    reg = context.registry()
+    result: dict[str, str] = {}
+
+    # Prefer registry metadata from @graphify registration.
+    for ns in ("graph", "graphfn"):
+        try:
+            meta = reg.get_meta(nspace=ns, name=graph_name, version=None) or {}
+        except Exception:
+            meta = {}
+        io_types = meta.get("io_types") if isinstance(meta, dict) else None
+        inp = io_types.get("inputs") if isinstance(io_types, dict) else None
+        if isinstance(inp, dict):
+            for k, v in inp.items():
+                if k:
+                    result[str(k)] = str(v)
+
+    # Fallback for graph_fn where io_types may be missing in metadata.
+    try:
+        gf = reg.get_graphfn(name=graph_name, version=None)
+        sig = gf.io_signature() if hasattr(gf, "io_signature") else {}
+        for slot in sig.get("inputs", []) or []:
+            if isinstance(slot, dict):
+                n = str(slot.get("name") or "")
+                t = slot.get("type")
+            else:
+                n = str(getattr(slot, "name", "") or "")
+                t = getattr(slot, "type", None)
+            if n and t:
+                result[n] = str(t)
+    except Exception:
+        pass
+
+    # Ensure all declared inputs have at least an "any" hint.
+    for raw in inputs:
+        n = str(raw or "").strip()
+        if n and n not in result:
+            result[n] = "any"
+
+    return result
 
 
 async def _propose_app_config_via_llm(
@@ -176,6 +255,10 @@ async def _propose_app_config_via_llm(
     tools = (plan or {}).get("tools") or []
     inputs = graph.get("inputs") or []
     outputs = graph.get("outputs") or []
+    input_type_hints = _graph_input_type_hints(
+        context=context, graph_name=graph_name, inputs=inputs
+    )
+    seed_input_schema = _infer_input_schema_overrides(inputs=inputs, type_hints=input_type_hints)
 
     system_prompt = skills.compile_prompt(
         GRAPH_BUILDER_SKILL_ID,
@@ -186,7 +269,11 @@ async def _propose_app_config_via_llm(
         fallback_keys=["graph_builder.system"],
     )
 
-    seed_config = _fallback_app_config(graph_name=graph_name, plan=plan)
+    seed_config = _fallback_app_config(
+        graph_name=graph_name,
+        plan=plan,
+        input_schema=seed_input_schema,
+    )
 
     user_prompt = (
         "You are helping configure an AetherGraph AppConfig for a graph.\n"
@@ -213,7 +300,18 @@ async def _propose_app_config_via_llm(
         '  "run_visibility": "normal",\n'
         '  "run_importance": "normal",\n'
         '  "flow_id": "random_2d_training_app",\n'
-        '  "github_url": ""\n'
+        '  "github_url": "",\n'
+        '  "input_schema": [\n'
+        "    {\n"
+        '      "name": "top_k",\n'
+        '      "type": "number",\n'
+        '      "label": "Top K",\n'
+        '      "widget": "number",\n'
+        '      "placeholder": "20",\n'
+        '      "description": "How many items to keep.",\n'
+        '      "default": 20\n'
+        "    }\n"
+        "  ]\n"
         "}\n\n"
         "Rules:\n"
         "- Prefer the given graph_name as a stable id/flow_id.\n"
@@ -222,11 +320,16 @@ async def _propose_app_config_via_llm(
         "- Use status 'available'.\n"
         "- If the graph has no required inputs, you MAY use mode 'no_input_v1',\n"
         "  otherwise prefer 'default_v1'.\n\n"
+        "- Infer `input_schema` from graph inputs and input types.\n"
+        "- Include one `input_schema` item per graph input when possible.\n"
+        "- Pick `widget` by type: number->number, boolean->switch, object/array->json, else text.\n"
+        "- Keep schema concise and UI-oriented; avoid extra unsupported keys.\n\n"
         "Do NOT include comments. Just a single JSON object.\n\n"
         f"Seed config (you can refine this):\n{json.dumps(seed_config, indent=2, ensure_ascii=False)}\n\n"
         f"Graph summary:\n"
         f"- name: {graph_name}\n"
         f"- inputs: {inputs}\n"
+        f"- input_type_hints: {input_type_hints}\n"
         f"- outputs: {outputs}\n"
         f"- tools: {[t.get('name') for t in tools]}\n\n"
         f"Plan JSON:\n{json.dumps(plan or {}, indent=2, ensure_ascii=False)}\n\n"
@@ -259,6 +362,8 @@ async def _propose_app_config_via_llm(
     merged.setdefault("status", "available")
     merged.setdefault("category", "R&D Lab")
     merged.setdefault("mode", "default_v1" if (graph.get("inputs") or []) else "no_input_v1")
+    if not isinstance(merged.get("input_schema"), list) or not merged.get("input_schema"):
+        merged["input_schema"] = seed_input_schema
 
     return merged
 

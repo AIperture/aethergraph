@@ -11,6 +11,7 @@ from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
 from .deps import RequestIdentity, get_identity
+from .input_schema import resolve_graph_input_schema
 from .schemas.graphs import GraphDetail, GraphListItem
 
 router = APIRouter(tags=["graphs"])
@@ -68,7 +69,8 @@ async def list_graphs(
             continue
 
         if meta_inputs is not None or meta_outputs is not None:
-            inputs = list(meta_inputs or [])
+            input_schema = resolve_graph_input_schema(reg, graph_id=name)
+            inputs = [f.name for f in input_schema] or list(meta_inputs or [])
             outputs = list(meta_outputs or [])
             items.append(
                 GraphListItem(
@@ -77,6 +79,7 @@ async def list_graphs(
                     description=None,
                     inputs=inputs,
                     outputs=outputs,
+                    input_schema=input_schema,
                     tags=meta_tags or ["graph"],
                     kind="graph",
                     flow_id=meta_flow_id,
@@ -103,7 +106,10 @@ async def list_graphs(
             )
             continue
 
-        inputs = list(spec.io.required.keys()) + list(spec.io.optional.keys())
+        input_schema = resolve_graph_input_schema(reg, graph_id=name)
+        inputs = [f.name for f in input_schema] or (
+            list(spec.io.required.keys()) + list(spec.io.optional.keys())
+        )
         outputs = list(spec.io.outputs.keys())
 
         desc = spec.meta.get("description") if hasattr(spec, "meta") else None
@@ -118,6 +124,7 @@ async def list_graphs(
                 description=desc,
                 inputs=inputs,
                 outputs=outputs,
+                input_schema=input_schema,
                 tags=tags,
                 kind="graph",
                 flow_id=meta_flow_id,
@@ -144,7 +151,8 @@ async def list_graphs(
         if flow_id is not None and meta_flow_id != flow_id:
             continue
 
-        inputs = list(getattr(gf, "inputs", []) or [])
+        input_schema = resolve_graph_input_schema(reg, graph_id=name)
+        inputs = [f.name for f in input_schema] or list(getattr(gf, "inputs", []) or [])
         outputs = list(getattr(gf, "outputs", []) or [])
         desc = getattr(gf, "description", None)
 
@@ -155,6 +163,7 @@ async def list_graphs(
                 description=desc,
                 inputs=inputs,
                 outputs=outputs,
+                input_schema=input_schema,
                 tags=meta_tags or ["graphfn"],
                 kind="graphfn",
                 flow_id=meta_flow_id,
@@ -186,12 +195,14 @@ async def get_graph_detail(
         meta_tags = list(meta.get("tags", []))
 
         if spec is None:
+            input_schema = resolve_graph_input_schema(reg, graph_id=graph_id)
             return GraphDetail(
                 graph_id=graph_id,
                 name=graph_id,
                 description=None,
-                inputs=[],
+                inputs=[f.name for f in input_schema],
                 outputs=[],
+                input_schema=input_schema,
                 tags=meta_tags or ["graph"],
                 kind="graph",
                 flow_id=flow_id,
@@ -224,7 +235,10 @@ async def get_graph_detail(
             {"source": src, "target": dst} for (src, dst) in sorted(edge_set)
         ]
 
-        inputs = list(spec.io.required.keys()) + list(spec.io.optional.keys())
+        input_schema = resolve_graph_input_schema(reg, graph_id=graph_id)
+        inputs = [f.name for f in input_schema] or (
+            list(spec.io.required.keys()) + list(spec.io.optional.keys())
+        )
         outputs = list(spec.io.outputs.keys())
         desc = spec.meta.get("description") if hasattr(spec, "meta") else None
         spec_tags = list(spec.meta.get("tags", [])) if hasattr(spec, "meta") else []
@@ -237,6 +251,7 @@ async def get_graph_detail(
             description=desc,
             inputs=inputs,
             outputs=outputs,
+            input_schema=input_schema,
             tags=tags,
             kind="graph",
             flow_id=flow_id,
@@ -259,7 +274,8 @@ async def get_graph_detail(
     entrypoint = bool(meta.get("entrypoint", False))
     meta_tags = list(meta.get("tags", []))
 
-    inputs = list(getattr(gf, "inputs", []) or [])
+    input_schema = resolve_graph_input_schema(reg, graph_id=graph_id)
+    inputs = [f.name for f in input_schema] or list(getattr(gf, "inputs", []) or [])
     outputs = list(getattr(gf, "outputs", []) or [])
     desc = getattr(gf, "description", None)
 
@@ -269,6 +285,7 @@ async def get_graph_detail(
         description=desc,
         inputs=inputs,
         outputs=outputs,
+        input_schema=input_schema,
         tags=meta_tags or ["graphfn"],
         kind="graphfn",
         flow_id=flow_id,

@@ -114,17 +114,61 @@ def graphify(
             ...
         ```
 
+        Typed app inputs with defaults + UI schema override:
+        ```python
+        @graphify(
+            name="generic_typed_workflow_v1",
+            inputs={
+                "limit": 100,                 # optional with default
+                "temperature": 0.2,           # optional with default
+                "options": {"mode": "fast"},  # optional object default
+                "required_like": None,        # workaround: treat as required in function validation
+            },
+            outputs=["result", "metrics", "artifacts"],
+            as_app={
+                "id": "generic-typed-app",
+                "name": "Generic Typed App",
+                "input_schema": [
+                    {"name": "limit", "label": "Limit", "widget": "number", "default": 250},
+                    {"name": "temperature", "label": "Temperature", "widget": "number"},
+                    {"name": "enabled", "label": "Enabled", "widget": "switch", "default": True},
+                    {"name": "options", "label": "Options", "widget": "json"},
+                    {"name": "required_like", "label": "Required Value", "widget": "text"},
+                ],
+            },
+        )
+        def generic_typed_workflow(
+            limit: int,
+            temperature: float,
+            options: dict[str, str],
+            required_like: str | None,
+            enabled: bool = False,
+        ):
+            if required_like is None:
+                raise ValueError("required_like must be provided")
+            ...
+        ```
+
     Args:
         name: Unique name for the graph function.
-        inputs: List of input parameter names. If `as_agent` is provided with `mode="chat_v1"`,
-            this must match `["message", "files", "context_refs", "session_id", "user_meta"]`.
+        inputs: Graph input declaration. Supports either:
+            - `list[str]`: required input names.
+            - `dict[str, Any]`: optional input names mapped to default values.
+            If `as_agent` is provided with `mode="chat_v1"`, this must match
+            `["message", "files", "context_refs", "session_id", "user_meta"]`.
+            Type inference uses function annotations for declared input names
+            (e.g. `int/float -> number`, `str -> string`, `bool -> boolean`,
+            `dict -> object`, `list -> array`).
         outputs: List of output keys returned by the function.
         version: Version string for the graph function (default: "0.1.0").
         entrypoint: If True, marks this graph as the main entrypoint for a flow.  [Currently unused]
         flow_id: Optional flow identifier for grouping related graphs.
         tags: List of string tags for discovery and categorization.
         as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
-        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI.
+            Supports optional `input_schema` UI overrides. Each entry is matched
+            by `name` and can provide UI hints such as `label`, `placeholder`,
+            `widget`, `description`, and `default`.
         description: Optional human-readable description of the graph function.
 
     Returns:
@@ -135,7 +179,17 @@ def graphify(
         - When registering as an agent, the `as_agent` dictionary should include at least an "id" key.
         - When registering as an app, the `as_app` dictionary should include at least an "id" key.
         - The decorated function is a sync function (generate the TaskGraph), despite the underlying `@tool` can be async.
-        - Fields `inputs` and `outputs` are can be inferred from the function signature if not explicitly provided, but it's recommended to declare them for clarity.
+        - For `graphify`, required vs optional is controlled by `inputs`:
+          `list[str]` means required; `dict[str, default]` means optional with defaults.
+        - `graphify` does not currently support mixing required and optional in a
+          single `inputs` declaration. To have required inputs, use `list[str]`.
+          If you must use `dict` only, a common workaround is a sentinel default
+          (for example `None`) and explicit validation inside the function body.
+        - Runtime optional defaults declared in `inputs` are applied by graph binding.
+          UI defaults are shown only when surfaced via API input schema and can be
+          overridden by `as_app.input_schema` defaults.
+        - Field types are inferred from function annotations for declared inputs and
+          are exposed as JSON-like types in registry metadata.
     """
 
     def _wrap(fn):

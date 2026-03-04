@@ -114,6 +114,9 @@ class AppConfig(TypedDict, total=False):
         run_importance (RunImportance): "normal" | "high" | ...
         flow_id (str): Flow identifier. Defaults to graph name.
         github_url (str): Optional GitHub link.
+        input_schema (list[dict]): Optional UI input overrides merged against graph-derived inputs.
+            Each item should include at least {"name": "<input_name>"} and can provide
+            {"label","placeholder","widget","description","default"}.
     """
 
     # Identity & UI
@@ -140,6 +143,7 @@ class AppConfig(TypedDict, total=False):
 
     # Optional metadata
     github_url: str
+    input_schema: list[dict[str, Any]]
 
 
 AGENT_CORE_KEYS = {
@@ -164,6 +168,7 @@ AGENT_CORE_KEYS = {
     "memory_level",
     "memory_scope",
     "github_url",
+    "input_schema",
 }
 
 APP_CORE_KEYS = {
@@ -436,6 +441,7 @@ def build_app_meta(
         "run_visibility": cfg.get("run_visibility", "normal"),
         "run_importance": cfg.get("run_importance", "normal"),
         "github_url": cfg.get("github_url"),
+        "input_schema": cfg.get("input_schema", []),
         "backing": {
             "type": "graphfn",
             "name": graph_name,

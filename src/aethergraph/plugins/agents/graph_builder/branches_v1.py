@@ -210,6 +210,7 @@ async def _handle_generate(
         "Requirements:\n"
         "- If scripts exist: wrap functions as @tool; do NOT rewrite scripts.\n"
         "- If expensive/iterative: add artifact checkpoint save/load around the expensive tool(s).\n"
+        "- Ensure graph function inputs are type-annotated (e.g. `def workflow(x: str, n: int)`).\n"
         "- Use context.channel().send_text for progress.\n\n"
         "Return (as Markdown):\n"
         "1) brief explanation\n"
@@ -303,6 +304,7 @@ async def _handle_register_app(
         "Output:\n"
         "- Explain what will be registered\n"
         "- Provide a complete ```python``` snippet showing @graph_fn or @graphify with as_app={...}\n"
+        "- Include as_app.input_schema inferred from graph inputs (labels/widgets/defaults where useful).\n"
         "- Keep it minimal; do not invent non-existent APIs."
     )
 

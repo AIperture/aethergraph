@@ -7,6 +7,7 @@ from .artifacts import (
 )
 from .channels import ChannelEvent, ChannelEventListResponse, ChannelIngressRequest
 from .graphs import GraphDetail, GraphEdgeInfo, GraphListItem, GraphNodeInfo
+from .input_schema import InputFieldSpec
 from .memory import (
     MemoryEvent,
     MemoryEventListResponse,
@@ -73,6 +74,7 @@ __all__ = [
     "GraphStats",
     "GraphStatsEntry",
     "HealthResponse",
+    "InputFieldSpec",
     "LLMStats",
     "LLMStatsEntry",
     "MemoryEvent",

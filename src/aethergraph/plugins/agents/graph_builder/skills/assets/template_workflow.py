@@ -49,7 +49,7 @@ async def expensive_step(x: str, *, context: NodeContext) -> dict:
 
 
 @graphify(name="my_workflow", inputs=["x"], outputs=["result"])
-def my_workflow(x):
+def my_workflow(x: str):
     # One tool invocation is one node. Use _after for non-data ordering.
     start = announce(step=TOOL_NAME)
     out = expensive_step(x=x, _after=[start])
