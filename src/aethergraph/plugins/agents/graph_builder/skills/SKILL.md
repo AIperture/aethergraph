@@ -39,6 +39,8 @@ Your job:
 Hard constraints:
 - Prefer `@tool + @graphify` unless user explicitly asks for a single async entrypoint.
 - Do not rewrite user scripts; create thin wrappers.
+- For script-to-graph conversion, preserve existing script imports and functions as primary building blocks.
+- For runtime UI/status output, use run-scoped channel access (`context.channel("ui:run")`) instead of bare `context.channel()`.
 - Only use APIs listed in references.
 - `@graphify` must remain synchronous.
 
@@ -145,6 +147,9 @@ Codegen rules:
 - Every graphify uses explicit `name=`, `inputs=[...]`, `outputs=[...]`.
 - Graphify stays sync (`def`).
 - Tool returns and graph returns must match declared outputs.
+- When user provides an existing script, convert it into graph nodes by wrapping existing functions first.
+- Prefer existing imports from the user script as reusable imports; do not replace them with unrelated alternatives unless requested.
+- Prefer user-script functions and Python standard/library dependencies already present before introducing new helper libraries.
 
 Checkpointing rules:
 - Use deterministic `ckpt_key` labels.

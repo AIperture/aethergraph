@@ -9,13 +9,13 @@ Use only the APIs below unless the user explicitly enables advanced services.
 
 ## Allowed calls
 
-- `context.channel()`
+- `context.channel("ui:run")`
 - `context.artifacts()`
 - `context.logger()` (optional)
 
 ## Rules
 
-- If a tool calls `channel()` or `artifacts()`, it MUST include `*, context: NodeContext`.
+- If a tool calls `channel("ui:run")` or `artifacts()`, it MUST include `*, context: NodeContext`.
 - Tool signatures should be `async def ...(*, context: NodeContext)` when using channel/artifacts.
 - In `@graphify`, never pass `context=` explicitly. Runtime injects it at node execution time.
 - Prefer async tools only when needed (I/O, artifact access, interactive channel calls).

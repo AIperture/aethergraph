@@ -28,7 +28,7 @@ async def _save_ckpt(*, ckpt_key: str, payload: dict, context: NodeContext) -> N
 
 @tool(name="announce", outputs=["ok"])
 async def announce(step: str, *, context: NodeContext) -> dict:
-    await context.channel().send_text(f"starting {step}")
+    await context.channel("ui:run").send_text(f"starting {step}")
     return {"ok": True}
 
 
@@ -37,14 +37,14 @@ async def expensive_step(x: str, *, context: NodeContext) -> dict:
     ckpt_key = f"{TOOL_NAME}:{x}"
     cached = await _try_load_ckpt(ckpt_key=ckpt_key, context=context)
     if cached is not None:
-        await context.channel().send_text("loaded checkpoint for expensive_step")
+        await context.channel("ui:run").send_text("loaded checkpoint for expensive_step")
         return {"result": cached["result"]}
 
-    await context.channel().send_text("running expensive_step")
+    await context.channel("ui:run").send_text("running expensive_step")
     result = x.upper()
 
     await _save_ckpt(ckpt_key=ckpt_key, payload={"result": result}, context=context)
-    await context.channel().send_text("saved checkpoint for expensive_step")
+    await context.channel("ui:run").send_text("saved checkpoint for expensive_step")
     return {"result": result}
 
 

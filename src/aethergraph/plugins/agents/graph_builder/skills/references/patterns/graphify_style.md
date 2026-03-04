@@ -20,7 +20,7 @@ title: Graphy Style
 - Prefer explicit tool `name=...` for stable identity and checkpoints.
 - Each tool must declare `outputs=[...]`.
 - Tool return dict keys must include every declared output key.
-- If a tool uses `context.channel()` or `context.artifacts()`, define it as:
+- If a tool uses `context.channel("ui:run")` or `context.artifacts()`, define it as:
   - `async def tool_name(..., *, context: NodeContext) -> dict`
 
 ## Example: explicit DAG with `_after`
@@ -34,7 +34,7 @@ def read_input(text: str) -> dict:
 
 @tool(name="announce_start", outputs=["ok"])
 async def announce_start(step: str, *, context: NodeContext) -> dict:
-    await context.channel().send_text(f"starting {step}")
+    await context.channel("ui:run").send_text(f"starting {step}")
     return {"ok": True}
 
 @tool(name="expensive_step", outputs=["result"])
