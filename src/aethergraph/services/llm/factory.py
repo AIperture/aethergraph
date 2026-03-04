@@ -1,7 +1,7 @@
 import logging
 import os
 
-from pydantic import SecretStr
+from pydantic import SecretStr  # type: ignore[import]
 
 from aethergraph.config.llm import LLMProfile, LLMSettings
 
@@ -124,6 +124,8 @@ def client_from_profile(p: LLMProfile, secrets: Secrets) -> GenericLLMClient:
         api_key=api_key,
         azure_deployment=p.azure_deployment,
         timeout=p.timeout,
+        thinking_budget=p.thinking_budget,
+        reasoning_summary=p.reasoning_summary,
     )
 
 

@@ -161,11 +161,4 @@ async def route_v2(
         context.logger().exception("graph_builder_v2: llm router failed; fallback engaged")
         return _fallback_route(message=message, state=state)
 
-    if decision["branch"] == GraphBuilderBranch.GENERATE:
-        has_plan = bool(state.pending_plan_json or state.last_plan_json)
-        if not has_plan:
-            return {
-                "branch": GraphBuilderBranch.CHAT,
-                "reason": "guard_generate_without_plan_redirect_to_chat",
-            }
     return decision

@@ -141,9 +141,83 @@ def _plan_card(plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_python_code(markdown_text: str) -> str | None:
-    m = re.search(r"```python\s*(.*?)\s*```", markdown_text or "", flags=re.DOTALL)
-    if m:
-        return m.group(1).strip()
+    text = markdown_text or ""
+
+    # Preferred: explicit Python fenced blocks.
+    for m in re.finditer(r"```(python|py)\s*(.*?)(?:```|$)", text, flags=re.DOTALL | re.IGNORECASE):
+        code = (m.group(2) or "").strip()
+        if code:
+            return code
+
+    # Fallback: unlabeled fenced block that looks like Python source.
+    for m in re.finditer(r"```[^\n]*\n(.*?)(?:```|$)", text, flags=re.DOTALL):
+        candidate = (m.group(1) or "").strip()
+        if not candidate:
+            continue
+        if re.search(
+            r"(^from\s+\S+\s+import\s+|^import\s+\S+|^@(?:tool|graphify|graph_fn)\b|^\s*def\s+\w+\s*\(|^\s*async\s+def\s+\w+\s*\()",
+            candidate,
+            flags=re.MULTILINE,
+        ):
+            return candidate
+
+    # Final fallback: harvest from a Python implementation section even if fencing is malformed/missing.
+    m_section = re.search(
+        r"(?:^|\n)\s*python implementation\s*:?\s*\n(.*)$",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if m_section:
+        tail = (m_section.group(1) or "").strip()
+        m_manifest = re.search(
+            r"(?:^|\n)\s*(?:file manifest|manifest)\s*:?\s*\n",
+            tail,
+            flags=re.IGNORECASE,
+        )
+        if m_manifest:
+            tail = tail[: m_manifest.start()].rstrip()
+        if tail:
+            return tail
+
+    return None
+
+
+def _extract_plan_json(markdown_text: str) -> dict[str, Any] | None:
+    text = markdown_text or ""
+
+    # Preferred: explicit JSON fenced block.
+    for m in re.finditer(r"```json\s*(.*?)(?:```|$)", text, flags=re.DOTALL | re.IGNORECASE):
+        block = (m.group(1) or "").strip()
+        if not block:
+            continue
+        try:
+            obj = json.loads(block)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            if isinstance(obj.get("plan"), dict):
+                return obj["plan"]
+            if isinstance(obj.get("graph"), dict):
+                return obj
+
+    # Fallback: scan arbitrary text for a decodable JSON object.
+    decoder = json.JSONDecoder()
+    idx = 0
+    while True:
+        start = text.find("{", idx)
+        if start < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text[start:])
+        except Exception:
+            idx = start + 1
+            continue
+        idx = start + max(end, 1)
+        if isinstance(obj, dict):
+            if isinstance(obj.get("plan"), dict):
+                return obj["plan"]
+            if isinstance(obj.get("graph"), dict):
+                return obj
     return None
 
 
@@ -162,6 +236,7 @@ async def _handle_plan_v2(
     message: str,
     files_summary: str,
     context: NodeContext,
+    show_approval_buttons: bool = True,
 ) -> tuple[str, dict[str, Any] | None]:
     llm = context.llm()
     chan = context.ui_session_channel()
@@ -203,14 +278,20 @@ async def _handle_plan_v2(
         rich=_plan_card(plan),
         memory_log=False,
     )
-    await chan.send_buttons(
-        text="Approve this plan to generate code, or replan with more details.",
-        buttons=[
-            Button(label="Proceed", value="proceed"),
-            Button(label="Replan", value="replan"),
-        ],
-        memory_log=False,
-    )
+    if show_approval_buttons:
+        await chan.send_buttons(
+            text="Approve this plan to generate code, or replan with more details.",
+            buttons=[
+                Button(label="Proceed", value="proceed"),
+                Button(label="Replan", value="replan"),
+            ],
+            memory_log=False,
+        )
+    else:
+        await chan.send_text(
+            "I drafted a plan from current context and will continue directly to generation.",
+            memory_log=False,
+        )
     await chan.send_phase(phase="thinking", status="done", label="Plan is ready.")
 
     if plan:
@@ -238,6 +319,26 @@ async def _handle_generate_v2(
     chan = context.ui_session_channel()
     state = await _load_state(context=context, level="user")
     plan = state.pending_plan_json or state.last_plan_json
+    if not plan:
+        await chan.send_phase(
+            phase="thinking",
+            status="active",
+            label="No plan found. Drafting a plan first...",
+        )
+        plan_message = (message or "").strip()
+        if plan_message.lower().startswith("/gen"):
+            remainder = plan_message[4:].strip()
+            plan_message = remainder or (
+                "Draft a practical build plan from prior chat context and available files."
+            )
+        _plan_reply, auto_plan = await _handle_plan_v2(
+            message=plan_message,
+            files_summary=files_summary,
+            context=context,
+            show_approval_buttons=False,
+        )
+        state = await _load_state(context=context, level="user")
+        plan = state.pending_plan_json or state.last_plan_json or auto_plan
     if not plan:
         return (
             "I do not have an approved plan yet. Please run /plan first or provide requirements for planning.",
@@ -285,20 +386,16 @@ async def _handle_generate_v2(
         raise
     print("🍎 Graph Builder: Code generation LLM response:\n", resp_text)
 
-    new_plan: dict[str, Any] | None = None
-    m_json = re.search(r"```json\s*(\{.*?\})\s*```", resp_text, flags=re.DOTALL)
-    if m_json:
-        try:
-            wrapper = json.loads(m_json.group(1))
-            if isinstance(wrapper, dict) and isinstance(wrapper.get("plan"), dict):
-                new_plan = wrapper["plan"]
-        except Exception:
-            new_plan = None
+    new_plan = _extract_plan_json(resp_text)
 
     code = _extract_python_code(resp_text)
     if not code:
         await chan.send_phase(
             phase="thinking", status="failed", label="No Python code block found."
+        )
+        await chan.send_text(
+            "I expected a Python code block in the generation output but couldn't find one. "
+            "Please ensure the LLM response includes a code block like ```python ... ```."
         )
         return (
             "I could not extract Python code from the generation output. Please replan or retry.",
@@ -557,6 +654,7 @@ async def _handle_register_app_v2(
         return msg
 
     if code_text:
+        # hotload the graph to validate it before registration, and to extract metadata for app config proposal
         await _ensure_graph_registered_from_code(
             context=context,
             graph_name=graph_name,

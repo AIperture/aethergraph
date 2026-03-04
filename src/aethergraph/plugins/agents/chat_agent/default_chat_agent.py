@@ -207,6 +207,9 @@ async def default_chat_agent(
     # 3) Layer 3: semantic search over events + artifacts
     # ------------------------------------------------------------------
     search_snippet_block = ""
+    resp = ""
+    usage: dict[str, Any] = {}
+
     try:
         # Scope-aware filtering: prefer this memory scope if present
         scope_id = getattr(mem, "memory_scope_id", None) or None
@@ -305,49 +308,16 @@ async def default_chat_agent(
     messages.append({"role": "user", "content": user_content})
 
     try:
-        # # Mark the "reasoning" phase as active before calling the LLM
-        # try:
-        #     await chan.send_phase(
-        #         phase="thinking",
-        #         status="active",
-        #         label="LLM call",
-        #         detail="Calling LLM (streaming response)...",
-        #     )
-
-        #     await asyncio.sleep(0.5)  # slight delay to ensure phase event ordering
-
-        # except Exception:
-        #     logger.debug("Failed to send LLM phase(active) state", exc_info=True)
-
-        async with chan.stream() as s:
-            # Hook for streaming deltas into the same message
-            async def on_delta(piece: str) -> None:
-                await s.delta(piece)
-
-            # Streaming LLM call
-            resp, usage = await llm.chat_stream(
-                messages=messages,
-                on_delta=on_delta,
-            )
-
-            # Finalize streaming + memory
-            memory_data = {"usage": usage} if usage else None
-            await s.end(
-                full_text=resp,
-                memory_tags=["session.chat"],
-                memory_data=memory_data,
-            )
-
-        # Mark the "reasoning" phase as done
-        try:
-            await chan.send_phase(
-                phase="reasoning",
-                status="done",
-                label="LLM call",
-                detail="LLM response finished.",
-            )
-        except Exception:
-            logger.debug("Failed to send LLM phase(done) state", exc_info=True)
+        resp, usage, _thinking = await chan.chat_and_stream(
+            llm=llm,
+            messages=messages,
+            memory_tags=["session.chat"],
+            # Keep LLM thinking updates independent from other phase emitters.
+            thinking_phase="thinking",
+            thinking_phase_key_suffix="phase:llm.thinking",
+            thinking_label_active="Thinking...",
+            thinking_label_done="Thinking",
+        )
 
     except Exception:
         logger.warning(

@@ -4,7 +4,6 @@ from typing import Any, Protocol
 
 class LLMClientProtocol(Protocol):
     async def chat(self, messages: list[dict[str, Any]], **kw) -> tuple[str, dict[str, int]]: ...
-    async def embed(self, texts: list[str], **kw) -> list[list[float]]: ...
     async def raw(
         self,
         *,
@@ -25,10 +24,7 @@ class EmbeddingClientProtocol(Protocol):
         *,
         model: str | None = None,
         **kwargs,
-    ) -> list[list[float]]:
-        """
-        Batch-embed texts. Returns one vector per text.
-        """
+    ) -> list[list[float]]: ...
 
     async def embed_one(
         self,
@@ -36,8 +32,4 @@ class EmbeddingClientProtocol(Protocol):
         *,
         model: str | None = None,
         **kwargs,
-    ) -> list[float]:
-        """
-        Convenience method: embed a single string.
-        Default implementation can call embed([text])[0].
-        """
+    ) -> list[float]: ...

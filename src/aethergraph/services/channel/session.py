@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import inspect
 import logging
 from pathlib import Path, PurePath
+import time
 from typing import Any, Literal
 import uuid
 
@@ -1469,6 +1470,180 @@ class ChannelSession:
         finally:
             # No auto-end; caller decides when to end()
             pass
+
+    async def chat_and_stream(
+        self,
+        *,
+        llm: Any,
+        messages: list[dict[str, Any]],
+        channel: str | None = None,
+        # LLM options
+        reasoning_effort: str | None = None,
+        thinking_budget: int | None = None,
+        reasoning_summary: str | None = None,
+        max_output_tokens: int | None = None,
+        output_format: str = "text",
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "output",
+        strict_schema: bool = True,
+        validate_json: bool = True,
+        fail_on_unsupported: bool = True,
+        llm_kwargs: dict[str, Any] | None = None,
+        # Thinking phase UX
+        thinking_phase: str = "thinking",
+        thinking_label_active: str = "Thinking...",
+        thinking_label_done: str = "Thinking",
+        thinking_detail_interval_s: float = 1.5,
+        thinking_detail_tail_chars: int = 300,
+        thinking_phase_key_suffix: str | None = "phase:llm.thinking",
+        include_thinking_code: bool = True,
+        emit_thinking_phase: bool = False,
+        # Memory logging
+        memory_log: bool = True,
+        memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
+    ) -> tuple[str, dict[str, int], str]:
+        """
+        Stream an LLM chat response to channel output and return final text/usage.
+
+        This helper wires `llm.chat_stream()` callbacks to channel stream events and
+        optional thinking-phase updates (`agent.progress.update`) so agent code does
+        not need to reimplement callback plumbing.
+        """
+
+        thinking_buffer: list[str] = []
+        last_thinking_ts = 0.0
+        thinking_started = False
+        text_started = False
+
+        async with self.stream(channel=channel) as s:
+
+            async def on_thinking_delta(piece: str) -> None:
+                nonlocal last_thinking_ts, thinking_started
+                if not emit_thinking_phase:
+                    return
+                if not piece:
+                    return
+
+                thinking_buffer.append(piece)
+                now = time.monotonic()
+
+                if not thinking_started:
+                    thinking_started = True
+                    try:
+                        await self.send_phase(
+                            phase=thinking_phase,
+                            status="active",
+                            label=thinking_label_active,
+                            channel=channel,
+                            key_suffix=thinking_phase_key_suffix,
+                        )
+                    except Exception as e:
+                        logger = logging.getLogger("aethergraph.services.channel.session")
+                        logger.debug("Failed to send thinking phase update")
+                        logger.exception("Error was: %s", str(e))
+
+                if now - last_thinking_ts >= thinking_detail_interval_s:
+                    last_thinking_ts = now
+                    full = "".join(thinking_buffer)
+                    detail = (
+                        ("..." + full[-thinking_detail_tail_chars:])
+                        if len(full) > thinking_detail_tail_chars
+                        else full
+                    )
+                    try:
+                        await self.send_phase(
+                            phase=thinking_phase,
+                            status="active",
+                            label=thinking_label_active,
+                            detail=detail,
+                            channel=channel,
+                            key_suffix=thinking_phase_key_suffix,
+                        )
+                    except Exception as e:
+                        logger = logging.getLogger("aethergraph.services.channel.session")
+                        logger.debug("Failed to send thinking phase update")
+                        logger.exception("Error was: %s", str(e))
+
+            async def on_delta(piece: str) -> None:
+                nonlocal text_started
+                if not piece:
+                    return
+
+                if not text_started and thinking_buffer:
+                    text_started = True
+                    full = "".join(thinking_buffer)
+                    try:
+                        await self.send_phase(
+                            phase=thinking_phase,
+                            status="done",
+                            label=thinking_label_done,
+                            detail=f"Reasoned ({len(full)} chars)",
+                            code=(full if include_thinking_code else None),
+                            channel=channel,
+                            key_suffix=thinking_phase_key_suffix,
+                        )
+                    except Exception as e:
+                        logger = logging.getLogger("aethergraph.services.channel.session")
+                        logger.debug("Failed to send thinking phase update on completion")
+                        logger.exception("Error was: %s", str(e))
+
+                await s.delta(piece)
+
+            kwargs: dict[str, Any] = {
+                "messages": messages,
+                "reasoning_effort": reasoning_effort,
+                "thinking_budget": thinking_budget,
+                "reasoning_summary": reasoning_summary,
+                "max_output_tokens": max_output_tokens,
+                "output_format": output_format,
+                "json_schema": json_schema,
+                "schema_name": schema_name,
+                "strict_schema": strict_schema,
+                "validate_json": validate_json,
+                "fail_on_unsupported": fail_on_unsupported,
+                "on_delta": on_delta,
+            }
+            if emit_thinking_phase:
+                kwargs["on_thinking_delta"] = on_thinking_delta
+            if llm_kwargs:
+                kwargs.update(llm_kwargs)
+
+            resp, usage = await llm.chat_stream(**kwargs)
+
+            if emit_thinking_phase and thinking_buffer and not text_started:
+                full = "".join(thinking_buffer)
+                try:
+                    await self.send_phase(
+                        phase=thinking_phase,
+                        status="done",
+                        label=thinking_label_done,
+                        code=(full if include_thinking_code else None),
+                        channel=channel,
+                        key_suffix=thinking_phase_key_suffix,
+                    )
+                except Exception as e:
+                    logger = logging.getLogger("aethergraph.services.channel.session")
+                    logger.debug("Failed to send thinking phase update on completion")
+                    logger.exception("Error was: %s", str(e))
+
+            final_memory_data = dict(memory_data or {})
+            if usage:
+                final_memory_data.setdefault("usage", usage)
+            await s.end(
+                full_text=resp,
+                memory_log=memory_log,
+                memory_role=memory_role,
+                memory_tags=memory_tags,
+                memory_data=final_memory_data or None,
+                memory_severity=memory_severity,
+                memory_signal=memory_signal,
+            )
+
+        return resp, usage, "".join(thinking_buffer)
 
     # ---------- progress ----------
     class _ProgressSender:
