@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from hashlib import sha1, sha256
@@ -12,30 +11,13 @@ from typing import Any
 
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.core.graph.graphify_validation import (
+    ValidationResult,
+    validate_graph_source,
+)
 from aethergraph.core.runtime.runtime_services import use_services
 from aethergraph.services.registry.unified_registry import TenantIdentity, UnifiedRegistry
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
-
-
-@dataclass
-class ValidationIssue:
-    code: str
-    message: str
-    line: int | None = None
-    col: int | None = None
-    end_line: int | None = None
-    end_col: int | None = None
-    severity: str = "error"
-    suggestion: str | None = None
-    symbol: str | None = None
-
-
-@dataclass
-class ValidationResult:
-    ok: bool
-    issues: list[ValidationIssue] = field(default_factory=list)
-    graph_names: list[str] = field(default_factory=list)
-    graphfn_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -86,72 +68,6 @@ def _normalize_tenant(tenant: TenantIdentity) -> dict[str, str | None] | None:
     return norm
 
 
-def _decorator_name(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Call):
-        return _decorator_name(node.func)
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
-
-
-def _call_kwarg_names(node: ast.AST) -> set[str]:
-    if not isinstance(node, ast.Call):
-        return set()
-    return {kw.arg for kw in node.keywords if kw.arg}
-
-
-def _extract_name_kw(node: ast.AST) -> str | None:
-    if not isinstance(node, ast.Call):
-        return None
-    for kw in node.keywords:
-        if (
-            kw.arg == "name"
-            and isinstance(kw.value, ast.Constant)
-            and isinstance(kw.value.value, str)
-        ):
-            return kw.value.value.strip()
-    return None
-
-
-def _is_tool_decorator(dec: ast.AST) -> bool:
-    return _decorator_name(dec) == "tool"
-
-
-def _collect_decorated_function_names(tree: ast.AST, decorator_name: str) -> set[str]:
-    out: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):  # noqa: UP038
-            continue
-        if any(_decorator_name(dec) == decorator_name for dec in node.decorator_list):
-            out.add(node.name)
-    return out
-
-
-def _is_supported_if_test(node: ast.AST) -> bool:
-    if isinstance(node, ast.Constant):
-        return isinstance(node.value, bool)
-    if isinstance(node, ast.Name):
-        return True
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
-        return _is_supported_if_test(node.operand)
-    if isinstance(node, ast.Compare):
-        allowed_ops = (ast.Eq, ast.NotEq, ast.In, ast.NotIn, ast.Is, ast.IsNot)
-        if any(not isinstance(op, allowed_ops) for op in node.ops):
-            return False
-
-        def _simple_expr(x: ast.AST) -> bool:
-            if isinstance(x, (ast.Name, ast.Constant, ast.Attribute)):  # noqa: UP038
-                return True
-            if isinstance(x, ast.Subscript):
-                return _simple_expr(x.value)
-            return False
-
-        return _simple_expr(node.left) and all(_simple_expr(c) for c in node.comparators)
-    return False
-
-
 class RegistrationService:
     """
     Source-based graph hotload + registration + replay persistence.
@@ -177,222 +93,7 @@ class RegistrationService:
         filename: str | None = None,
         strict: bool = True,
     ) -> ValidationResult:
-        issues: list[ValidationIssue] = []
-        graph_names: list[str] = []
-        graphfn_names: list[str] = []
-        display_name = filename or "<source>"
-
-        try:
-            tree = ast.parse(source, filename=display_name)
-        except SyntaxError as e:
-            issues.append(
-                ValidationIssue(
-                    code="syntax_error",
-                    message=e.msg or "Syntax error",
-                    line=e.lineno,
-                    col=e.offset,
-                )
-            )
-            return ValidationResult(ok=False, issues=issues)
-
-        saw_decorator = False
-        tool_names = _collect_decorated_function_names(tree, "tool")
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):  # noqa: UP038
-                continue
-
-            is_tool_fn = any(_is_tool_decorator(dec) for dec in node.decorator_list)
-            if is_tool_fn:
-                for n in ast.walk(node):
-                    if not isinstance(n, ast.Call):
-                        continue
-                    callee = _decorator_name(n.func)
-                    if callee and callee in tool_names:
-                        issues.append(
-                            ValidationIssue(
-                                code="tool_nested_tool_call_disallowed",
-                                message=(
-                                    f"Nested @tool call '{callee}(...)' inside tool '{node.name}' is not supported."
-                                ),
-                                line=getattr(n, "lineno", None),
-                                col=getattr(n, "col_offset", None),
-                                end_line=getattr(n, "end_lineno", None),
-                                end_col=getattr(n, "end_col_offset", None),
-                                symbol=node.name,
-                                suggestion="Move orchestration into @graphify/@graph_fn.",
-                            )
-                        )
-
-            for dec in node.decorator_list:
-                dec_name = _decorator_name(dec)
-                if dec_name not in {"graphify", "graph_fn"}:
-                    continue
-                saw_decorator = True
-                kw_names = _call_kwarg_names(dec)
-                required = {"name", "inputs", "outputs"}
-                missing = required - kw_names
-                if missing:
-                    issues.append(
-                        ValidationIssue(
-                            code="missing_decorator_kw",
-                            message=f"{dec_name} is missing required kwargs: {sorted(missing)}",
-                            line=getattr(dec, "lineno", None),
-                            col=getattr(dec, "col_offset", None),
-                        )
-                    )
-
-                if dec_name == "graphify" and isinstance(node, ast.AsyncFunctionDef):
-                    issues.append(
-                        ValidationIssue(
-                            code="graphify_async_def",
-                            message="@graphify must decorate sync def, not async def",
-                            line=node.lineno,
-                            col=node.col_offset,
-                            end_line=getattr(node, "end_lineno", None),
-                            end_col=getattr(node, "end_col_offset", None),
-                            symbol=node.name,
-                        )
-                    )
-
-                explicit_name = _extract_name_kw(dec)
-                if dec_name == "graphify":
-                    graph_names.append(explicit_name or node.name)
-
-                    for n in ast.walk(node):
-                        if isinstance(n, ast.Await):
-                            issues.append(
-                                ValidationIssue(
-                                    code="graphify_await_in_sync_body",
-                                    message="@graphify body cannot use await; graphify must declare DAG only.",
-                                    line=getattr(n, "lineno", None),
-                                    col=getattr(n, "col_offset", None),
-                                    end_line=getattr(n, "end_lineno", None),
-                                    end_col=getattr(n, "end_col_offset", None),
-                                    symbol=node.name,
-                                    suggestion="Move async execution into @tool or use @graph_fn.",
-                                )
-                            )
-
-                        if isinstance(n, (ast.While, ast.For, ast.AsyncFor, ast.Try, ast.Match)):  # noqa: UP038
-                            issues.append(
-                                ValidationIssue(
-                                    code="graphify_control_flow_non_deterministic",
-                                    message=(
-                                        f"Unsupported control flow '{type(n).__name__}' in @graphify '{node.name}'."
-                                    ),
-                                    line=getattr(n, "lineno", None),
-                                    col=getattr(n, "col_offset", None),
-                                    end_line=getattr(n, "end_lineno", None),
-                                    end_col=getattr(n, "end_col_offset", None),
-                                    symbol=node.name,
-                                    suggestion="Use declarative _condition or switch to @graph_fn.",
-                                )
-                            )
-
-                        if isinstance(n, ast.If) and not _is_supported_if_test(n.test):
-                            issues.append(
-                                ValidationIssue(
-                                    code="graphify_control_flow_non_deterministic",
-                                    message=(
-                                        f"@graphify '{node.name}' has unsupported if-condition shape."
-                                    ),
-                                    line=getattr(n, "lineno", None),
-                                    col=getattr(n, "col_offset", None),
-                                    end_line=getattr(n, "end_lineno", None),
-                                    end_col=getattr(n, "end_col_offset", None),
-                                    symbol=node.name,
-                                    suggestion="Use simple comparisons or _condition on tool calls.",
-                                )
-                            )
-
-                        if isinstance(n, ast.Call):
-                            for kw in n.keywords or []:
-                                if kw.arg != "_condition":
-                                    continue
-                                if not isinstance(  # noqa: UP038
-                                    kw.value,
-                                    (ast.Dict, ast.Constant, ast.Name),  # noqa: UP038
-                                ):
-                                    issues.append(
-                                        ValidationIssue(
-                                            code="graphify_unsupported_condition_expr",
-                                            message=(
-                                                "Tool _condition must be a bool/name or declarative dict expression."
-                                            ),
-                                            line=getattr(kw.value, "lineno", None),
-                                            col=getattr(kw.value, "col_offset", None),
-                                            end_line=getattr(kw.value, "end_lineno", None),
-                                            end_col=getattr(kw.value, "end_col_offset", None),
-                                            symbol=node.name,
-                                        )
-                                    )
-
-                    # Detect plain function calls later treated like NodeHandle accesses.
-                    call_assigns: dict[str, tuple[str | None, ast.Call]] = {}
-                    for stmt in node.body:
-                        if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, ast.Call):
-                            continue
-                        if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
-                            continue
-                        var_name = stmt.targets[0].id
-                        callee = _decorator_name(stmt.value.func)
-                        call_assigns[var_name] = (callee, stmt.value)
-
-                    for n in ast.walk(node):
-                        base_name = None
-                        if (
-                            isinstance(n, ast.Attribute)
-                            and isinstance(n.value, ast.Name)
-                            or isinstance(n, ast.Subscript)
-                            and isinstance(n.value, ast.Name)
-                        ):
-                            base_name = n.value.id
-                        if not base_name or base_name not in call_assigns:
-                            continue
-
-                        callee, call_node = call_assigns[base_name]
-                        if callee and callee in tool_names:
-                            continue
-                        issues.append(
-                            ValidationIssue(
-                                code="graphify_plain_call_used_as_handle",
-                                message=(
-                                    f"Variable '{base_name}' is from a plain call but used like a node handle/ref."
-                                ),
-                                line=getattr(n, "lineno", None),
-                                col=getattr(n, "col_offset", None),
-                                end_line=getattr(n, "end_lineno", None),
-                                end_col=getattr(n, "end_col_offset", None),
-                                symbol=node.name,
-                                suggestion=(
-                                    "Wrap the callable with @tool or return explicit ref/literal values."
-                                ),
-                            )
-                        )
-                        break
-                else:
-                    graphfn_names.append(explicit_name or node.name)
-
-        if not saw_decorator:
-            issues.append(
-                ValidationIssue(
-                    code="missing_graph_decorator",
-                    message="No @graphify(...) or @graph_fn(...) decorator found.",
-                )
-            )
-
-        try:
-            compile(source, display_name, "exec")
-        except Exception as e:
-            issues.append(ValidationIssue(code="compile_error", message=repr(e)))
-
-        ok = len(issues) == 0
-        result = ValidationResult(
-            ok=ok, issues=issues, graph_names=graph_names, graphfn_names=graphfn_names
-        )
-        if strict and not ok:
-            return result
-        return result
+        return validate_graph_source(source, filename=filename, strict=strict)
 
     async def register_by_file(
         self,
@@ -671,6 +372,8 @@ class RegistrationService:
         module_name = f"_ag_hotload_{module_key}_{sha1(str(id(self.registry)).encode('utf-8')).hexdigest()[:8]}"
         module = types.ModuleType(module_name)
         module.__file__ = f"<hotload:{module_name}>"
+        module.__dict__["__aethergraph_source__"] = source
+        module.__dict__["__aethergraph_source_name__"] = filename or source_ref or module_name
         sys.modules[module_name] = module
         # Force decorators in source (e.g. @graphify/@graph_fn) to bind to this service registry.
         with use_services(SimpleNamespace(registry=self.registry)):

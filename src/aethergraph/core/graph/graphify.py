@@ -3,7 +3,15 @@ from __future__ import annotations
 import inspect
 from typing import Any, get_origin, get_type_hints
 
+from aethergraph.contracts.errors.errors import GraphValidationError, build_error_hints
 from aethergraph.core.graph.action_spec import _map_py_type_to_json_type
+from aethergraph.core.graph.graphify_validation import (
+    emit_validation_warnings,
+    format_validation_errors,
+    resolve_validation_source_for_callable,
+    validate_graph_source,
+    warnings_as_errors_enabled,
+)
 from aethergraph.services.registry.agent_app_meta import (
     AgentConfig,
     AppConfig,
@@ -219,6 +227,34 @@ def graphify(
     """
 
     def _wrap(fn):
+        source, source_name = resolve_validation_source_for_callable(fn)
+        validation = validate_graph_source(
+            source,
+            filename=source_name,
+            strict=True,
+            warnings_as_errors=warnings_as_errors_enabled(),
+        )
+        # log_validation_issues(validation, filename=source_name)
+        if not validation.ok:
+            error_result = type(validation)(
+                ok=False,
+                issues=[i for i in validation.issues if i.severity != "warning"],
+                graph_names=validation.graph_names,
+                graphfn_names=validation.graphfn_names,
+            )
+            if error_result.issues:
+                message = format_validation_errors(error_result, filename=source_name)
+                hints: list[dict[str, str]] = []
+                for issue in error_result.issues:
+                    hints.extend(build_error_hints(issue.code, issue.message))
+                primary_code = (
+                    error_result.issues[0].code
+                    if len(error_result.issues) == 1
+                    else "graph_validation_failed"
+                )
+                raise GraphValidationError(message, code=primary_code, hints=hints)
+        emit_validation_warnings(validation, filename=source_name)
+
         fn_sig = inspect.signature(fn)
         fn_params = list(fn_sig.parameters.keys())
 

@@ -6,7 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.contracts.errors.errors import GraphHasPendingWaits
+from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.execution.forward_scheduler import ForwardScheduler
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
@@ -270,11 +270,32 @@ class RunManager:
             continuations = getattr(e, "continuations", [])
             # outputs remain None
 
+        except GraphBuildError as exc:
+            record.status = RunStatus.failed
+            record.finished_at = _utcnow()
+            error_msg = str(exc)
+            record.error = error_msg
+            record.meta["error_kind"] = "build"
+            record.meta["error_code"] = exc.code
+            record.meta["error_stage"] = exc.stage
+            record.meta["error_hints"] = list(exc.hints or [])
+            record.meta["error_message"] = error_msg
+            import logging
+
+            logging.getLogger("aethergraph.runtime.run_manager").exception(
+                "Run %s failed with build error: %s", record.run_id, error_msg
+            )
+
         except Exception as exc:  # noqa: BLE001
             record.status = RunStatus.failed
             record.finished_at = _utcnow()
             error_msg = str(exc)
             record.error = error_msg
+            record.meta["error_kind"] = "runtime"
+            record.meta["error_code"] = None
+            record.meta["error_stage"] = None
+            record.meta["error_hints"] = []
+            record.meta["error_message"] = error_msg
             import logging
 
             logging.getLogger("aethergraph.runtime.run_manager").exception(

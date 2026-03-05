@@ -95,6 +95,17 @@ class MeteringService(Protocol):
         """Get LLM usage statistics."""
         ...
 
+    async def get_embedding_stats(
+        self,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        window: str = "24h",
+        run_ids: list[str] | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Get embedding usage statistics."""
+        ...
+
     async def get_graph_stats(
         self,
         *,

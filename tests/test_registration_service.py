@@ -169,6 +169,19 @@ def g(x):
     assert "graphify_control_flow_non_deterministic" in issue_codes
 
 
+def test_validate_graphify_source_result_shape_regression():
+    reg = UnifiedRegistry()
+    set_current_registry(reg)
+    service = RegistrationService(registry=reg)
+
+    result = service.validate_graphify_source(GOOD_SOURCE, filename="good.py", strict=True)
+    assert result.ok is True
+    assert isinstance(result.issues, list)
+    assert isinstance(result.graph_names, list)
+    assert isinstance(result.graphfn_names, list)
+    assert "demo_graph" in result.graph_names
+
+
 @pytest.mark.asyncio
 async def test_replay_registered_sources(tmp_path):
     reg1 = UnifiedRegistry()

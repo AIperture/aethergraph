@@ -6,7 +6,13 @@ from typing import Any
 import uuid
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.contracts.errors.errors import GraphHasPendingWaits
+from aethergraph.contracts.errors.errors import (
+    GraphBuildError,
+    GraphHasPendingWaits,
+    GraphInputBindError,
+    GraphMaterializationError,
+    build_error_hints,
+)
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.graph.task_graph import TaskGraph
 from aethergraph.core.runtime.recovery import hash_spec, recover_graph_run
@@ -355,7 +361,17 @@ async def run_async(
     """
 
     inputs = inputs or {}
-    target = _materialize_target(target)
+    try:
+        target = _materialize_target(target)
+    except GraphBuildError:
+        raise
+    except Exception as exc:
+        raise GraphMaterializationError(
+            str(exc),
+            code="run_async_invalid_target",
+            hints=build_error_hints("run_async_invalid_target", str(exc)),
+            cause=exc,
+        ) from exc
 
     # GraphFunction path
     if isinstance(target, GraphFunction):
@@ -401,7 +417,17 @@ async def run_async(
             current_meter_context.reset(token)
 
     # TaskGraph path
-    graph = _materialize_task_graph(target)
+    try:
+        graph = _materialize_task_graph(target)
+    except GraphBuildError:
+        raise
+    except Exception as exc:
+        raise GraphMaterializationError(
+            str(exc),
+            code="run_async_target_not_task_graph",
+            hints=build_error_hints("run_async_target_not_task_graph", str(exc)),
+            cause=exc,
+        ) from exc
     env, retry, max_conc = await _build_env(graph, inputs, identity=identity, **rt_overrides)
 
     # Extract spec for run/recovery ...
@@ -431,12 +457,46 @@ async def run_async(
                     return await _resolve_graph_outputs(graph, inputs, env)
 
             # strict policy: block resume if any non-JSON / __aether_ref__ is present
-            assert_snapshot_json_only(env.run_id, snap_json, mode="reuse_only")
+            try:
+                assert_snapshot_json_only(env.run_id, snap_json, mode="reuse_only")
+            except GraphBuildError:
+                raise
+            except Exception as exc:
+                raise GraphBuildError(
+                    str(exc),
+                    code="resume_snapshot_policy_violation",
+                    stage="resume_guard",
+                    hints=build_error_hints("resume_snapshot_policy_violation", str(exc)),
+                    cause=exc,
+                ) from exc
     else:
-        graph = _materialize_task_graph(target)
+        try:
+            graph = _materialize_task_graph(target)
+        except GraphBuildError:
+            raise
+        except Exception as exc:
+            raise GraphMaterializationError(
+                str(exc),
+                code="run_async_target_not_task_graph",
+                hints=build_error_hints("run_async_target_not_task_graph", str(exc)),
+                cause=exc,
+            ) from exc
+
+    graph.state.run_id = graph.state.run_id or env.run_id
 
     # Bind/validate inputs
-    graph._validate_and_bind_inputs(inputs)
+    try:
+        graph._validate_and_bind_inputs(inputs)
+    except GraphBuildError:
+        raise
+    except Exception as exc:
+        code = "graph_inputs_missing_required"
+        raise GraphInputBindError(
+            str(exc),
+            code=code,
+            hints=build_error_hints(code, str(exc)),
+            cause=exc,
+        ) from exc
 
     # Attach persistence observer + run (unchanged) ...
     obs = await _attach_persistence(graph, env, spec, snapshot_every=1)

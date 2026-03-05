@@ -102,6 +102,7 @@ async def test_condition_false_skips_node():
 async def test_condition_false_skips_downstream_dependents():
     graph = condition_graph_downstream_test.build()
     await _run_graph_in_place(graph, {"x": 3})
+    # await run_async(graph, {"x": 3})
 
     side_node = graph.find_by_logic("conditional_side_for_condition_test", first=True)
     tail_node = graph.find_by_logic("downstream_after_side_for_condition_test", first=True)

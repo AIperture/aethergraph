@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aethergraph.contracts.errors.errors import GraphHasPendingWaits
+from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
@@ -188,6 +188,11 @@ async def test_run_manager_start_run_failure(monkeypatch, dummy_meter):
     assert has_waits is False
     assert continuations == []
     assert record.error == "boom"
+    assert record.meta.get("error_kind") == "runtime"
+    assert record.meta.get("error_code") is None
+    assert record.meta.get("error_stage") is None
+    assert record.meta.get("error_hints") == []
+    assert record.meta.get("error_message") == "boom"
 
     loaded = await store.get(record.run_id)
     assert loaded is not None
@@ -198,6 +203,51 @@ async def test_run_manager_start_run_failure(monkeypatch, dummy_meter):
     assert len(dummy_meter.calls) == 1
     call = dummy_meter.calls[0]
     assert call["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_manager_start_run_build_failure(monkeypatch, dummy_meter):
+    store = InMemoryRunStore()
+    reg = UnifiedRegistry()
+    rm = RunManager(run_store=store, registry=reg)
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        raise GraphBuildError(
+            "build failed",
+            code="graph_inputs_missing_required",
+            stage="input_bind",
+            hints=[{"code": "provide_required_inputs", "message": "Provide x"}],
+        )
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record, outputs, has_waits, continuations = await rm.start_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+    )
+
+    assert record.status == RunStatus.failed
+    assert outputs is None
+    assert has_waits is False
+    assert continuations == []
+    assert record.meta.get("error_kind") == "build"
+    assert record.meta.get("error_code") == "graph_inputs_missing_required"
+    assert record.meta.get("error_stage") == "input_bind"
+    assert record.meta.get("error_message", "").endswith("build failed")
+    assert record.meta.get("error_hints") == [
+        {"code": "provide_required_inputs", "message": "Provide x"}
+    ]
 
 
 @pytest.mark.asyncio
