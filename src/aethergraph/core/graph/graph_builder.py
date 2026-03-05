@@ -54,6 +54,7 @@ class GraphBuilder:
         expected_output_keys: Iterable[str] | None = None,
         after: Iterable[str] | None = None,
         inject: list[str] | None = None,
+        condition: bool | dict[str, Any] | None = None,
         tool_name: str | None = None,
         tool_version: str | None = None,
     ) -> GraphBuilder:
@@ -105,6 +106,7 @@ class GraphBuilder:
             dependencies=list(deps),
             expected_input_keys=expected_input_keys,
             expected_output_keys=expected_output_keys,
+            condition=True if condition is None else condition,
             metadata={},
             tool_name=tool_name or logic or "unknown_tool",
             tool_version=tool_version,  # could be set to a version string if available

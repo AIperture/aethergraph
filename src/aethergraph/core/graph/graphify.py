@@ -149,6 +149,26 @@ def graphify(
             ...
         ```
 
+        Conditional node execution with `_condition`:
+        ```python
+        @tool(name="score_text", outputs=["score"])
+        def score_text(text: str):
+            return {"score": len(text)}
+
+        @tool(name="expensive_step", outputs=["result"])
+        def expensive_step(text: str):
+            return {"result": text.upper()}
+
+        @graphify(name="conditional_graph", inputs=["text"], outputs=["score"])
+        def conditional_graph(text: str):
+            s = score_text(text=text)
+            expensive_step(
+                text=text,
+                _condition={"op": "eq", "left": s.score, "right": 999},
+            )
+            return {"score": s.score}
+        ```
+
     Args:
         name: Unique name for the graph function.
         inputs: Graph input declaration. Supports either:
@@ -190,6 +210,12 @@ def graphify(
           overridden by `as_app.input_schema` defaults.
         - Field types are inferred from function annotations for declared inputs and
           are exposed as JSON-like types in registry metadata.
+        - Tool calls inside `@graphify` may include `_condition` for declarative branching.
+          Supported shapes are booleans and dict expressions such as:
+          `{"op":"eq","left": <ref-or-literal>, "right": <ref-or-literal>}`,
+          `{"op":"truthy","value": <ref-or-literal>}`,
+          `{"op":"and","args":[...]}`
+          and `{"op":"or","args":[...]}`.
     """
 
     def _wrap(fn):

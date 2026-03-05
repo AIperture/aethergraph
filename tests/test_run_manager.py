@@ -103,8 +103,8 @@ async def test_run_manager_start_run_success(monkeypatch, dummy_meter):
 @pytest.mark.asyncio
 async def test_run_manager_start_run_waits(monkeypatch, dummy_meter):
     """
-    GraphHasPendingWaits currently results in:
-      - record.status == RunStatus.failed
+    GraphHasPendingWaits results in:
+      - record.status == RunStatus.waiting
       - has_waits = True
       - continuations = e.continuations
       - outputs is None
@@ -139,15 +139,14 @@ async def test_run_manager_start_run_waits(monkeypatch, dummy_meter):
     )
 
     assert record.graph_id == "my-graph"
-    # With the current implementation, we mark this as failed (for now).
-    assert record.status == RunStatus.failed
+    assert record.status == RunStatus.waiting
     assert outputs is None
     assert has_waits is True
     assert continuations == [{"node_id": "node1", "kind": "text"}]
 
     loaded = await store.get(record.run_id)
     assert loaded is not None
-    assert loaded.status == RunStatus.failed
+    assert loaded.status == RunStatus.waiting
 
     # Metering should be called once with status "waiting"
     assert len(dummy_meter.calls) == 1

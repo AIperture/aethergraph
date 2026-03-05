@@ -10,6 +10,7 @@ from ..graph.graph_refs import RESERVED_INJECTABLES  # {"context", "resume", "se
 from ..graph.task_node import NodeStatus, TaskNodeRuntime
 from ..runtime.execution_context import ExecutionContext
 from ..runtime.node_context import NodeContext
+from .execution_guard import enter_tool_execution
 from .retry_policy import RetryPolicy
 from .step_result import StepResult
 from .wait_types import WaitRequested
@@ -29,6 +30,16 @@ def _normalize_result(res):
     if isinstance(res, tuple):
         return {f"out{i}": v for i, v in enumerate(res)}
     return {"result": res}
+
+
+def _contains_awaitable(value: Any) -> bool:
+    if inspect.isawaitable(value):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_awaitable(v) for v in value.values())
+    if isinstance(value, list | tuple | set):
+        return any(_contains_awaitable(v) for v in value)
+    return False
 
 
 def _waiting_status(kind: str) -> str:
@@ -207,14 +218,26 @@ async def step_forward(
         runtime_ctx=ctx,  # <-- pass runtime explicitly to resolve resume payload
     )
     try:
-        result = (
-            await logic_fn(**kwargs)
-            if inspect.iscoroutinefunction(logic_fn)
-            or (callable(logic_fn) and inspect.iscoroutinefunction(logic_fn.__call__))
-            else logic_fn(**kwargs)
-        )
+        with enter_tool_execution():
+            result = (
+                await logic_fn(**kwargs)
+                if inspect.iscoroutinefunction(logic_fn)
+                or (callable(logic_fn) and inspect.iscoroutinefunction(logic_fn.__call__))
+                else logic_fn(**kwargs)
+            )
+
+        if inspect.isawaitable(result):
+            raise TypeError(
+                "tool_returns_awaitable_from_sync_fn: sync tool returned an awaitable. "
+                "Did you pass an async callable into a threadpool/executor helper?"
+            )
 
         outputs = _normalize_result(result)
+        if _contains_awaitable(outputs):
+            raise TypeError(
+                "tool_executor_async_callable_in_threadpool: tool outputs include awaitable values. "
+                "Ensure executor-backed helpers only run sync callables and return concrete values."
+            )
         if lg:
             lg.info("done")
         return StepResult(status=NodeStatus.DONE, outputs=outputs)

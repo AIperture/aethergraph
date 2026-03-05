@@ -265,7 +265,7 @@ class RunManager:
 
         except GraphHasPendingWaits as e:
             # Graph quiesced with pending waits
-            record.status = RunStatus.failed  # consider 'waiting' status later
+            record.status = RunStatus.waiting
             has_waits = True
             continuations = getattr(e, "continuations", [])
             # outputs remain None

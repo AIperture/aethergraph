@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from aethergraph.services.skills.utils import parse_skill_markdown
 
 from .skills import Skill
+
+logger = logging.getLogger(__name__)
 
 
 class SkillRegistry:
@@ -249,6 +252,7 @@ class SkillRegistry:
         """
         skill = self.get(skill_id)
         if skill is None:
+            logger.error(f"Skill with id={skill_id!r} not found in registry")
             raise KeyError(f"Skill with id={skill_id!r} not found")
         return skill
 

@@ -132,6 +132,43 @@ async def x(a):
     assert "graphify_async_def" in issue_codes
 
 
+def test_validate_graphify_source_strict_dag_rules():
+    reg = UnifiedRegistry()
+    set_current_registry(reg)
+    service = RegistrationService(registry=reg)
+
+    source = """
+from aethergraph import graphify, tool
+
+@tool(name="inner", outputs=["x"])
+def inner(x: int):
+    return {"x": x}
+
+@tool(name="outer", outputs=["x"])
+def outer(x: int):
+    y = inner(x=x)
+    return {"x": y["x"]}
+
+def plain(x):
+    return {"x": x}
+
+@graphify(name="g", inputs=["x"], outputs=["x"])
+def g(x):
+    h = plain(x)
+    z = inner(x=x, _condition=lambda n: True)
+    if h["x"] > 1:
+        return {"x": z.x}
+    return {"x": 0}
+"""
+    result = service.validate_graphify_source(source, filename="strict_bad.py", strict=True)
+    assert result.ok is False
+    issue_codes = {i.code for i in result.issues}
+    assert "tool_nested_tool_call_disallowed" in issue_codes
+    assert "graphify_plain_call_used_as_handle" in issue_codes
+    assert "graphify_unsupported_condition_expr" in issue_codes
+    assert "graphify_control_flow_non_deterministic" in issue_codes
+
+
 @pytest.mark.asyncio
 async def test_replay_registered_sources(tmp_path):
     reg1 = UnifiedRegistry()
