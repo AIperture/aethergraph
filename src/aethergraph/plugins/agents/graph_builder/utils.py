@@ -47,21 +47,15 @@ def _classify_builder_file(
     return "other"
 
 
-async def _process_builder_files(
-    files: list[Any] | None,
-    context_refs: list[dict[str, Any]] | None,
+async def _process_builder_attachments(
+    attachments: list[dict[str, Any]] | None,
     context: NodeContext,
 ) -> tuple[list[BuilderFileRef], list[BuilderFileRef], list[BuilderFileRef], str]:
     """
-    Process uploaded files and context_refs into (code, text, other, notes).
+    Process normalized attachments into (code, text, other, notes).
 
-    - "files" are direct uploads passed via chat_v1.
-    - "context_refs" may reference artifacts in the artifact store by artifact_id.
-
-    We:
-      - classify files into code/notebook/text/other,
-      - resolve artifact refs via context.artifacts().get_by_id(),
-      - produce human-readable notes about anything we ignore or can't resolve.
+    Current supported attachment kind is:
+      - artifact (with artifact_id)
     """
     artifacts = context.artifacts()
     notes = ""
@@ -70,68 +64,52 @@ async def _process_builder_files(
     text_files: list[BuilderFileRef] = []
     other_files: list[BuilderFileRef] = []
 
-    # --- 1) uploaded files ---
-    for f in files or []:
-        # we support both dict-like and object-like file representations for flexibility
-        if isinstance(f, dict):
-            name = f.get("filename") or f.get("name")
-            mimetype = f.get("mimetype") or f.get("type") or f.get("content_type")
-            uri = f.get("uri")  # optional pre-signed URI for direct access
-        else:
-            name = getattr(f, "filename", None) or getattr(f, "name", None)
-            mimetype = (
-                getattr(f, "mimetype", None)
-                or getattr(f, "type", None)
-                or getattr(f, "content_type", None)
-            )
-            uri = getattr(f, "uri", None)
-        kind = _classify_builder_file(name, mimetype)
-        ref = BuilderFileRef(
-            name=name,
-            mimetype=mimetype,
-            source="upload",
-            uri=uri,
-            kind=kind,
-        )
+    for ref in attachments or []:
+        if not isinstance(ref, dict):
+            notes += f"- Ignoring malformed attachment entry: {json.dumps(ref)}\n"
+            continue
 
-        if kind in ("code", "notebook"):
-            code_files.append(ref)
-        elif kind == "text":
-            text_files.append(ref)
-        else:
-            if mimetype:
-                notes += (
-                    f"- Ignoring uploaded file '{name}' with unsupported mimetype '{mimetype}'.\n"
-                )
-            else:
-                notes += f"- Ignoring uploaded file '{name}' with unknown mimetype.\n"
+        kind_name = str(ref.get("kind") or "").strip()
+        if kind_name != "artifact":
+            notes += f"- Ignoring unsupported attachment kind '{kind_name or 'unknown'}'.\n"
+            continue
 
-    # --- 2) context_refs that point to artifacts ---
-    for ref in context_refs or []:
         art_id = ref.get("artifact_id")
         if not art_id:
-            # Could be other ref kinds; we ignore for now but note it.
-            notes += f"- Ignoring context_ref without artifact_id: {json.dumps(ref)}\n"
+            notes += f"- Ignoring artifact attachment without artifact_id: {json.dumps(ref)}\n"
             continue
         try:
             art = await artifacts.get_by_id(art_id)
         except Exception as e:
-            notes += f"- Failed to retrieve artifact for context_ref with artifact_id '{art_id}': {str(e)}\n"
+            notes += (
+                f"- Failed to retrieve artifact for attachment artifact_id '{art_id}': {str(e)}\n"
+            )
             continue
 
         if not art:
-            notes += f"- No artifact found for context_ref with artifact_id '{art_id}'.\n"
+            notes += f"- No artifact found for attachment artifact_id '{art_id}'.\n"
             continue
 
-        mimetype = getattr(art, "mimetype", None) or getattr(art, "mime", None)
-        name = getattr(art, "name", None) or getattr(art, "filename", None) or art_id
-        uri = getattr(art, "uri", None)  # optional pre-signed URI for direct access
+        source = str(ref.get("source") or "context_ref").strip() or "context_ref"
+        if source not in {"upload", "context_ref", "system"}:
+            source = "context_ref"
+
+        mimetype = (
+            ref.get("mimetype") or getattr(art, "mimetype", None) or getattr(art, "mime", None)
+        )
+        name = (
+            ref.get("name")
+            or getattr(art, "name", None)
+            or getattr(art, "filename", None)
+            or art_id
+        )
+        uri = ref.get("uri") or getattr(art, "uri", None)
 
         kind = _classify_builder_file(name, mimetype)
         bref = BuilderFileRef(
             name=name,
             mimetype=mimetype,
-            source="artifact",
+            source="upload" if source == "upload" else "artifact",
             artifact_id=art_id,
             uri=uri,
             kind=kind,
@@ -150,7 +128,7 @@ async def _process_builder_files(
     return code_files, text_files, other_files, notes
 
 
-def _infer_builder_mode(message: str, files: list[Any] | None = None) -> str:
+def _infer_builder_mode(message: str, attachments: list[Any] | None = None) -> str:
     """
     Heuristic: decide whether we're creating from intent or wrapping an existing script.
 
@@ -163,13 +141,13 @@ def _infer_builder_mode(message: str, files: list[Any] | None = None) -> str:
     has_py_hint = ".py" in msg or "python" in msg
 
     has_py_file = False
-    for f in files or []:
+    for f in attachments or []:
         # Adjust this depending on your file structure; this is intentionally loose.
         name = ""
         if isinstance(f, dict):
             name = f.get("filename") or f.get("name") or ""
-        elif hasattr(f, "filename"):
-            name = getattr(f, "filename", "") or ""
+        elif hasattr(f, "filename") or hasattr(f, "name"):
+            name = getattr(f, "filename", "") or getattr(f, "name", "") or ""
         if name.endswith(".py"):
             has_py_file = True
             break

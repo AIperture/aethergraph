@@ -16,14 +16,14 @@ from aethergraph.plugins.agents.graph_builder.types import (
     GraphBuilderBranch,
 )
 from aethergraph.plugins.agents.graph_builder.utils import (
-    _process_builder_files,
+    _process_builder_attachments,
     _summarize_builder_files_for_llm,
 )
 
 
 @graph_fn(
     name="graph_builder",
-    inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+    inputs=["message", "attachments", "session_id", "user_meta"],
     outputs=["reply"],
     as_agent={
         "id": "graph_builder",
@@ -47,8 +47,7 @@ from aethergraph.plugins.agents.graph_builder.utils import (
 )
 async def graph_builder(
     message: str,
-    files: list[Any] | None = None,
-    context_refs: list[dict[str, Any]] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
     session_id: str | None = None,
     user_meta: dict[str, Any] | None = None,
     *,
@@ -59,7 +58,7 @@ async def graph_builder(
     chan = context.ui_session_channel()
 
     raw_message = (message or "").strip()
-    if not raw_message and not (files or []):
+    if not raw_message and not (attachments or []):
         reply = (
             "Hi - I am the Graph Builder.\n\n"
             "- Describe the workflow you want, or\n"
@@ -85,9 +84,8 @@ async def graph_builder(
     )
 
     try:
-        code_files, text_files, other_files, notes = await _process_builder_files(
-            files=files,
-            context_refs=context_refs,
+        code_files, text_files, other_files, notes = await _process_builder_attachments(
+            attachments=attachments,
             context=context,
         )
     except Exception as e:

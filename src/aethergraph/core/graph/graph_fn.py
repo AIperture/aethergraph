@@ -313,7 +313,7 @@ def graph_fn(
         ```python
         @graph_fn(
             name="chat_agent",
-            inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+            inputs=["message", "attachments", "session_id", "user_meta"],
             outputs=["response"],
             as_agent={
                 "id": "chatbot",
@@ -376,7 +376,7 @@ def graph_fn(
         inputs: Optional list of input parameter names to expose. If omitted, the
             runtime can infer names from the function signature in IO surfaces.
             If provided with `as_agent` mode `chat_v1`, this must match
-            `["message", "files", "context_refs", "session_id", "user_meta"]`.
+            `["message", "attachments", "session_id", "user_meta"]`.
             Type/required/default inference for IO schema comes from function
             annotations and default values in the function signature.
         outputs: List of output keys returned by the function.

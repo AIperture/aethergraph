@@ -6,6 +6,7 @@ from typing import Any
 
 import aiohttp
 
+from aethergraph.services.channel.attachments import InputAttachment, attachment_to_dict
 from aethergraph.services.continuations.continuation import Continuation, Correlator
 
 
@@ -45,6 +46,7 @@ class IncomingMessage:
     # For ask_text / ask_file continuations
     text: str | None = None  # Text content of the message
     files: Iterable[IncomingFile] | None = None  # Attached files
+    attachments: Iterable[InputAttachment] | None = None  # Canonical graph-facing attachments
 
     # For approval
     choice: str | None = None  # User's choice/response
@@ -280,6 +282,7 @@ class ChannelIngress:
         # Build payload for resumption
         kind = cont.kind
         meta = msg.meta or {}
+        normalized_attachments = [attachment_to_dict(a) for a in (msg.attachments or [])]
 
         if kind == "approval":
             choice = (msg.choice or (msg.text or "")).strip() or "reject"
@@ -293,6 +296,7 @@ class ChannelIngress:
             payload = {
                 "text": msg.text or "",
                 "files": file_refs,
+                "attachments": normalized_attachments,
                 "channel_key": ch_key,
                 "thread_id": msg.thread_id,
                 "meta": meta,
@@ -300,6 +304,7 @@ class ChannelIngress:
         else:
             payload = {
                 "text": msg.text or "",
+                "attachments": normalized_attachments,
                 "channel_key": ch_key,
                 "thread_id": msg.thread_id,
                 "meta": meta,

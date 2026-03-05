@@ -81,7 +81,7 @@ def graphify(
         ```python
         @graphify(
             name="chat_agent",
-            inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+            inputs=["message", "attachments", "session_id", "user_meta"],
             outputs=["response"],
             as_agent={
                 "id": "chatbot",
@@ -155,7 +155,7 @@ def graphify(
             - `list[str]`: required input names.
             - `dict[str, Any]`: optional input names mapped to default values.
             If `as_agent` is provided with `mode="chat_v1"`, this must match
-            `["message", "files", "context_refs", "session_id", "user_meta"]`.
+            `["message", "attachments", "session_id", "user_meta"]`.
             Type inference uses function annotations for declared input names
             (e.g. `int/float -> number`, `str -> string`, `bool -> boolean`,
             `dict -> object`, `list -> array`).

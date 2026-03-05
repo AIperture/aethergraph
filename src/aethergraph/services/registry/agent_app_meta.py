@@ -197,8 +197,7 @@ APP_CORE_KEYS = {
 
 CHAT_V1_REQUIRED_INPUTS = [
     "message",
-    "files",
-    "context_refs",
+    "attachments",
     "session_id",
     "user_meta",
 ]
