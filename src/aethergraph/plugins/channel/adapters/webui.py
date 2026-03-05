@@ -54,12 +54,18 @@ class WebUIChannelAdapter(ChannelAdapter):
 
         out: dict[str, Any] = dict(file_info)
 
-        # Prefer explicit artifact_id, but fall back to uri
-        artifact_id = out.get("artifact_id") or out.get("uri")
+        # Prefer explicit artifact identity fields; never treat storage URI as artifact ID.
+        artifact_id = out.get("artifact_id") or out.get("id")
+        if not artifact_id:
+            uri = out.get("uri")
+            if isinstance(uri, str) and "://" not in uri and "/" not in uri and "\\" not in uri:
+                artifact_id = uri
+        if artifact_id and not out.get("artifact_id"):
+            out["artifact_id"] = artifact_id
 
         # Only set url if caller didn't already set one
         if artifact_id and not out.get("url"):
-            out["url"] = f"/artifacts/{artifact_id}/content"
+            out["url"] = f"/api/v1/artifacts/{artifact_id}/content"
 
         # Normalize naming a bit so the UI can be consistent
         if "name" not in out and out.get("filename"):

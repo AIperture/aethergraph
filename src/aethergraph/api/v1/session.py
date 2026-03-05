@@ -3,7 +3,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 import logging
 
-from fastapi import (
+from fastapi import (  # type: ignore
     APIRouter,
     Depends,
     HTTPException,
@@ -15,9 +15,8 @@ from fastapi import (
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
-from aethergraph.api.v1.runs import _extract_app_id_from_tags
-from aethergraph.api.v1.schemas import (
-    RunSummary,
+from aethergraph.api.v1.run_presenters import to_run_summary
+from aethergraph.api.v1.schemas.session import (
     Session,
     SessionChatEvent,
     SessionCreateRequest,
@@ -167,51 +166,7 @@ async def get_session_runs(
     ]
 
     reg = getattr(container, "registry", None) or current_registry()
-    summaries: list[RunSummary] = []
-
-    for rec in records:
-        # defaults to avoid UnboundLocalError if reg is None
-        flow_id: str | None = None
-        entrypoint = False
-
-        if reg is not None:
-            if rec.kind == "taskgraph":
-                meta = reg.get_meta(nspace="graph", name=rec.graph_id, version=None) or {}
-            elif rec.kind == "graphfn":
-                meta = reg.get_meta(nspace="graphfn", name=rec.graph_id, version=None) or {}
-            else:
-                meta = {}
-
-            flow_id = meta.get("flow_id")
-            entrypoint = bool(meta.get("entrypoint", False))
-
-        # derive app info
-        app_id = rec.meta.get("app_id") or _extract_app_id_from_tags(rec.tags)
-        app_name = rec.meta.get("app_name")
-
-        summaries.append(
-            RunSummary(
-                run_id=rec.run_id,
-                graph_id=rec.graph_id,
-                status=rec.status,
-                started_at=rec.started_at,
-                finished_at=rec.finished_at,
-                tags=rec.tags,
-                user_id=rec.user_id,
-                org_id=rec.org_id,
-                graph_kind=rec.kind,
-                flow_id=flow_id,
-                entrypoint=entrypoint,
-                meta=rec.meta or {},
-                app_id=app_id,
-                app_name=app_name,
-                session_id=rec.session_id,
-                origin=rec.origin,
-                visibility=rec.visibility,
-                importance=rec.importance,
-                agent_id=rec.agent_id,
-            )
-        )
+    summaries = [to_run_summary(rec, reg=reg) for rec in records]
 
     return SessionRunsResponse(items=summaries)
 

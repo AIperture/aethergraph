@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sqlite3
+import threading
 from typing import Any, Literal
 
 from aethergraph.contracts.services.artifacts import Artifact
@@ -22,6 +23,7 @@ class SqliteArtifactIndexSync:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -148,8 +150,9 @@ class SqliteArtifactIndexSync:
         labels_json = json.dumps(rec.get("labels") or {}, ensure_ascii=False)
         metrics_json = json.dumps(rec.get("metrics") or {}, ensure_ascii=False)
 
-        self._conn.execute(
-            """
+        with self._lock:
+            self._conn.execute(
+                """
             INSERT INTO artifacts (
                 artifact_id,
                 run_id,
@@ -216,33 +219,33 @@ class SqliteArtifactIndexSync:
                 client_id     = excluded.client_id,
                 app_id        = excluded.app_id,
                 session_id    = excluded.session_id
-            """,
-            {
-                "artifact_id": rec["artifact_id"],
-                "run_id": rec.get("run_id"),
-                "graph_id": rec.get("graph_id"),
-                "node_id": rec.get("node_id"),
-                "tool_name": rec.get("tool_name"),
-                "tool_version": rec.get("tool_version"),
-                "kind": rec.get("kind"),
-                "sha256": rec.get("sha256"),
-                "bytes": rec.get("bytes"),
-                "mime": rec.get("mime"),
-                "created_at": rec.get("created_at"),
-                "labels_json": labels_json,
-                "metrics_json": metrics_json,
-                "pinned": int(rec.get("pinned") or 0),
-                "uri": rec.get("uri"),
-                "preview_uri": rec.get("preview_uri"),
-                "org_id": rec.get("org_id"),
-                "user_id": rec.get("user_id"),
-                "client_id": rec.get("client_id"),
-                "app_id": rec.get("app_id"),
-                "session_id": rec.get("session_id"),
-            },
-        )
+                """,
+                {
+                    "artifact_id": rec["artifact_id"],
+                    "run_id": rec.get("run_id"),
+                    "graph_id": rec.get("graph_id"),
+                    "node_id": rec.get("node_id"),
+                    "tool_name": rec.get("tool_name"),
+                    "tool_version": rec.get("tool_version"),
+                    "kind": rec.get("kind"),
+                    "sha256": rec.get("sha256"),
+                    "bytes": rec.get("bytes"),
+                    "mime": rec.get("mime"),
+                    "created_at": rec.get("created_at"),
+                    "labels_json": labels_json,
+                    "metrics_json": metrics_json,
+                    "pinned": int(rec.get("pinned") or 0),
+                    "uri": rec.get("uri"),
+                    "preview_uri": rec.get("preview_uri"),
+                    "org_id": rec.get("org_id"),
+                    "user_id": rec.get("user_id"),
+                    "client_id": rec.get("client_id"),
+                    "app_id": rec.get("app_id"),
+                    "session_id": rec.get("session_id"),
+                },
+            )
 
-        self._conn.commit()
+            self._conn.commit()
 
         # cur = self._conn.execute(
         #     "SELECT artifact_id, kind, run_id, org_id, user_id, labels_json FROM artifacts"
@@ -251,11 +254,12 @@ class SqliteArtifactIndexSync:
         #     print(f"Artifact in DB: id={row['artifact_id']} kind={row['kind']} run_id={row['run_id']} org_id={row['org_id']} user_id={row['user_id']} labels={row['labels_json']}")
 
     def list_for_run(self, run_id: str) -> list[Artifact]:
-        cur = self._conn.execute(
-            "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at ASC",
-            (run_id,),
-        )
-        rows = cur.fetchall()
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at ASC",
+                (run_id,),
+            )
+            rows = cur.fetchall()
         return [self._row_to_artifact(r) for r in rows]
 
     def search(
@@ -338,8 +342,9 @@ class SqliteArtifactIndexSync:
                 sql += " LIMIT -1 OFFSET ?"
                 params.append(offset)
 
-            cur = self._conn.execute(sql, params)
-            rows = [self._row_to_artifact(r) for r in cur.fetchall()]
+            with self._lock:
+                cur = self._conn.execute(sql, params)
+                rows = [self._row_to_artifact(r) for r in cur.fetchall()]
 
             # Apply Python-side tag filtering
             if tag_filter:
@@ -349,8 +354,9 @@ class SqliteArtifactIndexSync:
 
         # Slow path: metric sorting in Python (same as before)
         sql = base_sql + " ORDER BY created_at DESC"
-        cur = self._conn.execute(sql, params)
-        rows = [self._row_to_artifact(r) for r in cur.fetchall()]
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            rows = [self._row_to_artifact(r) for r in cur.fetchall()]
 
         # Tag filter first
         if tag_filter:
@@ -387,34 +393,36 @@ class SqliteArtifactIndexSync:
         return rows[0] if rows else None
 
     def pin(self, artifact_id: str, pinned: bool = True) -> None:
-        self._conn.execute(
-            "UPDATE artifacts SET pinned = ? WHERE artifact_id = ?",
-            (int(bool(pinned)), artifact_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE artifacts SET pinned = ? WHERE artifact_id = ?",
+                (int(bool(pinned)), artifact_id),
+            )
+            self._conn.commit()
 
     def record_occurrence(self, a: Artifact, extra_labels: dict | None = None) -> None:
         labels = {**(a.labels or {}), **(extra_labels or {})}
         labels_json = json.dumps(labels, ensure_ascii=False)
-        self._conn.execute(
-            """
-            INSERT INTO artifact_occurrences (
-                artifact_id, run_id, graph_id, node_id,
-                tool_name, tool_version, created_at, labels_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                a.artifact_id,
-                a.run_id,
-                a.graph_id,
-                a.node_id,
-                a.tool_name,
-                a.tool_version,
-                a.created_at,
-                labels_json,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO artifact_occurrences (
+                    artifact_id, run_id, graph_id, node_id,
+                    tool_name, tool_version, created_at, labels_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    a.artifact_id,
+                    a.run_id,
+                    a.graph_id,
+                    a.node_id,
+                    a.tool_name,
+                    a.tool_version,
+                    a.created_at,
+                    labels_json,
+                ),
+            )
+            self._conn.commit()
 
     # -------- helpers --------
 
@@ -450,11 +458,12 @@ class SqliteArtifactIndexSync:
         )
 
     def get(self, artifact_id: str) -> Artifact | None:
-        cur = self._conn.execute(
-            "SELECT * FROM artifacts WHERE artifact_id = ?",
-            (artifact_id,),
-        )
-        row = cur.fetchone()
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            )
+            row = cur.fetchone()
         if row:
             return self._row_to_artifact(row)
         return None

@@ -1,10 +1,10 @@
 # /health /config
 
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends  # type: ignore
 
 from .deps import RequestIdentity, get_identity
-from .schemas import ConfigLLMProvider, ConfigResponse, HealthResponse
+from .schemas.misc import ConfigLLMProvider, ConfigResponse, HealthResponse
 
 router = APIRouter(tags=["misc"])
 

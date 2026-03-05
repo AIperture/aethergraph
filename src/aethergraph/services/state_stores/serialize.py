@@ -9,6 +9,31 @@ from .externalize import externalize_to_artifact
 _JSON_SCALARS = (str, int, float, bool, type(None))
 
 
+def _edges_from_graph(graph_obj: Any | None) -> list[dict[str, str]]:
+    if graph_obj is None:
+        return []
+
+    edge_set: set[tuple[str, str]] = set()
+
+    runtime_nodes = getattr(graph_obj, "nodes", None)
+    if runtime_nodes:
+        for runtime_node in runtime_nodes:
+            spec = getattr(runtime_node, "spec", None)
+            node_id = getattr(spec, "node_id", None) or getattr(runtime_node, "node_id", None)
+            if not node_id:
+                continue
+            for dep_id in getattr(spec, "dependencies", []) or []:
+                edge_set.add((str(dep_id), str(node_id)))
+    else:
+        spec = getattr(graph_obj, "spec", None)
+        spec_nodes = getattr(spec, "nodes", None) or {}
+        for node_id, node_spec in spec_nodes.items():
+            for dep_id in getattr(node_spec, "dependencies", []) or []:
+                edge_set.add((str(dep_id), str(node_id)))
+
+    return [{"from": src, "to": dst} for (src, dst) in sorted(edge_set)]
+
+
 def is_json_pure(obj: Any) -> bool:
     if isinstance(obj, _JSON_SCALARS):
         return True
@@ -194,6 +219,7 @@ async def state_to_json_safe(
     *,
     run_id: str,
     graph_id: str,
+    graph_obj: Any | None = None,
     artifacts=None,
     allow_externalize: bool = False,  # Do not externalize by default until fixing artifacts writer
     include_wait_spec: bool = True,
@@ -251,4 +277,5 @@ async def state_to_json_safe(
         "patches": [asdict(p) for p in getattr(state_obj, "patches", [])],
         "_bound_inputs": getattr(state_obj, "_bound_inputs", None),
         "nodes": nodes_block,
+        "edges": _edges_from_graph(graph_obj),
     }

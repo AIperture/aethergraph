@@ -21,7 +21,7 @@ Use checkpointing when:
 
 - Include `tool` and `tool_ver` in labels.
 - Keep checkpoint payload minimal (store big binaries as files via save_file).
-- Use `await context.channel().send_text(...)` on cache hit/miss boundaries (not per-iteration).
+- Use `await context.channel("ui:run").send_text(...)` on cache hit/miss boundaries (not per-iteration).
 - Build `ckpt_key` from deterministic business inputs only (no timestamps/random UUIDs).
 - Keep checkpointing logic in the same tool that runs the expensive step.
 - Keep orchestration in `@graphify`; do not create checkpoint orchestration by calling tool A from inside tool B.

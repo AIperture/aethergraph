@@ -7,6 +7,8 @@ from typing import Any, get_type_hints
 from aethergraph.core.graph.action_spec import IOSlot, _map_py_type_to_json_type
 from aethergraph.core.runtime.run_registration import RunRegistrationGuard
 from aethergraph.services.registry.agent_app_meta import (
+    AgentConfig,
+    AppConfig,
     build_agent_meta,
     build_app_meta,
 )
@@ -49,7 +51,7 @@ class GraphFunction:
         *,
         env: RuntimeEnv | None = None,
         retry: RetryPolicy | None = None,
-        max_concurrency: int | None = None,
+        max_concurrency: int = 1,
         **inputs,
     ):
         """
@@ -284,8 +286,8 @@ def graph_fn(
     entrypoint: bool = False,
     flow_id: str | None = None,
     tags: list[str] | None = None,
-    as_agent: dict[str, Any] | None = None,
-    as_app: dict[str, Any] | None = None,
+    as_agent: AgentConfig | None = None,
+    as_app: AppConfig | None = None,
     description: str | None = None,
 ) -> Callable[[Callable], GraphFunction]:
     """
@@ -311,7 +313,7 @@ def graph_fn(
         ```python
         @graph_fn(
             name="chat_agent",
-            inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+            inputs=["message", "attachments", "session_id", "user_meta"],
             outputs=["response"],
             as_agent={
                 "id": "chatbot",
@@ -344,17 +346,49 @@ def graph_fn(
             ...
         ```
 
+        Typed app inputs inferred from signature + UI schema override:
+        ```python
+        @graph_fn(
+            name="generic_fn_workflow_v1",
+            inputs=["query", "top_k", "include_meta", "config"],
+            outputs=["result", "meta"],
+            as_app={
+                "id": "generic-fn-app",
+                "name": "Generic Function App",
+                "input_schema": [
+                    {"name": "top_k", "label": "Top K", "widget": "number"},
+                    {"name": "include_meta", "label": "Include Metadata", "widget": "switch"},
+                    {"name": "config", "label": "Config JSON", "widget": "json"},
+                ],
+            },
+        )
+        async def generic_fn_workflow(
+            query: str,
+            top_k: int = 20,                  # optional/default inferred
+            include_meta: bool = True,        # optional/default inferred
+            config: dict[str, str] | None = None,  # object/nullable inferred
+        ):
+            ...
+        ```
+
     Args:
         name: Unique name for the graph function.
-        inputs: List of input parameter names. If `as_agent` is provided with `mode="chat_v1"`,
-            this must match `["message", "files", "context_refs", "session_id", "user_meta"]`.
+        inputs: Optional list of input parameter names to expose. If omitted, the
+            runtime can infer names from the function signature in IO surfaces.
+            If provided with `as_agent` mode `chat_v1`, this must match
+            `["message", "attachments", "session_id", "user_meta"]`.
+            Type/required/default inference for IO schema comes from function
+            annotations and default values in the function signature.
         outputs: List of output keys returned by the function.
         version: Version string for the graph function (default: "0.1.0").
         entrypoint: If True, marks this graph as the main entrypoint for a flow.  [Currently unused]
         flow_id: Optional flow identifier for grouping related graphs.
         tags: List of string tags for discovery and categorization.
         as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
-        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI. See additional information below.
+        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI.
+            Supports optional `input_schema` UI overrides. Each entry is matched
+            by `name` and can provide UI hints such as `label`, `placeholder`,
+            `widget`, `description`, and `default`.
         description: Optional human-readable description of the graph function.
 
     Returns:
@@ -366,21 +400,31 @@ def graph_fn(
         - When registering as an agent, the `as_agent` dictionary should include at least an "id" key.
         - When registering as an app, the `as_app` dictionary should include at least an "id" key.
         - The decorated function can be either synchronous or asynchronous.
-        - Fields `inputs` and `outputs` are can be inferred from the function signature if not explicitly provided, but it's recommended to declare them for clarity.
+        - For `graph_fn`, optional/default input behavior is inferred from function
+          parameter defaults (`param=...`) and used by IO schema surfaces.
+        - UI defaults are shown only when available in API input schema and can be
+          overridden by `as_app.input_schema` defaults.
+        - Field types are inferred from function annotations and normalized to
+          JSON-like types (string/number/boolean/object/array/any).
     """
 
     def decorator(fn: Callable) -> GraphFunction:
         agent_id = as_agent.get("id") if as_agent else None
         app_id = as_app.get("id") if as_app else None
-        gf = GraphFunction(
-            name=name,
-            fn=fn,
-            inputs=inputs,
-            outputs=outputs,
-            version=version,
-            agent_id=agent_id,
-            app_id=app_id,
-        )
+
+        def _build_graph_fn() -> GraphFunction:
+            return GraphFunction(
+                name=name,
+                fn=fn,
+                inputs=inputs,
+                outputs=outputs,
+                version=version,
+                agent_id=agent_id,
+                app_id=app_id,
+            )
+
+        _build_graph_fn.__ag_builder__ = True
+        gf = _build_graph_fn()
         registry = current_registry()
 
         if registry is None:
@@ -407,7 +451,7 @@ def graph_fn(
             nspace="graphfn",
             name=name,
             version=version,
-            obj=gf,
+            obj=_build_graph_fn,
             meta=graph_meta,
         )
 
@@ -424,7 +468,7 @@ def graph_fn(
                 nspace="agent",
                 name=agent_meta["id"],
                 version=version,
-                obj=gf,
+                obj=_build_graph_fn,
                 meta=agent_meta,
             )
 
@@ -440,7 +484,7 @@ def graph_fn(
                 nspace="app",
                 name=app_meta["id"],
                 version=version,
-                obj=gf,
+                obj=_build_graph_fn,
                 meta=app_meta,
             )
 

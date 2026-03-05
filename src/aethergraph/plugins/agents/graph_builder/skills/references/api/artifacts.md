@@ -58,13 +58,13 @@ async def expensive_step(x: str, *, context: NodeContext) -> dict:
     ckpt_key = f"{TOOL_NAME}:{x}"
     cached = await _try_load_ckpt(ckpt_key=ckpt_key, context=context)
     if cached is not None:
-        await context.channel().send_text("loaded checkpoint")
+        await context.channel("ui:run").send_text("loaded checkpoint")
         return {"result": cached["result"]}
 
-    await context.channel().send_text("running expensive step")
+    await context.channel("ui:run").send_text("running expensive step")
     result = x.upper()  # replace with real work
     await _save_ckpt(ckpt_key=ckpt_key, payload={"result": result}, context=context)
-    await context.channel().send_text("saved checkpoint")
+    await context.channel("ui:run").send_text("saved checkpoint")
     return {"result": result}
 ```
 

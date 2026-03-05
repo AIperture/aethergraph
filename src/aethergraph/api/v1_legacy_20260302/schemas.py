@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, RootModel
+from pydantic import BaseModel, Field, RootModel  # type: ignore
 
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility, SessionKind
 
@@ -517,6 +517,11 @@ class SessionUpdateRequest(BaseModel):
 
 
 # ------ Agent and App Schemas ------
+class SlashCommandDescriptor(BaseModel):
+    name: str
+    description: str = ""
+
+
 class AgentDescriptor(BaseModel):
     """
     Lightweight wrapper for an agent's registry metadata.
@@ -527,6 +532,8 @@ class AgentDescriptor(BaseModel):
 
     id: str
     graph_id: str
+    deletable: bool = False
+    slash_commands: list[SlashCommandDescriptor] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -540,4 +547,6 @@ class AppDescriptor(BaseModel):
 
     id: str
     graph_id: str
+    deletable: bool = False
+    slash_commands: list[SlashCommandDescriptor] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)

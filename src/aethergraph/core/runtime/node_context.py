@@ -7,8 +7,8 @@ from aethergraph.contracts.services.execution import (
     CodeExecutionRequest,
     CodeExecutionResult,
     ExecutionService,
+    Language,
 )
-from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
@@ -21,9 +21,11 @@ from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
+from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.planning.node_planner import NodePlanner
+from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.scope.scope import Scope
 from aethergraph.services.skills.skill_registry import SkillRegistry
@@ -60,7 +62,7 @@ class NodeContext:
         self,
         code: str,
         *,
-        language: str = "python",
+        language: Language = "python",
         timeout_s: float = 30.0,
         args: list[str] | None = None,
         workdir: str | None = None,
@@ -314,6 +316,8 @@ class NodeContext:
         return self._planner_facade
 
     def logger(self):
+        if not self.services.logger:
+            raise RuntimeError("Logger service not available")
         return self.services.logger.for_node_ctx(
             run_id=self.run_id, node_id=self.node_id, graph_id=self.graph_id
         )
@@ -328,9 +332,12 @@ class NodeContext:
         Returns:
             ChannelSession: The channel session associated with the current session.
         """
-        if not self.session_id:
-            raise RuntimeError("NodeContext.session_id is not set")
-        return ChannelSession(self, f"ui:session/{self.session_id}")
+        warnings.warn(
+            "NodeContext.ui_session_channel() is deprecated; use context.channel('ui:session').",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.channel("ui:session")
 
     def ui_run_channel(self) -> "ChannelSession":
         """
@@ -342,7 +349,12 @@ class NodeContext:
         Returns:
             ChannelSession: The channel session associated with the current run.
         """
-        return ChannelSession(self, f"ui:run/{self.run_id}")
+        warnings.warn(
+            "NodeContext.ui_run_channel() is deprecated; use context.channel('ui:run').",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.channel("ui:run")
 
     def triggers(self) -> TriggerFacade:
         if not self.services.triggers:
@@ -354,6 +366,11 @@ class NodeContext:
             raise RuntimeError("NodeContext.services.skills is not configured")
         return self.services.skills
 
+    def registry(self) -> RegistryFacade:
+        if not self.services.registry:
+            raise RuntimeError("NodeContext.services.registry is not configured")
+        return self.services.registry
+
     def channel(self, channel_key: str | None = None):
         """
         Set up a new ChannelSession for the current node context.
@@ -361,6 +378,9 @@ class NodeContext:
         Args:
             channel_key (str | None): An optional key to specify a particular channel.
             If not provided, the default channel will be used.
+            Special shorthand values are supported:
+            - `ui:session` -> `ui:session/<current_session_id>`
+            - `ui:run` -> `ui:run/<current_run_id>`
 
         Returns:
             ChannelSession: An instance representing the session for the specified channel.
@@ -374,11 +394,19 @@ class NodeContext:
             | Slack                | `slack:team/{team_id}:chan/{channel_id}`      | Needs additional configuration        |
             | Telegram             | `tg:chat/{chat_id}`                           | Needs additional configuration        |
             | UI Session           | `ui:session/{session_id}`                     | Requires AG web UI                    |
+            | UI Session (current) | `ui:session`                                  | Expands to current `session_id`       |
             | UI Run               | `ui:run/{run_id}`                             | Requires AG web UI                    |
+            | UI Run (current)     | `ui:run`                                      | Expands to current `run_id`           |
             | Webhook              | `webhook:{unique_identifier}`                 | For Slack, Discord, Zapier, etc.      |
             | File-based channel   | `file:path/to/directory`                      | File system based channels            |
         """
-        return ChannelSession(self, channel_key)
+        resolved_key = channel_key
+        if channel_key == "ui:session":
+            resolved_key = f"ui:session/{self.session_id}"
+        elif channel_key == "ui:run":
+            resolved_key = f"ui:run/{self.run_id}"
+
+        return ChannelSession(self, resolved_key)
 
     # New way: prefer memory_facade directly
     def memory(self) -> MemoryFacade:
@@ -457,7 +485,7 @@ class NodeContext:
         api_key: str | None = None,
         azure_deployment: str | None = None,
         timeout: float | None = None,
-    ) -> LLMClientProtocol:
+    ) -> GenericLLMClient:
         """
         Retrieve or configure an LLM client for this context.
 
@@ -498,6 +526,9 @@ class NodeContext:
             LLMClientProtocol: The configured LLM client instance for this context.
         """
         svc = self.services.llm
+
+        if svc is None:
+            raise RuntimeError("LLM service not available")
 
         if (
             provider is None
@@ -558,6 +589,8 @@ class NodeContext:
             to `context.llm(profile=...)`.
         """
         svc = self.services.llm
+        if svc is None:
+            raise RuntimeError("LLM service not available")
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
 
     def mcp(self, name):
@@ -579,6 +612,8 @@ class NodeContext:
 
     def prepare_wait_for_resume(self, token: str):
         # creates and registers a Future for this token without awaiting
+        if not self.services.wait_registry:
+            raise RuntimeError("WaitRegistry missing on context/runtime")
         return self.services.wait_registry.register(token)
 
     def clock(self):

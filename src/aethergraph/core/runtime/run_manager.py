@@ -39,6 +39,15 @@ def _is_graphfn(obj: Any) -> bool:
     return isinstance(obj, GraphFunction)
 
 
+class DuplicateRunIdError(RuntimeError):
+    """Raised when a requested run_id already exists in the RunStore."""
+
+
+def _is_duplicate_run_id_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "unique constraint failed" in msg and "runs.run_id" in msg
+
+
 class RunManager:
     """
     TODO: for global schedulers, we may want to have a dedicated run manager -- current
@@ -130,7 +139,7 @@ class RunManager:
         - RunRecord (not yet persisted)
         - target object: graph or graphfn
         """
-        rid = run_id or f"run-{uuid4().hex[:8]}"
+        rid = run_id or f"run-{uuid4().hex[:12]}"
         started_at = _utcnow()
         tags = list(tags or [])
 
@@ -359,33 +368,53 @@ class RunManager:
         try:
             tags = tags or []
 
-            record, target = await self._build_run_record(
-                graph_id=graph_id,
-                run_id=run_id,
-                session_id=session_id,
-                tags=tags,
-                identity=identity,
-                origin=origin,
-                visibility=visibility,
-                importance=importance,
-                agent_id=agent_id,
-                app_id=app_id,
-            )
-
-            # Optional: store a UI-only input preview
-            try:
-                preview, truncated = _make_preview(inputs)
-                record.meta["input_preview"] = preview
-                record.meta["input_truncated"] = truncated
-            except Exception:
-                import logging
-
-                logging.getLogger("aethergraph.runtime.run_manager").exception(
-                    "Error creating input preview for run_id=%s", record.run_id
+            record: RunRecord | None = None
+            target: Any = None
+            max_attempts = 5 if run_id is None else 1
+            for _ in range(max_attempts):
+                record, target = await self._build_run_record(
+                    graph_id=graph_id,
+                    run_id=run_id,
+                    session_id=session_id,
+                    tags=tags,
+                    identity=identity,
+                    origin=origin,
+                    visibility=visibility,
+                    importance=importance,
+                    agent_id=agent_id,
+                    app_id=app_id,
                 )
 
-            if self._store is not None:
-                await self._store.create(record)
+                # Optional: store a UI-only input preview
+                try:
+                    preview, truncated = _make_preview(inputs)
+                    record.meta["input_preview"] = preview
+                    record.meta["input_truncated"] = truncated
+                except Exception:
+                    import logging
+
+                    logging.getLogger("aethergraph.runtime.run_manager").exception(
+                        "Error creating input preview for run_id=%s", record.run_id
+                    )
+
+                if self._store is None:
+                    break
+
+                try:
+                    await self._store.create(record)
+                    break
+                except Exception as e:
+                    if not _is_duplicate_run_id_error(e):
+                        raise
+                    if run_id is not None:
+                        raise DuplicateRunIdError(f"Run id '{run_id}' already exists") from e
+                    # Auto-generated id collision: retry with a fresh id.
+                    continue
+            else:
+                raise RuntimeError("Failed to allocate a unique run_id after retries")
+
+            if record is None:
+                raise RuntimeError("Failed to create run record")
 
             async def _bg():
                 try:
@@ -708,7 +737,7 @@ class RunManager:
 
         tags = tags or []
         target = await self._resolve_target(graph_id)
-        rid = run_id or f"run-{uuid4().hex[:8]}"
+        rid = run_id or f"run-{uuid4().hex[:12]}"
         started_at = _utcnow()
 
         if _is_task_graph(target):

@@ -19,6 +19,16 @@ class LLMProfile(BaseModel):
         default=None, description="Name in secret store, e.g. 'OPENAI_API_KEY'"
     )
 
+    # thinking / reasoning
+    thinking_budget: int | None = Field(
+        default=4096,
+        description="Anthropic extended thinking budget_tokens. Enables thinking when set.",
+    )
+    reasoning_summary: str | None = Field(
+        default="auto",
+        description="OpenAI reasoning summary mode: 'auto' or 'concise'. Enables reasoning summaries when set.",
+    )
+
 
 class LLMSettings(BaseModel):
     enabled: bool = True

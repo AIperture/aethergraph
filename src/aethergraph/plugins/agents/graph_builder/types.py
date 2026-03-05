@@ -34,7 +34,16 @@ def _detect_approval_intent(message: str) -> ApprovalIntent:
     if not msg:
         return "unknown"
 
-    approve_terms = {"proceed", "generate", "yes", "ok", "approve", "ship it"}
+    approve_terms = {
+        "proceed",
+        "generate",
+        "yes",
+        "ok",
+        "approve",
+        "ship it",
+        "regenerate",
+        "retry",
+    }
     revise_terms = {"replan", "revise", "change", "update", "modify"}
     decline_terms = {"skip", "no", "decline", "cancel", "reject"}
 
@@ -62,12 +71,21 @@ class GraphBuilderState:
     last_contract_hash: str | None = None
 
     # v2 pending interaction state
-    pending_action: str | None = None  # awaiting_plan_approval | awaiting_register_decision
+    pending_action: str | None = (
+        None  # awaiting_plan_approval | awaiting_regeneration_decision | awaiting_register_decision
+    )
     pending_plan_json: dict[str, Any] | None = None
 
     # latest generated code metadata
     last_generated_code: str | None = None
     last_generated_filename: str | None = None
+    last_generated_artifact_id: str | None = None
+    last_generated_artifact_uri: str | None = None
+    last_generated_code_sha256: str | None = None
+
+    # last registered app metadata
+    last_registered_app_id: str | None = None
+    last_registered_app_version: str | None = None
 
 
 STATE_KEY = "ag.graph_builder.state"  # stable key for memory state snapshots

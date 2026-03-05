@@ -5,7 +5,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import itertools
 from typing import Any
-import uuid
 
 from .graph_refs import GRAPH_INPUTS_NODE_ID, RESERVED_INJECTABLES
 from .graph_spec import TaskGraphSpec
@@ -20,8 +19,6 @@ def current_builder() -> GraphBuilder | None:
 
 
 class GraphBuilder:
-    _auto_counter = itertools.count(1)
-
     def __init__(
         self, *, name: str = "default_graph", agent_id: str | None = None, app_id: str | None = None
     ):
@@ -31,6 +28,7 @@ class GraphBuilder:
         self.graph = TaskGraph(spec=self.spec)
         self.graph.ensure_inputs_node()
 
+        self._auto_counter = itertools.count(1)
         self._auto_counter_by_logic = {}  # logic_name -> counter
 
         # index for quick lookup
@@ -137,9 +135,13 @@ class GraphBuilder:
 
     # ---- ids and utils ----
     def next_id(self, logic_name: str | None = None) -> str:
-        """Generate a unique node ID."""
+        """
+        Generate a deterministic node ID for this graph build.
+        """
         base = (logic_name or "node").rstrip("_")
-        return f"{base}_{next(self._auto_counter)}_{uuid.uuid4().hex[:6]}"
+        n = self._auto_counter_by_logic.get(base, 0) + 1
+        self._auto_counter_by_logic[base] = n
+        return f"{base}_{n}"
 
     def _next_readable_id(self, logic_name: str | None = None) -> str:
         """Generate a more human-readable node ID, but may not be unique."""

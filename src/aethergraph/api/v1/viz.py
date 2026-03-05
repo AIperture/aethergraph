@@ -3,10 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
-from aethergraph.api.v1.schemas import (
+from aethergraph.api.v1.schemas.viz import (
     RunVizResponse,
     VizFigure,
     VizKind,

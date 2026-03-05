@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any
 
 from fastapi import FastAPI
@@ -154,3 +155,46 @@ async def test_run_channel_incoming_resumes_continuation():
     )
     # meta should be preserved
     assert payload["meta"] == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
+async def test_run_channel_incoming_multipart_with_attachments_json():
+    cont = Continuation(
+        run_id="run-xyz",
+        node_id="node-abc",
+        token="tok-123",
+        kind="user_input",
+        channel="ui:run/run-xyz",
+        prompt="Send payload",
+    )
+    container = FakeContainer(cont=cont)
+    app = build_app_with_container(container)
+    client = TestClient(app)
+
+    attachments = [
+        {
+            "kind": "artifact",
+            "source": "context_ref",
+            "artifact_id": "art-1",
+            "name": "input.py",
+            "mimetype": "text/x-python",
+        }
+    ]
+    resp = client.post(
+        "/api/v1/runs/run-xyz/channel/incoming",
+        data={
+            "text": "use attached context",
+            "attachments_json": json.dumps(attachments),
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["resumed"] is True
+
+    rr = container.resume_router
+    assert len(rr.calls) == 1
+    payload = rr.calls[0]["payload"]
+    assert payload["text"] == "use attached context"
+    assert payload["attachments"][0]["artifact_id"] == "art-1"
+    assert payload["attachments"][0]["kind"] == "artifact"

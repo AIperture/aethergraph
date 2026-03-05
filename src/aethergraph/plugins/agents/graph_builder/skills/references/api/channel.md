@@ -3,18 +3,18 @@ id: ag-graph-builder-channel-api
 title: Channel API
 ---
 
-# context.channel() (curated)
+# context.channel("ui:run") (curated)
 
 This pack lists channel methods safe to use by default.
 
 ## Allowed methods
 
-- `await context.channel().send_text(text: str, *, meta: dict | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant", memory_tags: list[str] | None = None, memory_data: dict | None = None)`
-- `await context.channel().send_rich(text: str | None = None, *, rich: dict | None = None, meta: dict | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant", memory_tags: list[str] | None = None, memory_data: dict | None = None)`
-- `await context.channel().send_phase(phase: str, status: Literal["pending", "active", "done", "failed", "skipped"], *, label: str | None = None, detail: str | None = None, code: str | None = None, channel: str | None = None, key_suffix: str | None = None)`
-- `await context.channel().send_file(url: str | None = None, *, file_bytes: bytes | None = None, filename: str = "file.bin", title: str | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant")`
-- `await context.channel().send_buttons(text: str, buttons: list[Button], *, meta: dict | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant")`
-- `async with context.channel().stream(channel: str | None = None) as s: ...`
+- `await context.channel("ui:run").send_text(text: str, *, meta: dict | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant", memory_tags: list[str] | None = None, memory_data: dict | None = None)`
+- `await context.channel("ui:run").send_rich(text: str | None = None, *, rich: dict | None = None, meta: dict | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant", memory_tags: list[str] | None = None, memory_data: dict | None = None)`
+- `await context.channel("ui:run").send_phase(phase: str, status: Literal["pending", "active", "done", "failed", "skipped"], *, label: str | None = None, detail: str | None = None, code: str | None = None, channel: str | None = None, key_suffix: str | None = None)`
+- `await context.channel("ui:run").send_file(url: str | None = None, *, file_bytes: bytes | None = None, filename: str = "file.bin", title: str | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant")`
+- `await context.channel("ui:run").send_buttons(text: str, buttons: list[Button], *, meta: dict | None = None, channel: str | None = None, memory_log: bool = True, memory_role: Literal["user","assistant","system","tool"] = "assistant")`
+- `async with context.channel("ui:run").stream(channel: str | None = None) as s: ...`
   - `await s.delta("...")`
   - `await s.end(full_text: str | None = None, memory_tags: list[str] | None = None, memory_log: bool = True)`
 
@@ -26,3 +26,4 @@ This pack lists channel methods safe to use by default.
 - Use `send_buttons` for plan/register decisions.
 - Use `send_file` to deliver generated code artifacts to UI.
 - Use `stream` only when token-by-token output is explicitly required.
+- Prefer run-scoped channel sessions (`context.channel("ui:run")`) over bare `context.channel()`.

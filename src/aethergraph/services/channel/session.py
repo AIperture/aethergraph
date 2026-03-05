@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import inspect
 import logging
 from pathlib import Path, PurePath
+import time
 from typing import Any, Literal
 import uuid
 
@@ -88,6 +89,9 @@ class ChannelSession:
     def __init__(self, context, channel_key: str | None = None):
         self.ctx = context
         self._override_key = channel_key  # optional strong binding
+        self._phase_group_id: str | None = None
+        self._phase_seq: int = 0
+        self._phase_group_counter: int = 0
 
     @property
     def _memory_facade(self):
@@ -122,6 +126,19 @@ class ChannelSession:
     @property
     def _session_id(self):
         return self.ctx.session_id
+
+    def _begin_reply_lifecycle(self) -> str:
+        self._phase_group_counter += 1
+        self._phase_seq = 0
+        self._phase_group_id = f"{self._run_id}:{self._node_id}:phase-group:{self._phase_group_counter}:{uuid.uuid4().hex[:8]}"
+        return self._phase_group_id
+
+    def _ensure_reply_lifecycle(self) -> str:
+        return self._phase_group_id or self._begin_reply_lifecycle()
+
+    def _close_reply_lifecycle(self) -> None:
+        self._phase_group_id = None
+        self._phase_seq = 0
 
     def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         """
@@ -341,15 +358,37 @@ class ChannelSession:
         suffix = key_suffix or f"phase:{phase}"
         upsert_key = f"{self._run_id}:{self._node_id}:{suffix}"
 
+        phase_group_id = self._ensure_reply_lifecycle()
+        self._phase_seq += 1
+        phase_seq = self._phase_seq
+        phase_updated_at = time.time()
+        phase_event_id = f"{upsert_key}:{phase_seq}"
+
         rich = {
             "kind": "phase",
             "phase": phase,
             "status": status,
             "label": label or phase.title(),
             "detail": detail or "",
+            "phase_group_id": phase_group_id,
+            "phase_seq": phase_seq,
+            "phase_event_id": phase_event_id,
+            "phase_updated_at": phase_updated_at,
         }
         if code:
             rich["code"] = code
+
+        phase_meta = {
+            "kind": "phase",
+            "phase": phase,
+            "status": status,
+            "label": label or phase.title(),
+            "detail": detail or "",
+            "phase_group_id": phase_group_id,
+            "phase_seq": phase_seq,
+            "phase_event_id": phase_event_id,
+            "phase_updated_at": phase_updated_at,
+        }
 
         await self._bus.publish(
             OutEvent(
@@ -357,7 +396,7 @@ class ChannelSession:
                 channel=ch_key,
                 upsert_key=upsert_key,
                 rich=rich,
-                meta=self._inject_context_meta(None),
+                meta=self._inject_context_meta(phase_meta),
             )
         )
 
@@ -429,9 +468,15 @@ class ChannelSession:
             type="agent.message",
             channel=self._resolve_key(channel),
             text=text,
-            meta=self._inject_context_meta(meta),
+            meta=self._inject_context_meta(
+                {
+                    **(meta or {}),
+                    "phase_group_id": self._ensure_reply_lifecycle(),
+                }
+            ),
         )
         await self._bus.publish(event)
+        self._close_reply_lifecycle()
 
     async def send_rich(
         self,
@@ -514,9 +559,15 @@ class ChannelSession:
                 channel=self._resolve_key(channel),
                 text=text,
                 rich=rich,
-                meta=self._inject_context_meta(meta),
+                meta=self._inject_context_meta(
+                    {
+                        **(meta or {}),
+                        "phase_group_id": self._ensure_reply_lifecycle(),
+                    }
+                ),
             )
         )
+        self._close_reply_lifecycle()
 
     async def send_image(
         self,
@@ -1332,9 +1383,15 @@ class ChannelSession:
             self._channel_key = outer._resolve_key(channel_key)
             # Unique per stream so multiple streams from same node don’t collide
             self._upsert_key = f"{outer._run_id}:{outer._node_id}:stream:{uuid.uuid4().hex}"
+            self._phase_group_id = outer._ensure_reply_lifecycle()
 
         def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
             return self._outer._inject_context_meta(meta)
+
+        def _stream_meta(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+            base = dict(extra or {})
+            base.setdefault("phase_group_id", self._phase_group_id)
+            return self._inject_context_meta(base)
 
         def _buf(self):
             return getattr(self, "__buf", None)
@@ -1352,7 +1409,7 @@ class ChannelSession:
                         type="agent.stream.start",
                         channel=self._channel_key,
                         upsert_key=self._upsert_key,
-                        meta=self._inject_context_meta(None),
+                        meta=self._stream_meta(None),
                     )
                 )
 
@@ -1377,7 +1434,7 @@ class ChannelSession:
                     channel=self._channel_key,
                     text=text_piece,
                     upsert_key=self._upsert_key,
-                    meta=self._inject_context_meta(None),
+                    meta=self._stream_meta(None),
                 )
             )
 
@@ -1425,9 +1482,10 @@ class ChannelSession:
                     channel=self._channel_key,
                     text=full_text,
                     upsert_key=self._upsert_key,
-                    meta=self._inject_context_meta(None),
+                    meta=self._stream_meta(None),
                 )
             )
+            self._outer._close_reply_lifecycle()
 
     @asynccontextmanager
     async def stream(self, channel: str | None = None) -> AsyncIterator["_StreamSender"]:
@@ -1469,6 +1527,180 @@ class ChannelSession:
         finally:
             # No auto-end; caller decides when to end()
             pass
+
+    async def chat_and_stream(
+        self,
+        *,
+        llm: Any,
+        messages: list[dict[str, Any]],
+        channel: str | None = None,
+        # LLM options
+        reasoning_effort: str | None = None,
+        thinking_budget: int | None = None,
+        reasoning_summary: str | None = None,
+        max_output_tokens: int | None = None,
+        output_format: str = "text",
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "output",
+        strict_schema: bool = True,
+        validate_json: bool = True,
+        fail_on_unsupported: bool = True,
+        llm_kwargs: dict[str, Any] | None = None,
+        # Thinking phase UX
+        thinking_phase: str = "thinking",
+        thinking_label_active: str = "Thinking...",
+        thinking_label_done: str = "Thinking",
+        thinking_detail_interval_s: float = 1.5,
+        thinking_detail_tail_chars: int = 300,
+        thinking_phase_key_suffix: str | None = "phase:llm.thinking",
+        include_thinking_code: bool = True,
+        emit_thinking_phase: bool = False,
+        # Memory logging
+        memory_log: bool = True,
+        memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
+    ) -> tuple[str, dict[str, int], str]:
+        """
+        Stream an LLM chat response to channel output and return final text/usage.
+
+        This helper wires `llm.chat_stream()` callbacks to channel stream events and
+        optional thinking-phase updates (`agent.progress.update`) so agent code does
+        not need to reimplement callback plumbing.
+        """
+
+        thinking_buffer: list[str] = []
+        last_thinking_ts = 0.0
+        thinking_started = False
+        text_started = False
+
+        async with self.stream(channel=channel) as s:
+
+            async def on_thinking_delta(piece: str) -> None:
+                nonlocal last_thinking_ts, thinking_started
+                if not emit_thinking_phase:
+                    return
+                if not piece:
+                    return
+
+                thinking_buffer.append(piece)
+                now = time.monotonic()
+
+                if not thinking_started:
+                    thinking_started = True
+                    try:
+                        await self.send_phase(
+                            phase=thinking_phase,
+                            status="active",
+                            label=thinking_label_active,
+                            channel=channel,
+                            key_suffix=thinking_phase_key_suffix,
+                        )
+                    except Exception as e:
+                        logger = logging.getLogger("aethergraph.services.channel.session")
+                        logger.debug("Failed to send thinking phase update")
+                        logger.exception("Error was: %s", str(e))
+
+                if now - last_thinking_ts >= thinking_detail_interval_s:
+                    last_thinking_ts = now
+                    full = "".join(thinking_buffer)
+                    detail = (
+                        ("..." + full[-thinking_detail_tail_chars:])
+                        if len(full) > thinking_detail_tail_chars
+                        else full
+                    )
+                    try:
+                        await self.send_phase(
+                            phase=thinking_phase,
+                            status="active",
+                            label=thinking_label_active,
+                            detail=detail,
+                            channel=channel,
+                            key_suffix=thinking_phase_key_suffix,
+                        )
+                    except Exception as e:
+                        logger = logging.getLogger("aethergraph.services.channel.session")
+                        logger.debug("Failed to send thinking phase update")
+                        logger.exception("Error was: %s", str(e))
+
+            async def on_delta(piece: str) -> None:
+                nonlocal text_started
+                if not piece:
+                    return
+
+                if not text_started and thinking_buffer:
+                    text_started = True
+                    full = "".join(thinking_buffer)
+                    try:
+                        await self.send_phase(
+                            phase=thinking_phase,
+                            status="done",
+                            label=thinking_label_done,
+                            detail=f"Reasoned ({len(full)} chars)",
+                            code=(full if include_thinking_code else None),
+                            channel=channel,
+                            key_suffix=thinking_phase_key_suffix,
+                        )
+                    except Exception as e:
+                        logger = logging.getLogger("aethergraph.services.channel.session")
+                        logger.debug("Failed to send thinking phase update on completion")
+                        logger.exception("Error was: %s", str(e))
+
+                await s.delta(piece)
+
+            kwargs: dict[str, Any] = {
+                "messages": messages,
+                "reasoning_effort": reasoning_effort,
+                "thinking_budget": thinking_budget,
+                "reasoning_summary": reasoning_summary,
+                "max_output_tokens": max_output_tokens,
+                "output_format": output_format,
+                "json_schema": json_schema,
+                "schema_name": schema_name,
+                "strict_schema": strict_schema,
+                "validate_json": validate_json,
+                "fail_on_unsupported": fail_on_unsupported,
+                "on_delta": on_delta,
+            }
+            if emit_thinking_phase:
+                kwargs["on_thinking_delta"] = on_thinking_delta
+            if llm_kwargs:
+                kwargs.update(llm_kwargs)
+
+            resp, usage = await llm.chat_stream(**kwargs)
+
+            if emit_thinking_phase and thinking_buffer and not text_started:
+                full = "".join(thinking_buffer)
+                try:
+                    await self.send_phase(
+                        phase=thinking_phase,
+                        status="done",
+                        label=thinking_label_done,
+                        code=(full if include_thinking_code else None),
+                        channel=channel,
+                        key_suffix=thinking_phase_key_suffix,
+                    )
+                except Exception as e:
+                    logger = logging.getLogger("aethergraph.services.channel.session")
+                    logger.debug("Failed to send thinking phase update on completion")
+                    logger.exception("Error was: %s", str(e))
+
+            final_memory_data = dict(memory_data or {})
+            if usage:
+                final_memory_data.setdefault("usage", usage)
+            await s.end(
+                full_text=resp,
+                memory_log=memory_log,
+                memory_role=memory_role,
+                memory_tags=memory_tags,
+                memory_data=final_memory_data or None,
+                memory_severity=memory_severity,
+                memory_signal=memory_signal,
+            )
+
+        return resp, usage, "".join(thinking_buffer)
 
     # ---------- progress ----------
     class _ProgressSender:

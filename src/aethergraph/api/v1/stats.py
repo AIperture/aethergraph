@@ -1,12 +1,12 @@
 from collections.abc import Iterable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, get_identity
-from .schemas import (
+from .schemas.stats import (
     ArtifactStats,
     GraphStats,
     GraphStatsEntry,

@@ -5,8 +5,6 @@ from collections.abc import Awaitable, Callable
 import json
 import logging
 import os
-
-# from time import time
 import time
 from typing import Any
 
@@ -16,30 +14,29 @@ from aethergraph.config.config import RateLimitSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.services.llm._anthropic_mixin import _AnthropicMixin
+from aethergraph.services.llm._azure_mixin import _AzureMixin
+from aethergraph.services.llm._gemini_mixin import _GeminiMixin
+from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
+
+# Provider mixins (chat, streaming, image generation)
+from aethergraph.services.llm._openai_mixin import _OpenAIMixin
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
-    GeneratedImage,
     ImageFormat,
     ImageGenerationResult,
     ImageResponseFormat,
     LLMUnsupportedFeatureError,
 )
 from aethergraph.services.llm.utils import (
-    _azure_images_generations_url,
-    _data_url_to_b64_and_mime,
-    _ensure_system_json_directive,
     _extract_json_text,
-    _guess_mime_from_format,
-    _is_data_url,
-    _normalize_base_url_no_trailing_slash,
-    _normalize_openai_responses_input,
     _strip_schema_enforced_json_fence,
-    _to_anthropic_blocks,
-    _to_gemini_parts,
     _validate_json_schema,
 )
 
 DeltaCallback = Callable[[str], Awaitable[None]]
+ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
+_UNSET = object()
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -58,18 +55,15 @@ class _Retry:
         raise exc
 
 
-def _first_text(choices):
-    """Extract text and usage from OpenAI-style choices list."""
-    if not choices:
-        return "", {}
-    c = choices[0]
-    text = (c.get("message", {}) or {}).get("content") or c.get("text") or ""
-    usage = {}
-    return text, usage
-
-
 # ---- Generic client -------------------------------------------------------
-class GenericLLMClient(LLMClientProtocol):
+class GenericLLMClient(
+    _OpenAIMixin,
+    _AnthropicMixin,
+    _AzureMixin,
+    _GeminiMixin,
+    _OpenAILikeMixin,
+    LLMClientProtocol,
+):
     """
     provider: one of {"openai","azure","anthropic","google","openrouter","lmstudio","ollama"}
     Configuration (read from env by default, but you can pass in):
@@ -95,6 +89,9 @@ class GenericLLMClient(LLMClientProtocol):
         metering: MeteringService | None = None,
         # rate limit
         rate_limit_cfg: RateLimitSettings | None = None,
+        # thinking / reasoning
+        thinking_budget: int | None = None,
+        reasoning_summary: str | None = None,
     ):
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
@@ -134,6 +131,10 @@ class GenericLLMClient(LLMClientProtocol):
         self._rate_limit_cfg = rate_limit_cfg
         self._per_run_calls: dict[str, int] = {}
         self._per_run_tokens: dict[str, int] = {}
+
+        # Thinking / reasoning config
+        self.thinking_budget = thinking_budget
+        self.reasoning_summary = reasoning_summary
 
     # ---------------- internal helpers for metering ----------------
     @staticmethod
@@ -243,7 +244,7 @@ class GenericLLMClient(LLMClientProtocol):
         loop = asyncio.get_running_loop()
 
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = httpx.AsyncClient(timeout=self._timeout)
             self._bound_loop = loop
             return
 
@@ -252,6 +253,9 @@ class GenericLLMClient(LLMClientProtocol):
             self._client = httpx.AsyncClient(timeout=self._timeout)
             self._bound_loop = loop
 
+    # ================================================================
+    # chat() — non-streaming
+    # ================================================================
     async def chat(
         self,
         messages: list[dict[str, Any]],
@@ -360,11 +364,16 @@ class GenericLLMClient(LLMClientProtocol):
 
         return text, usage
 
+    # ================================================================
+    # chat_stream() — streaming with thinking/reasoning support
+    # ================================================================
     async def chat_stream(
         self,
         messages: list[dict[str, Any]],
         *,
         reasoning_effort: str | None = None,
+        thinking_budget: int | None | object = _UNSET,
+        reasoning_summary: str | None | object = _UNSET,
         max_output_tokens: int | None = None,
         output_format: ChatOutputFormat = "text",
         json_schema: dict[str, Any] | None = None,
@@ -373,6 +382,7 @@ class GenericLLMClient(LLMClientProtocol):
         validate_json: bool = True,
         fail_on_unsupported: bool = True,
         on_delta: DeltaCallback | None = None,
+        on_thinking_delta: ThinkingDeltaCallback | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         """
@@ -404,6 +414,10 @@ class GenericLLMClient(LLMClientProtocol):
         Args:
             messages: List of message dicts, each with "role" and "content" keys.
             reasoning_effort: Optional string to control model reasoning depth.
+            thinking_budget: Anthropic extended thinking budget_tokens. Uses profile default
+                when omitted; pass None (or <=0) to disable for this call.
+            reasoning_summary: OpenAI reasoning summary mode ('auto'/'concise'). Uses profile
+                default when omitted; pass None to disable for this call.
             max_output_tokens: Optional maximum number of output tokens.
             output_format: Output format, e.g., "text" or "json".
             json_schema: Optional JSON schema for validating structured output.
@@ -412,6 +426,7 @@ class GenericLLMClient(LLMClientProtocol):
             validate_json: If True, validate JSON output against schema.
             fail_on_unsupported: If True, raise error for unsupported features.
             on_delta: Optional callback function to handle real-time text deltas.
+            on_thinking_delta: Optional callback for thinking/reasoning token deltas.
             **kw: Additional provider-specific keyword arguments.
 
         Returns:
@@ -425,20 +440,28 @@ class GenericLLMClient(LLMClientProtocol):
         Notes:
             - This method centralizes handling of streaming and non-streaming paths for LLM providers.
             - The `on_delta` callback allows for real-time updates, making it suitable for interactive applications.
+            - The `on_thinking_delta` callback streams thinking/reasoning tokens (OpenAI reasoning summaries, Anthropic extended thinking).
             - Rate limiting and usage metering are applied consistently across providers.
-            - Currently, only OpenAI's Responses API streaming is implemented; other providers will fall back to the non-streaming `chat()` method.
         """
 
         await self._ensure_client()
         model = kw.pop("model", self.model)
         start = time.perf_counter()
 
-        # For now, only OpenAI Responses streaming is implemented.
+        # Resolve thinking config: omitted -> profile default, explicit value -> per-call override.
+        _thinking_budget = self.thinking_budget if thinking_budget is _UNSET else thinking_budget
+        _reasoning_summary = (
+            self.reasoning_summary if reasoning_summary is _UNSET else reasoning_summary
+        )
+        if isinstance(_thinking_budget, int) and _thinking_budget <= 0:
+            _thinking_budget = None
+
         if self.provider == "openai":
             text, usage = await self._chat_openai_responses_stream(
                 messages,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                reasoning_summary=_reasoning_summary,
                 max_output_tokens=max_output_tokens,
                 output_format=output_format,
                 json_schema=json_schema,
@@ -446,6 +469,20 @@ class GenericLLMClient(LLMClientProtocol):
                 strict_schema=strict_schema,
                 fail_on_unsupported=fail_on_unsupported,
                 on_delta=on_delta,
+                on_thinking_delta=on_thinking_delta,
+                **kw,
+            )
+        elif self.provider == "anthropic":
+            text, usage = await self._chat_anthropic_messages_stream(
+                messages,
+                model=model,
+                thinking_budget=_thinking_budget,
+                max_output_tokens=max_output_tokens,
+                output_format=output_format,
+                json_schema=json_schema,
+                fail_on_unsupported=fail_on_unsupported,
+                on_delta=on_delta,
+                on_thinking_delta=on_thinking_delta,
                 **kw,
             )
         else:
@@ -482,128 +519,9 @@ class GenericLLMClient(LLMClientProtocol):
 
         return text, usage
 
-    async def _chat_openai_responses_stream(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        model: str,
-        reasoning_effort: str | None,
-        max_output_tokens: int | None,
-        output_format: ChatOutputFormat,
-        json_schema: dict[str, Any] | None,
-        schema_name: str,
-        strict_schema: bool,
-        fail_on_unsupported: bool,
-        on_delta: DeltaCallback | None = None,
-        **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
-        """
-        Stream text using OpenAI Responses API.
-
-        - We only support text / json_object / json_schema here.
-        - We look for `response.output_text.delta` events and call on_delta(delta).
-        - We accumulate full text and best-effort usage from the final event.
-        """
-        await self._ensure_client()
-        assert self._client is not None
-
-        url = f"{self.base_url}/responses"
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-
-        input_messages = _normalize_openai_responses_input(messages)
-
-        body: dict[str, Any] = {
-            "model": model,
-            "input": input_messages,
-            "stream": True,
-        }
-
-        if reasoning_effort is not None:
-            body["reasoning"] = {"effort": reasoning_effort}
-        if max_output_tokens is not None:
-            body["max_output_tokens"] = max_output_tokens
-
-        # Structured output config (same as non-streaming path)
-        if output_format == "json_object":
-            body["text"] = {"format": {"type": "json_object"}}
-        elif output_format == "json_schema":
-            if json_schema is None:
-                raise ValueError("output_format='json_schema' requires json_schema")
-            body["text"] = {
-                "format": {
-                    "type": "json_schema",
-                    "name": schema_name,
-                    "schema": json_schema,
-                    "strict": bool(strict_schema),
-                }
-            }
-        # else: default "text" format
-
-        full_chunks: list[str] = []
-        usage: dict[str, int] = {}
-
-        async def _handle_event(evt: dict[str, Any]):
-            nonlocal usage
-
-            etype = evt.get("type")
-
-            # Main text deltas
-            if etype == "response.output_text.delta":
-                delta = evt.get("delta") or ""
-                if delta:
-                    full_chunks.append(delta)
-                    if on_delta is not None:
-                        await on_delta(delta)
-
-            # Finalization – grab usage from completed response if present
-            elif etype in ("response.completed", "response.incomplete", "response.failed"):
-                resp = evt.get("response") or {}
-                # Usage may or may not be present, keep best-effort
-                usage = resp.get("usage") or usage
-
-            # Optional: basic error surface
-            elif etype == "error":
-                # in practice `error` may be structured differently; this is just a guardrail
-                msg = evt.get("message") or "Unknown streaming error"
-                raise RuntimeError(f"OpenAI streaming error: {msg}")
-
-        async def _call():
-            async with self._client.stream(
-                "POST",
-                url,
-                headers=headers,
-                json=body,
-            ) as r:
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    text = await r.aread()
-                    raise RuntimeError(f"OpenAI Responses streaming error: {text!r}") from e
-
-                # SSE: each event line is "data: {...}" + blank lines between events
-                async for line in r.aiter_lines():
-                    if not line:
-                        continue
-                    if not line.startswith("data:"):
-                        continue
-
-                    data_str = line[len("data:") :].strip()
-                    if not data_str or data_str == "[DONE]":
-                        # OpenAI ends stream with `data: [DONE]`
-                        break
-
-                    try:
-                        evt = json.loads(data_str)
-                    except Exception:
-                        # best-effort: ignore malformed chunks
-                        continue
-
-                    await _handle_event(evt)
-
-        await self._retry.run(_call)
-
-        return "".join(full_chunks), usage
-
+    # ================================================================
+    # Dispatch + postprocessing
+    # ================================================================
     async def _chat_dispatch(
         self,
         messages: list[dict[str, Any]],
@@ -718,431 +636,22 @@ class GenericLLMClient(LLMClientProtocol):
         # Canonical JSON string output (makes downstream robust)
         return json.dumps(obj, ensure_ascii=False)
 
-    async def _chat_openai_responses(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        model: str,
-        reasoning_effort: str | None,
-        max_output_tokens: int | None,
-        output_format: ChatOutputFormat,
-        json_schema: dict[str, Any] | None,
-        schema_name: str,
-        strict_schema: bool,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: Any = None,
-        **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
-        await self._ensure_client()
-        assert self._client is not None
-
-        url = f"{self.base_url}/responses"
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-
-        input_messages = _normalize_openai_responses_input(messages)
-
-        body: dict[str, Any] = {"model": model, "input": input_messages}
-
-        if reasoning_effort is not None:
-            body["reasoning"] = {"effort": reasoning_effort}
-        if max_output_tokens is not None:
-            body["max_output_tokens"] = max_output_tokens
-
-        # Structured output
-        if output_format == "json_object":
-            body["text"] = {"format": {"type": "json_object"}}
-        elif output_format == "json_schema":
-            if json_schema is None:
-                raise ValueError("output_format='json_schema' requires json_schema")
-            body["text"] = {
-                "format": {
-                    "type": "json_schema",
-                    "name": schema_name,
-                    "schema": json_schema,
-                    "strict": bool(strict_schema),
-                }
-            }
-
-        # Tools (Responses API style)
-        if tools is not None:
-            body["tools"] = tools
-        if tool_choice is not None:
-            body["tool_choice"] = tool_choice
-
-        async def _call():
-            r = await self._client.post(url, headers=headers, json=body)
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
-
-            data = r.json()
-            usage = data.get("usage", {}) or {}
-
-            # If caller asked for raw provider payload, just return it as a JSON string
-            if output_format == "raw":
-                txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
-
-            # Existing parsing logic for message-only flows
-            output = data.get("output")
-            txt = ""
-
-            if isinstance(output, list) and output:
-                chunks: list[str] = []
-                for item in output:
-                    if isinstance(item, dict) and item.get("type") == "message":
-                        parts = item.get("content") or []
-                        for p in parts:
-                            if isinstance(p, dict) and "text" in p:
-                                chunks.append(p["text"])
-                txt = "".join(chunks)
-
-            elif isinstance(output, dict) and output.get("type") == "message":
-                msg = output.get("message") or output
-                parts = msg.get("content") or []
-                chunks: list[str] = []
-                for p in parts:
-                    if isinstance(p, dict) and "text" in p:
-                        chunks.append(p["text"])
-                txt = "".join(chunks)
-
-            elif isinstance(output, str):
-                txt = output
-            else:
-                txt = ""
-
-            return txt, usage
-
-        return await self._retry.run(_call)
-
-    async def _chat_openai_like_chat_completions(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        model: str,
-        output_format: ChatOutputFormat,
-        json_schema: dict[str, Any] | None,
-        fail_on_unsupported: bool,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
-        **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
-        await self._ensure_client()
-        assert self._client is not None
-
-        temperature = kw.get("temperature", 0.5)
-        top_p = kw.get("top_p", 1.0)
-
-        msg_for_provider = messages
-        response_format = None
-
-        if output_format == "json_object":
-            response_format = {"type": "json_object"}
-            msg_for_provider = _ensure_system_json_directive(messages, schema=None)
-        elif output_format == "json_schema":
-            if fail_on_unsupported:
-                raise RuntimeError(f"provider {self.provider} does not support native json_schema")
-            msg_for_provider = _ensure_system_json_directive(messages, schema=json_schema)
-
-        async def _call():
-            body: dict[str, Any] = {
-                "model": model,
-                "messages": msg_for_provider,
-                "temperature": temperature,
-                "top_p": top_p,
-            }
-            if response_format is not None:
-                body["response_format"] = response_format
-            if tools is not None:
-                body["tools"] = tools
-            if tool_choice is not None:
-                body["tool_choice"] = tool_choice
-
-            r = await self._client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers_openai_like(),
-                json=body,
-            )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                raise RuntimeError(f"OpenAI-like chat/completions error: {e.response.text}") from e
-
-            data = r.json()
-            usage = data.get("usage", {}) or {}
-
-            if output_format == "raw":
-                txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
-
-            txt, _ = _first_text(data.get("choices", []))
-            return txt, usage
-
-        return await self._retry.run(_call)
-
-    async def _chat_azure_chat_completions(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        model: str,
-        output_format: ChatOutputFormat,
-        json_schema: dict[str, Any] | None,
-        fail_on_unsupported: bool,
-        tools: list[dict[str, Any]] | None = None,
-        tool_choice: str | dict[str, Any] | None = None,
-        **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
-        await self._ensure_client()
-        assert self._client is not None
-
-        if not (self.base_url and self.azure_deployment):
-            raise RuntimeError(
-                "Azure OpenAI requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT"
-            )
-
-        temperature = kw.get("temperature", 0.5)
-        top_p = kw.get("top_p", 1.0)
-
-        msg_for_provider = messages
-        payload: dict[str, Any] = {
-            "messages": msg_for_provider,
-            "temperature": temperature,
-            "top_p": top_p,
-        }
-
-        if output_format == "json_object":
-            payload["response_format"] = {"type": "json_object"}
-            payload["messages"] = _ensure_system_json_directive(messages, schema=None)
-        elif output_format == "json_schema":
-            if fail_on_unsupported:
-                raise RuntimeError(
-                    "Azure native json_schema not guaranteed; set fail_on_unsupported=False for best-effort"
-                )
-            payload["messages"] = _ensure_system_json_directive(messages, schema=json_schema)
-
-        if tools is not None:
-            payload["tools"] = tools
-        if tool_choice is not None:
-            payload["tool_choice"] = tool_choice
-
-        async def _call():
-            r = await self._client.post(
-                f"{self.base_url}/openai/deployments/{self.azure_deployment}/chat/completions?api-version=2024-08-01-preview",
-                headers={"api-key": self.api_key, "Content-Type": "application/json"},
-                json=payload,
-            )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                raise RuntimeError(f"Azure chat/completions error: {e.response.text}") from e
-
-            data = r.json()
-            usage = data.get("usage", {}) or {}
-
-            if output_format == "raw":
-                txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
-
-            txt, _ = _first_text(data.get("choices", []))
-            return txt, usage
-
-        return await self._retry.run(_call)
-
-    async def _chat_anthropic_messages(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        model: str,
-        output_format: ChatOutputFormat,
-        json_schema: dict[str, Any] | None,
-        fail_on_unsupported: bool,
-        tools: list[dict[str, Any]] | None = None,
-        **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
-        await self._ensure_client()
-        assert self._client is not None
-
-        if tools is not None and fail_on_unsupported:
-            raise RuntimeError("Anthropic tools/function calling not wired yet in this client")
-
-        temperature = kw.get("temperature", 0.5)
-        top_p = kw.get("top_p", 1.0)
-
-        # System text aggregation
-        sys_msgs: list[str] = []
-        for m in messages:
-            if m.get("role") == "system":
-                c = m.get("content")
-                sys_msgs.append(c if isinstance(c, str) else str(c))
-
-        if output_format in ("json_object", "json_schema"):
-            sys_msgs.insert(0, "Return ONLY valid JSON. No markdown, no commentary.")
-            if output_format == "json_schema" and json_schema is not None:
-                sys_msgs.insert(
-                    1,
-                    "JSON MUST conform to this schema:\n"
-                    + json.dumps(json_schema, ensure_ascii=False),
-                )
-
-        # Convert messages to Anthropic format (blocks)
-        conv: list[dict[str, Any]] = []
-        for m in messages:
-            role = m.get("role")
-            if role == "system":
-                continue
-            anthro_role = "assistant" if role == "assistant" else "user"
-            content_blocks = _to_anthropic_blocks(m.get("content"))
-            conv.append({"role": anthro_role, "content": content_blocks})
-
-        payload: dict[str, Any] = {
-            "model": model,
-            "max_tokens": kw.get("max_tokens", 1024),
-            "messages": conv,
-            "temperature": temperature,
-            "top_p": top_p,
-        }
-        if sys_msgs:
-            payload["system"] = "\n\n".join(sys_msgs)
-
-        async def _call():
-            r = await self._client.post(
-                f"{self.base_url}/v1/messages",
-                headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                body = e.response.text or ""
-                if e.response.status_code == 404:
-                    # Often model not found, or wrong base URL.
-                    hint = (
-                        "Anthropic returned 404. Common causes:\n"
-                        "1) base_url should be https://api.anthropic.com (no /v1 suffix)\n"
-                        "2) model id is invalid / unavailable for your key\n"
-                        f"Request URL: {e.request.url}\n"
-                    )
-                    raise RuntimeError(hint + "Response body:\n" + body) from e
-
-                raise RuntimeError(f"Anthropic API error ({e.response.status_code}): {body}") from e
-
-            data = r.json()
-            usage = data.get("usage", {}) or {}
-
-            if output_format == "raw":
-                txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
-
-            blocks = data.get("content") or []
-            txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-            return txt, usage
-
-        return await self._retry.run(_call)
-
-    async def _chat_gemini_generate_content(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        model: str,
-        output_format: ChatOutputFormat,
-        json_schema: dict[str, Any] | None,
-        fail_on_unsupported: bool,
-        tools: list[dict[str, Any]] | None = None,
-        **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
-        await self._ensure_client()
-        assert self._client is not None
-
-        temperature = kw.get("temperature", 0.5)
-        top_p = kw.get("top_p", 1.0)
-
-        if tools is not None and fail_on_unsupported:
-            raise RuntimeError("Gemini tools/function calling not wired yet in this client")
-
-        # Merge system messages into preamble
-        system_parts: list[str] = []
-        for m in messages:
-            if m.get("role") == "system":
-                c = m.get("content")
-                system_parts.append(c if isinstance(c, str) else str(c))
-        system = "\n".join(system_parts)
-
-        turns: list[dict[str, Any]] = []
-        for m in messages:
-            if m.get("role") == "system":
-                continue
-            role = "user" if m.get("role") == "user" else "model"
-            parts = _to_gemini_parts(m.get("content"))
-            turns.append({"role": role, "parts": parts})
-
-        if system:
-            turns.insert(0, {"role": "user", "parts": [{"text": f"System instructions: {system}"}]})
-
-        async def _call():
-            gen_cfg: dict[str, Any] = {"temperature": temperature, "topP": top_p}
-
-            # Gemini native structured outputs
-            if output_format == "json_object":
-                gen_cfg["responseMimeType"] = "application/json"
-            elif output_format == "json_schema":
-                if json_schema is None:
-                    raise ValueError("output_format='json_schema' requires json_schema")
-                gen_cfg["responseMimeType"] = "application/json"
-                gen_cfg["responseJsonSchema"] = json_schema
-
-            payload = {"contents": turns, "generationConfig": gen_cfg}
-
-            r = await self._client.post(
-                f"{self.base_url}/v1/models/{model}:generateContent?key={self.api_key}",
-                headers={"Content-Type": "application/json"},
-                json=payload,
-            )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"Gemini generateContent failed ({e.response.status_code}): {e.response.text}"
-                ) from e
-
-            data = r.json()
-            um = data.get("usageMetadata") or {}
-            usage = {
-                "input_tokens": int(um.get("promptTokenCount", 0) or 0),
-                "output_tokens": int(um.get("candidatesTokenCount", 0) or 0),
-            }
-
-            if output_format == "raw":
-                txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
-
-            cand = (data.get("candidates") or [{}])[0]
-            txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
-            return txt, usage
-
-        return await self._retry.run(_call)
-
-    # ---------------- Image Generation ----------------
-
+    # ================================================================
+    # Image Generation
+    # ================================================================
     async def generate_image(
         self,
         prompt: str,
         *,
         model: str | None = None,
         n: int = 1,
-        size: str | None = None,  # e.g. "1024x1024"
-        quality: str | None = None,  # OpenAI: "high|medium|low|auto" or dall-e: "hd|standard"
-        style: str | None = None,  # dall-e-3: "vivid|natural"
-        output_format: ImageFormat | None = None,  # OpenAI GPT image models: png|jpeg|webp
-        response_format: ImageResponseFormat | None = None,  # dall-e: url|b64_json (OpenAI/azure)
-        background: str | None = None,  # OpenAI GPT image models: "transparent|opaque|auto"
-        # Optional image inputs for providers that can do edit-style generation via "prompt + image(s)"
-        input_images: list[str] | None = None,  # data: URLs (base64) for now
-        # Provider-specific knobs
+        size: str | None = None,
+        quality: str | None = None,
+        style: str | None = None,
+        output_format: ImageFormat | None = None,
+        response_format: ImageResponseFormat | None = None,
+        background: str | None = None,
+        input_images: list[str] | None = None,
         azure_api_version: str | None = None,
         **kw: Any,
     ) -> ImageGenerationResult:
@@ -1151,30 +660,6 @@ class GenericLLMClient(LLMClientProtocol):
 
         This method supports provider-agnostic image generation, including OpenAI, Azure, and Google Gemini.
         It automatically handles rate limiting, usage metering, and provider-specific options.
-
-        Examples:
-            Basic usage with a prompt:
-            ```python
-            result = await context.llm().generate_image("A cat riding a bicycle")
-            ```
-
-            Requesting multiple images with custom size and style:
-            ```python
-            result = await context.llm().generate_image(
-                "A futuristic cityscape",
-                n=3,
-                size="1024x1024",
-                style="vivid"
-            )
-            ```
-
-            Supplying input images for edit-style generation (Gemini):
-            ```python
-            result = await context.llm().generate_image(
-                "Make this image brighter",
-                input_images=[my_data_url]
-            )
-            ```
 
         Args:
             prompt: The text prompt describing the desired image(s).
@@ -1196,11 +681,6 @@ class GenericLLMClient(LLMClientProtocol):
         Raises:
             LLMUnsupportedFeatureError: If the provider does not support image generation.
             RuntimeError: For provider-specific errors or invalid configuration.
-
-        Notes:
-            - This method is accessed via `context.llm().generate_image(...)`.
-            - Usage metering and rate limits are enforced automatically. However, token usage is typically not reported for image generation.
-            - The returned `ImageGenerationResult` includes both images and metadata.
         """
         await self._ensure_client()
         model = model or self.model
@@ -1293,216 +773,9 @@ class GenericLLMClient(LLMClientProtocol):
             f"provider '{self.provider}' does not support generate_image() in this client."
         )
 
-    async def _image_openai_generate(
-        self,
-        prompt: str,
-        *,
-        model: str,
-        n: int,
-        size: str | None,
-        quality: str | None,
-        style: str | None,
-        output_format: ImageFormat | None,
-        response_format: ImageResponseFormat | None,
-        background: str | None,
-        **kw: Any,
-    ) -> ImageGenerationResult:
-        assert self._client is not None
-
-        url = f"{_normalize_base_url_no_trailing_slash(self.base_url)}/images/generations"
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-
-        body: dict[str, Any] = {
-            "model": model,
-            "prompt": prompt,
-            "n": n,
-        }
-        if size is not None:
-            body["size"] = size
-        if quality is not None:
-            body["quality"] = quality
-        if style is not None:
-            body["style"] = style
-        if output_format is not None:
-            body["output_format"] = output_format
-        if background is not None:
-            body["background"] = background
-
-        # For dall-e models, response_format can be url|b64_json.
-        # GPT image models generally return base64 and may ignore response_format. :contentReference[oaicite:4]{index=4}
-        if response_format is not None:
-            body["response_format"] = response_format
-
-        async def _call():
-            r = await self._client.post(url, headers=headers, json=body)
-            try:
-                r.raise_for_status()
-            except Exception as e:
-                raise RuntimeError(f"OpenAI image generation error: {r.text}") from e
-
-            data = r.json()
-            imgs: list[GeneratedImage] = []
-            for item in data.get("data", []) or []:
-                imgs.append(
-                    GeneratedImage(
-                        b64=item.get("b64_json"),
-                        url=item.get("url"),
-                        mime_type=_guess_mime_from_format(output_format or "png")
-                        if item.get("b64_json")
-                        else None,
-                        revised_prompt=item.get("revised_prompt"),
-                    )
-                )
-
-            # OpenAI images endpoints often don't return token usage; keep empty usage.
-            return ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data)
-
-        return await self._retry.run(_call)
-
-    async def _image_azure_generate(
-        self,
-        prompt: str,
-        *,
-        model: str,
-        n: int,
-        size: str | None,
-        quality: str | None,
-        style: str | None,
-        output_format: ImageFormat | None,
-        response_format: ImageResponseFormat | None,
-        background: str | None,
-        azure_api_version: str | None,
-        **kw: Any,
-    ) -> ImageGenerationResult:
-        assert self._client is not None
-
-        if not self.base_url or not self.azure_deployment:
-            raise RuntimeError(
-                "Azure generate_image requires base_url=<resource endpoint> and azure_deployment=<deployment name>"
-            )
-
-        api_version = (
-            azure_api_version or "2025-04-01-preview"
-        )  # doc example for GPT-image-1 series :contentReference[oaicite:6]{index=6}
-        url = _azure_images_generations_url(self.base_url, self.azure_deployment, api_version)
-
-        headers = {"api-key": self.api_key, "Content-Type": "application/json"}
-
-        body: dict[str, Any] = {"prompt": prompt, "n": n}
-
-        # For GPT-image-1 series Azure expects "model" in body (per docs). :contentReference[oaicite:7]{index=7}
-        if model:
-            body["model"] = model
-
-        if size is not None:
-            body["size"] = size
-        if quality is not None:
-            body["quality"] = quality
-        if style is not None:
-            body["style"] = style
-
-        # Azure docs: GPT-image-1 series returns base64; DALL-E supports url/b64_json. :contentReference[oaicite:8]{index=8}
-        if response_format is not None:
-            body["response_format"] = response_format
-        if output_format is not None:
-            # Azure uses output_format like PNG/JPEG for some image models; you can pass through as-is.
-            body["output_format"] = output_format.upper()
-        if background is not None:
-            body["background"] = background
-
-        async def _call():
-            r = await self._client.post(url, headers=headers, json=body)
-            try:
-                r.raise_for_status()
-            except Exception as e:
-                raise RuntimeError(f"Azure image generation error: {r.text}") from e
-
-            data = r.json()
-            imgs: list[GeneratedImage] = []
-            for item in data.get("data", []) or []:
-                imgs.append(
-                    GeneratedImage(
-                        b64=item.get("b64_json"),
-                        url=item.get("url"),
-                        mime_type=_guess_mime_from_format((output_format or "png").lower())
-                        if item.get("b64_json")
-                        else None,
-                        revised_prompt=item.get("revised_prompt"),
-                    )
-                )
-
-            return ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data)
-
-        return await self._retry.run(_call)
-
-    async def _image_gemini_generate(
-        self,
-        prompt: str,
-        *,
-        model: str,
-        input_images: list[str] | None,
-        **kw: Any,
-    ) -> ImageGenerationResult:
-        assert self._client is not None
-
-        # Gemini REST endpoint uses generativelanguage.googleapis.com and API key header. :contentReference[oaicite:10]{index=10}
-        # Your self.base_url should already be something like: https://generativelanguage.googleapis.com
-        base = (
-            _normalize_base_url_no_trailing_slash(self.base_url)
-            or "https://generativelanguage.googleapis.com"
-        )
-        url = f"{base}/v1beta/models/{model}:generateContent"
-
-        parts: list[dict[str, Any]] = []
-        if input_images:
-            for img in input_images:
-                if not _is_data_url(img):
-                    raise ValueError("Gemini input_images must be data: URLs (base64) for now.")
-                b64, mime = _data_url_to_b64_and_mime(img)
-                parts.append({"inline_data": {"mime_type": mime, "data": b64}})
-
-        parts.append({"text": prompt})
-
-        payload: dict[str, Any] = {
-            "contents": [{"parts": parts}],
-        }
-        # Optional: ImageConfig etc. could be added here later per Gemini docs. :contentReference[oaicite:11]{index=11}
-
-        async def _call():
-            r = await self._client.post(
-                url,
-                headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
-                json=payload,
-            )
-            try:
-                r.raise_for_status()
-            except Exception as e:
-                raise RuntimeError(f"Gemini image generation error: {r.text}") from e
-
-            data = r.json()
-            cand = (data.get("candidates") or [{}])[0]
-            content = cand.get("content") or {}
-            out_parts = content.get("parts") or []
-
-            imgs: list[GeneratedImage] = []
-            for p in out_parts:
-                inline = p.get("inlineData") or p.get("inline_data")
-                if inline and inline.get("data"):
-                    mime = inline.get("mimeType") or inline.get("mime_type")
-                    imgs.append(GeneratedImage(b64=inline["data"], mime_type=mime))
-
-            # Usage shape varies; keep best-effort.
-            um = data.get("usageMetadata") or {}
-            usage = {
-                "input_tokens": int(um.get("promptTokenCount", 0) or 0),
-                "output_tokens": int(um.get("candidatesTokenCount", 0) or 0),
-            }
-
-            return ImageGenerationResult(images=imgs, usage=usage, raw=data)
-
-        return await self._retry.run(_call)
-
-    # ---------------- Embeddings ----------------
+    # ================================================================
+    # Embeddings (deprecated — use EmbeddingClient instead)
+    # ================================================================
     async def embed_deprecated(self, texts: list[str], **kw) -> list[list[float]]:
         # model override order: kw > self.embed_model > ENV > default
         await self._ensure_client()
@@ -1525,7 +798,6 @@ class GenericLLMClient(LLMClientProtocol):
                 try:
                     r.raise_for_status()
                 except httpx.HTTPStatusError as e:
-                    # Log or re-raise with more context
                     msg = f"Embeddings request failed ({e.response.status_code}): {e.response.text}"
                     raise RuntimeError(msg) from e
 
@@ -1545,7 +817,6 @@ class GenericLLMClient(LLMClientProtocol):
                 try:
                     r.raise_for_status()
                 except httpx.HTTPStatusError as e:
-                    # Log or re-raise with more context
                     msg = f"Embeddings request failed ({e.response.status_code}): {e.response.text}"
                     raise RuntimeError(msg) from e
 
@@ -1582,47 +853,14 @@ class GenericLLMClient(LLMClientProtocol):
     ) -> list[list[float]]:
         """
         Generate vector embeddings for a batch of texts using the configured LLM provider.
-
-        This method provides a provider-agnostic interface for embedding text, automatically
-        handling model selection, batching, and provider-specific API quirks. It ensures the
-        output shape matches the input and raises informative errors for configuration issues.
-
-        Examples:
-            Basic usage with a list of texts:
-            ```python
-            embeddings = await context.llm().embed([
-                "The quick brown fox.",
-                "Jumped over the lazy dog."
-            ])
-            ```
-
-            Specifying a custom embedding model:
-            ```python
-            embeddings = await context.llm().embed(
-                ["Hello world!"],
-                model="text-embedding-3-large"
-            )
-            ```
+        Deprecated: use the dedicated EmbeddingClient instead.
 
         Args:
             texts: List of input strings to embed.
-            model: Optional model name to override the default embedding model.
-            azure_api_version: Optional Azure API version override.
-            extra_body: Optional dict of extra fields to pass to the provider.
             **kw: Additional provider-specific keyword arguments.
 
         Returns:
-            list[list[float]]: List of embedding vectors, one per input text.
-
-        Raises:
-            TypeError: If `texts` is not a list of strings.
-            RuntimeError: For provider/model/configuration errors or shape mismatches.
-            NotImplementedError: If embeddings are not supported for the provider.
-
-        Notes:
-            - For Google Gemini, uses batch embedding if available, otherwise falls back to per-item embedding.
-            - For Azure, requires `azure_deployment` to be set.
-            - The returned list always matches the length of `texts`.
+            list[list[float]]: List of embedding vectors, one per text.
         """
         await self._ensure_client()
         assert self._client is not None
@@ -1634,7 +872,6 @@ class GenericLLMClient(LLMClientProtocol):
             return []
 
         # ---- resolve model ----
-        # model override order: kw > self.embed_model > ENV > default
         model = (
             kw.get("model")
             or self.embed_model
@@ -1653,11 +890,9 @@ class GenericLLMClient(LLMClientProtocol):
 
         # Optional knobs
         azure_api_version = kw.get("azure_api_version") or "2024-08-01-preview"
-        # For OpenAI-like, some providers support extra fields like dimensions/user; pass-through if present
         extra_body = kw.get("extra_body") or {}
 
         # ---- build request spec (within one function) ----
-        # spec = (url, headers, json_body, parser_fn)
         if self.provider in {"openai", "openrouter", "lmstudio", "ollama"}:
             url = f"{self.base_url}/embeddings"
             headers = self._headers_openai_like()
@@ -1668,7 +903,6 @@ class GenericLLMClient(LLMClientProtocol):
             def parse(data: dict) -> list[list[float]]:
                 items = data.get("data", []) or []
                 embs = [d.get("embedding") for d in items]
-                # Ensure shape consistency
                 if len(embs) != len(texts) or any(e is None for e in embs):
                     raise RuntimeError(
                         f"Embeddings response shape mismatch: got {len(embs)} items for {len(texts)} inputs"
@@ -1688,11 +922,9 @@ class GenericLLMClient(LLMClientProtocol):
             return await self._retry.run(_call)
 
         if self.provider == "azure":
-            # Azure embeddings are typically per-deployment; model sometimes optional/ignored
             url = f"{self.base_url}/openai/deployments/{self.azure_deployment}/embeddings?api-version={azure_api_version}"
             headers = {"api-key": self.api_key, "Content-Type": "application/json"}
             body: dict[str, object] = {"input": texts}
-            # Some Azure variants also accept "model" or dimensions; keep pass-through flexible
             if model:
                 body["model"] = model
             if isinstance(extra_body, dict):
@@ -1720,11 +952,7 @@ class GenericLLMClient(LLMClientProtocol):
             return await self._retry.run(_call)
 
         if self.provider == "google":
-            # Goal: return one embedding per input.
-            # Preferred: batchEmbedContents if supported by your endpoint/model.
-            # If it 404s/400s, fallback to per-item embedContent.
             base = self.base_url.rstrip("/")
-            # Newer APIs often live under v1beta; your current code uses v1. Keep v1 but fallback to v1beta if needed.
             batch_url_v1 = f"{base}/v1/models/{model}:batchEmbedContents?key={self.api_key}"
             embed_url_v1 = f"{base}/v1/models/{model}:embedContent?key={self.api_key}"
             batch_url_v1beta = f"{base}/v1beta/models/{model}:batchEmbedContents?key={self.api_key}"
@@ -1736,7 +964,6 @@ class GenericLLMClient(LLMClientProtocol):
                 return (data.get("embedding") or {}).get("values") or []
 
             def parse_batch(data: dict) -> list[list[float]]:
-                # Typical shape: {"embeddings":[{"values":[...]} , ...]}
                 embs = []
                 for e in data.get("embeddings") or []:
                     embs.append((e or {}).get("values") or [])
@@ -1779,7 +1006,6 @@ class GenericLLMClient(LLMClientProtocol):
                 return out
 
             async def _call():
-                # Try v1 batch, then v1beta batch, then fallback to v1 single, then v1beta single
                 res = await try_batch(batch_url_v1)
                 if res is not None:
                     return res
@@ -1787,7 +1013,6 @@ class GenericLLMClient(LLMClientProtocol):
                 if res is not None:
                     return res
 
-                # fallback loop
                 try:
                     return await call_single(embed_url_v1)
                 except RuntimeError:
@@ -1797,7 +1022,9 @@ class GenericLLMClient(LLMClientProtocol):
 
         raise NotImplementedError(f"Embeddings not supported for {self.provider}")
 
-    # ---------------- Internals ----------------
+    # ================================================================
+    # Internals
+    # ================================================================
     def _headers_openai_like(self):
         hdr = {"Content-Type": "application/json"}
         if self.provider in {"openai", "openrouter"}:
@@ -1833,8 +1060,6 @@ class GenericLLMClient(LLMClientProtocol):
             else:
                 raise RuntimeError("Azure OpenAI requires an API key for raw() calls.")
 
-        # For google, lmstudio, ollama we usually put keys in the URL or
-        # they’re local; leave headers minimal unless user overrides.
         return hdr
 
     async def raw(
@@ -1849,63 +1074,20 @@ class GenericLLMClient(LLMClientProtocol):
         return_response: bool = False,
     ) -> Any:
         """
-        Send a low-level HTTP request using the configured LLM provider’s client.
-
-        This method provides direct access to the underlying HTTP transport, automatically
-        applying provider-specific authentication, base URL resolution, and retry logic.
-        It is intended for advanced use cases where you need to call custom endpoints
-        or experiment with provider APIs not covered by higher-level methods.
-
-        Examples:
-            Basic usage with a relative path:
-            ```python
-            result = await context.llm().raw(
-                method="POST",
-                path="/custom/endpoint",
-                json={"foo": "bar"}
-            )
-            ```
-
-            Sending a GET request to an absolute URL:
-            ```python
-            response = await context.llm().raw(
-                method="GET",
-                url="https://api.openai.com/v1/models",
-                return_response=True
-            )
-            ```
-
-            Overriding headers and query parameters:
-            ```python
-            result = await context.llm().raw(
-                path="/v1/special",
-                headers={"X-Custom": "123"},
-                params={"q": "search"}
-            )
-            ```
+        Send a low-level HTTP request using the configured LLM provider's client.
 
         Args:
             method: HTTP method to use (e.g., "POST", "GET").
-            path: Relative path to append to the provider’s base URL.
+            path: Relative path to append to the provider's base URL.
             url: Absolute URL to call (overrides `path` and `base_url`).
             json: JSON-serializable body to send with the request.
             params: Dictionary of query parameters.
             headers: Dictionary of HTTP headers to override defaults.
-            return_response: If True, return the raw `httpx.Response` object;
-                otherwise, return the parsed JSON response.
+            return_response: If True, return the raw `httpx.Response` object.
 
         Returns:
             Any: The parsed JSON response by default, or the raw `httpx.Response`
             if `return_response=True`.
-
-        Raises:
-            ValueError: If neither `url` nor `path` is provided.
-            RuntimeError: For HTTP errors or provider-specific failures.
-
-        Notes:
-            - This method is accessed via `context.llm().raw(...)`.
-            - Provider authentication and retry logic are handled automatically.
-            - Use with caution; malformed requests may result in provider errors.
         """
         await self._ensure_client()
 

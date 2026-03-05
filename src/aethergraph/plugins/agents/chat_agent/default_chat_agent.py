@@ -37,16 +37,15 @@ async def _maybe_distill_session(mem) -> None:
 
 def _should_search_artifacts(
     message: str,
-    files: list[Any] | None,
-    context_refs: list[dict[str, Any]] | None,
+    attachments: list[dict[str, Any]] | None,
 ) -> bool:
     """
     Heuristic: when do we bother searching artifacts (files, reports, logs)?
 
-    - Always, if user attached files or context refs.
+    - Always, if user attached files/context via attachments.
     - Otherwise, only if the message looks artifact-oriented.
     """
-    if files or context_refs:
+    if attachments:
         return True
 
     msg = (message or "").lower()
@@ -117,7 +116,7 @@ def _format_search_snippets(event_results, artifact_results, max_total: int = 8)
 
 @graph_fn(
     name="default_chat_agent",
-    inputs=["message", "files", "context_refs", "session_id", "user_meta"],
+    inputs=["message", "attachments", "session_id", "user_meta"],
     outputs=["reply"],
     as_agent={
         "id": "chat_agent",
@@ -134,16 +133,18 @@ def _format_search_snippets(event_results, artifact_results, max_total: int = 8)
 )
 async def default_chat_agent(
     message: str,
-    files: list[Any] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
     session_id: str | None = None,
     user_meta: dict[str, Any] | None = None,
-    context_refs: list[dict[str, Any]] | None = None,
     *,
     context: NodeContext,
 ):
     """
     Built-in chat agent with 3-layer session memory: Recency, Long-term summaries, Semantic search.
     """
+    print("🍎")
+    for a in attachments or []:
+        print("attachment:", a)
 
     logger = context.logger()
     llm = context.llm()
@@ -207,6 +208,9 @@ async def default_chat_agent(
     # 3) Layer 3: semantic search over events + artifacts
     # ------------------------------------------------------------------
     search_snippet_block = ""
+    resp = ""
+    usage: dict[str, Any] = {}
+
     try:
         # Scope-aware filtering: prefer this memory scope if present
         scope_id = getattr(mem, "memory_scope_id", None) or None
@@ -230,7 +234,7 @@ async def default_chat_agent(
 
         # Search artifacts only when the message/files/context suggests it.
         artifact_results = []
-        if _should_search_artifacts(message, files, context_refs):
+        if _should_search_artifacts(message, attachments):
             artifact_results = await indices.search_artifacts(
                 query=message,
                 top_k=5,
@@ -263,10 +267,8 @@ async def default_chat_agent(
     # 4) Build user message (with lightweight metadata hints for LLM)
     # ------------------------------------------------------------------
     meta_lines: list[str] = []
-    if files:
-        meta_lines.append(f"(User attached {len(files)} file(s).)")
-    if context_refs:
-        meta_lines.append(f"(User attached {len(context_refs)} context reference(s).)")
+    if attachments:
+        meta_lines.append(f"(User attached {len(attachments)} attachment(s).)")
 
     meta_block = ""
     if meta_lines:
@@ -276,21 +278,8 @@ async def default_chat_agent(
 
     # Record user turn into memory (this becomes part of Layer 1 + 3 later)
     user_data: dict[str, Any] = {}
-    if files:
-        user_data["files"] = [
-            {
-                "id": getattr(f, "id", None),
-                "name": getattr(f, "name", None),
-                "mimetype": getattr(f, "mimetype", None),
-                "size": getattr(f, "size", None),
-                "url": getattr(f, "url", None),
-                "uri": getattr(f, "uri", None),
-                "extra": getattr(f, "extra", None),
-            }
-            for f in files
-        ]
-    if context_refs:
-        user_data["context_refs"] = context_refs
+    if attachments:
+        user_data["attachments"] = attachments
 
     try:
         await mem.record_chat_user(
@@ -305,49 +294,16 @@ async def default_chat_agent(
     messages.append({"role": "user", "content": user_content})
 
     try:
-        # # Mark the "reasoning" phase as active before calling the LLM
-        # try:
-        #     await chan.send_phase(
-        #         phase="thinking",
-        #         status="active",
-        #         label="LLM call",
-        #         detail="Calling LLM (streaming response)...",
-        #     )
-
-        #     await asyncio.sleep(0.5)  # slight delay to ensure phase event ordering
-
-        # except Exception:
-        #     logger.debug("Failed to send LLM phase(active) state", exc_info=True)
-
-        async with chan.stream() as s:
-            # Hook for streaming deltas into the same message
-            async def on_delta(piece: str) -> None:
-                await s.delta(piece)
-
-            # Streaming LLM call
-            resp, usage = await llm.chat_stream(
-                messages=messages,
-                on_delta=on_delta,
-            )
-
-            # Finalize streaming + memory
-            memory_data = {"usage": usage} if usage else None
-            await s.end(
-                full_text=resp,
-                memory_tags=["session.chat"],
-                memory_data=memory_data,
-            )
-
-        # Mark the "reasoning" phase as done
-        try:
-            await chan.send_phase(
-                phase="reasoning",
-                status="done",
-                label="LLM call",
-                detail="LLM response finished.",
-            )
-        except Exception:
-            logger.debug("Failed to send LLM phase(done) state", exc_info=True)
+        resp, usage, _thinking = await chan.chat_and_stream(
+            llm=llm,
+            messages=messages,
+            memory_tags=["session.chat"],
+            # Keep LLM thinking updates independent from other phase emitters.
+            thinking_phase="thinking",
+            thinking_phase_key_suffix="phase:llm.thinking",
+            thinking_label_active="Thinking...",
+            thinking_label_done="Thinking",
+        )
 
     except Exception:
         logger.warning(

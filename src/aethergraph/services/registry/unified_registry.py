@@ -7,7 +7,7 @@ from typing import Any
 
 try:
     # Prefer packaging for correct PEP 440 / pre-release ordering
-    from packaging.version import Version
+    from packaging.version import Version  # type: ignore
 
     _has_packaging = True
 except Exception:
@@ -20,6 +20,8 @@ from .registry_key import NS, Key
 RegistryObject = Any
 RegistryFactory = Callable[[], Any]
 RegistryValue = RegistryObject | RegistryFactory
+TenantIdentity = Mapping[str, str | None] | None
+_GLOBAL_TENANT_KEY = "__global__"
 
 
 class UnifiedRegistry:
@@ -31,14 +33,63 @@ class UnifiedRegistry:
     """
 
     def __init__(self, *, allow_overwrite: bool = True):
-        self._store: dict[tuple[str, str], dict[str, RegistryValue]] = {}
-        self._latest: dict[tuple[str, str], str] = {}
-        self._aliases: dict[tuple[str, str], dict[str, str]] = {}  # (ns,name) -> alias -> version
+        # (ns,name,tenant_key) -> version -> object
+        self._store: dict[tuple[str, str, str], dict[str, RegistryValue]] = {}
+        self._latest: dict[tuple[str, str, str], str] = {}
+        # (ns,name,tenant_key) -> alias -> version
+        self._aliases: dict[tuple[str, str, str], dict[str, str]] = {}
         self._lock = threading.RLock()
         self._allow_overwrite = allow_overwrite
 
         # per-version metadata
-        self._meta: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._meta: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+    @staticmethod
+    def _normalize_tenant(tenant: TenantIdentity) -> dict[str, str | None] | None:
+        if tenant is None:
+            return None
+        normalized = {
+            "org_id": tenant.get("org_id"),
+            "user_id": tenant.get("user_id"),
+            "client_id": tenant.get("client_id"),
+        }
+        if not any(normalized.values()):
+            return None
+        return normalized
+
+    @staticmethod
+    def _tenant_key(tenant: dict[str, str | None] | None) -> str:
+        if tenant is None:
+            return _GLOBAL_TENANT_KEY
+        return (
+            f"org:{tenant.get('org_id') or ''}"
+            f"|user:{tenant.get('user_id') or ''}"
+            f"|client:{tenant.get('client_id') or ''}"
+        )
+
+    def _candidate_tenant_keys(
+        self, tenant: TenantIdentity, include_global: bool
+    ) -> tuple[str, ...]:
+        norm = self._normalize_tenant(tenant)
+        if norm is None:
+            return (_GLOBAL_TENANT_KEY,)
+        key = self._tenant_key(norm)
+        if include_global and key != _GLOBAL_TENANT_KEY:
+            return (key, _GLOBAL_TENANT_KEY)
+        return (key,)
+
+    def _bucket_key(
+        self, *, nspace: str, name: str, tenant: TenantIdentity = None
+    ) -> tuple[str, str, str]:
+        return (nspace, name, self._tenant_key(self._normalize_tenant(tenant)))
+
+    def _resolve_version(self, bucket: tuple[str, str, str], version: str | None) -> str | None:
+        versions = self._store.get(bucket)
+        if not versions:
+            return None
+        if version is None:
+            return self._latest.get(bucket)
+        return self._aliases.get(bucket, {}).get(version, version)
 
     # ---------- registration ----------
 
@@ -50,10 +101,12 @@ class UnifiedRegistry:
         version: str,
         obj: RegistryValue,
         meta: dict[str, Any] | None = None,
+        tenant: TenantIdentity = None,
     ) -> None:
         if nspace not in NS:
             raise ValueError(f"Unknown namespace: {nspace}")
-        key = (nspace, name)
+        tenant_norm = self._normalize_tenant(tenant)
+        key = self._bucket_key(nspace=nspace, name=name, tenant=tenant_norm)
         with self._lock:
             versions = self._store.setdefault(key, {})
             if (version in versions) and not self._allow_overwrite:
@@ -64,18 +117,35 @@ class UnifiedRegistry:
             self._latest[key] = self._pick_latest(versions.keys())
 
             # Store metadata
-            if meta is not None:
-                self._meta[(nspace, name, version)] = meta
+            if meta is not None or tenant_norm is not None:
+                stored_meta = dict(meta or {})
+                if tenant_norm is not None:
+                    stored_meta.setdefault("tenant", dict(tenant_norm))
+                self._meta[(nspace, name, key[2], version)] = stored_meta
 
     def register_latest(
-        self, *, nspace: str, name: str, obj: RegistryValue, version: str = "0.0.0"
+        self,
+        *,
+        nspace: str,
+        name: str,
+        obj: RegistryValue,
+        version: str = "0.0.0",
+        tenant: TenantIdentity = None,
     ) -> None:
         # Explicit version anyway; also marks latest via _pick_latest
-        self.register(nspace=nspace, name=name, version=version, obj=obj)
+        self.register(nspace=nspace, name=name, version=version, obj=obj, tenant=tenant)
 
-    def alias(self, *, nspace: str, name: str, tag: str, to_version: str) -> None:
+    def alias(
+        self,
+        *,
+        nspace: str,
+        name: str,
+        tag: str,
+        to_version: str,
+        tenant: TenantIdentity = None,
+    ) -> None:
         """Define tag aliases like 'stable', 'canary' mapping to a concrete version."""
-        key = (nspace, name)
+        key = self._bucket_key(nspace=nspace, name=name, tenant=tenant)
         with self._lock:
             if key not in self._store or to_version not in self._store[key]:
                 raise KeyError(f"Cannot alias to missing version: {nspace}:{name}@{to_version}")
@@ -84,83 +154,144 @@ class UnifiedRegistry:
 
     # ---------- resolve ----------
 
-    def get(self, ref: str | Key) -> Any:
+    def get(
+        self,
+        ref: str | Key,
+        *,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> Any:
         key = parse_ref(ref) if isinstance(ref, str) else ref
-        k = (key.nspace, key.name)
         with self._lock:
-            versions = self._store.get(k)
-            if not versions:
-                raise KeyError(f"Not found: {key.canonical()}")
+            for tenant_key in self._candidate_tenant_keys(tenant, include_global):
+                bucket = (key.nspace, key.name, tenant_key)
+                versions = self._store.get(bucket)
+                if not versions:
+                    continue
 
-            # resolve version: explicit → alias → latest
-            ver = key.version
-            ver = self._aliases.get(k, {}).get(ver, ver) if ver else self._latest.get(k)
+                ver = self._resolve_version(bucket, key.version)
+                if ver is None or ver not in versions:
+                    continue
 
-            if ver not in versions:
-                raise KeyError(f"Version not found: {key.nspace}:{key.name}@{ver}")
+                val = versions[ver]
 
-            val = versions[ver]
-
-            ## Materialize if factory -> we handle it when executing the graphs. Here it can cause
-            # the graph_fn returns a coroutine inside the GraphFunction object, not the expected function.
-            # if callable(val):
-            #     obj = val()
-            #     versions[ver] = obj
-            #     return obj
-            return val
+                # Materialize if factory -> we handle it when executing the graphs. Here it can
+                # cause graph_fn to return a coroutine inside GraphFunction object.
+                # if callable(val):
+                #     obj = val()
+                #     versions[ver] = obj
+                #     return obj
+                return val
+            raise KeyError(f"Not found: {key.canonical()}")
 
     # ---------- listing / admin ----------
 
-    def list(self, nspace: str | None = None) -> dict[str, str]:
+    def list(
+        self,
+        nspace: str | None = None,
+        *,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> dict[str, str]:
         """Return { 'ns:name': '<latest_version>' } optionally filtered."""
         out: dict[str, str] = {}
+        seen: set[str] = set()
         with self._lock:
-            for (ns, name), _ in self._store.items():
-                if nspace and ns != nspace:
-                    continue
-                out[f"{ns}:{name}"] = self._latest.get((ns, name), "unknown")
+            for tenant_key in self._candidate_tenant_keys(tenant, include_global):
+                for ns, name, tk in self._store.keys():  # noqa: SIM118
+                    if tk != tenant_key:
+                        continue
+                    if nspace and ns != nspace:
+                        continue
+                    ref = f"{ns}:{name}"
+                    if ref in seen:
+                        continue
+                    out[ref] = self._latest.get((ns, name, tk), "unknown")
+                    seen.add(ref)
         return out
 
-    def list_versions(self, *, nspace: str, name: str) -> Iterable[str]:
-        k = (nspace, name)
+    def list_versions(
+        self,
+        *,
+        nspace: str,
+        name: str,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> Iterable[str]:
         with self._lock:
-            return tuple(sorted(self._store.get(k, {}).keys(), key=self._semver_sort_key))
+            for tenant_key in self._candidate_tenant_keys(tenant, include_global):
+                bucket = (nspace, name, tenant_key)
+                if bucket in self._store:
+                    return tuple(
+                        sorted(self._store.get(bucket, {}).keys(), key=self._semver_sort_key)
+                    )
+            return tuple()
 
-    def get_aliases(self, *, nspace: str, name: str) -> Mapping[str, str]:
+    def get_aliases(
+        self,
+        *,
+        nspace: str,
+        name: str,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> Mapping[str, str]:
         with self._lock:
-            return dict(self._aliases.get((nspace, name), {}))
+            for tenant_key in self._candidate_tenant_keys(tenant, include_global):
+                bucket = (nspace, name, tenant_key)
+                aliases = self._aliases.get(bucket)
+                if aliases:
+                    return dict(aliases)
+            return {}
 
-    def unregister(self, *, nspace: str, name: str, version: str | None = None) -> None:
+    def unregister(
+        self,
+        *,
+        nspace: str,
+        name: str,
+        version: str | None = None,
+        tenant: TenantIdentity = None,
+    ) -> None:
         with self._lock:
-            k = (nspace, name)
-            if k not in self._store:
-                return
-            if version is None:
-                # remove all versions and aliases
-                self._store.pop(k, None)
-                self._latest.pop(k, None)
-                self._aliases.pop(k, None)
-                # NEW: drop all meta for this (ns,name)
-                for key in list(self._meta.keys()):
-                    if key[0] == nspace and key[1] == name:
-                        self._meta.pop(key, None)
-                return
-            vers = self._store[k]
-            vers.pop(version, None)
-            # drop aliases pointing to this version
-            if k in self._aliases:
-                for tag, v in list(self._aliases[k].items()):
-                    if v == version:
-                        self._aliases[k].pop(tag, None)
-            # drop meta for this version
-            self._meta.pop((nspace, name, version), None)
-            # recompute latest
-            if vers:
-                self._latest[k] = self._pick_latest(vers.keys())
+            if tenant is None:
+                tenant_keys = [
+                    tk
+                    for ns, nm, tk in self._store.keys()  # noqa: SIM118
+                    if ns == nspace and nm == name
+                ]
             else:
-                self._store.pop(k, None)
-                self._latest.pop(k, None)
-                self._aliases.pop(k, None)
+                tenant_keys = [self._bucket_key(nspace=nspace, name=name, tenant=tenant)[2]]
+
+            for tenant_key in tenant_keys:
+                bucket = (nspace, name, tenant_key)
+                if bucket not in self._store:
+                    continue
+                if version is None:
+                    # remove all versions and aliases
+                    self._store.pop(bucket, None)
+                    self._latest.pop(bucket, None)
+                    self._aliases.pop(bucket, None)
+                    # drop all meta for this (ns,name,tenant)
+                    for mk in list(self._meta.keys()):
+                        if mk[0] == nspace and mk[1] == name and mk[2] == tenant_key:
+                            self._meta.pop(mk, None)
+                    continue
+
+                vers = self._store[bucket]
+                vers.pop(version, None)
+                # drop aliases pointing to this version
+                if bucket in self._aliases:
+                    for tag, v in list(self._aliases[bucket].items()):
+                        if v == version:
+                            self._aliases[bucket].pop(tag, None)
+                # drop meta for this version
+                self._meta.pop((nspace, name, tenant_key, version), None)
+                # recompute latest
+                if vers:
+                    self._latest[bucket] = self._pick_latest(vers.keys())
+                else:
+                    self._store.pop(bucket, None)
+                    self._latest.pop(bucket, None)
+                    self._aliases.pop(bucket, None)
 
     def clear(self) -> None:
         with self._lock:
@@ -171,61 +302,134 @@ class UnifiedRegistry:
 
     # ---------- typed getters ----------
 
-    def get_tool(self, name: str, version: str | None = None) -> Any:
-        return self.get(Key(nspace="tool", name=name, version=version))
+    @staticmethod
+    def _materialize_if_builder(val: Any) -> Any:
+        """
+        Materialize values explicitly registered as lazy graph builders.
+        """
+        if getattr(val, "__ag_builder__", False) and callable(val):
+            return val()
+        return val
 
-    def get_graph(self, name: str, version: str | None = None) -> Any:
-        return self.get(Key(nspace="graph", name=name, version=version))
+    def get_tool(
+        self,
+        name: str,
+        version: str | None = None,
+        *,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> Any:
+        return self.get(
+            Key(nspace="tool", name=name, version=version),
+            tenant=tenant,
+            include_global=include_global,
+        )
 
-    def get_graphfn(self, name: str, version: str | None = None) -> Any:
-        return self.get(Key(nspace="graphfn", name=name, version=version))
+    def get_graph(
+        self,
+        name: str,
+        version: str | None = None,
+        *,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> Any:
+        return self._materialize_if_builder(
+            self.get(
+                Key(nspace="graph", name=name, version=version),
+                tenant=tenant,
+                include_global=include_global,
+            )
+        )
 
-    def get_agent(self, name: str, version: str | None = None) -> Any:
-        return self.get(Key(nspace="agent", name=name, version=version))
+    def get_graphfn(
+        self,
+        name: str,
+        version: str | None = None,
+        *,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> Any:
+        return self._materialize_if_builder(
+            self.get(
+                Key(nspace="graphfn", name=name, version=version),
+                tenant=tenant,
+                include_global=include_global,
+            )
+        )
+
+    def get_agent(
+        self,
+        name: str,
+        version: str | None = None,
+        *,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
+    ) -> Any:
+        return self._materialize_if_builder(
+            self.get(
+                Key(nspace="agent", name=name, version=version),
+                tenant=tenant,
+                include_global=include_global,
+            )
+        )
 
     def get_meta(
         self,
         nspace: str,
         name: str,
         version: str | None = None,
+        tenant: TenantIdentity = None,
+        include_global: bool = True,
     ) -> dict[str, Any] | None:
         """
         Return metadata for a given registered object, or None if not set.
-        Follows the same version resolution as `get()`: explicit → alias → latest.
+        Follows the same version resolution as `get()`: explicit -> alias -> latest.
         """
         if nspace not in NS:
             raise ValueError(f"Unknown namespace: {nspace}")
-        key = (nspace, name)
         with self._lock:
-            versions = self._store.get(key)
-            if not versions:
-                return None
+            for tenant_key in self._candidate_tenant_keys(tenant, include_global):
+                bucket = (nspace, name, tenant_key)
+                versions = self._store.get(bucket)
+                if not versions:
+                    continue
 
-            ver = version
-            # resolve aliases or default to latest
-            ver = self._aliases.get(key, {}).get(ver, ver) if ver else self._latest.get(key)
-            if ver is None:
-                return None
+                ver = self._resolve_version(bucket, version)
+                if ver is None:
+                    continue
 
-            return self._meta.get((nspace, name, ver))
+                meta = self._meta.get((nspace, name, tenant_key, ver))
+                if meta is not None:
+                    return meta
+            return None
 
     # ---------- list typed ----------
-    def list_tools(self) -> dict[str, str]:
-        return self.list(nspace="tool")
+    def list_tools(
+        self, *, tenant: TenantIdentity = None, include_global: bool = True
+    ) -> dict[str, str]:
+        return self.list(nspace="tool", tenant=tenant, include_global=include_global)
 
-    def list_graphs(self) -> dict[str, str]:
-        return self.list(nspace="graph")
+    def list_graphs(
+        self, *, tenant: TenantIdentity = None, include_global: bool = True
+    ) -> dict[str, str]:
+        return self.list(nspace="graph", tenant=tenant, include_global=include_global)
 
-    def list_graphfns(self) -> dict[str, str]:
-        return self.list(nspace="graphfn")
+    def list_graphfns(
+        self, *, tenant: TenantIdentity = None, include_global: bool = True
+    ) -> dict[str, str]:
+        return self.list(nspace="graphfn", tenant=tenant, include_global=include_global)
 
-    def list_agents(self) -> dict[str, str]:
+    def list_agents(
+        self, *, tenant: TenantIdentity = None, include_global: bool = True
+    ) -> dict[str, str]:
         # Return {'agent:<id>': '<latest_version>'}
-        return self.list(nspace="agent")
+        return self.list(nspace="agent", tenant=tenant, include_global=include_global)
 
-    def list_apps(self) -> dict[str, str]:
+    def list_apps(
+        self, *, tenant: TenantIdentity = None, include_global: bool = True
+    ) -> dict[str, str]:
         # Return {'app:<id>': '<latest_version>'}
-        return self.list(nspace="app")
+        return self.list(nspace="app", tenant=tenant, include_global=include_global)
 
     # ---------- helpers ----------
 

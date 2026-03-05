@@ -5,15 +5,15 @@ import os
 from typing import Annotated, Any
 import unicodedata
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response  # type: ignore
+from fastapi.responses import RedirectResponse  # type: ignore
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.contracts.storage.artifact_index import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, get_identity
-from .schemas import (
+from .schemas.artifacts import (
     ArtifactListResponse,
     ArtifactMeta,
     ArtifactSearchHit,

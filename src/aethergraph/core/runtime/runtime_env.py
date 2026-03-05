@@ -21,6 +21,7 @@ from aethergraph.services.continuations.stores.fs_store import (
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
@@ -105,10 +106,6 @@ class RuntimeEnv:
     @property
     def llm_service(self):
         return self.container.llm
-
-    @property
-    def rag_facade(self):
-        return self.container.rag
 
     @property
     def mcp_service(self):
@@ -258,6 +255,11 @@ class RuntimeEnv:
             kb=kb,  # NodeKB
             triggers=triggers,  # TriggerFacade for this node
             web_search=web_search,  # WebSearchFacade or None
+            registry=RegistryFacade(
+                registry=self.registry,
+                scope=mem_scope or node_scope,
+                registration_service=getattr(self.container, "registration_service", None),
+            ),
         )
         return ExecutionContext(
             run_id=self.run_id,

@@ -1,7 +1,7 @@
 from typing import Literal
 
-from fastapi import Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel, Field
+from fastapi import Depends, Header, HTTPException, Request, status  # type: ignore
+from pydantic import BaseModel, Field  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.auth.authz import AuthZService

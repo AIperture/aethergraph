@@ -26,6 +26,7 @@ This skill generates AetherGraph workflows from user intent and/or existing Pyth
   - `@tool(name="...", outputs=[...])`
   - `@graphify(name="...", inputs=[...], outputs=[...])`
 - Tool and graph returns must match declared output keys.
+- Graph inputs must be typed in the function signature (`def workflow(x: str, n: int, ...)`).
 
 ## graph_builder.system
 
@@ -39,6 +40,8 @@ Your job:
 Hard constraints:
 - Prefer `@tool + @graphify` unless user explicitly asks for a single async entrypoint.
 - Do not rewrite user scripts; create thin wrappers.
+- For script-to-graph conversion, preserve existing script imports and functions as primary building blocks.
+- For runtime UI/status output, use run-scoped channel access (`context.channel("ui:run")`) instead of bare `context.channel()`.
 - Only use APIs listed in references.
 - `@graphify` must remain synchronous.
 
@@ -61,6 +64,9 @@ Task:
 State-sensitive routing rules:
 - If pending plan exists and user approves/proceeds, choose `generate`.
 - If pending plan exists and user adds requirements/revisions, choose `plan`.
+- If `pending_action=awaiting_regeneration_decision` and user asks to retry/regenerate/proceed, choose `generate`.
+- If `pending_action=awaiting_regeneration_decision` and user asks to revise scope, choose `plan`.
+- If `pending_action=awaiting_regeneration_decision` and user declines, choose `chat`.
 - If user asks to proceed/generate and no plan exists, choose `chat` and redirect to planning.
 
 Output:
@@ -76,6 +82,7 @@ Output:
 
 Use this section when user is asking questions or when generation cannot proceed.
 - Answer clearly and briefly.
+- Prefer streamed plain-text responses using channel `chat_and_stream`, but do not expose LLM thinking traces.
 - If user asks to proceed but no plan exists, redirect to `/plan` or ask for requirements.
 
 ## graph_builder.plan
@@ -134,26 +141,37 @@ When generating code:
 - Output one complete Python code block.
 - Output file manifest list.
 - Runtime will send code as file artifact; do not depend on streamed UI tokens.
+- Use `llm.chat()` for planner/codegen outputs; reserve streaming for chat/help replies.
 
 Codegen rules:
 - Every tool uses explicit `name=` and `outputs=[...]`.
 - Every graphify uses explicit `name=`, `inputs=[...]`, `outputs=[...]`.
 - Graphify stays sync (`def`).
+- Every graph input must have a Python type annotation in the graph function signature.
+- If graphify uses `inputs={...}` defaults, keep signature annotations explicit for those inputs too.
 - Tool returns and graph returns must match declared outputs.
+- When user provides an existing script, convert it into graph nodes by wrapping existing functions first.
+- Prefer existing imports from the user script as reusable imports; do not replace them with unrelated alternatives unless requested.
+- Prefer user-script functions and Python standard/library dependencies already present before introducing new helper libraries.
 
 Checkpointing rules:
 - Use deterministic `ckpt_key` labels.
 - Search before run, load if found, save after run.
 
 UX rules:
+- For critical phases (`routing`, `planning`, `coding`, `validation`, `registration`, `finishing`), always use `send_phase` with both `label` and `detail`.
 - For long work, use `send_phase(..., status="active")` and close with `status="done"` or `status="failed"`.
 - Plan UX uses rich card and buttons.
+- After code generation, validate using registry + static import checks before offering register buttons.
+- If validation fails, show concise errors and offer `Regenerate` / `Replan` actions.
 
 ## graph_builder.register
 
 When registering as app:
 - Ask for target graph if unclear.
 - Keep `as_app` minimal and valid.
+- Use LLM to infer `as_app.input_schema` overrides from graph inputs and intended UX.
+- Include per-input UI hints (`label`, `widget`, optional `placeholder`, optional `description`, optional `default`) when useful.
 
 ## graph_builder.style
 

@@ -14,13 +14,14 @@ title: Graphy Style
 - Use `_after=` only when you need ordering without passing data.
 - Do not pass `context` from graph code. `context` is injected at runtime for tool functions.
 - Bare decorators are invalid. Always include explicit attributes.
+- Graph inputs should be typed via function annotations so runtime/UI can infer schemas.
 
 ## Tool rules
 
 - Prefer explicit tool `name=...` for stable identity and checkpoints.
 - Each tool must declare `outputs=[...]`.
 - Tool return dict keys must include every declared output key.
-- If a tool uses `context.channel()` or `context.artifacts()`, define it as:
+- If a tool uses `context.channel("ui:run")` or `context.artifacts()`, define it as:
   - `async def tool_name(..., *, context: NodeContext) -> dict`
 
 ## Example: explicit DAG with `_after`
@@ -34,7 +35,7 @@ def read_input(text: str) -> dict:
 
 @tool(name="announce_start", outputs=["ok"])
 async def announce_start(step: str, *, context: NodeContext) -> dict:
-    await context.channel().send_text(f"starting {step}")
+    await context.channel("ui:run").send_text(f"starting {step}")
     return {"ok": True}
 
 @tool(name="expensive_step", outputs=["result"])
@@ -42,7 +43,7 @@ def expensive_step(clean_text: str) -> dict:
     return {"result": clean_text.upper()}
 
 @graphify(name="text_pipeline", inputs=["text"], outputs=["result"])
-def text_pipeline(text):
+def text_pipeline(text: str):
     start = announce_start(step="expensive_step")
     parsed = read_input(text=text)
     final = expensive_step(clean_text=parsed.clean_text, _after=[start])
@@ -80,7 +81,7 @@ async def create_video(..., *, context: NodeContext) -> dict:
     return {"video_output": "file.mp4"}
 
 @graphify(name="workflow", inputs=["args"], outputs=["final_lens_json", "video_output"])
-def workflow(args):
+def workflow(args: dict):
     ...
     return {"final_lens_json": final.final_lens_json, "video_output": video.video_output}
 ```

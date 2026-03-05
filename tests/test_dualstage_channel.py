@@ -186,7 +186,7 @@ async def test_dualstage_resume_via_http_client():
         await waiter
 
         # 6) Check final outputs
-        result = _resolve_graph_outputs(task_graph, inputs={"x": 7}, env=env)
+        result = await _resolve_graph_outputs(task_graph, inputs={"x": 7}, env=env)
         print("[TEST/http] FINAL RESULT:", result)
 
         assert result["final_result"] == 7 * 2
@@ -237,7 +237,7 @@ async def test_dualstage_resume_via_channel_client():
         await waiter
 
         # 7) Check final outputs
-        result = _resolve_graph_outputs(task_graph, inputs={"x": 7}, env=env)
+        result = await _resolve_graph_outputs(task_graph, inputs={"x": 7}, env=env)
         print("[TEST/client] FINAL RESULT:", result)
 
         assert result["final_result"] == 7 * 2

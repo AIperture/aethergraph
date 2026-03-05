@@ -3,16 +3,17 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request  #     type: ignore
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
-from aethergraph.core.runtime.run_manager import RunManager
+from aethergraph.core.runtime.run_manager import DuplicateRunIdError, RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, enforce_run_rate_limits, get_identity, require_runs_execute
-from .schemas import (
+from .run_presenters import to_run_summary
+from .schemas.runs import (
     NodeSnapshot,
     RunChannelEvent,
     RunCreateRequest,
@@ -52,18 +53,21 @@ async def create_run(
             app_vis = RunVisibility(app_vis) if app_vis else None
             app_imp = RunImportance(app_imp) if app_imp else None
 
-    record = await rm.submit_run(
-        graph_id=graph_id,
-        inputs=body.inputs or {},
-        run_id=body.run_id,
-        tags=body.tags,
-        identity=identity,
-        origin=body.origin or RunOrigin.app,
-        visibility=body.visibility or app_vis or RunVisibility.normal,
-        importance=body.importance or app_imp or RunImportance.normal,
-        agent_id=body.agent_id or None,
-        app_id=body.app_id or None,
-    )
+    try:
+        record = await rm.submit_run(
+            graph_id=graph_id,
+            inputs=body.inputs or {},
+            run_id=body.run_id,
+            tags=body.tags,
+            identity=identity,
+            origin=body.origin or RunOrigin.app,
+            visibility=body.visibility or app_vis or RunVisibility.normal,
+            importance=body.importance or app_imp or RunImportance.normal,
+            agent_id=body.agent_id or None,
+            app_id=body.app_id or None,
+        )
+    except DuplicateRunIdError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     return RunCreateResponse(
         run_id=record.run_id,
@@ -75,19 +79,6 @@ async def create_run(
         started_at=record.started_at,
         finished_at=record.finished_at,
     )
-
-
-def _extract_app_id_from_tags(tags: list[str]) -> str | None:
-    # This is a convention: look for first tag that is not a client/flow tag
-    # and return it as app_id
-    # NOTE: this is not robust; in real usage, app_id should be stored in RunRecord.meta
-    # Only for demo purposes
-    for t in tags:
-        # skip client / flow tags
-        if t.startswith("client:") or t.startswith("flow:"):
-            continue
-        return t
-    return None
 
 
 @router.get("/runs", response_model=RunListResponse)
@@ -135,52 +126,7 @@ async def list_runs(
     ]
 
     reg = getattr(container, "registry", None) or current_registry()
-    summaries: list[RunSummary] = []
-
-    for rec in records:
-        # Graph metadata logic as before
-        flow_meta_id: str | None = None
-        entrypoint = False
-        if reg is not None:
-            if rec.kind == "taskgraph":
-                meta = reg.get_meta(nspace="graph", name=rec.graph_id, version=None) or {}
-            elif rec.kind == "graphfn":
-                meta = reg.get_meta(nspace="graphfn", name=rec.graph_id, version=None) or {}
-            else:
-                meta = {}
-            flow_meta_id = meta.get("flow_id")
-            entrypoint = bool(meta.get("entrypoint", False))
-
-        effective_flow_id = rec.meta.get("flow_id") or flow_meta_id
-
-        app_id = rec.app_id
-        app_name = rec.meta.get("app_name")
-
-        summaries.append(
-            RunSummary(
-                run_id=rec.run_id,
-                graph_id=rec.graph_id,
-                status=rec.status,
-                started_at=rec.started_at,
-                finished_at=rec.finished_at,
-                tags=rec.tags,
-                user_id=rec.user_id,
-                org_id=rec.org_id,
-                session_id=rec.session_id or None,
-                graph_kind=rec.kind,
-                flow_id=effective_flow_id,
-                entrypoint=entrypoint,
-                meta=rec.meta or {},
-                app_id=app_id,
-                app_name=app_name,
-                agent_id=rec.meta.get("agent_id") or None,
-                origin=rec.origin,
-                visibility=rec.visibility,
-                importance=rec.importance,
-                artifact_count=rec.get("artifact_count"),
-                last_artifact_at=rec.get("last_artifact_at"),
-            )
-        )
+    summaries = [to_run_summary(rec, reg=reg) for rec in records]
 
     next_cursor = encode_cursor(offset + limit) if len(records) == limit else None
     return RunListResponse(runs=summaries, next_cursor=next_cursor)
@@ -215,47 +161,7 @@ async def get_run(
             raise HTTPException(status_code=403, detail="User identity required")
 
     reg = getattr(container, "registry", None) or current_registry()
-    flow_id: str | None = None
-    entrypoint = False
-
-    if reg is not None:
-        if rec.kind == "taskgraph":
-            meta = reg.get_meta(nspace="graph", name=rec.graph_id, version=None) or {}
-        elif rec.kind == "graphfn":
-            meta = reg.get_meta(nspace="graphfn", name=rec.graph_id, version=None) or {}
-        else:
-            meta = {}
-
-        flow_id = meta.get("flow_id")
-        entrypoint = bool(meta.get("entrypoint", False))
-
-    app_id = rec.app_id or rec.meta.get("app_id") or _extract_app_id_from_tags(rec.tags)
-    app_name = rec.meta.get("app_name")
-    agent_id = rec.agent_id or rec.meta.get("agent_id")
-
-    return RunSummary(
-        run_id=rec.run_id,
-        graph_id=rec.graph_id,
-        status=rec.status,
-        started_at=rec.started_at,
-        finished_at=rec.finished_at,
-        tags=rec.tags,
-        user_id=rec.user_id,
-        org_id=rec.org_id,
-        graph_kind=rec.kind,
-        flow_id=flow_id,
-        entrypoint=entrypoint,
-        meta=rec.meta or {},
-        app_id=app_id,
-        app_name=app_name,
-        agent_id=agent_id,
-        session_id=rec.session_id or None,
-        origin=rec.origin,
-        visibility=rec.visibility,
-        importance=rec.importance,
-        artifact_count=rec.get("artifact_count"),
-        last_artifact_at=rec.get("last_artifact_at"),
-    )
+    return to_run_summary(rec, reg=reg)
 
 
 @router.post("/runs/{run_id}/cancel")
@@ -384,20 +290,13 @@ async def get_run_snapshot(
         flow_id = meta.get("flow_id")
         entrypoint = bool(meta.get("entrypoint", False))
 
-    # --- Load static TaskGraph spec if it exists ---
-    spec = None
-    if reg is not None:
-        try:
-            graph_obj = reg.get_graph(name=graph_id, version=None)
-            spec = getattr(graph_obj, "spec", None)
-        except KeyError:
-            spec = None
-
     # --- Load latest GraphSnapshot (if we have a state store) ---
     snap = None
     if state_store is not None:
         snap = await state_store.load_latest_snapshot(run_id)
 
+    # print(f"Run {run_id} snapshot: record status={rec.status}, graph_id={graph_id}, graph_kind={graph_kind}, flow_id={flow_id}, entrypoint={entrypoint}")
+    # print(snap)
     nodes_state: dict[str, dict[str, Any]] = {}
     snapshot_edges: list[dict[str, str]] = []
 
@@ -409,10 +308,24 @@ async def get_run_snapshot(
         raw_edges = snap.state.get("edges") or []
         if isinstance(raw_edges, list):
             snapshot_edges = [
-                {"source": e.get("from"), "target": e.get("to")}
+                {
+                    "source": e.get("from", e.get("source")),
+                    "target": e.get("to", e.get("target")),
+                }
                 for e in raw_edges
-                if isinstance(e, dict) and "from" in e and "to" in e
+                if isinstance(e, dict)
+                and (e.get("from") or e.get("source"))
+                and (e.get("to") or e.get("target"))
             ]
+
+    # --- Load static TaskGraph spec when snapshot does not include explicit edges ---
+    spec = None
+    if not snapshot_edges and graph_kind == "taskgraph" and reg is not None:
+        try:
+            graph_obj = reg.get_graph(name=graph_id, version=None)
+            spec = getattr(graph_obj, "spec", None)
+        except KeyError:
+            spec = None
 
     # --- Build edges ---
     edges: list[dict[str, str]] = []
