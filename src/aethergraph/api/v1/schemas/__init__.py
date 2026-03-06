@@ -18,7 +18,13 @@ from .memory import (
     MemorySummaryListResponse,
 )
 from .misc import ConfigLLMProvider, ConfigResponse, HealthResponse
-from .registry import AgentDescriptor, AppDescriptor, SlashCommandDescriptor
+from .registry import (
+    AgentDescriptor,
+    AppDescriptor,
+    RegistryRegisterRequest,
+    RegistryRegisterResponse,
+    SlashCommandDescriptor,
+)
 from .runs import (
     EdgeSnapshot,
     NodeSnapshot,
@@ -94,6 +100,8 @@ __all__ = [
     "RunStatus",
     "RunSummary",
     "RunVizResponse",
+    "RegistryRegisterRequest",
+    "RegistryRegisterResponse",
     "Session",
     "SessionChatEvent",
     "SessionChatFile",

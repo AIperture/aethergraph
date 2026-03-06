@@ -5,6 +5,7 @@ from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.scope.scope import Scope
+from aethergraph.services.scope.tenant import registry_tenant_from_identity
 
 
 def scoped_registry(identity: RequestIdentity) -> RegistryFacade:
@@ -14,11 +15,12 @@ def scoped_registry(identity: RequestIdentity) -> RegistryFacade:
     except Exception:
         registration_service = None
 
+    tenant = registry_tenant_from_identity(identity)
     return RegistryFacade(
         registry=current_registry(),
         scope=Scope(
-            org_id=identity.org_id,
-            user_id=identity.user_id,
+            org_id=tenant.get("org_id") if tenant else None,
+            user_id=tenant.get("user_id") if tenant else None,
             client_id=identity.client_id,
             mode=identity.mode,
         ),
@@ -32,7 +34,7 @@ def ensure_delete_identity(identity: RequestIdentity, resource_name: str) -> Non
             status_code=403,
             detail=f"Deleting {resource_name} requires authenticated tenant identity.",
         )
-    if not (identity.org_id or identity.user_id or identity.client_id):
+    if not (identity.org_id or identity.user_id):
         raise HTTPException(
             status_code=403,
             detail=f"Missing tenant identity. Cannot delete {resource_name}.",

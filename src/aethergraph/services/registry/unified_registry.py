@@ -5,6 +5,8 @@ import re
 import threading
 from typing import Any
 
+from aethergraph.services.scope.tenant import normalize_registry_tenant
+
 try:
     # Prefer packaging for correct PEP 440 / pre-release ordering
     from packaging.version import Version  # type: ignore
@@ -46,26 +48,13 @@ class UnifiedRegistry:
 
     @staticmethod
     def _normalize_tenant(tenant: TenantIdentity) -> dict[str, str | None] | None:
-        if tenant is None:
-            return None
-        normalized = {
-            "org_id": tenant.get("org_id"),
-            "user_id": tenant.get("user_id"),
-            "client_id": tenant.get("client_id"),
-        }
-        if not any(normalized.values()):
-            return None
-        return normalized
+        return normalize_registry_tenant(tenant)
 
     @staticmethod
     def _tenant_key(tenant: dict[str, str | None] | None) -> str:
         if tenant is None:
             return _GLOBAL_TENANT_KEY
-        return (
-            f"org:{tenant.get('org_id') or ''}"
-            f"|user:{tenant.get('user_id') or ''}"
-            f"|client:{tenant.get('client_id') or ''}"
-        )
+        return f"org:{tenant.get('org_id') or ''}|user:{tenant.get('user_id') or ''}"
 
     def _candidate_tenant_keys(
         self, tenant: TenantIdentity, include_global: bool

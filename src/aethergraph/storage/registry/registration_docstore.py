@@ -6,6 +6,7 @@ from typing import Any
 import uuid
 
 from aethergraph.contracts.storage.doc_store import DocStore
+from aethergraph.services.scope.tenant import normalize_registry_tenant
 
 REGISTRY_DOC_PREFIX = "registry:entry:"
 
@@ -15,16 +16,7 @@ def _utc_now_iso() -> str:
 
 
 def _normalize_tenant(tenant: Mapping[str, str | None] | None) -> dict[str, str | None] | None:
-    if tenant is None:
-        return None
-    norm = {
-        "org_id": tenant.get("org_id"),
-        "user_id": tenant.get("user_id"),
-        "client_id": tenant.get("client_id"),
-    }
-    if not any(norm.values()):
-        return None
-    return norm
+    return normalize_registry_tenant(tenant)
 
 
 def _tenant_matches(
@@ -43,11 +35,9 @@ def _tenant_matches(
     if entry_norm is None:
         return bool(include_global)
 
-    return (
-        (entry_norm.get("org_id") or "") == (req_norm.get("org_id") or "")
-        and (entry_norm.get("user_id") or "") == (req_norm.get("user_id") or "")
-        and (entry_norm.get("client_id") or "") == (req_norm.get("client_id") or "")
-    )
+    return (entry_norm.get("org_id") or "") == (req_norm.get("org_id") or "") and (
+        entry_norm.get("user_id") or ""
+    ) == (req_norm.get("user_id") or "")
 
 
 class RegistrationManifestStore:

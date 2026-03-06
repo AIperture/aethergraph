@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.auth.authz import AuthZService
+from aethergraph.services.scope.tenant import registry_tenant_from_identity
 
 
 class RequestIdentity(BaseModel):
@@ -33,7 +34,10 @@ class RequestIdentity(BaseModel):
     @property
     def tenant_key(self) -> tuple[str | None, str | None]:
         """Convenience key for tenant scoping."""
-        return (self.org_id, self.user_id)
+        tenant = registry_tenant_from_identity(self)
+        if tenant is None:
+            return (None, None)
+        return (tenant.get("org_id"), tenant.get("user_id"))
 
 
 async def get_identity(
@@ -95,15 +99,14 @@ def _rate_key(identity: RequestIdentity) -> str:
     Compute a stable key for rate limiting.
 
     - CLOUD: prefer org_id, then user_id
-    - DEMO: use client_id if present, else "demo"
+    - DEMO: use resolved user_id (demo:<client_id>) for consistency
     - LOCAL: just "local"
     """
     if identity.mode == "cloud":
         return identity.org_id or identity.user_id or "anonymous"
 
     if identity.mode == "demo":
-        # Each browser/client gets its own key if possible
-        return identity.client_id or "demo"
+        return identity.user_id or "demo"
 
     # local / dev
     return "local"

@@ -8,10 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 from aethergraph.core.graph.graph_fn import GraphFunction
 from aethergraph.core.graph.task_graph import TaskGraph
 from aethergraph.core.runtime.runtime_registry import current_registry
-from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
 from .deps import RequestIdentity, get_identity
 from .input_schema import resolve_graph_input_schema
+from .registry_helpers import scoped_registry
 from .schemas.graphs import GraphDetail, GraphListItem
 
 router = APIRouter(tags=["graphs"])
@@ -46,7 +46,8 @@ async def list_graphs(
     Optional:
       - flow_id: filter to graphs whose registry metadata has this flow_id.
     """
-    reg: UnifiedRegistry = current_registry()
+    reg = scoped_registry(identity)
+    reg.registry = current_registry()
 
     items: list[GraphListItem] = []
 
@@ -182,7 +183,8 @@ async def get_graph_detail(
     """
     Get detailed information about a specific graph (structure only).
     """
-    reg: UnifiedRegistry = current_registry()
+    reg = scoped_registry(identity)
+    reg.registry = current_registry()
 
     # 1) Try TaskGraph
     try:

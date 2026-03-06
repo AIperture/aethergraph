@@ -8,6 +8,7 @@ from .graphs import router as graphs_router
 from .identity import router as identity_router
 from .memory import router as memory_router
 from .misc import router as misc_router
+from .registry import router as registry_router
 from .runs import router as runs_router
 from .session import router as session_router
 from .stats import router as stats_router
@@ -28,3 +29,4 @@ router.include_router(session_router)
 router.include_router(apps_router)
 router.include_router(agents_router)
 router.include_router(triggers_router)
+router.include_router(registry_router)
