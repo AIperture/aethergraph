@@ -38,10 +38,19 @@ async def test_manifest_store_tenant_filtering(tmp_path):
             "active": True,
         }
     )
+    await store.upsert_entry(
+        {
+            "entry_id": "u1-other-client",
+            "source_kind": "file",
+            "source_ref": "/tmp/u1-client-b.py",
+            "tenant": {"org_id": "o1", "user_id": "u1", "client_id": "client-b"},
+            "active": True,
+        }
+    )
 
     tenant_u1 = {"org_id": "o1", "user_id": "u1", "client_id": None}
     rows_with_global = await store.list_entries(tenant=tenant_u1, include_global=True)
     rows_no_global = await store.list_entries(tenant=tenant_u1, include_global=False)
 
-    assert {r["entry_id"] for r in rows_with_global} == {"global", "u1"}
-    assert {r["entry_id"] for r in rows_no_global} == {"u1"}
+    assert {r["entry_id"] for r in rows_with_global} == {"global", "u1", "u1-other-client"}
+    assert {r["entry_id"] for r in rows_no_global} == {"u1", "u1-other-client"}

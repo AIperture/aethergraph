@@ -15,6 +15,7 @@ from fastapi import (  # type: ignore
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
+from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.api.v1.run_presenters import to_run_summary
 from aethergraph.api.v1.schemas.session import (
     Session,
@@ -25,7 +26,6 @@ from aethergraph.api.v1.schemas.session import (
     SessionUpdateRequest,
 )
 from aethergraph.core.runtime.run_types import RunImportance, RunVisibility, SessionKind
-from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
 router = APIRouter(tags=["sessions"])
@@ -165,7 +165,7 @@ async def get_session_runs(
         if rec.visibility in visible_states and rec.importance == RunImportance.normal
     ]
 
-    reg = getattr(container, "registry", None) or current_registry()
+    reg = scoped_registry(identity)
     summaries = [to_run_summary(rec, reg=reg) for rec in records]
 
     return SessionRunsResponse(items=summaries)

@@ -14,6 +14,7 @@ from starlette.datastructures import FormData
 from starlette.responses import JSONResponse
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
+from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.plugins.channel.mime_detect import detect_mime_for_path
@@ -342,7 +343,7 @@ async def session_chat_incoming(
 ):
     container = current_services()
     ingress = container.channel_ingress
-    registry = container.registry
+    registry = scoped_registry(identity)
     rm = container.run_manager
     event_log = container.eventlog
 

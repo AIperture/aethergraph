@@ -6,9 +6,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request  #     type: ignore
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
+from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.core.runtime.run_manager import DuplicateRunIdError, RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
-from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, enforce_run_rate_limits, get_identity, require_runs_execute
@@ -44,9 +44,9 @@ async def create_run(
 
     app_vis = None
     app_imp = None
-    reg = getattr(container, "registry", None) or current_registry()
+    reg = scoped_registry(identity)
     if body.app_id and reg is not None:
-        app_meta = reg.get_meta(nspace="app", name=body.app_id)
+        app_meta = reg.get_meta(nspace="app", name=body.app_id, include_global=True)
         if app_meta:
             app_vis = app_meta.get("run_visibility")
             app_imp = app_meta.get("run_importance")
@@ -128,7 +128,7 @@ async def list_runs(
         if rec.visibility == RunVisibility.normal and rec.importance == RunImportance.normal
     ]
 
-    reg = getattr(container, "registry", None) or current_registry()
+    reg = scoped_registry(identity)
     summaries = [to_run_summary(rec, reg=reg) for rec in records]
 
     next_cursor = encode_cursor(offset + limit) if len(records) == limit else None
@@ -164,7 +164,7 @@ async def get_run(
         else:
             raise HTTPException(status_code=403, detail="User identity required")
 
-    reg = getattr(container, "registry", None) or current_registry()
+    reg = scoped_registry(identity)
     return to_run_summary(rec, reg=reg)
 
 
@@ -281,7 +281,7 @@ async def get_run_snapshot(
     graph_kind = rec.kind
 
     # --- Graph metadata from registry ---
-    reg = getattr(container, "registry", None) or current_registry()
+    reg = scoped_registry(identity)
 
     flow_id: str | None = None
     entrypoint = False

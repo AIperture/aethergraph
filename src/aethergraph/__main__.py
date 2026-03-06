@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import os
 from pathlib import Path
 import sys
 import time
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import uvicorn
 
@@ -193,6 +197,22 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    register = sub.add_parser("register", help="Register a local graph source into registry.")
+    register.add_argument("--workspace", default="./aethergraph_data")
+    register.add_argument("--server-url", default=None)
+    register.add_argument("--mode", choices=["auto", "api", "local"], default="auto")
+    register.add_argument("--source", choices=["file", "artifact"], default="file")
+    register.add_argument("--path", default=None, help="Path to Python file when --source=file.")
+    register.add_argument("--artifact-id", default=None, help="Artifact id when --source=artifact.")
+    register.add_argument("--uri", default=None, help="Artifact URI when --source=artifact.")
+    register.add_argument("--app-config-json", default=None, help="JSON object for app config.")
+    register.add_argument("--agent-config-json", default=None, help="JSON object for agent config.")
+    register.add_argument("--org-id", default=None)
+    register.add_argument("--user-id", default=None)
+    register.add_argument("--client-id", default=None)
+    register.add_argument("--no-persist", action="store_true")
+    register.add_argument("--no-strict", action="store_true")
+
     args = parser.parse_args(argv)
     print(args)
 
@@ -343,6 +363,99 @@ def main(argv: list[str] | None = None) -> int:
                 factory=True,
             )
             return 0
+
+    if args.cmd == "register":
+        app_config = json.loads(args.app_config_json) if args.app_config_json else None
+        agent_config = json.loads(args.agent_config_json) if args.agent_config_json else None
+        payload = {
+            "source": args.source,
+            "path": args.path,
+            "artifact_id": args.artifact_id,
+            "uri": args.uri,
+            "app_config": app_config,
+            "agent_config": agent_config,
+            "persist": not bool(args.no_persist),
+            "strict": not bool(args.no_strict),
+        }
+        headers = {"Content-Type": "application/json"}
+        if args.user_id:
+            headers["X-User-ID"] = args.user_id
+        if args.org_id:
+            headers["X-Org-ID"] = args.org_id
+        if args.client_id:
+            headers["X-Client-ID"] = args.client_id
+
+        def _register_via_api() -> dict:
+            base = (
+                args.server_url or get_running_url_if_any(args.workspace) or "http://127.0.0.1:8745"
+            )
+            req = Request(
+                url=f"{base.rstrip('/')}/api/v1/registry/register",
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urlopen(req, timeout=20) as resp:  # noqa: S310
+                return json.loads(resp.read().decode("utf-8"))
+
+        async def _register_via_local() -> dict:
+            from aethergraph.core.runtime.runtime_registry import current_registry
+            from aethergraph.services.registry.registration_service import RegistrationService
+            from aethergraph.storage.docstore.fs_doc import FSDocStore
+            from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
+
+            docs = FSDocStore(root=str(Path(args.workspace) / "docs"))
+            manifests = RegistrationManifestStore(doc_store=docs)
+            service = RegistrationService(
+                registry=current_registry(),
+                manifest_store=manifests,
+            )
+            tenant = {"org_id": args.org_id, "user_id": args.user_id}
+            if args.source == "file":
+                if not args.path:
+                    raise ValueError("--path is required for --source=file")
+                result = await service.register_by_file(
+                    args.path,
+                    app_config=app_config,
+                    agent_config=agent_config,
+                    tenant=tenant,
+                    persist=not bool(args.no_persist),
+                    strict=not bool(args.no_strict),
+                )
+            else:
+                result = await service.register_by_artifact(
+                    artifact_id=args.artifact_id,
+                    uri=args.uri,
+                    app_config=app_config,
+                    agent_config=agent_config,
+                    tenant=tenant,
+                    persist=not bool(args.no_persist),
+                    strict=not bool(args.no_strict),
+                )
+            return RegistrationService.to_dict(result)
+
+        if args.mode in {"api", "auto"}:
+            try:
+                out = _register_via_api()
+                print(json.dumps(out, indent=2))
+                return 0
+            except HTTPError as e:
+                detail = e.read().decode("utf-8")
+                if args.mode == "api":
+                    print(detail or str(e), file=sys.stderr)
+                    return 1
+            except URLError as e:
+                if args.mode == "api":
+                    print(str(e), file=sys.stderr)
+                    return 1
+
+        try:
+            out = asyncio.run(_register_via_local())
+            print(json.dumps(out, indent=2))
+            return 0
+        except Exception as e:  # noqa: BLE001
+            print(str(e), file=sys.stderr)
+            return 1
 
     return 2
 

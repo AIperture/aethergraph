@@ -23,6 +23,7 @@ from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_registry import current_registry
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
+from aethergraph.services.scope.tenant import registry_tenant_from_identity
 
 
 def _utcnow() -> datetime:
@@ -109,14 +110,16 @@ class RunManager:
 
     async def _resolve_target(self, graph_id: str) -> Any:
         reg = self.registry()
+        identity = getattr(self, "_resolve_target_identity", None)
+        tenant = registry_tenant_from_identity(identity) if identity is not None else None
         # Try static TaskGraph
         try:
-            return reg.get_graph(name=graph_id, version=None)
+            return reg.get_graph(name=graph_id, version=None, tenant=tenant, include_global=True)
         except KeyError:
             pass
         # Try GraphFunction
         try:
-            return reg.get_graphfn(name=graph_id, version=None)
+            return reg.get_graphfn(name=graph_id, version=None, tenant=tenant, include_global=True)
         except KeyError:
             pass
         raise KeyError(f"Graph '{graph_id}' not found")
@@ -153,7 +156,12 @@ class RunManager:
         started_at = _utcnow()
         tags = list(tags or [])
 
-        target = await self._resolve_target(graph_id)
+        tenant = registry_tenant_from_identity(identity)
+        self._resolve_target_identity = identity
+        try:
+            target = await self._resolve_target(graph_id)
+        finally:
+            self._resolve_target_identity = None
         if _is_task_graph(target):
             kind = "taskgraph"
         elif _is_graphfn(target):
@@ -165,9 +173,27 @@ class RunManager:
         reg = self.registry()
         if reg is not None:
             if kind == "taskgraph":
-                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+                meta = (
+                    reg.get_meta(
+                        nspace="graph",
+                        name=graph_id,
+                        version=None,
+                        tenant=tenant,
+                        include_global=True,
+                    )
+                    or {}
+                )
             elif kind == "graphfn":
-                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+                meta = (
+                    reg.get_meta(
+                        nspace="graphfn",
+                        name=graph_id,
+                        version=None,
+                        tenant=tenant,
+                        include_global=True,
+                    )
+                    or {}
+                )
             else:
                 meta = {}
             flow_id = meta.get("flow_id") or graph_id
@@ -809,7 +835,12 @@ class RunManager:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
         tags = tags or []
-        target = await self._resolve_target(graph_id)
+        tenant = registry_tenant_from_identity(identity)
+        self._resolve_target_identity = identity
+        try:
+            target = await self._resolve_target(graph_id)
+        finally:
+            self._resolve_target_identity = None
         rid = run_id or f"run-{uuid4().hex[:12]}"
         started_at = _utcnow()
 
@@ -825,9 +856,27 @@ class RunManager:
         reg = self.registry()
         if reg is not None:
             if kind == "taskgraph":
-                meta = reg.get_meta(nspace="graph", name=graph_id, version=None) or {}
+                meta = (
+                    reg.get_meta(
+                        nspace="graph",
+                        name=graph_id,
+                        version=None,
+                        tenant=tenant,
+                        include_global=True,
+                    )
+                    or {}
+                )
             elif kind == "graphfn":
-                meta = reg.get_meta(nspace="graphfn", name=graph_id, version=None) or {}
+                meta = (
+                    reg.get_meta(
+                        nspace="graphfn",
+                        name=graph_id,
+                        version=None,
+                        tenant=tenant,
+                        include_global=True,
+                    )
+                    or {}
+                )
             else:
                 meta = {}
             flow_id = meta.get("flow_id") or graph_id

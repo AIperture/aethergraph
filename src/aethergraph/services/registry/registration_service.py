@@ -17,6 +17,7 @@ from aethergraph.core.graph.graphify_validation import (
 )
 from aethergraph.core.runtime.runtime_services import use_services
 from aethergraph.services.registry.unified_registry import TenantIdentity, UnifiedRegistry
+from aethergraph.services.scope.tenant import normalize_registry_tenant
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
 
 
@@ -56,16 +57,7 @@ class DeletionResult:
 
 
 def _normalize_tenant(tenant: TenantIdentity) -> dict[str, str | None] | None:
-    if tenant is None:
-        return None
-    norm = {
-        "org_id": tenant.get("org_id"),
-        "user_id": tenant.get("user_id"),
-        "client_id": tenant.get("client_id"),
-    }
-    if not any(norm.values()):
-        return None
-    return norm
+    return normalize_registry_tenant(tenant)
 
 
 class RegistrationService:

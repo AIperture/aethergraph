@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from aethergraph.services.scope.scope import Scope
+from aethergraph.services.scope.tenant import normalize_registry_tenant
 
 from .registration_service import (
     DeletionResult,
@@ -27,14 +28,12 @@ class RegistryFacade:
     def tenant(self) -> dict[str, str | None] | None:
         if self.scope is None:
             return None
-        tenant = {
-            "org_id": self.scope.org_id,
-            "user_id": self.scope.user_id,
-            "client_id": self.scope.client_id,
-        }
-        if not any(tenant.values()):
-            return None
-        return tenant
+        return normalize_registry_tenant(
+            {
+                "org_id": self.scope.org_id,
+                "user_id": self.scope.user_id,
+            }
+        )
 
     def _effective_tenant(self, tenant: TenantIdentity = None) -> TenantIdentity:
         if tenant is not None:
