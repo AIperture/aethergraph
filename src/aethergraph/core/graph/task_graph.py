@@ -502,7 +502,19 @@ class TaskGraph:
             raise ValueError("Cannot reset the special graph inputs node.")
 
         node = self.state.nodes[node_id]
-        await node.reset_node(preserve_outputs=preserve_outputs)
+        node.status = NodeStatus.PENDING
+        if not preserve_outputs:
+            node.outputs = {}
+        node.error = None
+        node.attempts = 0
+        node.next_wakeup_at = None
+        node.wait_token = None
+        node.wait_spec = None
+        node.finished_at = None
+        self.state.rev += 1
+        await self._notify_status_change(node_id)
+        if not preserve_outputs:
+            await self._notify_output_change(node_id)
 
     async def reset(
         self,

@@ -309,3 +309,64 @@ async def test_run_manager_submit_run_non_blocking(monkeypatch, dummy_meter):
     call = dummy_meter.calls[0]
     assert call["run_id"] == record.run_id
     assert call["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_run_manager_submit_run_persists_launch_metadata_and_run_config(
+    monkeypatch, dummy_meter
+):
+    store = InMemoryRunStore()
+    reg = UnifiedRegistry()
+    rm = RunManager(run_store=store, registry=reg, max_concurrent_runs=10)
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    captured_kwargs = {}
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"out": 7}
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record, outputs, has_waits, continuations = await rm.run_and_wait(
+        graph_id="my-graph",
+        inputs={"x": 2},
+        identity=Identity(user_id="u1", org_id="o1"),
+        tags=["app:demo"],
+        session_id="sess-1",
+        app_id="app-1",
+        app_name="Demo App",
+        agent_id="agent-1",
+        run_config={"resume_from_run_id": "run-old", "resume_mode": "failed_nodes"},
+    )
+
+    assert outputs == {"out": 7}
+    assert has_waits is False
+    assert continuations == []
+
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted.meta["original_inputs"] == {"x": 2}
+    assert persisted.meta["original_run_config"] == {
+        "resume_from_run_id": "run-old",
+        "resume_mode": "failed_nodes",
+    }
+    assert persisted.meta["original_tags"] == ["app:demo"]
+    assert persisted.meta["original_session_id"] == "sess-1"
+    assert persisted.meta["original_app_id"] == "app-1"
+    assert persisted.meta["app_name"] == "Demo App"
+    assert persisted.meta["agent_id"] == "agent-1"
+    assert persisted.meta["resume_from_run_id"] == "run-old"
+    assert persisted.meta["resume_mode"] == "failed_nodes"
+    assert captured_kwargs["resume_from_run_id"] == "run-old"
+    assert captured_kwargs["resume_mode"] == "failed_nodes"
