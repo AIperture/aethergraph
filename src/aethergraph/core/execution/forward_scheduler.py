@@ -298,9 +298,12 @@ class ForwardScheduler(BaseScheduler):
             if not running and scheduled == 0:
                 nothing_pending = (not self._backoff_tasks) and (not self._resume_pending)
                 if nothing_pending and not self._any_waiting():
-                    # graph is effectively terminal (DONE/FAILED/SKIPPED only)
-                    self._terminated = True
-                    break
+                    # Only terminate when all non-plan nodes are terminal.
+                    if self._all_nodes_terminal():
+                        self._terminated = True
+                        break
+                    # Otherwise this is a real deadlock/stall.
+                    raise RuntimeError("stalled")
 
                 if self._any_waiting():
                     # 4) BLOCK until a resume/wakeup arrives (no CPU spin)
@@ -511,10 +514,95 @@ class ForwardScheduler(BaseScheduler):
         # 3) normal ready nodes
         if available > 0:
             for nid in list(self._compute_ready())[:available]:
-                await self._start_node(self.graph.node(nid))
+                node = self.graph.node(nid)
+                try:
+                    cond_ok = self._condition_allows(node)
+                except Exception as e:
+                    await self.graph.set_node_status(node.node_id, NodeStatus.FAILED)
+                    if self.logger:
+                        self.logger.exception(
+                            "Node %s condition evaluation failed: %r", node.node_id, e
+                        )
+                    else:
+                        print(
+                            f"[ForwardScheduler] Node {node.node_id} condition evaluation failed: {e!r}"
+                        )
+                    continue
+
+                if not cond_ok:
+                    await self.graph.set_node_status(node.node_id, NodeStatus.SKIPPED)
+                    await self._skip_dependents(node.node_id)
+                    continue
+
+                await self._start_node(node)
                 scheduled += 1
 
         return scheduled
+
+    def _condition_allows(self, node: TaskNodeRuntime) -> bool:
+        cond = getattr(node.spec, "condition", True)
+        if cond is None or cond is True:
+            return True
+        if cond is False:
+            return False
+        if isinstance(cond, dict):
+            return bool(self._eval_condition_expr(cond))
+        raise ValueError(
+            f"Unsupported condition type for node '{node.node_id}': {type(cond).__name__}"
+        )
+
+    def _resolve_condition_value(self, value):
+        from ..graph.graph_refs import is_ref
+
+        if is_ref(value):
+            return self.graph._resolve_ref(value, self.graph.state.node_outputs)
+        if isinstance(value, dict) and "op" in value:
+            return self._eval_condition_expr(value)
+        if isinstance(value, list):
+            return [self._resolve_condition_value(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(self._resolve_condition_value(v) for v in value)
+        return value
+
+    def _eval_condition_expr(self, expr: dict[str, Any]) -> bool:
+        op = str(expr.get("op") or "").lower().strip()
+        if not op:
+            raise ValueError("Condition dict must include non-empty 'op'")
+
+        if op in {"eq", "=="}:
+            return self._resolve_condition_value(expr.get("left")) == self._resolve_condition_value(
+                expr.get("right")
+            )
+        if op in {"ne", "!="}:
+            return self._resolve_condition_value(expr.get("left")) != self._resolve_condition_value(
+                expr.get("right")
+            )
+        if op == "in":
+            return self._resolve_condition_value(expr.get("left")) in self._resolve_condition_value(
+                expr.get("right")
+            )
+        if op == "not_in":
+            return self._resolve_condition_value(
+                expr.get("left")
+            ) not in self._resolve_condition_value(expr.get("right"))
+        if op == "truthy":
+            return bool(self._resolve_condition_value(expr.get("value")))
+        if op == "falsy":
+            return not bool(self._resolve_condition_value(expr.get("value")))
+        if op == "not":
+            return not bool(self._resolve_condition_value(expr.get("value")))
+        if op == "and":
+            args = expr.get("args", [])
+            if not isinstance(args, list):
+                raise ValueError("Condition op 'and' expects list 'args'")
+            return all(bool(self._resolve_condition_value(a)) for a in args)
+        if op == "or":
+            args = expr.get("args", [])
+            if not isinstance(args, list):
+                raise ValueError("Condition op 'or' expects list 'args'")
+            return any(bool(self._resolve_condition_value(a)) for a in args)
+
+        raise ValueError(f"Unsupported condition op: {op}")
 
     async def _skip_dependents(self, failed_node_id: str):
         """Mark all downstream dependents of failed_node_id as SKIPPED if not already terminal/running."""

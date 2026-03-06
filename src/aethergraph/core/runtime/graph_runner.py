@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import Any
 import uuid
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.contracts.errors.errors import GraphHasPendingWaits
+from aethergraph.contracts.errors.errors import (
+    GraphBuildError,
+    GraphHasPendingWaits,
+    GraphInputBindError,
+    GraphMaterializationError,
+    build_error_hints,
+)
 from aethergraph.contracts.services.state_stores import GraphSnapshot
+from aethergraph.core.graph.node_state import NodeStatus
 from aethergraph.core.graph.task_graph import TaskGraph
 from aethergraph.core.runtime.recovery import hash_spec, recover_graph_run
 from aethergraph.services.state_stores.graph_observer import PersistenceObserver
@@ -166,11 +174,25 @@ async def _resolve_graph_outputs(
     try:
         result = {k: _res(v) for k, v in bindings.items()}
     except KeyError as e:
+        failed = [
+            nid
+            for nid, n in graph.state.nodes.items()
+            if getattr(n, "status", "") in (NodeStatus.FAILED, NodeStatus.CANCELLED)
+        ]
+        if failed:
+            raise RuntimeError(
+                "Graph failed before outputs became resolvable. "
+                f"Failed nodes: {', '.join(sorted(failed))}"
+            ) from e
         waiting = [
             nid
             for nid, n in graph.state.nodes.items()
             if getattr(n, "status", "").startswith("WAITING_")
         ]
+        if not waiting:
+            raise RuntimeError(
+                "Graph terminated without resolvable outputs and without pending waits."
+            ) from e
         continuations = []
         if env.continuation_store and hasattr(env.continuation_store, "get"):
             conts = await asyncio.gather(
@@ -218,6 +240,16 @@ def _seed_outputs_from_snapshot(env, snap: GraphSnapshot):
             env.outputs_by_node[nid] = outs
 
 
+def _seed_outputs_from_graph(env: RuntimeEnv, graph: TaskGraph):
+    env.outputs_by_node = env.outputs_by_node or {}
+    for nid, ns in graph.state.nodes.items():
+        outs = (ns.outputs or {}) if ns is not None else {}
+        if outs:
+            env.outputs_by_node[nid] = dict(outs)
+        else:
+            env.outputs_by_node.pop(nid, None)
+
+
 def _is_graph_complete(snap: GraphSnapshot) -> bool:
     nodes = snap.state.get("nodes", {})
     if not nodes:
@@ -249,6 +281,94 @@ async def load_latest_snapshot_json(store, run_id: str) -> dict[str, Any] | None
         "spec_hash": snap.spec_hash,
         "state": snap.state,
     }
+
+
+def _recover_graph_from_snapshot(
+    *,
+    spec,
+    target_run_id: str,
+    source_run_id: str,
+    snap: GraphSnapshot,
+) -> TaskGraph:
+    graph = TaskGraph.from_spec(spec=spec, state=None)
+    graph.state.run_id = target_run_id
+    if not snap:
+        return graph
+
+    want = hash_spec(spec)
+    if snap.spec_hash != want:
+        logging.getLogger("aethergraph.core.runtime.recovery").warning(
+            "[recover_graph_run] Spec hash mismatch for source run %s -> target run %s: snapshot has %s..., want %s...",
+            source_run_id,
+            target_run_id,
+            snap.spec_hash[:8],
+            want[:8],
+        )
+
+    graph.state.rev = snap.state.get("rev", 0)
+    graph.state._bound_inputs = snap.state.get("_bound_inputs")
+    for nid, ns_json in snap.state.get("nodes", {}).items():
+        ns = graph.state.nodes.setdefault(nid, graph.state.nodes.get(nid))
+        status_name = ns_json.get("status", "PENDING")
+        status = getattr(NodeStatus, status_name, NodeStatus.PENDING)
+        if status == NodeStatus.RUNNING:
+            status = NodeStatus.PENDING
+        ns.status = status
+        ns.outputs = ns_json.get("outputs") or {}
+        ns.error = ns_json.get("error")
+        ns.attempts = ns_json.get("attempts", 0)
+        ns.next_wakeup_at = ns_json.get("next_wakeup_at")
+        ns.wait_token = ns_json.get("wait_token")
+        ns.wait_spec = ns_json.get("wait_spec")
+        ns.started_at = ns_json.get("started_at")
+        ns.finished_at = ns_json.get("finished_at")
+    return graph
+
+
+def _is_resume_failed_status(status: Any) -> bool:
+    return str(status or "").upper() in {
+        NodeStatus.FAILED,
+        NodeStatus.FAILED_TIMEOUT,
+        NodeStatus.CANCELLED,
+    }
+
+
+async def _prepare_resume_failed_nodes(
+    *,
+    graph: TaskGraph,
+    snap: GraphSnapshot,
+    source_run_id: str,
+) -> list[str]:
+    raw_nodes = (snap.state or {}).get("nodes") or {}
+    if not isinstance(raw_nodes, dict) or not raw_nodes:
+        raise GraphBuildError(
+            f"Resume source run '{source_run_id}' has no node state to replay.",
+            code="resume_missing_node_state",
+            stage="resume_prepare",
+            hints=build_error_hints(
+                "resume_missing_node_state",
+                f"Run '{source_run_id}' does not have a node snapshot to resume from.",
+            ),
+        )
+
+    failed_roots = sorted(
+        nid for nid, ns in raw_nodes.items() if _is_resume_failed_status((ns or {}).get("status"))
+    )
+    if not failed_roots:
+        raise GraphBuildError(
+            f"Resume source run '{source_run_id}' has no failed or canceled nodes to replay.",
+            code="resume_no_failed_nodes",
+            stage="resume_prepare",
+            hints=build_error_hints(
+                "resume_no_failed_nodes",
+                f"Run '{source_run_id}' is not resumable in failed_nodes mode.",
+            ),
+        )
+
+    await graph.reset(
+        node_ids=failed_roots, recursive=True, direction="forward", preserve_outputs=False
+    )
+    return failed_roots
 
 
 def _register_metering_context(env: RuntimeEnv, target: GraphFunction | TaskGraph | Any):
@@ -355,7 +475,17 @@ async def run_async(
     """
 
     inputs = inputs or {}
-    target = _materialize_target(target)
+    try:
+        target = _materialize_target(target)
+    except GraphBuildError:
+        raise
+    except Exception as exc:
+        raise GraphMaterializationError(
+            str(exc),
+            code="run_async_invalid_target",
+            hints=build_error_hints("run_async_invalid_target", str(exc)),
+            cause=exc,
+        ) from exc
 
     # GraphFunction path
     if isinstance(target, GraphFunction):
@@ -401,7 +531,17 @@ async def run_async(
             current_meter_context.reset(token)
 
     # TaskGraph path
-    graph = _materialize_task_graph(target)
+    try:
+        graph = _materialize_task_graph(target)
+    except GraphBuildError:
+        raise
+    except Exception as exc:
+        raise GraphMaterializationError(
+            str(exc),
+            code="run_async_target_not_task_graph",
+            hints=build_error_hints("run_async_target_not_task_graph", str(exc)),
+            cause=exc,
+        ) from exc
     env, retry, max_conc = await _build_env(graph, inputs, identity=identity, **rt_overrides)
 
     # Extract spec for run/recovery ...
@@ -411,32 +551,110 @@ async def run_async(
 
     store = getattr(env.container, "state_store", None)
     snap = None
+    resume_from_run_id = rt_overrides.get("resume_from_run_id")
+    resume_mode = rt_overrides.get("resume_mode")
     assert store is None or hasattr(
         store, "load_latest_snapshot"
     ), "state_store must implement lo  ad_latest_snapshot(run_id)"
 
     if store:
-        # 1) Attempt cold-resume (build a graph with hydrated state)
-        graph = await recover_graph_run(spec=spec, run_id=env.run_id, store=store)
+        resume_source_run_id = resume_from_run_id or env.run_id
+        if resume_from_run_id and resume_from_run_id != env.run_id:
+            snap = await store.load_latest_snapshot(resume_source_run_id)
+            if snap is None:
+                raise GraphBuildError(
+                    f"Resume source run '{resume_source_run_id}' not found.",
+                    code="resume_source_run_missing",
+                    stage="resume_prepare",
+                    hints=build_error_hints(
+                        "resume_source_run_missing",
+                        f"Run '{resume_source_run_id}' has no persisted snapshot to resume from.",
+                    ),
+                )
+            graph = _recover_graph_from_snapshot(
+                spec=spec,
+                target_run_id=env.run_id,
+                source_run_id=resume_source_run_id,
+                snap=snap,
+            )
+        else:
+            # 1) Attempt cold-resume (build a graph with hydrated state)
+            graph = await recover_graph_run(spec=spec, run_id=env.run_id, store=store)
+            snap = await store.load_latest_snapshot(env.run_id)
 
         # 2) Load raw JSON snapshot and ENFORCE strict policy
-        snap_json = await load_latest_snapshot_json(store, env.run_id)
+        snap_json = await load_latest_snapshot_json(store, resume_source_run_id)
         if snap_json:
             # keep for short-circuit + seeding
-            snap = await store.load_latest_snapshot(env.run_id)
             # Short-circuit if already complete
-            if snap:
+            if snap and not (resume_from_run_id and resume_from_run_id != env.run_id):
                 _seed_outputs_from_snapshot(env, snap)
                 if _is_graph_complete(snap):
                     return await _resolve_graph_outputs(graph, inputs, env)
 
             # strict policy: block resume if any non-JSON / __aether_ref__ is present
-            assert_snapshot_json_only(env.run_id, snap_json, mode="reuse_only")
+            try:
+                assert_snapshot_json_only(env.run_id, snap_json, mode="reuse_only")
+            except GraphBuildError:
+                raise
+            except Exception as exc:
+                raise GraphBuildError(
+                    str(exc),
+                    code="resume_snapshot_policy_violation",
+                    stage="resume_guard",
+                    hints=build_error_hints("resume_snapshot_policy_violation", str(exc)),
+                    cause=exc,
+                ) from exc
+
+        if resume_mode == "failed_nodes":
+            if snap is None:
+                raise GraphBuildError(
+                    f"Resume source run '{resume_source_run_id}' has no persisted snapshot to resume from.",
+                    code="resume_source_run_missing",
+                    stage="resume_prepare",
+                    hints=build_error_hints(
+                        "resume_source_run_missing",
+                        f"Run '{resume_source_run_id}' has no persisted snapshot to resume from.",
+                    ),
+                )
+            resumed_failed_nodes = await _prepare_resume_failed_nodes(
+                graph=graph,
+                snap=snap,
+                source_run_id=resume_source_run_id,
+            )
+            env.run_id = env.run_id
+            _seed_outputs_from_graph(env, graph)
+            rt_overrides.setdefault("resumed_failed_nodes", resumed_failed_nodes)
+        elif snap:
+            _seed_outputs_from_graph(env, graph)
     else:
-        graph = _materialize_task_graph(target)
+        try:
+            graph = _materialize_task_graph(target)
+        except GraphBuildError:
+            raise
+        except Exception as exc:
+            raise GraphMaterializationError(
+                str(exc),
+                code="run_async_target_not_task_graph",
+                hints=build_error_hints("run_async_target_not_task_graph", str(exc)),
+                cause=exc,
+            ) from exc
+
+    graph.state.run_id = graph.state.run_id or env.run_id
 
     # Bind/validate inputs
-    graph._validate_and_bind_inputs(inputs)
+    try:
+        graph._validate_and_bind_inputs(inputs)
+    except GraphBuildError:
+        raise
+    except Exception as exc:
+        code = "graph_inputs_missing_required"
+        raise GraphInputBindError(
+            str(exc),
+            code=code,
+            hints=build_error_hints(code, str(exc)),
+            cause=exc,
+        ) from exc
 
     # Attach persistence observer + run (unchanged) ...
     obs = await _attach_persistence(graph, env, spec, snapshot_every=1)

@@ -5,7 +5,7 @@ import inspect
 from typing import Any
 import uuid
 
-from ..execution.step_forward import _normalize_result
+from ..execution.execution_guard import is_tool_execution_active
 from ..graph.graph_builder import current_builder
 from ..graph.interpreter import AwaitableResult, SimpleNS, current_interpreter
 from ..graph.node_handle import NodeHandle
@@ -101,7 +101,7 @@ def tool(
 
             async def _immediate(call_kwargs):
                 res = await impl(**call_kwargs)
-                out = _normalize_result(res)
+                out = _normalize_result_to_dict(res)
                 _check_contract(outputs, out, impl)
                 return out
 
@@ -114,6 +114,11 @@ def tool(
                 call_kwargs = dict(bound.arguments)
                 if current_builder() is not None:
                     return call_tool(proxy, **call_kwargs, **ctrl)
+                if is_tool_execution_active():
+                    raise RuntimeError(
+                        "tool_nested_tool_call_disallowed: nested @tool calls inside a tool body "
+                        "are not supported. Move orchestration into @graphify/@graph_fn."
+                    )
                 return _immediate(call_kwargs)
         else:
 
@@ -125,7 +130,12 @@ def tool(
                 call_kwargs = dict(bound.arguments)
                 if current_builder() is not None:
                     return call_tool(proxy, **call_kwargs, **ctrl)
-                out = _normalize_result(impl(**call_kwargs))
+                if is_tool_execution_active():
+                    raise RuntimeError(
+                        "tool_nested_tool_call_disallowed: nested @tool calls inside a tool body "
+                        "are not supported. Move orchestration into @graphify/@graph_fn."
+                    )
+                out = _normalize_result_to_dict(impl(**call_kwargs))
                 _check_contract(outputs, out, impl)
                 return out
 
@@ -355,7 +365,7 @@ def call_tool(fn_or_path, **kwargs):
     alias = ctrl.get("_alias", None)
     node_id_kw = ctrl.get("_id", None)  # hard override for node_id
     labels = _ensure_list(ctrl.get("_labels", None))
-    # condition = ctrl.get("_condition", None)  # TODO
+    condition = ctrl.get("_condition", None)
 
     after_ids = [_id_of(a) for a in _ensure_list(after_raw)]
 
@@ -406,6 +416,7 @@ def call_tool(fn_or_path, **kwargs):
             expected_input_keys=inputs_decl,
             expected_output_keys=outputs_decl,
             after=after_ids,
+            condition=condition,
             tool_name=logic_name,
             tool_version=logic_version,
         )

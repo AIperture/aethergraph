@@ -16,6 +16,9 @@ class NoopMeteringService(MeteringService):
     async def get_llm_stats(self, **kwargs) -> dict[str, dict[str, int]]:
         return {}
 
+    async def get_embedding_stats(self, **kwargs) -> dict[str, dict[str, int]]:
+        return {}
+
     async def get_graph_stats(self, **kwargs) -> dict[str, dict[str, int]]:
         return {}
 

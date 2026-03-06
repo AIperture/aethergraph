@@ -3,7 +3,15 @@ from __future__ import annotations
 import inspect
 from typing import Any, get_origin, get_type_hints
 
+from aethergraph.contracts.errors.errors import GraphValidationError, build_error_hints
 from aethergraph.core.graph.action_spec import _map_py_type_to_json_type
+from aethergraph.core.graph.graphify_validation import (
+    emit_validation_warnings,
+    format_validation_errors,
+    resolve_validation_source_for_callable,
+    validate_graph_source,
+    warnings_as_errors_enabled,
+)
 from aethergraph.services.registry.agent_app_meta import (
     AgentConfig,
     AppConfig,
@@ -149,6 +157,26 @@ def graphify(
             ...
         ```
 
+        Conditional node execution with `_condition`:
+        ```python
+        @tool(name="score_text", outputs=["score"])
+        def score_text(text: str):
+            return {"score": len(text)}
+
+        @tool(name="expensive_step", outputs=["result"])
+        def expensive_step(text: str):
+            return {"result": text.upper()}
+
+        @graphify(name="conditional_graph", inputs=["text"], outputs=["score"])
+        def conditional_graph(text: str):
+            s = score_text(text=text)
+            expensive_step(
+                text=text,
+                _condition={"op": "eq", "left": s.score, "right": 999},
+            )
+            return {"score": s.score}
+        ```
+
     Args:
         name: Unique name for the graph function.
         inputs: Graph input declaration. Supports either:
@@ -190,9 +218,43 @@ def graphify(
           overridden by `as_app.input_schema` defaults.
         - Field types are inferred from function annotations for declared inputs and
           are exposed as JSON-like types in registry metadata.
+        - Tool calls inside `@graphify` may include `_condition` for declarative branching.
+          Supported shapes are booleans and dict expressions such as:
+          `{"op":"eq","left": <ref-or-literal>, "right": <ref-or-literal>}`,
+          `{"op":"truthy","value": <ref-or-literal>}`,
+          `{"op":"and","args":[...]}`
+          and `{"op":"or","args":[...]}`.
     """
 
     def _wrap(fn):
+        source, source_name = resolve_validation_source_for_callable(fn)
+        validation = validate_graph_source(
+            source,
+            filename=source_name,
+            strict=True,
+            warnings_as_errors=warnings_as_errors_enabled(),
+        )
+        # log_validation_issues(validation, filename=source_name)
+        if not validation.ok:
+            error_result = type(validation)(
+                ok=False,
+                issues=[i for i in validation.issues if i.severity != "warning"],
+                graph_names=validation.graph_names,
+                graphfn_names=validation.graphfn_names,
+            )
+            if error_result.issues:
+                message = format_validation_errors(error_result, filename=source_name)
+                hints: list[dict[str, str]] = []
+                for issue in error_result.issues:
+                    hints.extend(build_error_hints(issue.code, issue.message))
+                primary_code = (
+                    error_result.issues[0].code
+                    if len(error_result.issues) == 1
+                    else "graph_validation_failed"
+                )
+                raise GraphValidationError(message, code=primary_code, hints=hints)
+        emit_validation_warnings(validation, filename=source_name)
+
         fn_sig = inspect.signature(fn)
         fn_params = list(fn_sig.parameters.keys())
 

@@ -40,6 +40,8 @@ class FakeRunManager:
         importance: str | None = None,
         agent_id: str | None = None,
         app_id: str | None = None,
+        app_name: str | None = None,
+        run_config: dict | None = None,
     ):
         self.last_call = {
             "graph_id": graph_id,
@@ -48,6 +50,10 @@ class FakeRunManager:
             "tags": tags,
             "user_id": identity.user_id,
             "org_id": identity.org_id,
+            "session_id": session_id,
+            "app_id": app_id,
+            "app_name": app_name,
+            "run_config": run_config,
         }
         # For the HTTP API, submit_run returns just a RunRecord
         rec = RunRecord(
@@ -186,7 +192,14 @@ def client(monkeypatch) -> TestClient:
 def test_create_run_endpoint(client: TestClient):
     resp = client.post(
         "/api/v1/graphs/my-graph/runs",
-        json={"inputs": {"x": 1}, "tags": ["t1"]},
+        json={
+            "inputs": {"x": 1},
+            "tags": ["t1"],
+            "session_id": "sess-123",
+            "appId": "app-xyz",
+            "appName": "Demo App",
+            "run_config": {"resume_mode": "failed_nodes", "max_concurrency": 4},
+        },
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -199,6 +212,10 @@ def test_create_run_endpoint(client: TestClient):
     # Now these should be 'u1'/'o1', not 'local'
     assert rm.last_call["user_id"] == "u1"
     assert rm.last_call["org_id"] == "o1"
+    assert rm.last_call["session_id"] == "sess-123"
+    assert rm.last_call["app_id"] == "app-xyz"
+    assert rm.last_call["app_name"] == "Demo App"
+    assert rm.last_call["run_config"] == {"resume_mode": "failed_nodes", "max_concurrency": 4}
 
 
 def test_get_run_endpoint(client: TestClient):

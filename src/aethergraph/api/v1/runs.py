@@ -59,12 +59,15 @@ async def create_run(
             inputs=body.inputs or {},
             run_id=body.run_id,
             tags=body.tags,
+            session_id=body.session_id,
             identity=identity,
             origin=body.origin or RunOrigin.app,
             visibility=body.visibility or app_vis or RunVisibility.normal,
             importance=body.importance or app_imp or RunImportance.normal,
             agent_id=body.agent_id or None,
             app_id=body.app_id or None,
+            app_name=body.app_name or None,
+            run_config=body.run_config or {},
         )
     except DuplicateRunIdError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
@@ -129,6 +132,7 @@ async def list_runs(
     summaries = [to_run_summary(rec, reg=reg) for rec in records]
 
     next_cursor = encode_cursor(offset + limit) if len(records) == limit else None
+
     return RunListResponse(runs=summaries, next_cursor=next_cursor)
 
 
@@ -234,6 +238,8 @@ def _coerce_node_status(value: Any, fallback: RunStatus) -> RunStatus:
                 return RunStatus.failed
             if value == "CANCELLED":
                 return RunStatus.canceled
+            if value == "SKIPPED":
+                return RunStatus.skipped
             if value == "PENDING":
                 return RunStatus.pending
             return RunStatus(value)

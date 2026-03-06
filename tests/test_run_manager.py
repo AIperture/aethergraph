@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from aethergraph.contracts.errors.errors import GraphHasPendingWaits
+from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
@@ -103,8 +103,8 @@ async def test_run_manager_start_run_success(monkeypatch, dummy_meter):
 @pytest.mark.asyncio
 async def test_run_manager_start_run_waits(monkeypatch, dummy_meter):
     """
-    GraphHasPendingWaits currently results in:
-      - record.status == RunStatus.failed
+    GraphHasPendingWaits results in:
+      - record.status == RunStatus.waiting
       - has_waits = True
       - continuations = e.continuations
       - outputs is None
@@ -139,15 +139,14 @@ async def test_run_manager_start_run_waits(monkeypatch, dummy_meter):
     )
 
     assert record.graph_id == "my-graph"
-    # With the current implementation, we mark this as failed (for now).
-    assert record.status == RunStatus.failed
+    assert record.status == RunStatus.waiting
     assert outputs is None
     assert has_waits is True
     assert continuations == [{"node_id": "node1", "kind": "text"}]
 
     loaded = await store.get(record.run_id)
     assert loaded is not None
-    assert loaded.status == RunStatus.failed
+    assert loaded.status == RunStatus.waiting
 
     # Metering should be called once with status "waiting"
     assert len(dummy_meter.calls) == 1
@@ -189,6 +188,11 @@ async def test_run_manager_start_run_failure(monkeypatch, dummy_meter):
     assert has_waits is False
     assert continuations == []
     assert record.error == "boom"
+    assert record.meta.get("error_kind") == "runtime"
+    assert record.meta.get("error_code") is None
+    assert record.meta.get("error_stage") is None
+    assert record.meta.get("error_hints") == []
+    assert record.meta.get("error_message") == "boom"
 
     loaded = await store.get(record.run_id)
     assert loaded is not None
@@ -199,6 +203,51 @@ async def test_run_manager_start_run_failure(monkeypatch, dummy_meter):
     assert len(dummy_meter.calls) == 1
     call = dummy_meter.calls[0]
     assert call["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_manager_start_run_build_failure(monkeypatch, dummy_meter):
+    store = InMemoryRunStore()
+    reg = UnifiedRegistry()
+    rm = RunManager(run_store=store, registry=reg)
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        raise GraphBuildError(
+            "build failed",
+            code="graph_inputs_missing_required",
+            stage="input_bind",
+            hints=[{"code": "provide_required_inputs", "message": "Provide x"}],
+        )
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record, outputs, has_waits, continuations = await rm.start_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+    )
+
+    assert record.status == RunStatus.failed
+    assert outputs is None
+    assert has_waits is False
+    assert continuations == []
+    assert record.meta.get("error_kind") == "build"
+    assert record.meta.get("error_code") == "graph_inputs_missing_required"
+    assert record.meta.get("error_stage") == "input_bind"
+    assert record.meta.get("error_message", "").endswith("build failed")
+    assert record.meta.get("error_hints") == [
+        {"code": "provide_required_inputs", "message": "Provide x"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -260,3 +309,64 @@ async def test_run_manager_submit_run_non_blocking(monkeypatch, dummy_meter):
     call = dummy_meter.calls[0]
     assert call["run_id"] == record.run_id
     assert call["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_run_manager_submit_run_persists_launch_metadata_and_run_config(
+    monkeypatch, dummy_meter
+):
+    store = InMemoryRunStore()
+    reg = UnifiedRegistry()
+    rm = RunManager(run_store=store, registry=reg, max_concurrent_runs=10)
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    captured_kwargs = {}
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        captured_kwargs.update(kwargs)
+        return {"out": 7}
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record, outputs, has_waits, continuations = await rm.run_and_wait(
+        graph_id="my-graph",
+        inputs={"x": 2},
+        identity=Identity(user_id="u1", org_id="o1"),
+        tags=["app:demo"],
+        session_id="sess-1",
+        app_id="app-1",
+        app_name="Demo App",
+        agent_id="agent-1",
+        run_config={"resume_from_run_id": "run-old", "resume_mode": "failed_nodes"},
+    )
+
+    assert outputs == {"out": 7}
+    assert has_waits is False
+    assert continuations == []
+
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted.meta["original_inputs"] == {"x": 2}
+    assert persisted.meta["original_run_config"] == {
+        "resume_from_run_id": "run-old",
+        "resume_mode": "failed_nodes",
+    }
+    assert persisted.meta["original_tags"] == ["app:demo"]
+    assert persisted.meta["original_session_id"] == "sess-1"
+    assert persisted.meta["original_app_id"] == "app-1"
+    assert persisted.meta["app_name"] == "Demo App"
+    assert persisted.meta["agent_id"] == "agent-1"
+    assert persisted.meta["resume_from_run_id"] == "run-old"
+    assert persisted.meta["resume_mode"] == "failed_nodes"
+    assert captured_kwargs["resume_from_run_id"] == "run-old"
+    assert captured_kwargs["resume_mode"] == "failed_nodes"

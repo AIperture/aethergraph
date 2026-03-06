@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from hashlib import sha1, sha256
@@ -12,25 +11,13 @@ from typing import Any
 
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.core.graph.graphify_validation import (
+    ValidationResult,
+    validate_graph_source,
+)
 from aethergraph.core.runtime.runtime_services import use_services
 from aethergraph.services.registry.unified_registry import TenantIdentity, UnifiedRegistry
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
-
-
-@dataclass
-class ValidationIssue:
-    code: str
-    message: str
-    line: int | None = None
-    col: int | None = None
-
-
-@dataclass
-class ValidationResult:
-    ok: bool
-    issues: list[ValidationIssue] = field(default_factory=list)
-    graph_names: list[str] = field(default_factory=list)
-    graphfn_names: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -81,35 +68,6 @@ def _normalize_tenant(tenant: TenantIdentity) -> dict[str, str | None] | None:
     return norm
 
 
-def _decorator_name(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Call):
-        return _decorator_name(node.func)
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
-
-
-def _call_kwarg_names(node: ast.AST) -> set[str]:
-    if not isinstance(node, ast.Call):
-        return set()
-    return {kw.arg for kw in node.keywords if kw.arg}
-
-
-def _extract_name_kw(node: ast.AST) -> str | None:
-    if not isinstance(node, ast.Call):
-        return None
-    for kw in node.keywords:
-        if (
-            kw.arg == "name"
-            and isinstance(kw.value, ast.Constant)
-            and isinstance(kw.value.value, str)
-        ):
-            return kw.value.value.strip()
-    return None
-
-
 class RegistrationService:
     """
     Source-based graph hotload + registration + replay persistence.
@@ -135,82 +93,7 @@ class RegistrationService:
         filename: str | None = None,
         strict: bool = True,
     ) -> ValidationResult:
-        issues: list[ValidationIssue] = []
-        graph_names: list[str] = []
-        graphfn_names: list[str] = []
-        display_name = filename or "<source>"
-
-        try:
-            tree = ast.parse(source, filename=display_name)
-        except SyntaxError as e:
-            issues.append(
-                ValidationIssue(
-                    code="syntax_error",
-                    message=e.msg or "Syntax error",
-                    line=e.lineno,
-                    col=e.offset,
-                )
-            )
-            return ValidationResult(ok=False, issues=issues)
-
-        saw_decorator = False
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):  # noqa: UP038
-                continue
-            for dec in node.decorator_list:
-                dec_name = _decorator_name(dec)
-                if dec_name not in {"graphify", "graph_fn"}:
-                    continue
-                saw_decorator = True
-                kw_names = _call_kwarg_names(dec)
-                required = {"name", "inputs", "outputs"}
-                missing = required - kw_names
-                if missing:
-                    issues.append(
-                        ValidationIssue(
-                            code="missing_decorator_kw",
-                            message=f"{dec_name} is missing required kwargs: {sorted(missing)}",
-                            line=getattr(dec, "lineno", None),
-                            col=getattr(dec, "col_offset", None),
-                        )
-                    )
-
-                if dec_name == "graphify" and isinstance(node, ast.AsyncFunctionDef):
-                    issues.append(
-                        ValidationIssue(
-                            code="graphify_async_def",
-                            message="@graphify must decorate sync def, not async def",
-                            line=node.lineno,
-                            col=node.col_offset,
-                        )
-                    )
-
-                explicit_name = _extract_name_kw(dec)
-                if dec_name == "graphify":
-                    graph_names.append(explicit_name or node.name)
-                else:
-                    graphfn_names.append(explicit_name or node.name)
-
-        if not saw_decorator:
-            issues.append(
-                ValidationIssue(
-                    code="missing_graph_decorator",
-                    message="No @graphify(...) or @graph_fn(...) decorator found.",
-                )
-            )
-
-        try:
-            compile(source, display_name, "exec")
-        except Exception as e:
-            issues.append(ValidationIssue(code="compile_error", message=repr(e)))
-
-        ok = len(issues) == 0
-        result = ValidationResult(
-            ok=ok, issues=issues, graph_names=graph_names, graphfn_names=graphfn_names
-        )
-        if strict and not ok:
-            return result
-        return result
+        return validate_graph_source(source, filename=filename, strict=strict)
 
     async def register_by_file(
         self,
@@ -489,6 +372,8 @@ class RegistrationService:
         module_name = f"_ag_hotload_{module_key}_{sha1(str(id(self.registry)).encode('utf-8')).hexdigest()[:8]}"
         module = types.ModuleType(module_name)
         module.__file__ = f"<hotload:{module_name}>"
+        module.__dict__["__aethergraph_source__"] = source
+        module.__dict__["__aethergraph_source_name__"] = filename or source_ref or module_name
         sys.modules[module_name] = module
         # Force decorators in source (e.g. @graphify/@graph_fn) to bind to this service registry.
         with use_services(SimpleNamespace(registry=self.registry)):

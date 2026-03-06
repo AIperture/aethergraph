@@ -8,6 +8,7 @@ from aethergraph.core.runtime.runtime_services import current_services
 from .deps import RequestIdentity, get_identity
 from .schemas.stats import (
     ArtifactStats,
+    EmbeddingStats,
     GraphStats,
     GraphStatsEntry,
     LLMStats,
@@ -199,3 +200,25 @@ async def get_stats_llm(
     )
     # raw: { "gpt-4o-mini": {"calls":..., "prompt_tokens":..., "completion_tokens":...}, ... }
     return LLMStats(root=raw)
+
+
+@router.get("/stats/embeddings", response_model=EmbeddingStats)
+async def get_stats_embeddings(
+    window: Annotated[str, Query(description="Time window, e.g., '24h', '7d'")] = "24h",
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> EmbeddingStats:
+    """
+    Embedding usage stats: tokens, texts, breakdown by model.
+    Backed by MeteringService.get_embedding_stats().
+    """
+    container = current_services()
+    meter = getattr(container, "metering", None)
+    if meter is None:
+        raise HTTPException(status_code=501, detail="Metering service not available")
+
+    raw: dict[str, dict[str, int]] = await meter.get_embedding_stats(
+        user_id=identity.user_id if identity and identity.user_id else None,
+        org_id=identity.org_id if identity and identity.org_id else None,
+        window=window,
+    )
+    return EmbeddingStats(root=raw)

@@ -125,7 +125,7 @@ aethergraph = [
 line-length = 100
 target-version = "py310"
 lint.select = ["E","F","I","B","UP","SIM"]
-lint.ignore = ["E203", "E266", "E501"]  # E501 handled by formatter
+lint.ignore = ["E203", "E266", "E501", "UP038"]  # E501 handled by formatter
 extend-exclude = ["docs", "scripts", "examples"]
 
 [tool.ruff.lint.isort]

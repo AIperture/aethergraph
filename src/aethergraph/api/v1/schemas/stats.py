@@ -11,6 +11,9 @@ class StatsOverview(BaseModel):
     artifacts: int = Field(0, description="Total artifacts recorded in the window")
     artifact_bytes: int = Field(0, description="Total artifact payload size in bytes")
     events: int = Field(0, description="Total metered memory events in the window")
+    embedding_calls: int = Field(0, description="Total embedding calls in the window")
+    embedding_texts: int = Field(0, description="Total texts embedded in the window")
+    embedding_tokens: int = Field(0, description="Total embedding tokens in the window")
 
 
 class GraphStatsEntry(BaseModel):
@@ -46,4 +49,14 @@ class LLMStatsEntry(BaseModel):
 
 
 class LLMStats(RootModel[dict[str, LLMStatsEntry]]):
+    pass
+
+
+class EmbeddingStatsEntry(BaseModel):
+    calls: int = 0
+    num_texts: int = 0
+    tokens: int = 0
+
+
+class EmbeddingStats(RootModel[dict[str, EmbeddingStatsEntry]]):
     pass

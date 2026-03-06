@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+import json
 from typing import Any
 from uuid import uuid4
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.contracts.errors.errors import GraphHasPendingWaits
+from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.execution.forward_scheduler import ForwardScheduler
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
@@ -46,6 +47,12 @@ class DuplicateRunIdError(RuntimeError):
 def _is_duplicate_run_id_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "unique constraint failed" in msg and "runs.run_id" in msg
+
+
+def _clone_jsonish_dict(value: dict[str, Any] | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    return json.loads(json.dumps(value, default=repr))
 
 
 class RunManager:
@@ -119,6 +126,7 @@ class RunManager:
         self,
         *,
         graph_id: str,
+        inputs: dict[str, Any],
         run_id: str | None,
         session_id: str | None,
         tags: list[str] | None,
@@ -128,6 +136,8 @@ class RunManager:
         importance: RunImportance | None,
         agent_id: str | None,
         app_id: str | None,
+        app_name: str | None,
+        run_config: dict[str, Any] | None,
     ) -> tuple[RunRecord, Any]:
         """
         Shared helper for submit_run and run_and_wait:
@@ -171,7 +181,7 @@ class RunManager:
             kind=kind,
             status=RunStatus.running,
             started_at=started_at,
-            tags=tags,
+            tags=list(tags),
             user_id=identity.user_id,
             org_id=identity.org_id,
             meta={},
@@ -192,6 +202,26 @@ class RunManager:
             if f"session:{session_id}" not in record.tags:
                 record.tags.append(f"session:{session_id}")
 
+        record.meta["original_inputs"] = _clone_jsonish_dict(inputs)
+        record.meta["original_run_config"] = _clone_jsonish_dict(run_config)
+        record.meta["original_tags"] = list(tags or [])
+        record.meta["original_session_id"] = session_id
+        record.meta["original_app_id"] = app_id
+        if app_name:
+            record.meta["app_name"] = app_name
+        if agent_id:
+            record.meta["agent_id"] = agent_id
+
+        resume_from_run_id = None
+        resume_mode = None
+        if run_config:
+            resume_from_run_id = run_config.get("resume_from_run_id")
+            resume_mode = run_config.get("resume_mode")
+        if resume_from_run_id:
+            record.meta["resume_from_run_id"] = resume_from_run_id
+        if resume_mode:
+            record.meta["resume_mode"] = resume_mode
+
         return record, target
 
     async def _run_and_finalize(
@@ -202,6 +232,7 @@ class RunManager:
         graph_id: str,
         inputs: dict[str, Any],
         identity: RequestIdentity,
+        run_config: dict[str, Any] | None = None,
         # user_id: str | None,
         # org_id: str | None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
@@ -234,6 +265,7 @@ class RunManager:
                 identity=identity,
                 agent_id=record.agent_id,
                 app_id=record.app_id,
+                **(run_config or {}),
             )
             # If we get here without GraphHasPendingWaits, run is completed
             outputs = result if isinstance(result, dict) else {"result": result}
@@ -265,16 +297,37 @@ class RunManager:
 
         except GraphHasPendingWaits as e:
             # Graph quiesced with pending waits
-            record.status = RunStatus.failed  # consider 'waiting' status later
+            record.status = RunStatus.waiting
             has_waits = True
             continuations = getattr(e, "continuations", [])
             # outputs remain None
+
+        except GraphBuildError as exc:
+            record.status = RunStatus.failed
+            record.finished_at = _utcnow()
+            error_msg = str(exc)
+            record.error = error_msg
+            record.meta["error_kind"] = "build"
+            record.meta["error_code"] = exc.code
+            record.meta["error_stage"] = exc.stage
+            record.meta["error_hints"] = list(exc.hints or [])
+            record.meta["error_message"] = error_msg
+            import logging
+
+            logging.getLogger("aethergraph.runtime.run_manager").exception(
+                "Run %s failed with build error: %s", record.run_id, error_msg
+            )
 
         except Exception as exc:  # noqa: BLE001
             record.status = RunStatus.failed
             record.finished_at = _utcnow()
             error_msg = str(exc)
             record.error = error_msg
+            record.meta["error_kind"] = "runtime"
+            record.meta["error_code"] = None
+            record.meta["error_stage"] = None
+            record.meta["error_hints"] = []
+            record.meta["error_message"] = error_msg
             import logging
 
             logging.getLogger("aethergraph.runtime.run_manager").exception(
@@ -346,6 +399,8 @@ class RunManager:
         importance: RunImportance | None = None,
         agent_id: str | None = None,
         app_id: str | None = None,
+        app_name: str | None = None,
+        run_config: dict[str, Any] | None = None,
     ) -> RunRecord:
         """
         Non-blocking entrypoint for the HTTP API.
@@ -374,6 +429,7 @@ class RunManager:
             for _ in range(max_attempts):
                 record, target = await self._build_run_record(
                     graph_id=graph_id,
+                    inputs=inputs,
                     run_id=run_id,
                     session_id=session_id,
                     tags=tags,
@@ -383,6 +439,8 @@ class RunManager:
                     importance=importance,
                     agent_id=agent_id,
                     app_id=app_id,
+                    app_name=app_name,
+                    run_config=run_config,
                 )
 
                 # Optional: store a UI-only input preview
@@ -418,12 +476,17 @@ class RunManager:
 
             async def _bg():
                 try:
+                    finalize_kwargs = {
+                        "record": record,
+                        "target": target,
+                        "graph_id": graph_id,
+                        "inputs": inputs,
+                        "identity": identity,
+                    }
+                    if run_config is not None:
+                        finalize_kwargs["run_config"] = run_config
                     await self._run_and_finalize(
-                        record=record,
-                        target=target,
-                        graph_id=graph_id,
-                        inputs=inputs,
-                        identity=identity,
+                        **finalize_kwargs,
                     )
                 finally:
                     await self._release_run_slot()
@@ -460,6 +523,8 @@ class RunManager:
         importance: RunImportance | None = None,
         agent_id: str | None = None,
         app_id: str | None = None,
+        app_name: str | None = None,
+        run_config: dict[str, Any] | None = None,
         count_slot: bool = False,  # important for nested orchestration
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
         """
@@ -484,6 +549,7 @@ class RunManager:
 
             record, target = await self._build_run_record(
                 graph_id=graph_id,
+                inputs=inputs,
                 run_id=run_id,
                 session_id=session_id,
                 tags=tags,
@@ -493,6 +559,8 @@ class RunManager:
                 importance=importance,
                 agent_id=agent_id,
                 app_id=app_id,
+                app_name=app_name,
+                run_config=run_config,
             )
 
             # Optional: UI-only input preview
@@ -510,13 +578,16 @@ class RunManager:
             if self._store is not None:
                 await self._store.create(record)
 
-            return await self._run_and_finalize(
-                record=record,
-                target=target,
-                graph_id=graph_id,
-                inputs=inputs,
-                identity=identity,
-            )
+            finalize_kwargs = {
+                "record": record,
+                "target": target,
+                "graph_id": graph_id,
+                "inputs": inputs,
+                "identity": identity,
+            }
+            if run_config is not None:
+                finalize_kwargs["run_config"] = run_config
+            return await self._run_and_finalize(**finalize_kwargs)
         finally:
             if count_slot:
                 await self._release_run_slot()
@@ -716,6 +787,8 @@ class RunManager:
         identity: RequestIdentity | None = None,
         agent_id: str | None = None,
         app_id: str | None = None,
+        app_name: str | None = None,
+        run_config: dict[str, Any] | None = None,
     ) -> tuple[RunRecord, dict[str, Any] | None, bool, list[dict[str, Any]]]:
         """
         Blocking helper (original behaviour).
@@ -790,15 +863,37 @@ class RunManager:
             if f"session:{session_id}" not in record.tags:
                 record.tags.append(f"session:{session_id}")  # add session tag if missing
 
+        record.meta["original_inputs"] = _clone_jsonish_dict(inputs)
+        record.meta["original_run_config"] = _clone_jsonish_dict(run_config)
+        record.meta["original_tags"] = list(tags or [])
+        record.meta["original_session_id"] = session_id
+        record.meta["original_app_id"] = app_id
+        if app_name:
+            record.meta["app_name"] = app_name
+        if agent_id:
+            record.meta["agent_id"] = agent_id
+
+        resume_from_run_id = run_config.get("resume_from_run_id") if run_config else None
+        resume_mode = run_config.get("resume_mode") if run_config else None
+        if resume_from_run_id:
+            record.meta["resume_from_run_id"] = resume_from_run_id
+        if resume_mode:
+            record.meta["resume_mode"] = resume_mode
+
         if self._store is not None:
             await self._store.create(record)
 
+        finalize_kwargs = {
+            "record": record,
+            "target": target,
+            "graph_id": graph_id,
+            "inputs": inputs,
+            "identity": identity,
+        }
+        if run_config is not None:
+            finalize_kwargs["run_config"] = run_config
         return await self._run_and_finalize(
-            record=record,
-            target=target,
-            graph_id=graph_id,
-            inputs=inputs,
-            identity=identity,
+            **finalize_kwargs,
             # agent_id=agent_id,
             # app_id=app_id,
         )
