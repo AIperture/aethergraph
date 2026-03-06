@@ -97,6 +97,30 @@ async def test_register_by_artifact_success(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_register_by_file_persists_app_graph_metadata(tmp_path):
+    reg = UnifiedRegistry()
+    set_current_registry(reg)
+    service = _make_service(tmp_path, registry=reg)
+
+    src_path = tmp_path / "demo_graph.py"
+    src_path.write_text(GOOD_SOURCE, encoding="utf-8")
+
+    result = await service.register_by_file(
+        str(src_path),
+        app_config={"id": "demo-app", "name": "Demo App"},
+        persist=True,
+        strict=True,
+    )
+
+    assert result.success is True
+    meta = reg.get_meta(nspace="app", name="demo-app", version=None)
+    assert meta is not None
+    assert meta["graph_id"] == "demo_graph"
+    assert meta["graph_name"] == "demo_graph"
+    assert meta["backing"]["name"] == "demo_graph"
+
+
+@pytest.mark.asyncio
 async def test_register_by_folder_mixed(tmp_path):
     reg = UnifiedRegistry()
     set_current_registry(reg)

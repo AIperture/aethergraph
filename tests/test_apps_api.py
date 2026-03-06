@@ -122,3 +122,36 @@ def test_create_app_run_uses_app_metadata_graph(client: TestClient):
     assert rm.last_call["graph_id"] == "g1"
     assert rm.last_call["app_id"] == "myapp"
     assert rm.last_call["app_name"] == "My App"
+
+
+def test_create_app_run_falls_back_to_graph_name_metadata(client: TestClient):
+    reg = apps_api.scoped_registry(FakeIdentity(user_id="u1", org_id="o1", mode="cloud"))
+    reg.register(
+        nspace="app",
+        name="graph-name-app",
+        version="0.1.0",
+        obj={"id": "graph-name-app"},
+        meta={
+            "id": "graph-name-app",
+            "name": "Graph Name App",
+            "graph_name": "g-from-graph-name",
+        },
+        tenant={"org_id": "o1", "user_id": "u1", "client_id": "browser-a"},
+    )
+
+    resp = client.post(
+        "/api/v1/apps/graph-name-app/runs",
+        json={
+            "inputs": {},
+            "run_config": {"max_concurrency": 4},
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["graph_id"] == "g-from-graph-name"
+
+    rm = client.fake_rm
+    assert rm.last_call["graph_id"] == "g-from-graph-name"
+    assert rm.last_call["app_id"] == "graph-name-app"
+    assert rm.last_call["app_name"] == "Graph Name App"
