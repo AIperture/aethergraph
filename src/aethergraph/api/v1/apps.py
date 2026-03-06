@@ -21,6 +21,30 @@ from aethergraph.core.runtime.runtime_services import current_services
 router = APIRouter(tags=["apps"])
 
 
+def _resolve_app_graph_id(app_meta: dict, *, default: str | None = None) -> str | None:
+    graph_id = app_meta.get("graph_id")
+    if graph_id:
+        return str(graph_id)
+
+    backing = app_meta.get("backing")
+    if isinstance(backing, dict):
+        backing_name = backing.get("name")
+        if backing_name:
+            return str(backing_name)
+
+    graph_name = app_meta.get("graph_name")
+    if graph_name:
+        return str(graph_name)
+
+    flow_id = app_meta.get("flow_id")
+    if flow_id:
+        return str(flow_id)
+
+    if default:
+        return str(default)
+    return None
+
+
 @router.get("/apps", response_model=list[AppDescriptor])
 async def list_apps(
     identity: Annotated[RequestIdentity, Depends(get_identity)],
@@ -38,7 +62,6 @@ async def list_apps(
     entries = reg.list_apps(include_global=True)
     out: list[AppDescriptor] = []
 
-    print(f"🍎 Found {len(entries)} registered apps for tenant={identity} (including global)")
     for ref, _version in entries.items():
         # ref is "app:<name>"
         try:
@@ -57,7 +80,7 @@ async def list_apps(
         # If present, this app is caller-owned and can be deleted.
         scoped_meta = reg.get_meta(nspace="app", name=name, include_global=False)
         app_id = meta.get("id", name)
-        graph_id = meta.get("graph_id", name)
+        graph_id = _resolve_app_graph_id(meta, default=name) or name
         input_schema = merge_input_schema_overrides(
             resolve_graph_input_schema(reg, graph_id=graph_id),
             app_meta=meta,
@@ -91,7 +114,9 @@ async def get_app(
     if not meta:
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
-    graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", app_id))
+    graph_id = _resolve_app_graph_id(meta, default=app_id)
+    if not graph_id:
+        raise HTTPException(status_code=400, detail=f"App '{app_id}' has no backing graph_id")
     input_schema = merge_input_schema_overrides(
         resolve_graph_input_schema(reg, graph_id=graph_id),
         app_meta=meta,
@@ -119,6 +144,7 @@ async def create_app_run(
     body: RunCreateRequest,
     identity: RequestIdentity = Depends(require_runs_execute),  # noqa: B008
 ) -> RunCreateResponse:
+    print(f"🍎 Received request to create run for app_id={app_id} with body={body} from identity={identity}")
     container = current_services()
     rm: RunManager = getattr(container, "run_manager", None)
     if rm is None:
@@ -129,7 +155,7 @@ async def create_app_run(
     if not app_meta:
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
-    graph_id = app_meta.get("graph_id") or app_meta.get("backing", {}).get("name")
+    graph_id = _resolve_app_graph_id(app_meta)
     if not graph_id:
         raise HTTPException(status_code=400, detail=f"App '{app_id}' has no backing graph_id")
 
@@ -137,7 +163,7 @@ async def create_app_run(
     app_imp = app_meta.get("run_importance")
     app_vis = RunVisibility(app_vis) if app_vis else None
     app_imp = RunImportance(app_imp) if app_imp else None
-
+    print("🍎 ", app_id, graph_id, app_vis, app_imp)
     try:
         record = await rm.submit_run(
             graph_id=graph_id,

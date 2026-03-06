@@ -424,6 +424,15 @@ class RegistrationService:
             merged.setdefault("flow_id", graph_name)
             merged.setdefault("graph_name", graph_name)
             version = str(merged.get("version") or version)
+            merged.setdefault("graph_id", graph_name)
+            merged.setdefault(
+                "backing",
+                {
+                    "type": "graphfn",
+                    "name": graph_name,
+                    "version": version,
+                },
+            )
             persisted_app_config = dict(merged)
             self.registry.register(
                 nspace="app",
