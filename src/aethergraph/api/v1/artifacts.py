@@ -2,6 +2,7 @@
 
 import mimetypes
 import os
+from time import perf_counter
 from typing import Annotated, Any
 import unicodedata
 
@@ -146,8 +147,10 @@ async def list_artifacts(
     session_id: Annotated[str | None, Query()] = None,
     kind: Annotated[str | None, Query()] = None,
     tags: Annotated[str | None, Query()] = None,
+    pinned: Annotated[bool | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    response: Response = None,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
     # print(f"list_artifacts called with scope_id={scope_id}, run_id={run_id}, session_id={session_id}, kind={kind}, tags={tags}, cursor={cursor}, limit={limit}, identity={identity}")
@@ -174,15 +177,21 @@ async def list_artifacts(
 
     label_filters.update(_tenant_label_filters(identity))
 
+    started_at = perf_counter()
     artifacts = await index.search(
         kind=kind.strip() if kind and kind.strip() else None,
         labels=label_filters or None,
+        pinned=pinned,
         metric=None,
         mode=None,
         limit=limit,
         offset=offset,
     )
     metas = [_artifact_to_meta(a) for a in artifacts]
+    if response is not None:
+        response.headers["X-AetherGraph-Artifact-Query-Ms"] = (
+            f"{(perf_counter() - started_at) * 1000:.2f}"
+        )
     next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
     return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
 
@@ -287,6 +296,7 @@ async def list_run_artifacts(
     run_id: str,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    response: Response = None,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
     container = current_services()
@@ -299,6 +309,7 @@ async def list_run_artifacts(
     label_filters: dict[str, Any] = {"run_id": run_id}
     label_filters.update(_tenant_label_filters(identity))
 
+    started_at = perf_counter()
     artifacts = await index.search(
         labels=label_filters,
         limit=limit,
@@ -306,6 +317,10 @@ async def list_run_artifacts(
     )
 
     metas = [_artifact_to_meta(a) for a in artifacts]
+    if response is not None:
+        response.headers["X-AetherGraph-Artifact-Query-Ms"] = (
+            f"{(perf_counter() - started_at) * 1000:.2f}"
+        )
     next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
     return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
 
@@ -315,6 +330,7 @@ async def list_session_artifacts(
     session_id: str,
     cursor: Annotated[str | None, Query()] = None,  # noqa: B008
     limit: Annotated[int, Query(ge=1, le=200)] = 50,  # noqa: B008
+    response: Response = None,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
     container = current_services()
@@ -327,6 +343,7 @@ async def list_session_artifacts(
     label_filters: dict[str, Any] = {"session_id": session_id}
     label_filters.update(_tenant_label_filters(identity))
 
+    started_at = perf_counter()
     artifacts = await index.search(
         labels=label_filters,
         limit=limit,
@@ -334,6 +351,10 @@ async def list_session_artifacts(
     )
 
     metas = [_artifact_to_meta(a) for a in artifacts]
+    if response is not None:
+        response.headers["X-AetherGraph-Artifact-Query-Ms"] = (
+            f"{(perf_counter() - started_at) * 1000:.2f}"
+        )
     next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
     return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
 
@@ -416,6 +437,7 @@ async def search_artifacts(
     artifacts = await index.search(
         kind=kind,
         labels=label_filter or None,
+        pinned=None,
         metric=metric,
         mode=mode,
         limit=limit,
