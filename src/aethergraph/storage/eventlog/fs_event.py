@@ -48,12 +48,14 @@ class FSEventLog(EventLog):
         def _write():
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             row = evt.copy()
+            partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
 
             # Normalize ts to a float UNIX timestamp
             ts = _to_ts_float(row.get("ts"))
             if ts is None:
                 ts = time.time()
             row["ts"] = ts
+            row["scope_id"] = partition_scope_id
 
             with self._lock, self._log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")

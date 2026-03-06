@@ -142,10 +142,6 @@ async def default_chat_agent(
     """
     Built-in chat agent with 3-layer session memory: Recency, Long-term summaries, Semantic search.
     """
-    print("🍎")
-    for a in attachments or []:
-        print("attachment:", a)
-
     logger = context.logger()
     llm = context.llm()
     chan = context.ui_session_channel()

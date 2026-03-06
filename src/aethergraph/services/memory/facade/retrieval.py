@@ -75,8 +75,9 @@ class RetrievalMixin:
             Event | None: The resolved event, or None when not found.
         """
         # 1) Try hotlog
-        recent = await self.hotlog.recent(
+        recent = await self.hotlog.query(
             self.timeline_id,
+            tenant=getattr(self, "memory_tenant", None),
             kinds=None,
             limit=self.hot_limit,
         )
@@ -86,7 +87,11 @@ class RetrievalMixin:
 
         # 2) Fallback to persistence
         if hasattr(self.persistence, "get_events_by_ids"):
-            events = await self.persistence.get_events_by_ids(self.timeline_id, [event_id])
+            events = await self.persistence.get_events_by_ids(
+                self.timeline_id,
+                [event_id],
+                tenant=getattr(self, "memory_tenant", None),
+            )
             return events[0] if events else None
 
         return None
@@ -141,12 +146,14 @@ class RetrievalMixin:
 
         """
         # 1) Pull a reasonably large window from hotlog.
-        buf = await self.hotlog.recent(
+        buf = await self.hotlog.query(
             self.timeline_id,
+            tenant=getattr(self, "memory_tenant", None),
             kinds=kinds,
             limit=self.hot_limit,
         )
 
+        print(self.timeline_id, len(buf), "events retrieved from hotlog before filtering by level")
         # 2) Apply scope-level filter
         scope = getattr(self, "scope", None)
 
@@ -198,7 +205,7 @@ class RetrievalMixin:
         Returns:
             list[Any]: Event rows or normalized dictionaries.
         """
-        if not hasattr(self.persistence, "query_events_view"):
+        if not hasattr(self.persistence, "query_events"):
             # Fallback: no view API -> just use hotlog semantics as a degraded mode
             return await self.recent(
                 kinds=kinds, limit=limit, level=level, return_event=return_event
@@ -206,17 +213,24 @@ class RetrievalMixin:
 
         scope = getattr(self, "scope", None)
 
-        rows = await self.persistence.query_events_view(
-            scope_id=self.timeline_id,
-            scope=scope,
-            level=level,
+        rows = await self.persistence.query_events(
+            self.timeline_id,
+            tenant=getattr(self, "memory_tenant", None),
             since=since,
             until=until,
             kinds=kinds,
             tags=tags,
-            limit=limit,
-            offset=offset,
+            session_id=self.session_id if level == "session" else None,
+            run_id=self.run_id if level == "run" else None,
+            limit=None,
+            offset=0,
         )
+        if level and level != "scope":
+            rows = [e for e in rows if event_matches_level(e, scope, level=level)]
+        if offset:
+            rows = rows[offset:]
+        if limit is not None:
+            rows = rows[:limit]
         return self.normalize_recent_output(rows, return_event=return_event)
 
     # ------ Indices Search ------
@@ -491,8 +505,9 @@ class RetrievalMixin:
         ids = [it.item_id for it in event_items]
 
         # 1) Try hotlog first
-        recent = await self.hotlog.recent(
+        recent = await self.hotlog.query(
             self.timeline_id,
+            tenant=getattr(self, "memory_tenant", None),
             kinds=None,
             limit=1,
             # limit=self.hot_limit,
@@ -502,7 +517,11 @@ class RetrievalMixin:
         # 2) Fallback to persistence for misses
         missing_ids = [eid for eid in ids if eid not in by_id]
         if missing_ids and hasattr(self.persistence, "get_events_by_ids"):
-            persisted = await self.persistence.get_events_by_ids(self.timeline_id, missing_ids)
+            persisted = await self.persistence.get_events_by_ids(
+                self.timeline_id,
+                missing_ids,
+                tenant=getattr(self, "memory_tenant", None),
+            )
             for e in persisted:
                 by_id[e.event_id] = e
 

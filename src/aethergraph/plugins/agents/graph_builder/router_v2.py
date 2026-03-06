@@ -162,7 +162,6 @@ async def _llm_route(
         validate_json=True,
         max_output_tokens=256,
     )
-    print("🍎 Graph Builder: LLM router response:\n", resp)
     obj = json.loads(resp) if isinstance(resp, str) else resp
     branch_str = str(obj.get("branch", "")).strip().lower()
     if branch_str not in {b.value for b in GraphBuilderBranch}:

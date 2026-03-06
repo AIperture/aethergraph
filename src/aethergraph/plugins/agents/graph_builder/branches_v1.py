@@ -187,7 +187,6 @@ async def _handle_generate(
     state: GraphBuilderState,
     context: NodeContext,
 ) -> tuple[str, dict[str, Any] | None]:
-    print("🍎 Graph Builder: starting _handle_generate with message:", message)
     llm: GenericLLMClient = context.llm()
     chan = context.ui_session_channel()
 

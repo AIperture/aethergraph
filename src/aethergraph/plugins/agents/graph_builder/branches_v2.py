@@ -474,7 +474,6 @@ async def _handle_generate_v2(
             detail="LLM code generation failed.",
         )
         raise
-    print("🍎 Graph Builder: Code generation LLM response:\n", resp_text)
 
     new_plan = _extract_plan_json(resp_text)
 

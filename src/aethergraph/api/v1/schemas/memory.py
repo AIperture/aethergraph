@@ -9,10 +9,26 @@ from pydantic import BaseModel, Field  # type: ignore
 class MemoryEvent(BaseModel):
     event_id: str
     scope_id: str
+    ts: str | float | None = None
+    session_id: str | None = None
+    agent_id: str | None = None
+    run_id: str | None = None
+    node_id: str | None = None
+    graph_id: str | None = None
     kind: str
+    stage: str | None = None
+    topic: str | None = None
+    tool: str | None = None
     tags: list[str] = Field(default_factory=list)
+    severity: int | None = None
+    signal: float | None = None
     created_at: datetime
+    snippet: str = ""
+    text: str | None = None
     data: dict[str, Any] | None = None
+    metrics: dict[str, float] | None = None
+    inputs: list[dict[str, Any]] | None = None
+    outputs: list[dict[str, Any]] | None = None
 
 
 class MemoryEventListResponse(BaseModel):

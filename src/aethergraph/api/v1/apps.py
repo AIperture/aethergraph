@@ -144,7 +144,6 @@ async def create_app_run(
     body: RunCreateRequest,
     identity: RequestIdentity = Depends(require_runs_execute),  # noqa: B008
 ) -> RunCreateResponse:
-    print(f"🍎 Received request to create run for app_id={app_id} with body={body} from identity={identity}")
     container = current_services()
     rm: RunManager = getattr(container, "run_manager", None)
     if rm is None:
@@ -163,7 +162,6 @@ async def create_app_run(
     app_imp = app_meta.get("run_importance")
     app_vis = RunVisibility(app_vis) if app_vis else None
     app_imp = RunImportance(app_imp) if app_imp else None
-    print("🍎 ", app_id, graph_id, app_vis, app_imp)
     try:
         record = await rm.submit_run(
             graph_id=graph_id,

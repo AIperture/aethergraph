@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, Protocol, TypedDict
 
 EventKind = Literal[
@@ -94,6 +95,12 @@ class Event:
     version: int = 2  # for schema evolution
 
 
+class MemoryTenantFilter(TypedDict, total=False):
+    org_id: str
+    user_id: str
+    client_id: str
+
+
 class MemoryFacadeProtocol(Protocol):
     """
     Structural protocol for MemoryFacade mixins.
@@ -181,32 +188,62 @@ class MemoryFacadeProtocol(Protocol):
 
 
 class HotLog(Protocol):
-    async def append(self, scope_id: str, evt: Event, *, ttl_s: int, limit: int) -> None: ...
+    async def append(self, timeline_id: str, evt: Event, *, ttl_s: int, limit: int) -> None: ...
     async def recent(
-        self, scope_id: str, *, kinds: list[str] | None = None, limit: int = 50
+        self, timeline_id: str, *, kinds: list[str] | None = None, limit: int = 50
+    ) -> list[Event]: ...
+    async def query(
+        self,
+        timeline_id: str,
+        *,
+        tenant: MemoryTenantFilter | None = None,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[Event]: ...
 
 
 class Persistence(Protocol):
-    async def append_event(self, scope_id: str, evt: Event) -> None: ...
-    async def save_json(self, uri: str, obj: dict[str, Any]) -> None: ...
+    async def append_event(self, timeline_id: str, evt: Event) -> None: ...
+    async def save_json(self, uri: str, obj: dict[str, Any]) -> str: ...
     async def load_json(self, uri: str) -> dict[str, Any]: ...
     async def get_events_by_ids(
         self,
-        scope_id: str,
+        timeline_id: str,
         event_ids: list[str],
+        tenant: MemoryTenantFilter | None = None,
     ) -> list[Event]: ...
     async def query_events(
         self,
-        scope_id: str,
+        timeline_id: str,
         *,
+        tenant: MemoryTenantFilter | None = None,
         since: str | None = None,
         until: str | None = None,
         kinds: list[str] | None = None,
         tags: list[str] | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Event]: ...
+    async def query_summaries(
+        self,
+        *,
+        scope_id: str | None = None,
+        timeline_id: str | None = None,
+        tenant: MemoryTenantFilter | None = None,
+        summary_tag: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]: ...
 
 
 class Distiller(Protocol):  # or base class

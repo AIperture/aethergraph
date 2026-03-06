@@ -222,6 +222,12 @@ class LLMMetaSummaryDistiller(Distiller):
               mem/<scope_id>/summaries/<source_tag>/*.json
           - If a different Persistence is used, we currently bail out.
         """
+        tenant_fields = {
+            "org_id": kw.get("org_id"),
+            "user_id": kw.get("user_id"),
+            "client_id": kw.get("client_id"),
+            "timeline_id": timeline_id,
+        }
         scope = scope_id or run_id
         prefix = _summary_prefix(scope, self.source_tag)
 
@@ -322,6 +328,7 @@ class LLMMetaSummaryDistiller(Distiller):
             "open_loops": payload.get("open_loops", []),
             "llm_usage": usage,
             "llm_model": getattr(self.llm, "model", None),
+            **{k: v for k, v in tenant_fields.items() if v is not None},
         }
 
         doc_id = _summary_doc_id(scope, self.summary_tag, ts)

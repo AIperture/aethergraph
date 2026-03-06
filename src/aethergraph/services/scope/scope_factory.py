@@ -29,6 +29,7 @@ class ScopeFactory:
         node_id: str | None = None,
         session_id: str | None = None,
         app_id: str | None = None,
+        agent_id: str | None = None,
         tool_name: str | None = None,
         tool_version: str | None = None,
     ) -> Scope:
@@ -42,6 +43,7 @@ class ScopeFactory:
             client_id=base.client_id,
             mode=base.mode,
             app_id=app_id or base.app_id,
+            agent_id=agent_id or base.agent_id,
             session_id=session_id,
             run_id=run_id,
             graph_id=graph_id,
@@ -81,6 +83,8 @@ class ScopeFactory:
         graph_id: str | None = None,
         node_id: str | None = None,
         session_id: str | None = None,
+        app_id: str | None = None,
+        agent_id: str | None = None,
         level: ScopeLevel | None = "session",
         custom_scope_id: str | None = None,
     ) -> Scope:
@@ -103,6 +107,8 @@ class ScopeFactory:
             graph_id=graph_id,
             node_id=node_id,
             session_id=session_id,
+            app_id=app_id,
+            agent_id=agent_id,
         )
 
         # Attach memory_level to the scope

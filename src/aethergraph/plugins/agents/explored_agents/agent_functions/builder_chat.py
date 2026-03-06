@@ -338,8 +338,6 @@ async def builder_chat_handler(
         "for graph/agent/app creation:\n\n" + builder_specialization
     )
 
-    # print(f"🍎 Compiled system prompt for builder_chat_handler: {system_prompt}")
-
     # return "dummy"  # placeholder until we implement the actual LLM call below
 
     messages: list[dict[str, Any]] = [

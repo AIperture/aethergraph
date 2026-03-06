@@ -67,6 +67,7 @@ class SQLiteEventLogSync:
 
     def append(self, evt: dict) -> None:
         row = dict(evt)
+        partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
 
         ts = row.get("ts")
         if isinstance(ts, datetime):
@@ -88,7 +89,7 @@ class SQLiteEventLogSync:
         if ts is None:
             ts = time.time()
 
-        scope_id = row.get("scope_id")
+        scope_id = partition_scope_id
         kind = row.get("kind")
         tags = row.get("tags") or []
         tags_json = json.dumps(tags, ensure_ascii=False)
