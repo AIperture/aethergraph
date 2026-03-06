@@ -28,6 +28,8 @@ class EventLog(Protocol):
         limit: int | None = None,  # max number of events to return
         tags: list[str] | None = None,  # filter by tags
         offset: int = 0,  # pagination offset
+        user_id: str | None = None,
+        org_id: str | None = None,
     ) -> list[dict]: ...
 
     async def get_many(

@@ -21,7 +21,19 @@ class FakeEventLog(EventLog):
     async def append(self, evt: dict) -> None:
         self.rows.append(evt)
 
-    async def query(self, *, scope_id: str | None = None, since=None, until=None):
+    async def query(
+        self,
+        *,
+        scope_id: str | None = None,
+        since=None,
+        until=None,
+        kinds=None,
+        limit=None,
+        tags=None,
+        offset=0,
+        user_id=None,
+        org_id=None,
+    ):
         # Very simple filter on scope_id; ignore time for now
         if scope_id is None:
             return list(self.rows)

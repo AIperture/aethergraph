@@ -124,6 +124,11 @@ class MemoryFacade(
         self.memory_scope_id = (
             self.scope.memory_scope_id() if self.scope else self.session_id or self.run_id
         )
+        self.memory_tenant = (
+            self.scope.memory_tenant_filter()
+            if self.scope and hasattr(self.scope, "memory_tenant_filter")
+            else {}
+        )
         self.timeline_id = derive_timeline_id(
             memory_scope_id=self.memory_scope_id,
             run_id=self.run_id,
@@ -180,7 +185,7 @@ class MemoryFacade(
         # Merge Scope dimensions
         dims: dict[str, str] = {}
         if self.scope is not None:
-            dims = self.scope.metering_dimensions()
+            dims = self.scope.identity_labels()
 
         run_id = base.get("run_id") or dims.get("run_id") or self.run_id
         session_id = base.get("session_id") or dims.get("session_id") or self.session_id
@@ -191,6 +196,8 @@ class MemoryFacade(
         client_id = base.get("client_id") or dims.get("client_id")
         graph_id = base.get("graph_id") or dims.get("graph_id") or self.graph_id
         node_id = base.get("node_id") or dims.get("node_id") or self.node_id
+        app_id = base.get("app_id") or dims.get("app_id")
+        agent_id = base.get("agent_id") or dims.get("agent_id")
 
         base.setdefault("run_id", run_id)
         base.setdefault("scope_id", scope_id)
@@ -198,6 +205,8 @@ class MemoryFacade(
         base.setdefault("run_id", run_id)
         base.setdefault("graph_id", graph_id)
         base.setdefault("node_id", node_id)
+        base.setdefault("app_id", app_id)
+        base.setdefault("agent_id", agent_id)
         base.setdefault("user_id", user_id)
         base.setdefault("org_id", org_id)
         base.setdefault("client_id", client_id)
@@ -237,6 +246,8 @@ class MemoryFacade(
             metrics=metrics,
             graph_id=graph_id,
             node_id=node_id,
+            app_id=app_id,
+            agent_id=agent_id,
             tool=base.get("tool"),
             topic=base.get("topic"),
             severity=severity,
@@ -262,6 +273,8 @@ class MemoryFacade(
                     "run_id": evt.run_id,
                     "scope_id": evt.scope_id,
                     "session_id": evt.session_id,
+                    "app_id": evt.app_id,
+                    "agent_id": evt.agent_id,
                     "graph_id": evt.graph_id,
                     "node_id": evt.node_id,
                     "stage": evt.stage,

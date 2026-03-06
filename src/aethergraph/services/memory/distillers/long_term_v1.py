@@ -109,6 +109,12 @@ class LongTermSummarizer(Distiller):
           4) Save JSON summary via DocStore.put(...).
           5) Log a summary Event to hotlog + persistence, with data.summary_uri.
         """
+        tenant_fields = {
+            "org_id": kw.get("org_id"),
+            "user_id": kw.get("user_id"),
+            "client_id": kw.get("client_id"),
+            "timeline_id": timeline_id,
+        }
         # 1) fetch more than we might keep to give filter some slack
         raw = await hotlog.recent(timeline_id, kinds=None, limit=self.max_events * 2)
         kept = self._filter_events(raw)
@@ -148,6 +154,7 @@ class LongTermSummarizer(Distiller):
             "num_events": len(kept),
             "source_event_ids": src_ids,
             "text": digest_text,
+            **{k: v for k, v in tenant_fields.items() if v is not None},
         }
 
         # 4) Persist JSON summary via DocStore

@@ -2,10 +2,15 @@ from dataclasses import asdict
 import hashlib
 from typing import Any
 
-from aethergraph.contracts.services.memory import Event, Persistence
+from aethergraph.contracts.services.memory import Event, MemoryTenantFilter, Persistence
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.services.memory.facade.utils import event_matches_level
+from aethergraph.services.memory.storage_filters import (
+    event_matches_filters,
+    event_time,
+    summary_matches_filters,
+)
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 
 
@@ -13,7 +18,7 @@ class EventLogPersistence(Persistence):
     """
     Persistence built on top of generic EventLog + DocStore.
 
-    - append_event: logs Event rows into EventLog with scope_id=<timeline_id>, kind="memory" (unless already set).
+    - append_event: logs Event rows into EventLog with timeline_id partitioning.
     - save_json / load_json: store arbitrary JSON in DocStore using memdoc:// URIs.
     """
 
@@ -28,16 +33,9 @@ class EventLogPersistence(Persistence):
         self._docs = docs
         self._prefix = uri_prefix
 
-    # --------- helpers ---------
     def _doc_id_from_uri(self, uri: str) -> str:
-        """
-        Accepts:
-          - memdoc://<id>  -> <id>
-          - anything-else  -> hashed to a stable doc_id.
-        """
         if uri.startswith(self._prefix):
             return uri[len(self._prefix) :]
-        # fallback: hash to avoid weird chars
         h = hashlib.sha1(uri.encode("utf-8")).hexdigest()
         return f"memdoc/{h}"
 
@@ -46,22 +44,20 @@ class EventLogPersistence(Persistence):
             return doc_id
         return f"{self._prefix}{doc_id}"
 
-    # --------- API ---------
-    async def append_event(self, scope_id: str, evt: Event) -> None:
-        """
-        Append a memory Event to the underlying EventLog.
+    def _event_from_row(self, row: dict[str, Any]) -> Event:
+        allowed = Event.__dataclass_fields__.keys()
+        payload = {k: v for k, v in row.items() if k in allowed}
+        return Event(**payload)
 
-        `scope_id` should be the logical timeline id (e.g., timeline_id derived
-        from memory_scope_id + org prefix). We preserve evt.kind if set.
-        """
+    async def append_event(self, timeline_id: str, evt: Event) -> None:
         payload = asdict(evt)
-        payload.setdefault("scope_id", scope_id)
+        payload["_partition_scope_id"] = timeline_id
+        payload["timeline_id"] = timeline_id
         payload.setdefault("kind", "memory")
         await self._log.append(payload)
 
     async def save_json(self, uri: str, obj: dict[str, Any]) -> str:
         doc_id = self._doc_id_from_uri(uri)
-        # Let DocStore own where/how it writes
         await self._docs.put(doc_id, obj)
         return self._uri_from_doc_id(doc_id)
 
@@ -74,32 +70,26 @@ class EventLogPersistence(Persistence):
 
     async def get_events_by_ids(
         self,
-        scope_id: str,
+        timeline_id: str,
         event_ids: list[str],
+        tenant: MemoryTenantFilter | None = None,
     ) -> list[Event]:
-        """
-        Fetch events for a given scope_id (timeline) by event_id.
-
-        Implementation v0: use EventLog.query and filter in Python.
-        For moderate timeline sizes and small event_ids lists, this is fine.
-        Later, you can optimize by adding a direct get_many API on EventLog
-        or indexing by (scope_id, event_id).
-        """
         if not event_ids:
             return []
 
-        # Fetch all events for the scope_id; TODO: add reasonable limits / paging
         rows = await self._log.query(
-            scope_id=scope_id,
+            scope_id=timeline_id,
             since=None,
             until=None,
             kinds=None,
             tags=None,
             limit=None,
             offset=0,
+            user_id=tenant.get("user_id") if tenant else None,
+            org_id=tenant.get("org_id") if tenant else None,
         )
 
-        by_id: dict[str, Event] = {}
+        by_id: dict[str, dict[str, Any]] = {}
         for row in rows:
             eid = row.get("event_id")
             if eid:
@@ -108,83 +98,133 @@ class EventLogPersistence(Persistence):
         result: list[Event] = []
         for eid in event_ids:
             row = by_id.get(eid)
-            if row is not None:
-                result.append(Event(**row))
+            if row is None:
+                continue
+            if not event_matches_filters(row, tenant=tenant):
+                continue
+            result.append(self._event_from_row(row))
         return result
 
     async def query_events(
         self,
-        scope_id: str,
+        timeline_id: str,
         *,
+        tenant: MemoryTenantFilter | None = None,
         since: str | None = None,
         until: str | None = None,
         kinds: list[str] | None = None,
         tags: list[str] | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Event]:
-        """
-        Query events for a given scope_id / timeline using the underlying EventLog.
-
-        - `since` / `until`: ISO timestamps or whatever EventLog.query expects.
-        - `kinds`: optional filter on event kinds.
-        - `tags`: optional filter on tags (handled by EventLog).
-        - `limit` / `offset`: paging.
-
-        Returns a list of Event objects.
-        """
         rows = await self._log.query(
-            scope_id=scope_id,
+            scope_id=timeline_id,
             since=since,
             until=until,
             kinds=kinds,
-            tags=tags,
-            limit=limit,
-            offset=offset,
-        )
-        return [Event(**row) for row in rows]
-
-    async def query_events_view(
-        self,
-        scope_id: str,
-        *,
-        scope: Scope | None = None,
-        level: ScopeLevel | None = None,
-        since: str | None = None,
-        until: str | None = None,
-        kinds: list[str] | None = None,
-        tags: list[str] | None = None,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> list[Event]:
-        """
-        Extended query_events that also filters by scope level (e.g., session, run).
-
-        If `level` is provided and not "scope", we will filter events to only include those that match the specified scope level based on the provided `scope` object.
-
-        This allows for more granular retrieval of events associated with specific sessions, runs, etc., within a broader timeline.
-        """
-        rows = await self._log.query(
-            scope_id=scope_id,
-            since=since,
-            until=until,
-            kinds=kinds,
-            tags=tags,
-            limit=None,  # fetch all and filter in Python for now
+            tags=None,
+            limit=None,
             offset=0,
+            user_id=tenant.get("user_id") if tenant else None,
+            org_id=tenant.get("org_id") if tenant else None,
         )
-
-        events = [Event(**row) for row in rows]
-
-        # This filter can partly be pushed down to Database later if needed,
-        # WHERE org_id = ... AND user_id = ... etc. based on level
-        if level and level != "scope":
-            events = [e for e in events if event_matches_level(e, scope, level=level)]
-
-        # Apply limit/offset after filtering
+        events = [
+            self._event_from_row(row)
+            for row in rows
+            if event_matches_filters(
+                row,
+                tenant=tenant,
+                kinds=kinds,
+                tags=tags,
+                since=since,
+                until=until,
+                session_id=session_id,
+                run_id=run_id,
+                agent_id=agent_id,
+            )
+        ]
+        events.sort(key=lambda e: (event_time(e), e.event_id))
         if offset:
             events = events[offset:]
         if limit is not None:
             events = events[:limit]
-
         return events
+
+    async def query_events_view(
+        self,
+        timeline_id: str,
+        *,
+        scope: Scope | None = None,
+        level: ScopeLevel | None = None,
+        tenant: MemoryTenantFilter | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Event]:
+        events = await self.query_events(
+            timeline_id,
+            tenant=tenant,
+            since=since,
+            until=until,
+            kinds=kinds,
+            tags=tags,
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            limit=None,
+            offset=0,
+        )
+        if level and level != "scope":
+            events = [e for e in events if event_matches_level(e, scope, level=level)]
+        if offset:
+            events = events[offset:]
+        if limit is not None:
+            events = events[:limit]
+        return events
+
+    async def query_summaries(
+        self,
+        *,
+        scope_id: str | None = None,
+        timeline_id: str | None = None,
+        tenant: MemoryTenantFilter | None = None,
+        summary_tag: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        try:
+            doc_ids = await self._docs.list()
+        except TypeError:
+            return []
+
+        summaries: list[dict[str, Any]] = []
+        for doc_id in doc_ids:
+            doc = await self._docs.get(doc_id)
+            if not isinstance(doc, dict):
+                continue
+            if timeline_id is not None and doc.get("timeline_id") not in (None, timeline_id):
+                continue
+            if not summary_matches_filters(
+                doc,
+                tenant=tenant,
+                scope_id=scope_id,
+                summary_tag=summary_tag,
+            ):
+                continue
+            summaries.append(doc)
+
+        summaries.sort(key=lambda doc: str(doc.get("ts") or doc.get("created_at") or ""))
+        if offset:
+            summaries = summaries[offset:]
+        if limit is not None:
+            summaries = summaries[:limit]
+        return summaries

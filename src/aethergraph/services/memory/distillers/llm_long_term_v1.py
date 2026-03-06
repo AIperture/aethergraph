@@ -115,6 +115,12 @@ class LLMLongTermSummarizer(Distiller):
         docs: DocStore,
         **kw: Any,
     ) -> dict[str, Any]:
+        tenant_fields = {
+            "org_id": kw.get("org_id"),
+            "user_id": kw.get("user_id"),
+            "client_id": kw.get("client_id"),
+            "timeline_id": timeline_id,
+        }
         # 1) fetch more events than needed, then filter
         raw = await hotlog.recent(timeline_id, kinds=None, limit=self.max_events * 2)
         kept = self._filter_events(raw)
@@ -159,6 +165,7 @@ class LLMLongTermSummarizer(Distiller):
             "open_loops": payload.get("open_loops", []),
             "llm_usage": usage,
             "llm_model": self.llm.model if hasattr(self.llm, "model") else None,
+            **{k: v for k, v in tenant_fields.items() if v is not None},
         }
 
         scope = scope_id or run_id

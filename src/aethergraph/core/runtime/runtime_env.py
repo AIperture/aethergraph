@@ -137,6 +137,8 @@ class RuntimeEnv:
                 graph_id=self.graph_id,
                 node_id=node.node_id,
                 session_id=self.session_id,
+                app_id=self.app_id,
+                agent_id=self.agent_id,
             )
             if self.container.scope_factory
             else None
@@ -150,6 +152,8 @@ class RuntimeEnv:
                 graph_id=self.graph_id,
                 node_id=node.node_id,
                 session_id=self.session_id,
+                app_id=self.app_id,
+                agent_id=self.agent_id,
                 level=level,
                 custom_scope_id=custom_scope_id,
             )

@@ -80,6 +80,19 @@ class Scope:
             out["scope_id"] = scope_id
         return out
 
+    def memory_tenant_filter(self) -> dict[str, str]:
+        """
+        Canonical tenant filter for memory storage reads.
+        """
+        out: dict[str, str] = {}
+        if self.org_id:
+            out["org_id"] = self.org_id
+        if self.user_id:
+            out["user_id"] = self.user_id
+        if self.client_id:
+            out["client_id"] = self.client_id
+        return out
+
     def metering_dimensions(self) -> dict[str, Any]:
         """Dimensions for MeteringService."""
         out: dict[str, Any] = {}
@@ -91,6 +104,8 @@ class Scope:
             out["client_id"] = self.client_id
         if self.app_id:
             out["app_id"] = self.app_id
+        if self.agent_id:
+            out["agent_id"] = self.agent_id
         if self.session_id:
             out["session_id"] = self.session_id
         if self.run_id:
