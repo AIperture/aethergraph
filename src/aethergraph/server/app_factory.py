@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager, suppress
 import logging
 import os
 from pathlib import Path
+import sys
 from typing import Optional
 
 from fastapi import FastAPI
@@ -243,6 +244,14 @@ def _load_user_graphs_from_env() -> None:
 
     project_root = Path(project_root_str).resolve()
     strict = strict_str.lower() in ("1", "true", "yes")
+
+    # Permanently add project_root to sys.path so hot-loaded files
+    # (e.g. via /api/v1/registry/register) can resolve local imports.
+    # TODO(cloud): Same as __main__.py — skip this in cloud mode and use
+    # per-request project_root in RegistrationService._register_source instead.
+    pr_str = str(project_root)
+    if pr_str not in sys.path:
+        sys.path.insert(0, pr_str)
 
     spec = LoadSpec(
         modules=modules,

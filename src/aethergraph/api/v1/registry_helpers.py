@@ -30,10 +30,8 @@ def scoped_registry(identity: RequestIdentity) -> RegistryFacade:
 
 def ensure_delete_identity(identity: RequestIdentity, resource_name: str) -> None:
     if identity.mode == "local":
-        raise HTTPException(
-            status_code=403,
-            detail=f"Deleting {resource_name} requires authenticated tenant identity.",
-        )
+        # Local user owns everything — allow delete without tenant identity.
+        return
     if not (identity.org_id or identity.user_id):
         raise HTTPException(
             status_code=403,

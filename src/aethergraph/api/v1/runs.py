@@ -89,6 +89,7 @@ async def list_runs(
     graph_id: str | None = Query(None),  # noqa: B008
     status: RunStatus | None = Query(None),  # noqa: B008
     flow_id: str | None = Query(None),  # noqa: B008
+    origin: RunOrigin | None = Query(None),  # noqa: B008
     cursor: str | None = Query(None),  # noqa: B008
     limit: int = Query(20, ge=1, le=100),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
@@ -120,6 +121,14 @@ async def list_runs(
         limit=limit,
         offset=offset,
     )
+
+    print(
+        f"Listed {len(records)} runs from offset {offset} (graph_id={graph_id}, status={status}, flow_id={flow_id}, origin={origin})"
+    )
+
+    # Filter by origin if requested
+    if origin is not None:
+        records = [rec for rec in records if rec.origin == origin]
 
     # Still apply UI visibility policy in Python (this is cheap)
     records = [

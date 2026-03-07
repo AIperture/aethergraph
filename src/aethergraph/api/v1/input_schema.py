@@ -93,6 +93,30 @@ def _normalize_override_item(raw: Any) -> dict[str, Any] | None:
     return out
 
 
+def _normalize_override_items(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        out: list[dict[str, Any]] = []
+        for item in raw:
+            normalized = _normalize_override_item(item)
+            if normalized is not None:
+                out.append(normalized)
+        return out
+
+    # Backward-compat path for dict-shaped app schemas:
+    # {"field_name": {"label": "...", "default": "..."}}
+    if isinstance(raw, dict):
+        out = []
+        for name, value in raw.items():
+            if not isinstance(value, dict):
+                continue
+            normalized = _normalize_override_item({"name": name, **value})
+            if normalized is not None:
+                out.append(normalized)
+        return out
+
+    return []
+
+
 def merge_input_schema_overrides(
     base: list[InputFieldSpec],
     *,
@@ -106,14 +130,12 @@ def merge_input_schema_overrides(
     override_raw = meta.get("input_schema")
     if override_raw is None:
         override_raw = extra.get("input_schema")
-    if not isinstance(override_raw, list):
+    override_items = _normalize_override_items(override_raw)
+    if not override_items:
         return base
 
     overrides_by_name: dict[str, dict[str, Any]] = {}
-    for item in override_raw:
-        normalized = _normalize_override_item(item)
-        if normalized is None:
-            continue
+    for normalized in override_items:
         overrides_by_name[normalized["name"]] = normalized
 
     merged: list[InputFieldSpec] = []
