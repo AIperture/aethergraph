@@ -70,6 +70,37 @@ class FakeRunManager:
         return rec
 
     async def get_record(self, run_id: str):
+        if run_id == "run-failed":
+            return RunRecord(
+                run_id="run-failed",
+                graph_id="failed-graph",
+                kind="taskgraph",
+                status=RunStatus.failed,
+                started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+                tags=["t1"],
+                user_id="u1",
+                org_id="o1",
+                error="Top-level failure",
+                meta={
+                    "error_kind": "runtime",
+                    "error_stage": "run_execution",
+                    "error_code": "ValueError",
+                    "error_hints": [{"code": "retry", "message": "Retry the run."}],
+                    "error_message": "Top-level failure",
+                    "error_detail": "Traceback: detailed failure",
+                    "error_is_traceback": True,
+                    "error_info": {
+                        "message": "Top-level failure",
+                        "detail": "Traceback: detailed failure",
+                        "kind": "runtime",
+                        "stage": "run_execution",
+                        "code": "ValueError",
+                        "hints": [{"code": "retry", "message": "Retry the run."}],
+                        "is_traceback": True,
+                    },
+                },
+            )
         if run_id != "run-xyz":
             return None
         return RunRecord(
@@ -229,6 +260,87 @@ def test_get_run_endpoint(client: TestClient):
     assert data["tags"] == ["t1"]
     assert data["user_id"] == "u1"
     assert data["org_id"] == "o1"
+
+
+def test_get_run_endpoint_includes_error_info(client: TestClient):
+    resp = client.get("/api/v1/runs/run-failed")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["status"] == "failed"
+    assert data["error_info"]["message"] == "Top-level failure"
+    assert data["error_info"]["detail"] == "Traceback: detailed failure"
+    assert data["error_info"]["kind"] == "runtime"
+    assert data["error_info"]["is_traceback"] is True
+
+
+def test_get_run_snapshot_includes_node_and_run_error_info(monkeypatch):
+    fake_rm = FakeRunManager()
+    fake_meter = FakeMetering(runs_count=0)
+    fake_settings = FakeSettings(enabled=True, max_runs_per_window=1000, burst_max_runs=1000)
+    fake_authz = FakeAuthz()
+
+    class FakeStateStore:
+        async def load_latest_snapshot(self, run_id: str):
+            assert run_id == "run-failed"
+            return type(
+                "Snapshot",
+                (),
+                {
+                    "state": {
+                        "nodes": {
+                            "node-a": {
+                                "status": "FAILED",
+                                "started_at": "2024-01-01T00:00:00+00:00",
+                                "finished_at": "2024-01-01T00:00:01+00:00",
+                                "outputs": None,
+                                "error": "Node exploded",
+                                "error_info": {
+                                    "message": "Node exploded",
+                                    "detail": "Traceback: node exploded",
+                                    "kind": "runtime",
+                                    "stage": "node_execution",
+                                    "code": "ValueError",
+                                    "hints": [],
+                                    "is_traceback": True,
+                                },
+                            }
+                        },
+                        "edges": [],
+                    }
+                },
+            )()
+
+    class FakeContainer:
+        run_manager = fake_rm
+        metering = fake_meter
+        settings = fake_settings
+        authz = fake_authz
+        run_burst_limiter = None
+        state_store = FakeStateStore()
+
+    monkeypatch.setattr("aethergraph.api.v1.runs.current_services", lambda: FakeContainer())
+    monkeypatch.setattr("aethergraph.api.v1.deps.current_services", lambda: FakeContainer())
+
+    app = FastAPI()
+    app.include_router(runs_api.router, prefix="/api/v1")
+
+    from aethergraph.api.v1.runs import get_identity
+
+    async def fake_get_identity():
+        return FakeIdentity(user_id="u1", org_id="o1", mode="cloud")
+
+    app.dependency_overrides[get_identity] = fake_get_identity
+    client = TestClient(app)
+
+    resp = client.get("/api/v1/runs/run-failed/snapshot")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["run_error_info"]["message"] == "Top-level failure"
+    assert data["nodes"][0]["error"] == "Node exploded"
+    assert data["nodes"][0]["error_info"]["detail"] == "Traceback: node exploded"
+    assert data["nodes"][0]["error_info"]["is_traceback"] is True
 
 
 def test_run_endpoint_window_rate_limit(monkeypatch):

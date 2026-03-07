@@ -14,5 +14,6 @@ class StepResult:
     outputs: dict[str, Any] | None = None  # outputs if completed
     artifacts: list[Artifact] = field(default_factory=list)
     error: str | None = None  # error message if failed
+    error_info: dict[str, Any] | None = None  # structured error details for UI/snapshots
     continuation: Continuation | None = None  # continuation if waiting
     next_wakeup_at: datetime | None = None  # ISO timestamp for next wakeup (for time-based waits)

@@ -449,6 +449,8 @@ class GlobalForwardScheduler:
                 )
 
                 if result.status == NodeStatus.DONE:
+                    node.state.error = None
+                    node.state.error_info = None
                     outs = result.outputs or {}
                     await rs.graph.set_node_outputs(node_id, outs)
                     await rs.graph.set_node_status(node_id, NodeStatus.DONE)
@@ -464,6 +466,8 @@ class GlobalForwardScheduler:
                         )
                     )
                 elif result.status.startswith("WAITING_"):
+                    node.state.error = None
+                    node.state.error_info = None
                     await rs.graph.set_node_status(node_id, result.status)
                     await self._emit(
                         NodeEvent(
@@ -476,6 +480,8 @@ class GlobalForwardScheduler:
                         )
                     )
                 elif result.status == NodeStatus.FAILED:
+                    node.state.error = result.error
+                    node.state.error_info = result.error_info
                     await rs.graph.set_node_status(node_id, NodeStatus.FAILED)
                     await self._emit(
                         NodeEvent(
@@ -499,6 +505,8 @@ class GlobalForwardScheduler:
                         if rs.settings.stop_on_first_error:
                             rs.terminated = True
                 elif result.status == NodeStatus.SKIPPED:
+                    node.state.error = None
+                    node.state.error_info = None
                     await rs.graph.set_node_status(node_id, NodeStatus.SKIPPED)
                     await self._emit(
                         NodeEvent(
@@ -512,6 +520,16 @@ class GlobalForwardScheduler:
                     )
             except asyncio.CancelledError:
                 try:
+                    node.state.error = "Run cancelled by user"
+                    node.state.error_info = {
+                        "message": "Run cancelled by user",
+                        "detail": None,
+                        "kind": "cancellation",
+                        "stage": "node_execution",
+                        "code": "run_cancelled",
+                        "hints": [],
+                        "is_traceback": False,
+                    }
                     await rs.graph.set_node_status(node_id, NodeStatus.CANCELLED)
                 except Exception as e:
                     if self._logger:

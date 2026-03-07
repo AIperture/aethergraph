@@ -710,6 +710,8 @@ class ForwardScheduler(BaseScheduler):
                 result = await step_forward(node=node, ctx=ctx, retry_policy=self.retry_policy)
 
                 if result.status == NodeStatus.DONE:
+                    node.state.error = None
+                    node.state.error_info = None
                     # normalize between output/outputs
                     outs = result.outputs or {}
 
@@ -731,6 +733,8 @@ class ForwardScheduler(BaseScheduler):
                     await self._emit(event)
 
                 elif result.status.startswith("WAITING_"):
+                    node.state.error = None
+                    node.state.error_info = None
                     # no outputs yet; continuation already persisted by ctx.storage via step_forward
                     # scheduler idles until on_resume() or wakeup queue triggers
                     await self.graph.set_node_status(node_id, result.status)
@@ -747,6 +751,8 @@ class ForwardScheduler(BaseScheduler):
                     await self._emit(event)
 
                 elif result.status == NodeStatus.FAILED:
+                    node.state.error = result.error
+                    node.state.error_info = result.error_info
                     # step_forward already incremented attempts (if policy applies)
                     # If retry allowed, schedule backoff sleeper:
                     await self.graph.set_node_status(node_id, NodeStatus.FAILED)
@@ -780,6 +786,8 @@ class ForwardScheduler(BaseScheduler):
                             self._terminated = True
 
                 elif result.status == NodeStatus.SKIPPED:
+                    node.state.error = None
+                    node.state.error_info = None
                     await self.graph.set_node_status(node_id, NodeStatus.SKIPPED)
 
                     # emit event
@@ -799,9 +807,29 @@ class ForwardScheduler(BaseScheduler):
 
             except NotImplementedError:
                 # subgraph logic not handled here; escalate to orchestrator
+                node.state.error = "Subgraph execution is not implemented"
+                node.state.error_info = {
+                    "message": "Subgraph execution is not implemented",
+                    "detail": None,
+                    "kind": "runtime",
+                    "stage": "node_execution",
+                    "code": "NotImplementedError",
+                    "hints": [],
+                    "is_traceback": False,
+                }
                 await self.graph.set_node_status(node_id, NodeStatus.FAILED)
             except asyncio.CancelledError:
                 # task cancelled (e.g. on terminate);
+                node.state.error = "Run cancelled by user"
+                node.state.error_info = {
+                    "message": "Run cancelled by user",
+                    "detail": None,
+                    "kind": "cancellation",
+                    "stage": "node_execution",
+                    "code": "run_cancelled",
+                    "hints": [],
+                    "is_traceback": False,
+                }
                 await self.graph.set_node_status(node_id, NodeStatus.CANCELLED)
             finally:
                 # remove from running tasks in caller

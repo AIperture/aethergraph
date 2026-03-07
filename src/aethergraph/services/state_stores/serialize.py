@@ -257,6 +257,7 @@ async def state_to_json_safe(
             "status": status_name,
             "outputs": outputs_json,
             "error": getattr(ns, "error", None),
+            "error_info": getattr(ns, "error_info", None),
             "attempts": getattr(ns, "attempts", 0),
             "next_wakeup_at": getattr(ns, "next_wakeup_at", None),
             "wait_token": getattr(ns, "wait_token", None),

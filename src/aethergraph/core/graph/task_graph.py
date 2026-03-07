@@ -464,6 +464,19 @@ class TaskGraph:
         self.state.rev += 1
         await self._notify_output_change(node_id)
 
+    async def set_node_error(
+        self,
+        node_id: str,
+        error: str | None,
+        error_info: dict[str, Any] | None = None,
+    ) -> None:
+        state = self.state.nodes.get(node_id)
+        if state is None:
+            raise KeyError(f"Unknown node_id: {node_id}")
+        state.error = error
+        state.error_info = error_info
+        self.state.rev += 1
+
     async def _notify_status_change(self, node_id: str):
         runtime_node = self._runtime_nodes.get(node_id)  # runtime view points at same state object
         for obs in self.observers:
@@ -506,6 +519,7 @@ class TaskGraph:
         if not preserve_outputs:
             node.outputs = {}
         node.error = None
+        node.error_info = None
         node.attempts = 0
         node.next_wakeup_at = None
         node.wait_token = None

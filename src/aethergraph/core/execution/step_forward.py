@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import functools
 import inspect
+import traceback
 from typing import Any
 
 from aethergraph.contracts.services.channel import OutEvent
@@ -182,13 +183,25 @@ async def step_forward(
 
     logic_fn = unwrap_callable(ctx.get_logic(node.logic))
 
+    def _runtime_error_info(exc: Exception) -> dict[str, Any]:
+        detail = traceback.format_exc()
+        return {
+            "message": str(exc),
+            "detail": detail if detail and detail.strip() != "NoneType: None" else repr(exc),
+            "kind": "runtime",
+            "stage": "node_execution",
+            "code": exc.__class__.__name__,
+            "hints": [],
+            "is_traceback": True,
+        }
+
     # Resolve graph inputs
     try:
         resolved_inputs = await ctx.resolve_inputs(node)
     except Exception as e:
         if lg:
             lg.exception("input resolution error")
-        return StepResult(status=NodeStatus.FAILED, error=e)
+        return StepResult(status=NodeStatus.FAILED, error=str(e), error_info=_runtime_error_info(e))
 
     # should_run gate (unchanged) ...
     should = True
@@ -259,7 +272,7 @@ async def step_forward(
                 lg.warning(f"retry scheduled in {backoff}")
             node.attempts = attempts + 1
         # import traceback; traceback.print_exc()
-        return StepResult(status=NodeStatus.FAILED, error=e)
+        return StepResult(status=NodeStatus.FAILED, error=str(e), error_info=_runtime_error_info(e))
 
 
 # ---- wait path ---------------------------------------------------------------

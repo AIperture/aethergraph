@@ -34,6 +34,7 @@ class RunSummary(BaseModel):
     flow_id: str | None = None
     entrypoint: bool | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
+    error_info: RunErrorInfo | None = None
     app_id: str | None = Field(default=None, alias="appId")
     app_name: str | None = Field(default=None, alias="appName")
     agent_id: str | None = Field(default=None, alias="agentId")
@@ -86,6 +87,16 @@ class RunChannelEvent(BaseModel):
     ts: float
 
 
+class RunErrorInfo(BaseModel):
+    message: str
+    detail: str | None = None
+    kind: str | None = None
+    stage: str | None = None
+    code: str | None = None
+    hints: list[dict[str, str]] = Field(default_factory=list)
+    is_traceback: bool = False
+
+
 class NodeSnapshot(BaseModel):
     node_id: str
     tool_name: str | None = None
@@ -94,6 +105,7 @@ class NodeSnapshot(BaseModel):
     finished_at: datetime | None = None
     outputs: dict[str, Any] | None = None
     error: str | None = None
+    error_info: RunErrorInfo | None = None
 
 
 class EdgeSnapshot(BaseModel):
@@ -106,6 +118,7 @@ class RunSnapshot(BaseModel):
     graph_id: str
     nodes: list[NodeSnapshot]
     edges: list[EdgeSnapshot]
+    run_error_info: RunErrorInfo | None = None
     graph_kind: str | None = None
     flow_id: str | None = None
     entrypoint: bool | None = None

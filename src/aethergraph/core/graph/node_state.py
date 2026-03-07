@@ -53,6 +53,7 @@ class TaskNodeState:
     status: NodeStatus = NodeStatus.PENDING
     outputs: dict[str, any] = field(default_factory=dict)
     error: str | None = None
+    error_info: dict[str, Any] | None = None
     attempts: int = 0
     next_wakeup_at: str | None = None  # ISO timestamp
     wait_token: str | None = None  # for external wait/resume with Continuation
