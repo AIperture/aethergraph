@@ -1,4 +1,4 @@
 version: 1
 display_name: AetherGraph Graph Builder
 short_description: Build and repair AG UI-ready graphify workflows from user intent in any workspace.
-default_prompt: Create a versioned AetherGraph workflow in this workspace, validate and repair it, register it as an app, and then ask whether to run it with run_async, start AG UI locally, or stop.
+default_prompt: Create a versioned AetherGraph workflow in this workspace, validate and repair it, register it as an app, and then ask whether to run it with `python -m aethergraph run`, start AG UI locally with `python -m aethergraph serve`, or stop.

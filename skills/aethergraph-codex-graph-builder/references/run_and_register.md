@@ -16,35 +16,42 @@ Use this after the workflow module is valid and registered.
 
 ## Local Run
 
-Use `run_async` when the user wants a direct local execution.
+Prefer the CLI in `src/aethergraph/__main__.py`.
 
-```python
-from aethergraph.runner import run_async
-from workflow import my_workflow
+When the final graph file is known, the simplest local run path is:
 
-result = await run_async(my_workflow, inputs={"request_text": "summarize this"})
-print(result)
+```bash
+python -m aethergraph run ./aethergraph_graphs/my-workflow/workflow.py \
+  --workspace ./aethergraph_data \
+  --project-root . \
+  --inputs '{"request_text":"summarize this"}'
 ```
 
-`await my_workflow(**inputs)` may also work for graph functions, but prefer `run_async` when following a consistent workflow handoff.
+Notes:
+- When `target` is a `.py` file, `run` automatically uses API mode, registers the file with the running server, and polls by default unless `--no-poll` is set.
+- If the file defines multiple graphs, pass `--graph <graph_name>`.
+- This path expects a running server for the workspace. If one is not running, start it with `python -m aethergraph serve ...` first.
+
+## In-Process Run
+
+Use this when the user wants a direct execution without a server:
+
+```bash
+python -m aethergraph run my_workflow \
+  --workspace ./aethergraph_data \
+  --project-root . \
+  --load-path ./aethergraph_graphs/my-workflow/workflow.py \
+  --inputs '{"request_text":"summarize this"}'
+```
+
+Notes:
+- This path runs in-process and does not require `--via-api`.
+- The `target` is the graph name, not the file path.
+- Prefer this when you want a one-shot local validation run without standing up the UI server.
 
 ## Local AG UI Server
 
-Use `start_server` when the user wants to interact through AG UI from Python.
-
-```python
-from aethergraph import start_server
-
-url, handle = start_server(
-    workspace="./aethergraph_data",
-    load_paths=["./aethergraph_graphs/my-workflow/workflow.py"],
-    project_root=".",
-    port=0,
-    return_handle=True,
-)
-print(url)
-handle.block()
-```
+Use `python -m aethergraph serve` when the user wants to interact through AG UI.
 
 Ask for approval before starting a long-running local server process.
 
@@ -82,7 +89,7 @@ python -m aethergraph serve \
 
 ## Optional CLI Registration
 
-If the skill separately registers a graph source by file, use:
+If you want an explicit registration step before serving or running, use:
 
 ```bash
 python -m aethergraph register \
@@ -93,12 +100,19 @@ python -m aethergraph register \
 
 Serving with `--load-path` is still the simplest path for getting the app into UI.
 
+## Auto-Run Guidance For This Skill
+
+After code generation and registration succeed:
+- Prefer giving or running `python -m aethergraph run <workflow.py> ...` for direct execution requests.
+- Prefer giving or running `python -m aethergraph serve ... --load-path <workflow.py>` for UI requests.
+- Use `python -m aethergraph register ...` only when the user explicitly wants a separate registration action or when the workflow must be registered before a non-serve path.
+
 ## Post-Generation Prompt
 
 After registration succeeds, ask the user:
 
-1. Run locally with `run_async`
-2. Start AG UI with `start_server`
+1. Run locally with `python -m aethergraph run`
+2. Start AG UI with `python -m aethergraph serve`
 3. Cancel
 
 Only start the server after approval.

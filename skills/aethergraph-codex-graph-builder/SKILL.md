@@ -1,6 +1,6 @@
 ---
 name: aethergraph-codex-graph-builder
-description: Build and iteratively repair AetherGraph `@tool + @graphify` workflows for Codex users from plain intent, existing scripts, docs, or an empty workspace. Use when a user wants a runnable workflow generated into their workspace, persisted as versioned files, validated with current `graphify` rules, registered as an app for AG UI, and optionally run locally with `run_async` or served with `start_server`.
+description: Build and iteratively repair AetherGraph `@tool + @graphify` workflows for Codex users from plain intent, existing scripts, docs, or an empty workspace. Use when a user wants a runnable workflow generated into their workspace, persisted as versioned files, validated with current `graphify` rules, registered as an app for AG UI, and optionally run or serve it through the current `python -m aethergraph` CLI.
 ---
 
 # AetherGraph Codex Graph Builder
@@ -23,6 +23,7 @@ Generate a runnable AetherGraph workflow in the user's workspace and carry it th
 - Prefer artifact-backed final outputs too; return artifact ids/uris as the main graph outputs unless the user explicitly asks for filesystem output or inline payloads.
 - Do not use `send_phase`; the run channel pattern is no longer reliable for this workflow.
 - For long-running steps, prefer artifact checkpoints and durable saved outputs over streaming status.
+- Prefer the current memory state API (`record_state`, `latest_state`, `state_history`) for small resumable state and checkpoint pointers.
 
 ## Default Workspace Layout
 
@@ -49,8 +50,8 @@ Generate a runnable AetherGraph workflow in the user's workspace and carry it th
 - Repeat until validation and build succeed.
 5. Register the workflow as an app.
 6. Ask the user what to do next:
-- Run locally with `run_async`
-- Start a local AG UI server with `start_server` and approval if needed
+- Run locally with `python -m aethergraph run`
+- Start a local AG UI server with `python -m aethergraph serve` and approval if needed
 - Cancel after generation/registration
 
 ## Output Rules
@@ -78,6 +79,7 @@ Generate a runnable AetherGraph workflow in the user's workspace and carry it th
 - Pass artifact identifiers or uris into later nodes as strings.
 - Default to saving the final deliverable into artifacts as well so the result is visible in the centralized artifact store.
 - For expensive steps, add checkpoint save/load tools so reruns can skip repeated work.
+- Store only small resume metadata in memory state; store actual checkpoint payloads in artifacts.
 - For long iterative nodes, save progress artifacts from inside the node and resume from the latest saved state if the node retries or restarts.
 - Prefer durable artifact saves over progress chatter.
 
@@ -92,4 +94,4 @@ Generate a runnable AetherGraph workflow in the user's workspace and carry it th
 
 - Register the workflow as an app after code generation succeeds.
 - If the user asked to revise an existing workflow, preserve version history before overwriting the main file.
-- After registration, ask whether to run it locally, start AG UI, or stop.
+- After registration, ask whether to run it locally with `python -m aethergraph run`, start AG UI with `python -m aethergraph serve`, or stop.
