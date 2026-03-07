@@ -40,25 +40,53 @@ class RequestIdentity(BaseModel):
         return (tenant.get("org_id"), tenant.get("user_id"))
 
 
+def _get_deploy_mode() -> str:
+    """Read server-level deploy_mode from settings. Falls back to 'local'."""
+    try:
+        container = current_services()
+        settings = getattr(container, "settings", None)
+        if settings is not None:
+            return getattr(settings, "deploy_mode", "local") or "local"
+    except Exception:
+        pass
+    return "local"
+
+
 async def get_identity(
     request: Request,
     x_user_id: str | None = Header(None, alias="X-User-ID"),
     x_org_id: str | None = Header(None, alias="X-Org-ID"),
     x_roles: str | None = Header(None, alias="X-Roles"),
     x_client_id: str | None = Header(None, alias="X-Client-ID"),
+    x_mode: str | None = Header(None, alias="X-Mode"),
 ) -> RequestIdentity:
     """
     Identity extraction hook.
 
-    Modes:
-    - CLOUD: auth gateway injects X-User-ID / X-Org-ID (optionally X-Client-ID).
-    - DEMO: no user/org, but a client_id is provided (header or query param).
-    - LOCAL: no headers; fall back to a single 'local' user/org.
+    Behaviour is driven by the server-level ``deploy_mode`` setting
+    (env: AETHERGRAPH_DEPLOY_MODE) **and** per-request headers.
+
+    deploy_mode="local" (default / OSS):
+        X-Client-ID is recorded for tracking but does NOT create a
+        separate tenant scope. CLI, script, and UI all share one
+        identity (user_id="local").
+
+    deploy_mode="demo":
+        X-Client-ID triggers demo-mode tenant isolation. Each browser
+        gets user_id="demo:<client_id>", so different demo visitors
+        only see their own runs.
+
+    deploy_mode="cloud":
+        Expects an auth gateway to inject X-User-ID / X-Org-ID.
+        Falls back to demo if only X-Client-ID is present.
+
+    A per-request X-Mode header can also force demo mode regardless
+    of deploy_mode (useful for testing).
     """
+    deploy_mode = _get_deploy_mode()
 
     roles = x_roles.split(",") if x_roles else []
 
-    # Allow demo frontend to keep sending ?client_id=... for now
     query_client_id = request.query_params.get("client_id")
     client_id = x_client_id or query_client_id
 
@@ -68,13 +96,15 @@ async def get_identity(
             user_id=x_user_id,
             org_id=x_org_id,
             roles=roles,
-            client_id=client_id,  # optional; may be unused in cloud
+            client_id=client_id,
             mode="cloud",
         )
 
-    # --- Demo mode: no auth, but we have a client_id ---
-    if client_id:
-        # Treat client_id as the actual user_id for demo
+    # --- Demo mode ---
+    # Triggered when:
+    #   1) deploy_mode="demo" and a client_id is present, OR
+    #   2) per-request X-Mode: demo header is sent (any deploy_mode)
+    if client_id and (deploy_mode == "demo" or x_mode == "demo"):
         demo_user_id = f"demo:{client_id}"
         return RequestIdentity(
             user_id=demo_user_id,
@@ -85,11 +115,13 @@ async def get_identity(
         )
 
     # --- Local mode: dev / sidecar ---
+    # All requests share a single identity. X-Client-ID is kept for
+    # tracking but does not gate visibility of runs/artifacts.
     return RequestIdentity(
         user_id="local",
         org_id="local",
         roles=["dev"],
-        client_id=None,
+        client_id=client_id,
         mode="local",
     )
 

@@ -86,11 +86,14 @@ async def list_apps(
             app_meta=meta,
         )
 
+        # In local mode the user owns everything, so all apps are deletable.
+        is_deletable = bool(scoped_meta) or identity.mode == "local"
+
         out.append(
             AppDescriptor(
                 id=app_id,
                 graph_id=graph_id,
-                deletable=bool(scoped_meta),
+                deletable=is_deletable,
                 slash_commands=meta.get("slash_commands") or [],
                 input_schema=input_schema,
                 meta=meta,
@@ -124,10 +127,12 @@ async def get_app(
     # If metadata exists in caller scope (not just global), allow delete UI.
     scoped_meta = reg.get_meta(nspace="app", name=app_id, include_global=False)
 
+    is_deletable = bool(scoped_meta) or identity.mode == "local"
+
     return AppDescriptor(
         id=meta.get("id", app_id),
         graph_id=graph_id,
-        deletable=bool(scoped_meta),
+        deletable=is_deletable,
         slash_commands=meta.get("slash_commands") or [],
         input_schema=input_schema,
         meta=meta,
@@ -207,14 +212,15 @@ async def delete_app(
         include_global=False,
     )
     if not scoped_meta:
-        # Exists globally (or under another tenant), but not owned by this identity.
         any_meta = reg.get_meta(nspace="app", name=app_id, include_global=True)
-        if any_meta:
+        if not any_meta:
+            raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
+        # In local mode the user owns everything — allow deleting global apps.
+        if identity.mode != "local":
             raise HTTPException(
                 status_code=403,
                 detail="App exists but cannot be deleted by this identity.",
             )
-        raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
     result = await reg.delete_registered_app(app_id=app_id)
     if not result.success:

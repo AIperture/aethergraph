@@ -129,6 +129,27 @@ class AppSettings(BaseSettings):
     # top-level for workspace root
     root: str = "./aethergraph_data"
 
+    # Deployment mode controls identity resolution and tenant scoping.
+    #
+    #   "local" (default / OSS):
+    #       All requests resolve to a single local identity. No tenant
+    #       isolation. CLI, scripts, and the UI all share the same view
+    #       of runs, apps, and artifacts. X-Client-ID is recorded but
+    #       does not create separate scopes.
+    #
+    #   "demo":
+    #       Multi-tenant demo. Each browser gets isolated via X-Client-ID
+    #       (user_id="demo:<client_id>"). Rate limits are enforced.
+    #       Useful for hosted public demos where multiple users share
+    #       one server but should not see each other's runs.
+    #
+    #   "cloud":
+    #       Production. Expects an auth gateway to inject X-User-ID and
+    #       X-Org-ID headers. Full tenant isolation and RBAC.
+    #
+    # Set via env: AETHERGRAPH_DEPLOY_MODE=demo
+    deploy_mode: Literal["local", "demo", "cloud"] = "local"
+
     rate_limit: RateLimitSettings = RateLimitSettings()
     logging: LoggingSettings = LoggingSettings()
     slack: SlackSettings = SlackSettings()

@@ -368,6 +368,16 @@ class RegistrationService:
         module.__dict__["__aethergraph_source_name__"] = filename or source_ref or module_name
         sys.modules[module_name] = module
         # Force decorators in source (e.g. @graphify/@graph_fn) to bind to this service registry.
+        #
+        # TODO(cloud): In cloud/multi-tenant mode, exec() here relies on
+        # sys.path being set up so the source file's imports resolve.
+        # Currently the ``serve`` command permanently adds --project-root
+        # to sys.path, which is fine for local/OSS but unsafe for cloud:
+        #   - Different tenants may register files from different project roots.
+        #   - A tenant's project root could shadow stdlib or other tenants' modules.
+        # For cloud mode, accept an optional ``project_root`` in the registration
+        # payload and temporarily add it to sys.path here (like GraphLoader's
+        # _temp_sys_path), scoped to this exec() call only.
         with use_services(SimpleNamespace(registry=self.registry)):
             exec(compile(source, filename or source_ref or module_name, "exec"), module.__dict__)
 

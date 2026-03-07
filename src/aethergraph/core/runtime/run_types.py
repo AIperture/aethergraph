@@ -25,6 +25,8 @@ class RunOrigin(str, Enum):
     api = "api"  # launched from an API call
     system = "system"  # launched from a system process (internal maintenance, cron job, etc.)
     schedule = "schedule"  # launched from a time-based trigger
+    cli = "cli"  # launched from the CLI (python -m aethergraph run)
+    local = "local"  # launched locally via runner.run() in scripts
 
 
 class RunVisibility(str, Enum):

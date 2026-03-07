@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import threading
 from typing import Any, Literal
@@ -110,6 +111,21 @@ class SqliteArtifactIndexSync:
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_artifacts_session ON artifacts(session_id, created_at)"
         )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_run_created ON artifacts(run_id, created_at)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_session_created ON artifacts(session_id, created_at)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_kind_created ON artifacts(kind, created_at)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_pinned_created ON artifacts(pinned, created_at)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_org_user_created ON artifacts(org_id, user_id, created_at)"
+        )
 
         self._conn.commit()
 
@@ -132,6 +148,9 @@ class SqliteArtifactIndexSync:
                     out.append(s)
             return out
         return []
+
+    def _normalize_label_scalar(self, value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value))
 
     def _artifact_has_tags(self, art: Artifact, required: list[str]) -> bool:
         """
@@ -267,6 +286,7 @@ class SqliteArtifactIndexSync:
         *,
         kind: str | None = None,
         labels: dict[str, Any] | None = None,
+        pinned: bool | None = None,
         metric: str | None = None,
         mode: Literal["max", "min"] | None = None,
         limit: int | None = None,
@@ -294,6 +314,10 @@ class SqliteArtifactIndexSync:
             where.append("kind = ?")
             params.append(kind)
 
+        if pinned is not None:
+            where.append("pinned = ?")
+            params.append(int(bool(pinned)))
+
         TENANT_KEYS = {
             "org_id": "org_id",
             "user_id": "user_id",
@@ -315,16 +339,19 @@ class SqliteArtifactIndexSync:
 
                 if k in TENANT_KEYS:
                     col = TENANT_KEYS[k]
-                    sv = str(v)
-                    where.append(f"({col} = ? OR labels_json LIKE ?)")
-                    params.append(sv)
-                    params.append(f'%"{k}": "{sv}"%')
+                    where.append(f"{col} = ?")
+                    params.append(str(v))
                     continue
 
                 labels_for_sql[k] = v
 
         # Non-tag label filters still go through JSON LIKE
         for k, v in labels_for_sql.items():
+            if k == "scope_id":
+                sv = self._normalize_label_scalar(v)
+                where.append("labels_json LIKE ?")
+                params.append(f'%"{k}": "{sv}"%')
+                continue
             where.append("labels_json LIKE ?")
             params.append(f'%"{k}": "{v}"%')
 
