@@ -14,6 +14,24 @@ if TYPE_CHECKING:
 class DistillationMixin:
     """Methods for memory summarization and distillation."""
 
+    def _summary_matches_scope_id(
+        self: MemoryFacadeProtocol,
+        evt: Event,
+        *,
+        scope_id: str | None,
+    ) -> bool:
+        if scope_id is None:
+            return True
+
+        if getattr(evt, "scope_id", None) == scope_id:
+            return True
+
+        data = getattr(evt, "data", None)
+        if isinstance(data, dict) and data.get("scope_id") == scope_id:
+            return True
+
+        return False
+
     async def _collect_events_for_distillation(
         self: MemoryFacadeProtocol,
         *,
@@ -421,30 +439,17 @@ class DistillationMixin:
         Returns:
             dict[str, Any] | None: The most recent summary as a dictionary, or None if no summary is found.
         """
-        scope_id = scope_id or self.memory_scope_id
-
-        events = await self.recent_persisted(
-            kinds=[summary_kind],
-            tags=["summary", summary_tag],
+        summaries = await self.load_recent_summaries(
+            summary_tag=summary_tag,
+            summary_kind=summary_kind,
             limit=1,
+            scope_id=scope_id,
             level=level,
         )
-        if not events:
+        if not summaries:
             return None
 
-        evt = events[-1]
-        # Prefer structured data
-        if evt.data:
-            return evt.data  # type: ignore[return-value]
-
-        # Fallback: reconstruct from text
-        return {
-            "summary": evt.text or "",
-            "summary_kind": summary_kind,
-            "summary_tag": summary_tag,
-            "event_id": evt.event_id,
-            "ts": evt.ts,
-        }
+        return summaries[-1]
 
     async def load_recent_summaries(
         self,
@@ -452,6 +457,7 @@ class DistillationMixin:
         summary_tag: str = "session",
         limit: int = 3,
         summary_kind: str = "long_term_summary",
+        scope_id: str | None = None,
         level: ScopeLevel | None = "scope",
     ) -> list[dict[str, Any]]:
         """
@@ -487,18 +493,27 @@ class DistillationMixin:
         Returns:
             list[dict[str, Any]]: A list of summary dictionaries, ordered from oldest to newest.
         """
+        fetch_limit = limit
+        if scope_id is not None:
+            fetch_limit = max(limit * 5, 20)
+
         events: list[Event] = await self.recent_persisted(
             kinds=[summary_kind],
             tags=["summary", summary_tag],
-            limit=limit,
+            limit=fetch_limit,
             level=level,
         )
 
         if not events:
             return []
 
+        if scope_id is not None:
+            events = [e for e in events if self._summary_matches_scope_id(e, scope_id=scope_id)]
+            if not events:
+                return []
+
         # Ensure chronological order
-        events = sorted(events, key=lambda e: e.ts)
+        events = sorted(events, key=lambda e: e.ts)[-limit:]
         out: list[dict[str, Any]] = []
         for evt in events:
             if evt.data:
@@ -520,6 +535,7 @@ class DistillationMixin:
         *,
         summary_tag: str = "session",
         summary_kind: str = "long_term_summary",
+        scope_id: str | None = None,
         level: ScopeLevel | None = "scope",
     ) -> dict[str, Any] | None:
         """
@@ -551,6 +567,7 @@ class DistillationMixin:
             Appends a hydrate event to HotLog and Persistence for the current timeline.
         """
         summary: dict[str, Any] | None = await self.load_last_summary(
+            scope_id=scope_id,
             summary_tag=summary_tag,
             summary_kind=summary_kind,
             level=level,

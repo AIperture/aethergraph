@@ -435,6 +435,8 @@ class MemoryFacade(
         recent_chat_limit: int = 12,
         include_long_term: bool = True,
         summary_tag: str = "session",
+        summary_scope_id: str | None = None,
+        summary_kind: str = "long_term_summary",
         max_summaries: int = 3,
         include_recent_tools: bool = False,
         tool: str | None = None,
@@ -442,6 +444,7 @@ class MemoryFacade(
         recent_chat_tags: list[str] | None = None,
         recent_tool_tags: list[str] | None = None,
         level: ScopeLevel | None = None,
+        use_persistence: bool = False,
     ) -> dict[str, Any]:
         """
         Assemble memory context for prompts, including long-term summaries,
@@ -505,7 +508,9 @@ class MemoryFacade(
             try:
                 summaries = await self.load_recent_summaries(
                     summary_tag=summary_tag,
+                    summary_kind=summary_kind,
                     limit=max_summaries,
+                    scope_id=summary_scope_id,
                     level=level,
                 )
             except Exception:
@@ -524,20 +529,26 @@ class MemoryFacade(
             limit=recent_chat_limit,
             tags=recent_chat_tags,
             level=level,
+            use_persistence=use_persistence,
         )
 
         # 2) Recent tools
         recent_tools: list[dict[str, Any]] = []
         if include_recent_tools:
             fetch_n = tool_limit
-            if recent_tool_tags:
+            if recent_tool_tags or tool:
                 fetch_n = max(tool_limit * 5, 50)
 
-            events = await self.recent_tool_results(tool=tool, limit=fetch_n)
-
-            if recent_tool_tags:
-                want = set(recent_tool_tags)
-                events = [e for e in events if want.issubset(set(e.tags or []))]
+            events = await self.recent_events(
+                kinds=["tool_result"],
+                tags=recent_tool_tags,
+                limit=fetch_n,
+                level=level,
+                use_persistence=use_persistence,
+                return_event=True,
+            )
+            if tool is not None:
+                events = [e for e in events if getattr(e, "tool", None) == tool]
 
             # IMPORTANT: keep the most recent tool events
             events = events[-tool_limit:] if tool_limit else []

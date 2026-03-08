@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import warnings
 
 from aethergraph.contracts.services.memory import Event
+from aethergraph.services.scope.scope import ScopeLevel
 
 if TYPE_CHECKING:
     from aethergraph.contracts.services.memory import MemoryFacadeProtocol
@@ -357,7 +358,10 @@ class ChatMixin:
         include_system_summary: bool = True,
         summary_tag: str = "session",
         summary_scope_id: str | None = None,
+        summary_kind: str = "long_term_summary",
         max_summaries: int = 3,
+        level: ScopeLevel | None = "scope",
+        use_persistence: bool = False,
     ) -> dict[str, Any]:
         """
         Build a ready-to-send OpenAI-style chat message list.
@@ -412,9 +416,11 @@ class ChatMixin:
         if include_system_summary:
             try:
                 summaries = await self.load_recent_summaries(
-                    scope_id=summary_scope_id,
                     summary_tag=summary_tag,
+                    summary_kind=summary_kind,
                     limit=max_summaries,
+                    scope_id=summary_scope_id,
+                    level=level,
                 )
             except Exception:
                 summaries = []
@@ -435,7 +441,11 @@ class ChatMixin:
                 )
 
         # Append recent chat turns
-        for item in await self.recent_chat(limit=limit):
+        for item in await self.recent_chat(
+            limit=limit,
+            level=level,
+            use_persistence=use_persistence,
+        ):
             role = item["role"]
             # Map unknown roles (e.g. "tool") to "assistant" by default
             mapped_role = role if role in {"user", "assistant", "system"} else "assistant"
