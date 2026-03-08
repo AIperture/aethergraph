@@ -6,6 +6,7 @@ from typing import Any
 
 from ..execution.wait_types import WaitRequested, WaitSpec
 from ..graph.graph_refs import RESERVED_INJECTABLES
+from ..runtime.injection import resolve_node_context_param
 
 
 class DualStageTool:
@@ -61,11 +62,14 @@ def _infer_inputs_for_waitable(cls_or_inst) -> list[str]:
     # Prefer the setup(...) signature for required inputs
     target = cls_or_inst.setup if inspect.isclass(cls_or_inst) else cls_or_inst.setup
     sig = inspect.signature(target)
+    context_param = resolve_node_context_param(target)
     keys = []
     for p in sig.parameters.values():
         if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
             continue
-        if p.name in {"node", "context", "logger"}:
+        if p.name in {"self", "node", "logger"}:
+            continue
+        if p.name == context_param:
             continue
         keys.append(p.name)
     return keys

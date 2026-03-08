@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from typing import Any, TypedDict
 
 GRAPH_INPUTS_NODE_ID = "__graph_inputs__"  # special node_id for graph inputs
-RESERVED_INJECTABLES = {"resume", "context", "self"}
+RESERVED_INJECTABLES = {"resume", "context", "ctx", "self"}
 
 
 REF_TYPE = "ref"

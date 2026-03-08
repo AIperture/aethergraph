@@ -22,6 +22,7 @@ from aethergraph.services.registry.agent_app_meta import (
 )
 
 from ..execution.retry_policy import RetryPolicy
+from ..runtime.injection import pop_explicit_node_context, resolve_node_context_param
 from ..runtime.runtime_env import RuntimeEnv
 from ..runtime.runtime_registry import current_registry  # ContextVar accessor
 from .graph_builder import graph  # context manager
@@ -53,6 +54,7 @@ class GraphFunction:
         self.last_memory_snapshot = None
         self.agent_id = agent_id
         self.app_id = app_id
+        self._node_context_param = resolve_node_context_param(fn)
 
     async def run(
         self,
@@ -64,19 +66,17 @@ class GraphFunction:
     ):
         """
         Build a fresh TaskGraph and execute this function via the Interpreter.
-        If 'context' is declared in the fn signature, inject a NodeContext.
+        If a single supported NodeContext parameter is declared, inject a NodeContext.
         """
         # Build env if not provided (use runner’s builder for consistency)
         if env is None:
             from ..runtime.graph_runner import _build_env  # internal helper
 
             inherited_identity = None
-            parent_ctx = inputs.get("context")
+            env_inputs = dict(inputs)
+            parent_ctx = pop_explicit_node_context(env_inputs)
             if parent_ctx is not None:
                 inherited_identity = getattr(parent_ctx, "identity", None)
-
-            env_inputs = dict(inputs)
-            env_inputs.pop("context", None)
             env, retry, max_concurrency = await _build_env(
                 self,
                 env_inputs,
@@ -105,11 +105,11 @@ class GraphFunction:
             with RunRegistrationGuard(
                 run_id=run_id, scheduler=interp.scheduler, container=env.container
             ):
-                sig = inspect.signature(self.fn)
                 call_kwargs = dict(inputs)
-                if "context" in sig.parameters:
+                parent_ctx = pop_explicit_node_context(call_kwargs)
+                if self._node_context_param is not None:
                     # Preserve explicitly provided parent context for nested graph calls.
-                    call_kwargs["context"] = call_kwargs.get("context") or node_ctx
+                    call_kwargs[self._node_context_param] = parent_ctx or node_ctx
 
                 with interp.enter():
                     res = self.fn(**call_kwargs)
@@ -156,8 +156,8 @@ class GraphFunction:
         if self.inputs is not None:
             input_names = list(self.inputs)
         else:
-            # fallback: all params except 'context'
-            input_names = [p for p in sig.parameters if p != "context"]
+            # fallback: all params except the injected NodeContext parameter
+            input_names = [p for p in sig.parameters if p != self._node_context_param]
 
         input_slots: list[IOSlot] = []
         for name in input_names:

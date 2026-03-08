@@ -7,9 +7,9 @@ from typing import Any
 from aethergraph.contracts.services.channel import OutEvent
 from aethergraph.services.continuations.continuation import Continuation
 
-from ..graph.graph_refs import RESERVED_INJECTABLES  # {"context", "resume", "self"}
 from ..graph.task_node import NodeStatus, TaskNodeRuntime
 from ..runtime.execution_context import ExecutionContext
+from ..runtime.injection import resolve_node_context_param
 from ..runtime.node_context import NodeContext
 from .execution_guard import enter_tool_execution
 from .retry_policy import RetryPolicy
@@ -127,18 +127,15 @@ def build_call_kwargs(
         flat = {**flat, **flat["kwargs"]}
         flat.pop("kwargs", None)
 
-    # Framework injectables (authoritative)
-    inject_pool = {
-        "context": node_ctx,  # always NodeContext
-        "resume": getattr(runtime_ctx, "resume_payload", None),
-    }
+    context_param = resolve_node_context_param(logic_fn)
+    inject_pool = {"resume": getattr(runtime_ctx, "resume_payload", None)}
+    if context_param is not None:
+        inject_pool[context_param] = node_ctx
 
     merged = dict(flat)
-    for k in RESERVED_INJECTABLES:
-        if k == "self":
-            continue
-        if k in params or has_var_kw:
-            merged[k] = inject_pool.get(k)
+    for k, value in inject_pool.items():
+        if k in params or (k == "resume" and has_var_kw):
+            merged[k] = value
 
     if not has_var_kw:
         merged = {k: v for k, v in merged.items() if k in params}

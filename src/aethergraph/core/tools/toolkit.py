@@ -9,15 +9,19 @@ from ..execution.execution_guard import is_tool_execution_active
 from ..graph.graph_builder import current_builder
 from ..graph.interpreter import AwaitableResult, SimpleNS, current_interpreter
 from ..graph.node_handle import NodeHandle
+from ..runtime.injection import resolve_node_context_param
 from ..runtime.runtime_registry import current_registry
 from .waitable import DualStageTool, waitable_tool
 
 
 def _infer_inputs_from_signature(fn: Callable) -> list[str]:
     sig = inspect.signature(fn)
+    context_param = resolve_node_context_param(fn)
     keys = []
     for p in sig.parameters.values():
         if p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL):
+            continue
+        if p.name == context_param:
             continue
         keys.append(p.name)
     return keys
@@ -87,11 +91,15 @@ def tool(
         waitable = inspect.isclass(obj) and issubclass(obj, DualStageTool)
         impl = waitable_tool(obj) if waitable else obj
         sig = inspect.signature(impl)
-        declared_inputs = inputs or [
-            p.name
-            for p in sig.parameters.values()
-            if p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)
-        ]
+        declared_inputs = (
+            inputs
+            or getattr(impl, "__aether_inputs__", None)
+            or [
+                p.name
+                for p in sig.parameters.values()
+                if p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)
+            ]
+        )
         is_async = inspect.iscoroutinefunction(impl) or (
             callable(impl) and inspect.iscoroutinefunction(impl.__call__)
         )
