@@ -259,6 +259,8 @@ class ChatMixin:
         level: str | None = None,
         use_persistence: bool = False,
         return_event: bool = False,
+        include_tags: bool = True,
+        include_ts: bool = True,
     ) -> list[Any]:
         """
         Retrieve the most recent chat turns as a normalized list.
@@ -290,6 +292,10 @@ class ChatMixin:
             level: Optional scope level to filter events by (e.g., "session", "run", "user", "org"). If provided, the search will be constrained to events associated with the specified scope level.
             use_persistence: Whether to include events from the full persistence layer (True) or just the hotlog (False). Defaults to False.
             return_event: If True, return `Event` objects; otherwise normalized chat dicts.
+            include_tags: When returning normalized dicts, include the `"tags"` key.
+                Defaults to True.
+            include_ts: When returning normalized dicts, include the `"ts"` key.
+                Defaults to True.
 
         Returns:
             list[Any]: Event list when `return_event=True`, else dictionaries
@@ -338,14 +344,15 @@ class ChatMixin:
             if not raw_text and getattr(e, "data", None):
                 raw_text = (e.data or {}).get("text", "") or ""
 
-            out.append(
-                {
-                    "ts": getattr(e, "ts", None),
-                    "role": role,
-                    "text": raw_text,
-                    "tags": list(e.tags or []),
-                }
-            )
+            item: dict[str, Any] = {
+                "role": role,
+                "text": raw_text,
+            }
+            if include_ts:
+                item["ts"] = getattr(e, "ts", None)
+            if include_tags:
+                item["tags"] = list(e.tags or [])
+            out.append(item)
 
         # events from recent_events should already be <= limit and chronological;
         # this slice is safe but technically redundant
@@ -445,6 +452,8 @@ class ChatMixin:
             limit=limit,
             level=level,
             use_persistence=use_persistence,
+            include_tags=False,
+            include_ts=False,
         ):
             role = item["role"]
             # Map unknown roles (e.g. "tool") to "assistant" by default
