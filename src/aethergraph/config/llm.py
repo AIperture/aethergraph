@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, SecretStr
 
 from aethergraph.services.llm.providers import Provider
@@ -30,10 +32,19 @@ class LLMProfile(BaseModel):
     )
 
 
+class LLMObservabilitySettings(BaseModel):
+    enabled: bool = True
+    sink: Literal["console", "file"] = "console"
+    path: str = "events/llm/llm_calls.jsonl"
+    capture_mode: Literal["metadata", "full"] = "full"
+    prompt_view: Literal["off", "compact", "truncated", "full"] = "compact"
+
+
 class LLMSettings(BaseModel):
     enabled: bool = True
     default: LLMProfile = LLMProfile()
     profiles: dict[str, LLMProfile] = Field(default_factory=dict)
+    observability: LLMObservabilitySettings = LLMObservabilitySettings()
 
 
 class EmbeddingProfile(BaseModel):

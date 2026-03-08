@@ -21,6 +21,11 @@ from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
+from aethergraph.services.llm.observability import (
+    CaptureMode,
+    LLMObservationRecord,
+    LLMObservationSink,
+)
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     ImageFormat,
@@ -92,6 +97,9 @@ class GenericLLMClient(
         # thinking / reasoning
         thinking_budget: int | None = None,
         reasoning_summary: str | None = None,
+        # observability
+        observation_sink: LLMObservationSink | None = None,
+        observation_capture_mode: CaptureMode = "full",
     ):
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
@@ -135,6 +143,8 @@ class GenericLLMClient(
         # Thinking / reasoning config
         self.thinking_budget = thinking_budget
         self.reasoning_summary = reasoning_summary
+        self.observation_sink = observation_sink
+        self.observation_capture_mode = observation_capture_mode
 
     # ---------------- internal helpers for metering ----------------
     @staticmethod
@@ -210,6 +220,21 @@ class GenericLLMClient(
                 "Consider simplifying the graph or raising the limit."
             )
 
+    def _current_dimensions(self) -> dict[str, Any]:
+        ctx = current_meter_context.get()
+        return {
+            "user_id": ctx.get("user_id"),
+            "org_id": ctx.get("org_id"),
+            "run_id": ctx.get("run_id"),
+            "graph_id": ctx.get("graph_id"),
+            "session_id": ctx.get("session_id"),
+            "app_id": ctx.get("app_id"),
+            "agent_id": ctx.get("agent_id"),
+            "node_id": ctx.get("node_id"),
+            "trace_id": ctx.get("trace_id"),
+            "span_id": ctx.get("span_id"),
+        }
+
     async def _record_llm_usage(
         self,
         *,
@@ -219,16 +244,13 @@ class GenericLLMClient(
     ) -> None:
         self.metering = self.metering or current_metering()
         prompt_tokens, completion_tokens = self._normalize_usage(usage)
-        ctx = current_meter_context.get()
-        user_id = ctx.get("user_id")
-        org_id = ctx.get("org_id")
-        run_id = ctx.get("run_id")
+        dims = self._current_dimensions()
 
         try:
             await self.metering.record_llm(
-                user_id=user_id,
-                org_id=org_id,
-                run_id=run_id,
+                user_id=dims.get("user_id"),
+                org_id=dims.get("org_id"),
+                run_id=dims.get("run_id"),
                 model=model,
                 provider=self.provider,
                 prompt_tokens=prompt_tokens,
@@ -239,6 +261,51 @@ class GenericLLMClient(
             # Never fail the LLM call due to metering issues
             logger = logging.getLogger("aethergraph.services.llm.generic_client")
             logger.warning(f"llm_metering_failed: {e}")
+
+    def _build_observation_record(
+        self,
+        *,
+        call_type: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+        validate_json: bool,
+        extra_params: dict[str, Any],
+        trace_payload: dict[str, Any] | None,
+    ) -> LLMObservationRecord:
+        return LLMObservationRecord.new(
+            call_type=call_type,
+            provider=self.provider,
+            model=model,
+            dimensions=self._current_dimensions(),
+            messages=messages,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            extra_params=extra_params,
+            trace_payload=trace_payload,
+        )
+
+    async def _emit_observation(self, record: LLMObservationRecord) -> None:
+        if self.observation_sink is None:
+            return
+        try:
+            await self.observation_sink.emit(
+                record,
+                capture_mode=self.observation_capture_mode,
+            )
+        except Exception as exc:
+            logger = logging.getLogger("aethergraph.services.llm.generic_client")
+            logger.warning(f"llm_observability_failed: {exc}")
 
     async def _ensure_client(self):
         loop = asyncio.get_running_loop()
@@ -323,13 +390,11 @@ class GenericLLMClient(
         """
         await self._ensure_client()
         model = kw.pop("model", self.model)
-
-        start = time.perf_counter()
-
-        # Provider-specific call (now symmetric)
-        text, usage = await self._chat_dispatch(
-            messages,
+        trace_payload = kw.pop("trace_payload", None)
+        observation_record = self._build_observation_record(
+            call_type="chat",
             model=model,
+            messages=messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,
@@ -337,32 +402,58 @@ class GenericLLMClient(
             schema_name=schema_name,
             strict_schema=strict_schema,
             validate_json=validate_json,
-            fail_on_unsupported=fail_on_unsupported,
-            **kw,
+            extra_params=kw,
+            trace_payload=trace_payload,
         )
 
-        # JSON postprocessing/validation is centralized here (consistent behavior)
-        text = self._postprocess_structured_output(
-            text=text,
-            output_format=output_format,
-            json_schema=json_schema,
-            strict_schema=strict_schema,
-            validate_json=validate_json,
-        )
+        start = time.perf_counter()
+        try:
+            # Provider-specific call (now symmetric)
+            text, usage = await self._chat_dispatch(
+                messages,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
+                output_format=output_format,
+                json_schema=json_schema,
+                schema_name=schema_name,
+                strict_schema=strict_schema,
+                validate_json=validate_json,
+                fail_on_unsupported=fail_on_unsupported,
+                **kw,
+            )
 
-        latency_ms = int((time.perf_counter() - start) * 1000)
+            # JSON postprocessing/validation is centralized here (consistent behavior)
+            text = self._postprocess_structured_output(
+                text=text,
+                output_format=output_format,
+                json_schema=json_schema,
+                strict_schema=strict_schema,
+                validate_json=validate_json,
+            )
 
-        # Enforce rate limits (existing)
-        self._enforce_llm_limits_for_run(usage=usage)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.raw_text = text
+            observation_record.usage = usage or {}
+            observation_record.latency_ms = latency_ms
 
-        # Metering (existing)
-        await self._record_llm_usage(
-            model=model,
-            usage=usage,
-            latency_ms=latency_ms,
-        )
+            # Enforce rate limits (existing)
+            self._enforce_llm_limits_for_run(usage=usage)
 
-        return text, usage
+            # Metering (existing)
+            await self._record_llm_usage(
+                model=model,
+                usage=usage,
+                latency_ms=latency_ms,
+            )
+            await self._emit_observation(observation_record)
+            return text, usage
+        except Exception as exc:
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.error_type = type(exc).__name__
+            observation_record.error_message = str(exc)
+            await self._emit_observation(observation_record)
+            raise
 
     # ================================================================
     # chat_stream() — streaming with thinking/reasoning support
@@ -446,6 +537,21 @@ class GenericLLMClient(
 
         await self._ensure_client()
         model = kw.pop("model", self.model)
+        trace_payload = kw.pop("trace_payload", None)
+        observation_record = self._build_observation_record(
+            call_type="chat_stream",
+            model=model,
+            messages=messages,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            extra_params=kw,
+            trace_payload=trace_payload,
+        )
         start = time.perf_counter()
 
         # Resolve thinking config: omitted -> profile default, explicit value -> per-call override.
@@ -456,68 +562,78 @@ class GenericLLMClient(
         if isinstance(_thinking_budget, int) and _thinking_budget <= 0:
             _thinking_budget = None
 
-        if self.provider == "openai":
-            text, usage = await self._chat_openai_responses_stream(
-                messages,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                reasoning_summary=_reasoning_summary,
-                max_output_tokens=max_output_tokens,
+        try:
+            if self.provider == "openai":
+                text, usage = await self._chat_openai_responses_stream(
+                    messages,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    reasoning_summary=_reasoning_summary,
+                    max_output_tokens=max_output_tokens,
+                    output_format=output_format,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    strict_schema=strict_schema,
+                    fail_on_unsupported=fail_on_unsupported,
+                    on_delta=on_delta,
+                    on_thinking_delta=on_thinking_delta,
+                    **kw,
+                )
+            elif self.provider == "anthropic":
+                text, usage = await self._chat_anthropic_messages_stream(
+                    messages,
+                    model=model,
+                    thinking_budget=_thinking_budget,
+                    max_output_tokens=max_output_tokens,
+                    output_format=output_format,
+                    json_schema=json_schema,
+                    fail_on_unsupported=fail_on_unsupported,
+                    on_delta=on_delta,
+                    on_thinking_delta=on_thinking_delta,
+                    **kw,
+                )
+            else:
+                text, usage = await self._chat_dispatch(
+                    messages,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                    output_format=output_format,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    strict_schema=strict_schema,
+                    validate_json=validate_json,
+                    fail_on_unsupported=fail_on_unsupported,
+                    **kw,
+                )
+                if on_delta is not None and text:
+                    await on_delta(text)
+
+            # Postprocess (JSON modes etc.)
+            text = self._postprocess_structured_output(
+                text=text,
                 output_format=output_format,
                 json_schema=json_schema,
-                schema_name=schema_name,
-                strict_schema=strict_schema,
-                fail_on_unsupported=fail_on_unsupported,
-                on_delta=on_delta,
-                on_thinking_delta=on_thinking_delta,
-                **kw,
-            )
-        elif self.provider == "anthropic":
-            text, usage = await self._chat_anthropic_messages_stream(
-                messages,
-                model=model,
-                thinking_budget=_thinking_budget,
-                max_output_tokens=max_output_tokens,
-                output_format=output_format,
-                json_schema=json_schema,
-                fail_on_unsupported=fail_on_unsupported,
-                on_delta=on_delta,
-                on_thinking_delta=on_thinking_delta,
-                **kw,
-            )
-        else:
-            # Fallback: just call normal chat() and send a single delta.
-            text, usage = await self.chat(
-                messages,
-                reasoning_effort=reasoning_effort,
-                max_output_tokens=max_output_tokens,
-                output_format=output_format,
-                json_schema=json_schema,
-                schema_name=schema_name,
                 strict_schema=strict_schema,
                 validate_json=validate_json,
-                fail_on_unsupported=fail_on_unsupported,
-                **kw,
             )
-            if on_delta is not None and text:
-                await on_delta(text)
 
-        # Postprocess (JSON modes etc.)
-        text = self._postprocess_structured_output(
-            text=text,
-            output_format=output_format,
-            json_schema=json_schema,
-            strict_schema=strict_schema,
-            validate_json=validate_json,
-        )
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.raw_text = text
+            observation_record.usage = usage or {}
+            observation_record.latency_ms = latency_ms
 
-        latency_ms = int((time.perf_counter() - start) * 1000)
-
-        # Rate limits + metering as usual
-        self._enforce_llm_limits_for_run(usage=usage)
-        await self._record_llm_usage(model=model, usage=usage, latency_ms=latency_ms)
-
-        return text, usage
+            # Rate limits + metering as usual
+            self._enforce_llm_limits_for_run(usage=usage)
+            await self._record_llm_usage(model=model, usage=usage, latency_ms=latency_ms)
+            await self._emit_observation(observation_record)
+            return text, usage
+        except Exception as exc:
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.error_type = type(exc).__name__
+            observation_record.error_message = str(exc)
+            await self._emit_observation(observation_record)
+            raise
 
     # ================================================================
     # Dispatch + postprocessing

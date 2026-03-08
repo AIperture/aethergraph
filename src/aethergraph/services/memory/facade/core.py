@@ -443,6 +443,8 @@ class MemoryFacade(
         tool_limit: int = 10,
         recent_chat_tags: list[str] | None = None,
         recent_tool_tags: list[str] | None = None,
+        recent_chat_include_tags: bool = True,
+        recent_chat_include_ts: bool = True,
         level: ScopeLevel | None = None,
         use_persistence: bool = False,
     ) -> dict[str, Any]:
@@ -528,6 +530,8 @@ class MemoryFacade(
         recent_chat = await self.recent_chat(
             limit=recent_chat_limit,
             tags=recent_chat_tags,
+            include_tags=recent_chat_include_tags,
+            include_ts=recent_chat_include_ts,
             level=level,
             use_persistence=use_persistence,
         )

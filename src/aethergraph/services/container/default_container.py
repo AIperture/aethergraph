@@ -54,6 +54,7 @@ from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBack
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
+from aethergraph.services.llm.observability import ConsoleLLMObservationSink, JsonlLLMObservationSink
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -332,7 +333,24 @@ def build_default_container(
     secrets = (
         EnvSecrets()
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
-    llm_clients = build_llm_clients(cfg.llm, secrets)  # return {profile: GenericLLMClient}
+    obs_cfg = cfg.llm.observability
+    llm_observation_sink = None
+    if obs_cfg.enabled:
+        if obs_cfg.sink == "console":
+            llm_observation_sink = ConsoleLLMObservationSink(prompt_view=obs_cfg.prompt_view)
+        elif obs_cfg.sink == "file":
+            obs_path = Path(obs_cfg.path)
+            if not obs_path.is_absolute():
+                obs_path = root_p / obs_path
+            llm_observation_sink = JsonlLLMObservationSink(obs_path)
+        else:
+            raise ValueError(f"Unsupported LLM observability sink: {obs_cfg.sink!r}")
+    llm_clients = build_llm_clients(
+        cfg.llm,
+        secrets,
+        observation_sink=llm_observation_sink,
+        observation_capture_mode=obs_cfg.capture_mode,
+    )  # return {profile: GenericLLMClient}
     llm_service = LLMService(clients=llm_clients) if llm_clients else None
 
     embed_clients = build_embedding_clients(
