@@ -908,10 +908,18 @@ class ChannelSession:
         channel: str | None,
         timeout_s: int,
     ) -> dict:
+        resumed = self._take_matching_resume_payload(kind=kind, expected_payload=payload)
+        if resumed is not None:
+            return resumed
+
         ch_key = self._resolve_key(channel)
+        cont_payload = {
+            "_channel_wait_kind": kind,
+            **payload,
+        }
         # 1) Create continuation (with audit/security)
         cont = await self.ctx.create_continuation(
-            channel=ch_key, kind=kind, payload=payload, deadline_s=timeout_s
+            channel=ch_key, kind=kind, payload=cont_payload, deadline_s=timeout_s
         )
         # 2) PREPARE the wait future BEFORE notifying (prevents race)
         fut = self.ctx.prepare_wait_for_resume(cont.token)
@@ -959,6 +967,43 @@ class ChannelSession:
 
         # 6) Await the already-prepared future (router will resolve it later)
         return await fut
+
+    def _take_matching_resume_payload(
+        self,
+        *,
+        kind: str,
+        expected_payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """
+        Consume a replay resume payload when this node is being re-entered after a
+        scheduler-backed resume.
+
+        Cooperative waits normally suspend on an in-process Future, but after a replay
+        the node body can be re-executed with `context.resume_payload` already attached.
+        In that case we should return the payload directly instead of minting a fresh
+        continuation and waiting again.
+        """
+        if getattr(self.ctx, "_channel_resume_payload_consumed", False):
+            return None
+
+        resume_payload = getattr(self.ctx, "resume_payload", None)
+        if not isinstance(resume_payload, dict) or not resume_payload:
+            return None
+
+        resume_kind = resume_payload.get("_channel_wait_kind")
+        if resume_kind is not None and resume_kind != kind:
+            return None
+
+        expected_prompt = expected_payload.get("prompt")
+        if "prompt" in resume_payload and resume_payload.get("prompt") != expected_prompt:
+            return None
+
+        for key in ("accept", "multiple"):
+            if key in expected_payload and resume_payload.get(key) != expected_payload.get(key):
+                return None
+
+        setattr(self.ctx, "_channel_resume_payload_consumed", True)
+        return resume_payload
 
     # ------------------ Public ask_* APIs (race-free, normalized) ------------------
     async def ask_text(

@@ -91,6 +91,8 @@ class FakeContainer:
         self.resume_router = FakeResumeRouter()
         self.logger = FakeLogger()
         self.eventlog = FakeEventLog()
+        self.wait_registry = None
+        self.sched_registry = None
         # channel_ingress will be set after ChannelIngress is constructed
 
 
@@ -198,3 +200,34 @@ async def test_run_channel_incoming_multipart_with_attachments_json():
     assert payload["text"] == "use attached context"
     assert payload["attachments"][0]["artifact_id"] == "art-1"
     assert payload["attachments"][0]["kind"] == "artifact"
+
+
+@pytest.mark.asyncio
+async def test_run_channel_incoming_drops_stale_continuation_without_live_resume_target():
+    cont = Continuation(
+        run_id="run-xyz",
+        node_id="node-abc",
+        token="tok-123",
+        kind="user_input",
+        channel="ui:run/run-xyz",
+        prompt="Say something",
+    )
+    container = FakeContainer(cont=cont)
+    app = build_app_with_container(container)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/runs/run-xyz/channel/incoming",
+        json={
+            "text": "hello from ui",
+            "meta": {
+                "foo": "bar",
+                "_drop_stale_continuation": True,
+            },
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["resumed"] is False
+    assert container.resume_router.calls == []
