@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import json
+import traceback
 from typing import Any
 from uuid import uuid4
 
@@ -317,6 +318,23 @@ class RunManager:
             record.status = RunStatus.canceled
             record.finished_at = _utcnow()
             error_msg = "Run cancelled by user"
+            record.error = error_msg
+            record.meta["error_kind"] = "cancellation"
+            record.meta["error_code"] = "run_cancelled"
+            record.meta["error_stage"] = "run_execution"
+            record.meta["error_hints"] = []
+            record.meta["error_message"] = error_msg
+            record.meta["error_detail"] = None
+            record.meta["error_is_traceback"] = False
+            record.meta["error_info"] = {
+                "message": error_msg,
+                "detail": None,
+                "kind": "cancellation",
+                "stage": "run_execution",
+                "code": "run_cancelled",
+                "hints": [],
+                "is_traceback": False,
+            }
             logging.getLogger("aethergraph.runtime.run_manager").info(
                 "Run %s was cancelled", record.run_id
             )
@@ -338,6 +356,17 @@ class RunManager:
             record.meta["error_stage"] = exc.stage
             record.meta["error_hints"] = list(exc.hints or [])
             record.meta["error_message"] = error_msg
+            record.meta["error_detail"] = traceback.format_exc()
+            record.meta["error_is_traceback"] = True
+            record.meta["error_info"] = {
+                "message": error_msg,
+                "detail": record.meta["error_detail"],
+                "kind": "build",
+                "stage": exc.stage,
+                "code": exc.code,
+                "hints": list(exc.hints or []),
+                "is_traceback": True,
+            }
             import logging
 
             logging.getLogger("aethergraph.runtime.run_manager").exception(
@@ -354,6 +383,17 @@ class RunManager:
             record.meta["error_stage"] = None
             record.meta["error_hints"] = []
             record.meta["error_message"] = error_msg
+            record.meta["error_detail"] = traceback.format_exc()
+            record.meta["error_is_traceback"] = True
+            record.meta["error_info"] = {
+                "message": error_msg,
+                "detail": record.meta["error_detail"],
+                "kind": "runtime",
+                "stage": "run_execution",
+                "code": exc.__class__.__name__,
+                "hints": [],
+                "is_traceback": True,
+            }
             import logging
 
             logging.getLogger("aethergraph.runtime.run_manager").exception(

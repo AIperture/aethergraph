@@ -69,6 +69,7 @@ def _state_to_json(state_obj) -> dict[str, Any]:
                 "status": _enum_name_or_str(getattr(ns, "status", "PENDING")),
                 "outputs": getattr(ns, "outputs", None),
                 "error": getattr(ns, "error", None),
+                "error_info": getattr(ns, "error_info", None),
                 "attempts": getattr(ns, "attempts", 0),
                 "next_wakeup_at": getattr(ns, "next_wakeup_at", None),
                 "wait_token": getattr(ns, "wait_token", None),

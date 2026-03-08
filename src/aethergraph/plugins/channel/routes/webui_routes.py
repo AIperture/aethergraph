@@ -439,7 +439,10 @@ async def session_chat_incoming(
             text=text,
             files=incoming_files or None,
             attachments=attachments or None,
-            meta=meta,
+            meta={
+                **meta,
+                "_drop_stale_continuation": True,
+            },
         )
     )
 

@@ -24,6 +24,39 @@ from .schemas.runs import (
     RunSummary,
 )
 
+
+def _build_error_info(payload: Any, fallback_message: str | None = None):
+    if payload is None:
+        if not fallback_message:
+            return None
+        payload = {"message": fallback_message}
+    if isinstance(payload, dict):
+        message = payload.get("message") or fallback_message
+        detail = payload.get("detail")
+        if not message and not detail:
+            return None
+        return {
+            "message": message or "Run failed",
+            "detail": detail,
+            "kind": payload.get("kind"),
+            "stage": payload.get("stage"),
+            "code": payload.get("code"),
+            "hints": list(payload.get("hints") or []),
+            "is_traceback": bool(payload.get("is_traceback", False)),
+        }
+    if fallback_message or payload:
+        return {
+            "message": fallback_message or str(payload),
+            "detail": None,
+            "kind": None,
+            "stage": None,
+            "code": None,
+            "hints": [],
+            "is_traceback": False,
+        }
+    return None
+
+
 router = APIRouter(tags=["runs"])
 
 
@@ -367,6 +400,7 @@ async def get_run_snapshot(
             finished_at = _coerce_ts_to_dt(st.get("finished_at"))
             outputs = st.get("outputs")
             error = st.get("error")
+            error_info = _build_error_info(st.get("error_info"), error)
 
             nodes.append(
                 NodeSnapshot(
@@ -377,6 +411,7 @@ async def get_run_snapshot(
                     finished_at=finished_at,
                     outputs=outputs,
                     error=error,
+                    error_info=error_info,
                 )
             )
 
@@ -385,6 +420,7 @@ async def get_run_snapshot(
             graph_id=graph_id,
             nodes=nodes,
             edges=edges,
+            run_error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
             graph_kind=graph_kind,
             flow_id=flow_id,
             entrypoint=entrypoint,
@@ -398,6 +434,7 @@ async def get_run_snapshot(
             finished_at = _coerce_ts_to_dt(st.get("finished_at"))
             outputs = st.get("outputs")
             error = st.get("error")
+            error_info = _build_error_info(st.get("error_info"), error)
 
             nodes.append(
                 NodeSnapshot(
@@ -408,6 +445,7 @@ async def get_run_snapshot(
                     finished_at=finished_at,
                     outputs=outputs,
                     error=error,
+                    error_info=error_info,
                 )
             )
 
@@ -416,6 +454,7 @@ async def get_run_snapshot(
             graph_id=graph_id,
             nodes=nodes,
             edges=edges,
+            run_error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
             graph_kind=graph_kind,
             flow_id=flow_id,
             entrypoint=entrypoint,
@@ -430,12 +469,14 @@ async def get_run_snapshot(
         finished_at=rec.finished_at,
         outputs=None,
         error=rec.error,
+        error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
     )
     return RunSnapshot(
         run_id=rec.run_id,
         graph_id=graph_id,
         nodes=[node],
         edges=[],
+        run_error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
         graph_kind=graph_kind,
         flow_id=flow_id,
         entrypoint=entrypoint,

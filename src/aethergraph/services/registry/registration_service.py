@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from hashlib import sha1, sha256
+import linecache
 from pathlib import Path
 import sys
 import types
@@ -58,6 +59,18 @@ class DeletionResult:
 
 def _normalize_tenant(tenant: TenantIdentity) -> dict[str, str | None] | None:
     return normalize_registry_tenant(tenant)
+
+
+def _resolve_registration_display_name(
+    *, source_kind: str, source_ref: str, filename: str | None, module_name: str
+) -> str:
+    if source_kind == "file":
+        return source_ref or filename or module_name
+    if source_kind == "artifact":
+        if filename:
+            return f"artifact:{filename}"
+        return source_ref or module_name
+    return filename or source_ref or module_name
 
 
 class RegistrationService:
@@ -130,7 +143,18 @@ class RegistrationService:
                 errors=["artifact_id or uri is required"],
             )
 
+        derived_filename: str | None = Path(uri).name if uri else None
         try:
+            if artifact_id and self.artifact_index is not None:
+                art = await self.artifact_index.get(artifact_id)
+                if art is not None:
+                    labels = art.labels or {}
+                    derived_filename = (
+                        labels.get("filename")
+                        or labels.get("name")
+                        or derived_filename
+                        or (Path(art.uri).name if art.uri else None)
+                    )
             source_uri = await self._resolve_artifact_uri(artifact_id=artifact_id, uri=uri)
             source = await self.artifact_store.load_text(source_uri)
         except Exception as e:
@@ -147,7 +171,7 @@ class RegistrationService:
             source=source,
             source_kind="artifact",
             source_ref=source_ref,
-            filename=(Path(uri).name if uri else None),
+            filename=derived_filename,
             app_config=app_config,
             agent_config=agent_config,
             tenant=tenant,
@@ -362,11 +386,23 @@ class RegistrationService:
         source_sha = sha256(source.encode("utf-8")).hexdigest()
         module_key = sha1(f"{source_kind}:{source_ref}:{source_sha}".encode()).hexdigest()[:12]
         module_name = f"_ag_hotload_{module_key}_{sha1(str(id(self.registry)).encode('utf-8')).hexdigest()[:8]}"
+        display_name = _resolve_registration_display_name(
+            source_kind=source_kind,
+            source_ref=source_ref,
+            filename=filename,
+            module_name=module_name,
+        )
         module = types.ModuleType(module_name)
-        module.__file__ = f"<hotload:{module_name}>"
+        module.__file__ = display_name
         module.__dict__["__aethergraph_source__"] = source
-        module.__dict__["__aethergraph_source_name__"] = filename or source_ref or module_name
+        module.__dict__["__aethergraph_source_name__"] = display_name
         sys.modules[module_name] = module
+        linecache.cache[display_name] = (
+            len(source),
+            None,
+            source.splitlines(keepends=True),
+            display_name,
+        )
         # Force decorators in source (e.g. @graphify/@graph_fn) to bind to this service registry.
         #
         # TODO(cloud): In cloud/multi-tenant mode, exec() here relies on
@@ -379,7 +415,7 @@ class RegistrationService:
         # payload and temporarily add it to sys.path here (like GraphLoader's
         # _temp_sys_path), scoped to this exec() call only.
         with use_services(SimpleNamespace(registry=self.registry)):
-            exec(compile(source, filename or source_ref or module_name, "exec"), module.__dict__)
+            exec(compile(source, display_name, "exec"), module.__dict__)
 
         tenant_norm = _normalize_tenant(tenant)
         graph_name = None

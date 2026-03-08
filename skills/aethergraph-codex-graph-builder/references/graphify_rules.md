@@ -19,7 +19,6 @@ Use this when generating or repairing `@graphify` code.
 
 ## IO Guidance
 
-- Prefer string inputs and outputs for app-facing workflows.
 - When a step produces large structured data, save it as an artifact and return its id or uri as a string output.
 - Use function annotations so registry IO typing is as accurate as possible.
 

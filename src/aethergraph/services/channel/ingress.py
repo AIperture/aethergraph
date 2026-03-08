@@ -243,6 +243,17 @@ class ChannelIngress:
 
         return cont
 
+    def _has_live_resume_target(self, cont: Continuation) -> bool:
+        waits = getattr(self.c, "wait_registry", None)
+        if waits is not None and hasattr(waits, "has") and waits.has(cont.token):
+            return True
+
+        sched_registry = getattr(self.c, "sched_registry", None)
+        if sched_registry is not None and getattr(sched_registry, "get", None):
+            return bool(sched_registry.get(cont.run_id))
+
+        return False
+
     # ---- Public method ----
     async def handle(self, msg: IncomingMessage) -> bool:
         """
@@ -260,6 +271,27 @@ class ChannelIngress:
             ch_key=ch_key,
             thread_id=msg.thread_id,
         )
+
+        drop_stale = bool((msg.meta or {}).get("_drop_stale_continuation"))
+        if drop_stale and cont and not self._has_live_resume_target(cont):
+            self._log(
+                "info",
+                "Ingress: dropping stale continuation without live waiter/scheduler",
+                channel_key=ch_key,
+                run_id=cont.run_id,
+                node_id=cont.node_id,
+            )
+            try:
+                await self.cont_store.delete(cont.run_id, cont.node_id)
+            except Exception as e:
+                self._log(
+                    "warning",
+                    f"Ingress: failed to delete stale continuation: {e}",
+                    channel_key=ch_key,
+                    run_id=cont.run_id,
+                    node_id=cont.node_id,
+                )
+            cont = None
 
         # Normalize and persist any attached files
         file_refs = []
