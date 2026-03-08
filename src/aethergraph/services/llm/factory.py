@@ -7,6 +7,7 @@ from aethergraph.config.llm import LLMProfile, LLMSettings
 
 from ..secrets.base import Secrets
 from .generic_client import GenericLLMClient
+from .observability import CaptureMode, LLMObservationSink
 from .providers import Provider
 
 
@@ -112,7 +113,13 @@ def _apply_env_overrides_to_profile(
     return p
 
 
-def client_from_profile(p: LLMProfile, secrets: Secrets) -> GenericLLMClient:
+def client_from_profile(
+    p: LLMProfile,
+    secrets: Secrets,
+    *,
+    observation_sink: LLMObservationSink | None = None,
+    observation_capture_mode: CaptureMode = "full",
+) -> GenericLLMClient:
     # At this point, _apply_env_overrides_to_profile has already filled
     # p.base_url, p.api_key, etc. as much as possible.
     api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
@@ -126,10 +133,18 @@ def client_from_profile(p: LLMProfile, secrets: Secrets) -> GenericLLMClient:
         timeout=p.timeout,
         thinking_budget=p.thinking_budget,
         reasoning_summary=p.reasoning_summary,
+        observation_sink=observation_sink,
+        observation_capture_mode=observation_capture_mode,
     )
 
 
-def build_llm_clients(cfg: LLMSettings, secrets: Secrets) -> dict[str, GenericLLMClient]:
+def build_llm_clients(
+    cfg: LLMSettings,
+    secrets: Secrets,
+    *,
+    observation_sink: LLMObservationSink | None = None,
+    observation_capture_mode: CaptureMode = "full",
+) -> dict[str, GenericLLMClient]:
     """Returns dict of {profile_name: client}, always includes 'default' if enabled."""
     if not cfg.enabled:
         return {}
@@ -142,7 +157,12 @@ def build_llm_clients(cfg: LLMSettings, secrets: Secrets) -> dict[str, GenericLL
         secrets=secrets,
     )
     clients: dict[str, GenericLLMClient] = {
-        "default": client_from_profile(default_profile, secrets)
+        "default": client_from_profile(
+            default_profile,
+            secrets,
+            observation_sink=observation_sink,
+            observation_capture_mode=observation_capture_mode,
+        )
     }
 
     # Extra profiles
@@ -153,6 +173,11 @@ def build_llm_clients(cfg: LLMSettings, secrets: Secrets) -> dict[str, GenericLL
             is_default=False,
             secrets=secrets,
         )
-        clients[name] = client_from_profile(prof, secrets)
+        clients[name] = client_from_profile(
+            prof,
+            secrets,
+            observation_sink=observation_sink,
+            observation_capture_mode=observation_capture_mode,
+        )
 
     return clients

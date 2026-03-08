@@ -44,6 +44,7 @@ class LLMService:
         Does NOT persist anything outside this process.
         """
         if profile not in self._clients:
+            template = self._clients.get("default")
             client = GenericLLMClient(
                 provider=provider,
                 model=model,
@@ -51,6 +52,10 @@ class LLMService:
                 api_key=api_key,
                 azure_deployment=azure_deployment,
                 timeout=timeout or 60.0,
+                observation_sink=getattr(template, "observation_sink", None),
+                observation_capture_mode=getattr(
+                    template, "observation_capture_mode", "full"
+                ),
             )
             self._clients[profile] = client
             return client

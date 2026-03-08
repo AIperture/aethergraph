@@ -527,7 +527,7 @@ class MemoryFacade(
                 long_term_text = "\n\n".join(parts)
 
         # 1) Recent chat (delegate tag filtering + correct "last N" to recent_chat)
-            recent_chat = await self.recent_chat(
+        recent_chat = await self.recent_chat(
             limit=recent_chat_limit,
             tags=recent_chat_tags,
             include_tags=recent_chat_include_tags,
