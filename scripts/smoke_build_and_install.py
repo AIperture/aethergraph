@@ -19,7 +19,8 @@ from pathlib import Path
 # ---- CONFIG: adjust paths if needed ----
 
 ROOT = Path(__file__).resolve().parent.parent  # assuming script is in ./scripts/
-FRONTEND_DIR = ROOT / "aethergraph-frontend"   # or whatever your frontend dir is
+REPO_ROOT = ROOT.parent                        # monorepo root (aethergraph-suite)
+FRONTEND_DIR = REPO_ROOT / "aethergraph-frontend"
 FRONTEND_DIST = FRONTEND_DIR / "dist"
 BACKEND_UI_STATIC = ROOT / "src" / "aethergraph" / "server" / "ui_static"
 DIST_DIR = ROOT / "dist"

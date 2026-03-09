@@ -746,7 +746,7 @@ class GenericLLMClient(
         except Exception as e:
             raise RuntimeError(f"Model did not return valid JSON. Raw output:\n{text}") from e
 
-        if output_format == "json_schema" and json_schema is not None and strict_schema:
+        if json_schema is not None and strict_schema:
             _validate_json_schema(obj, json_schema)
 
         # Canonical JSON string output (makes downstream robust)

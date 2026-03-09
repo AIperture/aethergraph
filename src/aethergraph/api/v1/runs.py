@@ -155,10 +155,6 @@ async def list_runs(
         offset=offset,
     )
 
-    print(
-        f"Listed {len(records)} runs from offset {offset} (graph_id={graph_id}, status={status}, flow_id={flow_id}, origin={origin})"
-    )
-
     # Filter by origin if requested
     if origin is not None:
         records = [rec for rec in records if rec.origin == origin]

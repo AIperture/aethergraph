@@ -62,12 +62,12 @@ def _artifact_to_chat_file(
     )
 
     return {
+        "artifact_id": artifact.artifact_id,
         "name": filename,
         "filename": filename,
         "mimetype": mime,
         "size": size,
         "uri": artifact.artifact_id,
-        # "url" key is adapter-specific; we don't set it here; webUI will build from artifact_id and its api
         "renderer": renderer,  # key for the UI
     }
 
@@ -1002,7 +1002,7 @@ class ChannelSession:
             if key in expected_payload and resume_payload.get(key) != expected_payload.get(key):
                 return None
 
-        setattr(self.ctx, "_channel_resume_payload_consumed", True)
+        self.ctx._channel_resume_payload_consumed = True
         return resume_payload
 
     # ------------------ Public ask_* APIs (race-free, normalized) ------------------

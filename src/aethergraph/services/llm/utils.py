@@ -131,8 +131,113 @@ def _validate_json_schema(obj: Any, schema: dict[str, Any]) -> None:
     try:
         import jsonschema  # type: ignore
     except Exception:
+        _validate_json_schema_fallback(obj, schema, path="$")
         return
     jsonschema.validate(instance=obj, schema=schema)
+
+
+def _validate_json_schema_fallback(obj: Any, schema: dict[str, Any], *, path: str) -> None:
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        if any(_matches_schema_type(obj, candidate) for candidate in schema_type):
+            matching_candidates = [
+                candidate for candidate in schema_type if _matches_schema_type(obj, candidate)
+            ]
+            # Prefer validating against the first non-null candidate that matches.
+            chosen = next(
+                (candidate for candidate in matching_candidates if candidate != "null"),
+                matching_candidates[0],
+            )
+            if chosen != "null":
+                _validate_type_specific(obj, schema, chosen, path=path)
+            _validate_enum(obj, schema, path=path)
+            return
+        raise RuntimeError(
+            f"JSON schema validation failed at {path}: expected one of {schema_type}, got {type(obj).__name__}"
+        )
+
+    if schema_type is not None and not _matches_schema_type(obj, schema_type):
+        raise RuntimeError(
+            f"JSON schema validation failed at {path}: expected {schema_type}, got {type(obj).__name__}"
+        )
+
+    if isinstance(schema_type, str):
+        _validate_type_specific(obj, schema, schema_type, path=path)
+
+    _validate_enum(obj, schema, path=path)
+
+
+def _validate_type_specific(
+    obj: Any, schema: dict[str, Any], schema_type: str, *, path: str
+) -> None:
+    if schema_type == "object":
+        if not isinstance(obj, dict):
+            raise RuntimeError(f"JSON schema validation failed at {path}: expected object")
+        required = schema.get("required", []) or []
+        for key in required:
+            if key not in obj:
+                raise RuntimeError(
+                    f"JSON schema validation failed at {path}: missing required key `{key}`"
+                )
+        properties = schema.get("properties", {}) or {}
+        additional = schema.get("additionalProperties", True)
+        if additional is False:
+            unexpected = [key for key in obj if key not in properties]
+            if unexpected:
+                raise RuntimeError(
+                    f"JSON schema validation failed at {path}: unexpected keys {unexpected}"
+                )
+        for key, value in obj.items():
+            if key in properties:
+                _validate_json_schema_fallback(value, properties[key], path=f"{path}.{key}")
+    elif schema_type == "array":
+        if not isinstance(obj, list):
+            raise RuntimeError(f"JSON schema validation failed at {path}: expected array")
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for idx, item in enumerate(obj):
+                _validate_json_schema_fallback(item, item_schema, path=f"{path}[{idx}]")
+    elif schema_type == "string":
+        if not isinstance(obj, str):
+            raise RuntimeError(f"JSON schema validation failed at {path}: expected string")
+    elif schema_type == "number":
+        if not isinstance(obj, (int, float)) or isinstance(obj, bool):
+            raise RuntimeError(f"JSON schema validation failed at {path}: expected number")
+    elif schema_type == "integer":
+        if not isinstance(obj, int) or isinstance(obj, bool):
+            raise RuntimeError(f"JSON schema validation failed at {path}: expected integer")
+    elif schema_type == "boolean":
+        if not isinstance(obj, bool):
+            raise RuntimeError(f"JSON schema validation failed at {path}: expected boolean")
+    elif schema_type == "null":
+        if obj is not None:
+            raise RuntimeError(f"JSON schema validation failed at {path}: expected null")
+
+
+def _validate_enum(obj: Any, schema: dict[str, Any], *, path: str) -> None:
+    enum_values = schema.get("enum")
+    if enum_values is not None and obj not in enum_values:
+        raise RuntimeError(
+            f"JSON schema validation failed at {path}: expected one of {enum_values}, got {obj!r}"
+        )
+
+
+def _matches_schema_type(obj: Any, schema_type: str) -> bool:
+    if schema_type == "object":
+        return isinstance(obj, dict)
+    if schema_type == "array":
+        return isinstance(obj, list)
+    if schema_type == "string":
+        return isinstance(obj, str)
+    if schema_type == "number":
+        return isinstance(obj, (int, float)) and not isinstance(obj, bool)
+    if schema_type == "integer":
+        return isinstance(obj, int) and not isinstance(obj, bool)
+    if schema_type == "boolean":
+        return isinstance(obj, bool)
+    if schema_type == "null":
+        return obj is None
+    return True
 
 
 def _ensure_system_json_directive(

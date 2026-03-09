@@ -152,8 +152,6 @@ class RetrievalMixin:
             kinds=kinds,
             limit=self.hot_limit,
         )
-
-        print(self.timeline_id, len(buf), "events retrieved from hotlog before filtering by level")
         # 2) Apply scope-level filter
         scope = getattr(self, "scope", None)
 
