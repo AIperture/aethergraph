@@ -159,6 +159,11 @@ def get_llm_service() -> Any:
     return svc.llm
 
 
+def get_tracer_service() -> Any:
+    svc = current_services()
+    return getattr(svc, "tracer", None)
+
+
 def register_llm_client(
     profile: str,
     provider: str,

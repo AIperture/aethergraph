@@ -24,6 +24,7 @@ from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.runner.facade import RunFacade
+from aethergraph.services.tracing import NoopTracer
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
@@ -264,6 +265,7 @@ class RuntimeEnv:
                 scope=mem_scope or node_scope,
                 registration_service=getattr(self.container, "registration_service", None),
             ),
+            tracer=self.container.tracer or NoopTracer(),
         )
         return ExecutionContext(
             run_id=self.run_id,

@@ -21,6 +21,7 @@ from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearch
 from aethergraph.services.artifacts.utils import _infer_content_mode
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.scope.scope import Scope, ScopeLevel
+from aethergraph.services.tracing import resolve_tracer
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 
@@ -94,6 +95,20 @@ class ArtifactFacade:
 
         # Keep track of the last created artifact
         self.last_artifact: Artifact | None = None
+
+    def _artifact_trace_meta(self, artifact: Artifact | None = None) -> dict[str, Any]:
+        meta: dict[str, Any] = {
+            "run_id": self.run_id,
+            "graph_id": self.graph_id,
+            "node_id": self.node_id,
+            "tool_name": self.tool_name,
+            "tool_version": self.tool_version,
+        }
+        if artifact is not None:
+            meta["artifact_id"] = artifact.artifact_id
+            meta["artifact_kind"] = artifact.kind
+            meta["artifact_uri"] = artifact.uri
+        return meta
 
     # ---------- Helpers for scopes ----------
     def _with_scope_labels(self, labels: dict[str, Any] | None) -> dict[str, Any]:
@@ -396,7 +411,23 @@ class ArtifactFacade:
         Returns:
             str: The planned staging file path as a string.
         """
-        return await self.store.plan_staging_path(planned_ext=ext)
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="stage_path",
+            request={"ext": ext},
+            tags=["artifacts", "stage"],
+            metadata=self._artifact_trace_meta(),
+        )
+        try:
+            staged = await self.store.plan_staging_path(planned_ext=ext)
+            await span.finish(
+                response={"staged_path": staged}, metadata=self._artifact_trace_meta()
+            )
+            return staged
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta())
+            raise
 
     async def stage_dir(self, suffix: str = "") -> str:
         """
@@ -423,7 +454,21 @@ class ArtifactFacade:
         Returns:
             str: The planned staging directory path as a string.
         """
-        return await self.store.plan_staging_dir(suffix=suffix)
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="stage_dir",
+            request={"suffix": suffix},
+            tags=["artifacts", "stage"],
+            metadata=self._artifact_trace_meta(),
+        )
+        try:
+            staged = await self.store.plan_staging_dir(suffix=suffix)
+            await span.finish(response={"staged_dir": staged}, metadata=self._artifact_trace_meta())
+            return staged
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta())
+            raise
 
     async def ingest_file(
         self,
@@ -490,22 +535,48 @@ class ArtifactFacade:
         # Add scope identity + scope_id
         scoped_labels = self._with_scope_labels(eff_labels)
 
-        a = await self.store.ingest_staged_file(
-            staged_path=staged_path,
-            kind=kind,
-            run_id=self.run_id,
-            graph_id=self.graph_id,
-            node_id=self.node_id,
-            tool_name=self.tool_name,
-            tool_version=self.tool_version,
-            tags=tags,
-            labels=scoped_labels,
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="ingest_file",
+            request={
+                "staged_path": staged_path,
+                "kind": kind,
+                "tags": tags,
+                "labels": scoped_labels,
+                "metrics": metrics,
+                "suggested_uri": suggested_uri,
+                "pin": pin,
+            },
+            tags=["artifacts", "write"],
+            metadata=self._artifact_trace_meta(),
             metrics=metrics,
-            suggested_uri=suggested_uri,
-            pin=pin,
         )
-        await self._record(a)
-        return a
+        try:
+            a = await self.store.ingest_staged_file(
+                staged_path=staged_path,
+                kind=kind,
+                run_id=self.run_id,
+                graph_id=self.graph_id,
+                node_id=self.node_id,
+                tool_name=self.tool_name,
+                tool_version=self.tool_version,
+                tags=tags,
+                labels=scoped_labels,
+                metrics=metrics,
+                suggested_uri=suggested_uri,
+                pin=pin,
+            )
+            await self._record(a)
+            await span.finish(
+                response={"artifact_id": a.artifact_id, "kind": a.kind, "uri": a.uri},
+                metadata=self._artifact_trace_meta(a),
+                metrics=metrics,
+            )
+            return a
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta(), metrics=metrics)
+            raise
 
     async def ingest_dir(
         self,
@@ -652,24 +723,53 @@ class ArtifactFacade:
             eff_labels["filename"] = PurePath(suggested_uri).name
 
         labels = self._with_scope_labels(eff_labels)
-        a = await self.store.save_file(
-            path=path,
-            kind=kind,
-            run_id=self.run_id,
-            graph_id=self.graph_id,
-            node_id=self.node_id,
-            tool_name=self.tool_name,
-            tool_version=self.tool_version,
-            mime=mime,
-            tags=tags,
-            labels=labels,
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="save_file",
+            request={
+                "path": path,
+                "kind": kind,
+                "tags": tags,
+                "mime": mime,
+                "labels": labels,
+                "metrics": metrics,
+                "suggested_uri": suggested_uri,
+                "name": name,
+                "pin": pin,
+                "cleanup": cleanup,
+            },
+            tags=["artifacts", "write"],
+            metadata=self._artifact_trace_meta(),
             metrics=metrics,
-            suggested_uri=suggested_uri,
-            pin=pin,
-            cleanup=cleanup,
         )
-        await self._record(a)
-        return a
+        try:
+            a = await self.store.save_file(
+                path=path,
+                kind=kind,
+                run_id=self.run_id,
+                graph_id=self.graph_id,
+                node_id=self.node_id,
+                tool_name=self.tool_name,
+                tool_version=self.tool_version,
+                mime=mime,
+                tags=tags,
+                labels=labels,
+                metrics=metrics,
+                suggested_uri=suggested_uri,
+                pin=pin,
+                cleanup=cleanup,
+            )
+            await self._record(a)
+            await span.finish(
+                response={"artifact_id": a.artifact_id, "kind": a.kind, "uri": a.uri},
+                metadata=self._artifact_trace_meta(a),
+                metrics=metrics,
+            )
+            return a
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta(), metrics=metrics)
+            raise
 
     async def save_text(
         self,
@@ -871,26 +971,44 @@ class ArtifactFacade:
             - If you want tags, call `w.add_labels({"tags": [...]})` inside the context
         """
         # 1) Delegate to the store's async context manager
-        async with self.store.open_writer(
-            kind=kind,
-            run_id=self.run_id,
-            graph_id=self.graph_id,
-            node_id=self.node_id,
-            tool_name=self.tool_name,
-            tool_version=self.tool_version,
-            planned_ext=planned_ext,
-            pin=pin,
-        ) as w:
-            # 2) Yield to user code (they write() and add_labels/add_metrics)
-            yield w
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="writer",
+            request={"kind": kind, "planned_ext": planned_ext, "pin": pin},
+            tags=["artifacts", "stream"],
+            metadata=self._artifact_trace_meta(),
+        )
+        try:
+            async with self.store.open_writer(
+                kind=kind,
+                run_id=self.run_id,
+                graph_id=self.graph_id,
+                node_id=self.node_id,
+                tool_name=self.tool_name,
+                tool_version=self.tool_version,
+                planned_ext=planned_ext,
+                pin=pin,
+            ) as w:
+                yield w
 
-        # 3) At this point, store.open_writer has fully exited and has set w.artifact
-        a = getattr(w, "artifact", None) or getattr(w, "_artifact", None)
-
-        if a:
-            await self._record(a)
-        else:
-            self.last_artifact = None
+            a = getattr(w, "artifact", None) or getattr(w, "_artifact", None)
+            if a:
+                await self._record(a)
+                writer_metrics = getattr(a, "metrics", None) if hasattr(a, "metrics") else None
+                await span.finish(
+                    response={"artifact_id": a.artifact_id, "kind": a.kind, "uri": a.uri},
+                    metadata=self._artifact_trace_meta(a),
+                    metrics=writer_metrics,
+                )
+            else:
+                self.last_artifact = None
+                await span.finish(
+                    response={"artifact_id": None}, metadata=self._artifact_trace_meta()
+                )
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta())
+            raise
 
     # ---------- load by artifact ID ----------
     async def get_by_id(self, artifact_id: str) -> Artifact | None:
@@ -915,9 +1033,26 @@ class ArtifactFacade:
         Returns:
             Artifact | None: The matching `Artifact` object if found, otherwise `None`.
         """
-        if self.index is None:
-            raise RuntimeError("Artifact index is not configured on this facade")
-        return await self.index.get(artifact_id)
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="get_by_id",
+            request={"artifact_id": artifact_id},
+            tags=["artifacts", "read"],
+            metadata=self._artifact_trace_meta(),
+        )
+        try:
+            if self.index is None:
+                raise RuntimeError("Artifact index is not configured on this facade")
+            artifact = await self.index.get(artifact_id)
+            await span.finish(
+                response={"artifact_id": getattr(artifact, "artifact_id", None)},
+                metadata=self._artifact_trace_meta(artifact),
+            )
+            return artifact
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta())
+            raise
 
     async def load_bytes_by_id(self, artifact_id: str) -> bytes:
         """
@@ -1513,10 +1648,30 @@ class ArtifactFacade:
         if tags:
             eff_labels.setdefault("tags", tags)
 
-        return await self.index.search(
-            labels=eff_labels or None,
-            limit=limit,
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="list",
+            request={
+                "level": level,
+                "include_node": include_node,
+                "tags": tags,
+                "filters": eff_labels,
+                "limit": limit,
+            },
+            tags=["artifacts", "read"],
+            metadata=self._artifact_trace_meta(),
         )
+        try:
+            rows = await self.index.search(
+                labels=eff_labels or None,
+                limit=limit,
+            )
+            await span.finish(response={"count": len(rows)}, metadata=self._artifact_trace_meta())
+            return rows
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta())
+            raise
 
     async def search(
         self,
@@ -1597,49 +1752,82 @@ class ArtifactFacade:
             eff_labels.setdefault("tags", tags)
 
         # --- Structured path: no query or empty query ---------------------
-        if not query:
-            return await self.index.search(
-                kind=kind,
-                labels=eff_labels or None,
-                metric=metric,
-                mode=metric_mode,  # metric ranking mode: "max"/"min"
-                limit=limit,
-            )
-
-        # --- Semantic / lexical / hybrid path via ScopedIndices ----------
-        if self.scoped_indices is None:
-            # Fallback: if no SearchBackend is available, degrade to structured search
-            return await self.index.search(
-                kind=kind,
-                labels=eff_labels or None,
-                metric=metric,
-                mode=metric_mode,
-                limit=limit,
-            )
-
-        top_k = limit or 20
-        eff_mode: SearchMode = mode or "semantic"
-
-        scored = await self.scoped_indices.search(
-            corpus="artifact",
-            query=query,
-            top_k=top_k,
-            filters=eff_labels,
-            level=None,  # level already applied via eff_labels
-            time_window=time_window,
-            mode=eff_mode,  # SearchMode, not metric mode
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="artifacts",
+            operation="search",
+            request={
+                "query": query,
+                "kind": kind,
+                "tags": tags,
+                "labels": eff_labels,
+                "metric": metric,
+                "metric_mode": metric_mode,
+                "level": level,
+                "limit": limit,
+                "include_graph": include_graph,
+                "include_node": include_node,
+                "time_window": time_window,
+                "mode": mode,
+            },
+            tags=["artifacts", "search"],
+            metadata=self._artifact_trace_meta(),
         )
+        try:
+            if not query:
+                rows = await self.index.search(
+                    kind=kind,
+                    labels=eff_labels or None,
+                    metric=metric,
+                    mode=metric_mode,
+                    limit=limit,
+                )
+                await span.finish(
+                    response={"count": len(rows)}, metadata=self._artifact_trace_meta()
+                )
+                return rows
 
-        ids = [s.item_id for s in scored]
-        if not ids:
-            return []
+            if self.scoped_indices is None:
+                rows = await self.index.search(
+                    kind=kind,
+                    labels=eff_labels or None,
+                    metric=metric,
+                    mode=metric_mode,
+                    limit=limit,
+                )
+                await span.finish(
+                    response={"count": len(rows)}, metadata=self._artifact_trace_meta()
+                )
+                return rows
 
-        arts: list[Artifact] = []
-        for art_id in ids:
-            art = await self.get_by_id(art_id)
-            if art:
-                arts.append(art)
-        return arts
+            top_k = limit or 20
+            eff_mode: SearchMode = mode or "semantic"
+
+            scored = await self.scoped_indices.search(
+                corpus="artifact",
+                query=query,
+                top_k=top_k,
+                filters=eff_labels,
+                level=None,
+                time_window=time_window,
+                mode=eff_mode,
+            )
+
+            ids = [s.item_id for s in scored]
+            if not ids:
+                await span.finish(response={"count": 0}, metadata=self._artifact_trace_meta())
+                return []
+
+            arts: list[Artifact] = []
+            for art_id in ids:
+                art = await self.get_by_id(art_id)
+                if art:
+                    arts.append(art)
+            await span.finish(response={"count": len(arts)}, metadata=self._artifact_trace_meta())
+            return arts
+        except Exception as exc:
+            await span.fail(exc, metadata=self._artifact_trace_meta())
+            raise
 
     async def best(
         self,

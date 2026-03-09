@@ -10,6 +10,7 @@ import uuid
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.services.channel import Button, FileRef, OutEvent
 from aethergraph.services.continuations.continuation import Correlator
+from aethergraph.services.tracing import resolve_tracer
 
 
 def _artifact_filename(artifact: Artifact, fallback: str | None = None) -> str:
@@ -126,6 +127,10 @@ class ChannelSession:
     @property
     def _session_id(self):
         return self.ctx.session_id
+
+    @property
+    def _tracer(self):
+        return resolve_tracer(getattr(self.ctx.services, "tracer", None))
 
     def _begin_reply_lifecycle(self) -> str:
         self._phase_group_counter += 1
@@ -908,65 +913,90 @@ class ChannelSession:
         channel: str | None,
         timeout_s: int,
     ) -> dict:
-        resumed = self._take_matching_resume_payload(kind=kind, expected_payload=payload)
-        if resumed is not None:
-            return resumed
-
         ch_key = self._resolve_key(channel)
-        cont_payload = {
-            "_channel_wait_kind": kind,
-            **payload,
-        }
-        # 1) Create continuation (with audit/security)
-        cont = await self.ctx.create_continuation(
-            channel=ch_key, kind=kind, payload=cont_payload, deadline_s=timeout_s
+        span = await self._tracer.start_span(
+            service="channel",
+            operation=f"_ask_core:{kind}",
+            request={
+                "kind": kind,
+                "payload": payload,
+                "channel_key": ch_key,
+                "timeout_s": timeout_s,
+            },
+            tags=["channel", "wait", kind],
+            metadata=self._inject_context_meta({"channel_key": ch_key}),
         )
-        # 2) PREPARE the wait future BEFORE notifying (prevents race)
-        fut = self.ctx.prepare_wait_for_resume(cont.token)
+        try:
+            resumed = self._take_matching_resume_payload(kind=kind, expected_payload=payload)
+            if resumed is not None:
+                await span.resume(
+                    metadata=self._inject_context_meta({"channel_key": ch_key}),
+                    response=resumed,
+                )
+                await span.finish(
+                    response=resumed,
+                    metadata=self._inject_context_meta({"channel_key": ch_key}),
+                )
+                return resumed
 
-        # 3) Notify (console/local-web may return {"payload": ...} inline)
-        res = await self._bus.notify(cont)
-
-        # 4) Inline short-circuit: skip waiting and cleanup
-        inline = (res or {}).get("payload")
-        if inline is not None:
-            # Defensive resolve (ok if already resolved by design)
-            try:
-                self.ctx.services.waits.resolve(cont.token, inline)
-            except Exception:
-                logger = logging.getLogger("aethergraph.services.channel.session")
-                logger.debug("Continuation token %s already resolved inline", cont.token)
-            try:
-                await self._cont_store.delete(self._run_id, self._node_id)
-            except Exception:
-                logger.debug("Failed to delete continuation for token %s", cont.token)
-                logger.exception("Error occurred while deleting continuation")
-            return inline
-
-        # 5) Push-only: bind correlator(s) so webhooks can locate the continuation
-        corr = (res or {}).get("correlator")
-        if corr:
-            await self._cont_store.bind_correlator(token=cont.token, corr=corr)
-            await self._cont_store.bind_correlator(  # message-less key for thread roots
-                token=cont.token,
-                corr=Correlator(
-                    scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
-                ),
+            cont_payload = {
+                "_channel_wait_kind": kind,
+                **payload,
+            }
+            cont = await self.ctx.create_continuation(
+                channel=ch_key, kind=kind, payload=cont_payload, deadline_s=timeout_s
             )
-        else:
-            # Best-effort binding (peek thread/channel)
-            peek = await self._bus.peek_correlator(ch_key)
-            if peek:
+            fut = self.ctx.prepare_wait_for_resume(cont.token)
+            wait_meta = self._inject_context_meta(
+                {"channel_key": ch_key, "continuation_token": cont.token}
+            )
+            await span.wait(metadata=wait_meta, request={"kind": kind, "payload": cont_payload})
+
+            res = await self._bus.notify(cont)
+            inline = (res or {}).get("payload")
+            if inline is not None:
+                try:
+                    self.ctx.services.waits.resolve(cont.token, inline)
+                except Exception:
+                    logger = logging.getLogger("aethergraph.services.channel.session")
+                    logger.debug("Continuation token %s already resolved inline", cont.token)
+                try:
+                    await self._cont_store.delete(self._run_id, self._node_id)
+                except Exception:
+                    logger.debug("Failed to delete continuation for token %s", cont.token)
+                    logger.exception("Error occurred while deleting continuation")
+                await span.resume(metadata=wait_meta, response=inline)
+                await span.finish(response=inline, metadata=wait_meta)
+                return inline
+
+            corr = (res or {}).get("correlator")
+            if corr:
+                await self._cont_store.bind_correlator(token=cont.token, corr=corr)
                 await self._cont_store.bind_correlator(
-                    token=cont.token, corr=Correlator(peek.scheme, peek.channel, peek.thread, "")
+                    token=cont.token,
+                    corr=Correlator(
+                        scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
+                    ),
                 )
             else:
-                await self._cont_store.bind_correlator(
-                    token=cont.token, corr=Correlator(self._bus._prefix(ch_key), ch_key, "", "")
-                )
+                peek = await self._bus.peek_correlator(ch_key)
+                if peek:
+                    await self._cont_store.bind_correlator(
+                        token=cont.token,
+                        corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
+                    )
+                else:
+                    await self._cont_store.bind_correlator(
+                        token=cont.token, corr=Correlator(self._bus._prefix(ch_key), ch_key, "", "")
+                    )
 
-        # 6) Await the already-prepared future (router will resolve it later)
-        return await fut
+            result = await fut
+            await span.resume(metadata=wait_meta, response=result)
+            await span.finish(response=result, metadata=wait_meta)
+            return result
+        except Exception as exc:
+            await span.fail(exc, metadata=self._inject_context_meta({"channel_key": ch_key}))
+            raise
 
     def _take_matching_resume_payload(
         self,
@@ -1054,33 +1084,49 @@ class ChannelSession:
         Notes:
             Reply memory logging occurs only when returned text is non-empty.
         """
-        if prompt:
-            await self._log_chat(
-                "assistant",
-                prompt,
-                tags=[*(memory_tags or []), "ask_text", "prompt"],
-                enabled=memory_log_prompt,
-                channel=channel,
-            )
-
-        payload = await self._ask_core(
-            kind="user_input",
-            payload={"prompt": prompt, "_silent": silent},
-            channel=channel,
-            timeout_s=timeout_s,
+        channel_key = self._resolve_key(channel)
+        span = await self._tracer.start_span(
+            service="channel",
+            operation="ask_text",
+            request={"prompt": prompt, "timeout_s": timeout_s, "channel_key": channel_key},
+            tags=["channel", "ask", "user_input"],
+            metadata=self._inject_context_meta({"channel_key": channel_key}),
         )
+        try:
+            if prompt:
+                await self._log_chat(
+                    "assistant",
+                    prompt,
+                    tags=[*(memory_tags or []), "ask_text", "prompt"],
+                    enabled=memory_log_prompt,
+                    channel=channel,
+                )
 
-        text = str(payload.get("text", ""))
-
-        if text:
-            await self._log_chat(
-                "user",
-                text,
-                tags=[*(memory_tags or []), "ask_text", "reply"],
-                enabled=memory_log_reply,
+            payload = await self._ask_core(
+                kind="user_input",
+                payload={"prompt": prompt, "_silent": silent},
                 channel=channel,
+                timeout_s=timeout_s,
             )
-        return text
+
+            text = str(payload.get("text", ""))
+
+            if text:
+                await self._log_chat(
+                    "user",
+                    text,
+                    tags=[*(memory_tags or []), "ask_text", "reply"],
+                    enabled=memory_log_reply,
+                    channel=channel,
+                )
+            await span.finish(
+                response={"text": text},
+                metadata=self._inject_context_meta({"channel_key": channel_key}),
+            )
+            return text
+        except Exception as exc:
+            await span.fail(exc, metadata=self._inject_context_meta({"channel_key": channel_key}))
+            raise
 
     async def wait_text(
         self,
@@ -1179,46 +1225,62 @@ class ChannelSession:
         Notes:
             If no choice is returned, or `options` is empty, `approved` is `False`.
         """
-        if prompt:
-            await self._log_chat(
-                "assistant",
-                prompt,
-                tags=[*(memory_tags or []), "ask_approval", "prompt"],
-                enabled=memory_log_prompt,
-                channel=channel,
-            )
-
-        payload = await self._ask_core(
-            kind="approval",
-            payload={"prompt": {"title": prompt, "buttons": list(options)}},
-            channel=channel,
-            timeout_s=timeout_s,
+        channel_key = self._resolve_key(channel)
+        button_list = list(options)
+        span = await self._tracer.start_span(
+            service="channel",
+            operation="ask_approval",
+            request={
+                "prompt": prompt,
+                "options": button_list,
+                "timeout_s": timeout_s,
+                "channel_key": channel_key,
+            },
+            tags=["channel", "ask", "approval"],
+            metadata=self._inject_context_meta({"channel_key": channel_key}),
         )
-        choice = payload.get("choice")
-        if choice is not None:
-            await self._log_chat(
-                "user",
-                f"Selected: {str(choice)}",
-                tags=[*(memory_tags or []), "ask_approval", "reply"],
-                enabled=memory_log_reply,
+        try:
+            if prompt:
+                await self._log_chat(
+                    "assistant",
+                    prompt,
+                    tags=[*(memory_tags or []), "ask_approval", "prompt"],
+                    enabled=memory_log_prompt,
+                    channel=channel,
+                )
+
+            payload = await self._ask_core(
+                kind="approval",
+                payload={"prompt": {"title": prompt, "buttons": button_list}},
                 channel=channel,
+                timeout_s=timeout_s,
             )
+            choice = payload.get("choice")
+            if choice is not None:
+                await self._log_chat(
+                    "user",
+                    f"Selected: {str(choice)}",
+                    tags=[*(memory_tags or []), "ask_approval", "reply"],
+                    enabled=memory_log_reply,
+                    channel=channel,
+                )
 
-        # Normalize return
-        # 1) If adapter explicitly sets approved, trust it
-        buttons = list(options)  # just plain list, not Button objects
-        # 2) Fallback: derive from choice + options
-        if choice is None or not buttons:
-            approved = False
-        else:
-            choice_norm = str(choice).strip().lower()
-            first_norm = str(buttons[0]).strip().lower()
-            approved = choice_norm == first_norm
+            if choice is None or not button_list:
+                approved = False
+            else:
+                choice_norm = str(choice).strip().lower()
+                first_norm = str(button_list[0]).strip().lower()
+                approved = choice_norm == first_norm
 
-        return {
-            "approved": approved,
-            "choice": choice,
-        }
+            result = {"approved": approved, "choice": choice}
+            await span.finish(
+                response=result,
+                metadata=self._inject_context_meta({"channel_key": channel_key}),
+            )
+            return result
+        except Exception as exc:
+            await span.fail(exc, metadata=self._inject_context_meta({"channel_key": channel_key}))
+            raise
 
     async def ask_files(
         self,
@@ -1272,36 +1334,61 @@ class ChannelSession:
         Notes:
             `accept` is advisory and adapter-dependent, not strict server-side validation.
         """
-        if prompt:
-            await self._log_chat(
-                "assistant",
-                prompt,
-                tags=[*(memory_tags or []), "ask_files", "prompt"],
-                enabled=memory_log_prompt,
-                channel=channel,
-            )
-
-        payload = await self._ask_core(
-            kind="user_files",
-            payload={"prompt": prompt, "accept": accept or [], "multiple": bool(multiple)},
-            channel=channel,
-            timeout_s=timeout_s,
+        channel_key = self._resolve_key(channel)
+        span = await self._tracer.start_span(
+            service="channel",
+            operation="ask_files",
+            request={
+                "prompt": prompt,
+                "accept": accept or [],
+                "multiple": bool(multiple),
+                "timeout_s": timeout_s,
+                "channel_key": channel_key,
+            },
+            tags=["channel", "ask", "files"],
+            metadata=self._inject_context_meta({"channel_key": channel_key}),
         )
+        try:
+            if prompt:
+                await self._log_chat(
+                    "assistant",
+                    prompt,
+                    tags=[*(memory_tags or []), "ask_files", "prompt"],
+                    enabled=memory_log_prompt,
+                    channel=channel,
+                )
 
-        text = str(payload.get("text", ""))
-        if text:
-            await self._log_chat(
-                "user",
-                text,
-                tags=[*(memory_tags or []), "ask_files", "reply"],
-                enabled=memory_log_reply,
+            payload = await self._ask_core(
+                kind="user_files",
+                payload={"prompt": prompt, "accept": accept or [], "multiple": bool(multiple)},
                 channel=channel,
+                timeout_s=timeout_s,
             )
 
-        return {
-            "text": text,
-            "files": payload.get("files", []) if isinstance(payload.get("files", []), list) else [],
-        }
+            text = str(payload.get("text", ""))
+            if text:
+                await self._log_chat(
+                    "user",
+                    text,
+                    tags=[*(memory_tags or []), "ask_files", "reply"],
+                    enabled=memory_log_reply,
+                    channel=channel,
+                )
+
+            result = {
+                "text": text,
+                "files": payload.get("files", [])
+                if isinstance(payload.get("files", []), list)
+                else [],
+            }
+            await span.finish(
+                response={"text": text, "files_count": len(result["files"])},
+                metadata=self._inject_context_meta({"channel_key": channel_key}),
+            )
+            return result
+        except Exception as exc:
+            await span.fail(exc, metadata=self._inject_context_meta({"channel_key": channel_key}))
+            raise
 
     async def ask_text_or_files(
         self,
@@ -1347,36 +1434,55 @@ class ChannelSession:
         Notes:
             Prefer `ask_text` + `get_latest_uploads` or `ask_files` when modality is known.
         """
-        if prompt:
-            await self._log_chat(
-                "assistant",
-                prompt,
-                tags=[*(memory_tags or []), "ask_text_or_files", "prompt"],
-                enabled=memory_log_prompt,
-                channel=channel,
-            )
-
-        payload = await self._ask_core(
-            kind="user_input_or_files",
-            payload={"prompt": prompt},
-            channel=channel,
-            timeout_s=timeout_s,
+        channel_key = self._resolve_key(channel)
+        span = await self._tracer.start_span(
+            service="channel",
+            operation="ask_text_or_files",
+            request={"prompt": prompt, "timeout_s": timeout_s, "channel_key": channel_key},
+            tags=["channel", "ask", "text_or_files"],
+            metadata=self._inject_context_meta({"channel_key": channel_key}),
         )
+        try:
+            if prompt:
+                await self._log_chat(
+                    "assistant",
+                    prompt,
+                    tags=[*(memory_tags or []), "ask_text_or_files", "prompt"],
+                    enabled=memory_log_prompt,
+                    channel=channel,
+                )
 
-        text = str(payload.get("text", ""))
-        if text:
-            await self._log_chat(
-                "user",
-                text,
-                tags=[*(memory_tags or []), "ask_text_or_files", "reply"],
-                enabled=memory_log_reply,
+            payload = await self._ask_core(
+                kind="user_input_or_files",
+                payload={"prompt": prompt},
                 channel=channel,
+                timeout_s=timeout_s,
             )
 
-        return {
-            "text": text,
-            "files": payload.get("files", []) if isinstance(payload.get("files", []), list) else [],
-        }
+            text = str(payload.get("text", ""))
+            if text:
+                await self._log_chat(
+                    "user",
+                    text,
+                    tags=[*(memory_tags or []), "ask_text_or_files", "reply"],
+                    enabled=memory_log_reply,
+                    channel=channel,
+                )
+
+            result = {
+                "text": text,
+                "files": payload.get("files", [])
+                if isinstance(payload.get("files", []), list)
+                else [],
+            }
+            await span.finish(
+                response={"text": text, "files_count": len(result["files"])},
+                metadata=self._inject_context_meta({"channel_key": channel_key}),
+            )
+            return result
+        except Exception as exc:
+            await span.fail(exc, metadata=self._inject_context_meta({"channel_key": channel_key}))
+            raise
 
     # ---------- inbox helpers (platform-agnostic) ----------
     async def get_latest_uploads(self, *, clear: bool = True) -> list[FileRef]:

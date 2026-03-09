@@ -389,8 +389,14 @@ def _register_metering_context(env: RuntimeEnv, target: GraphFunction | TaskGrap
         {
             "run_id": run_id,
             "graph_id": graph_id,
+            "session_id": env.session_id,
+            "agent_id": env.agent_id,
+            "app_id": env.app_id,
             "user_id": user_id,
             "org_id": org_id,
+            "trace_id": f"tr_{uuid.uuid4().hex}",
+            "span_id": None,
+            "parent_span_id": None,
         }
     )
     return token

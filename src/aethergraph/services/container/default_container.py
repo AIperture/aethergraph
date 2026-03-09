@@ -54,7 +54,10 @@ from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBack
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
-from aethergraph.services.llm.observability import ConsoleLLMObservationSink, JsonlLLMObservationSink
+from aethergraph.services.llm.observability import (
+    ConsoleLLMObservationSink,
+    JsonlLLMObservationSink,
+)
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -79,7 +82,7 @@ from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.skills.skill_registry import SkillRegistry
-from aethergraph.services.tracing.noop import NoopTracer
+from aethergraph.services.tracing import EventLogTracer, NoopTracer
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
@@ -216,7 +219,7 @@ class DefaultContainer:
 
     metering: MeteringService | None = None
     rate_limiter: SimpleRateLimiter | None = None
-    tracer: NoopTracer | None = None
+    tracer: NoopTracer | EventLogTracer | None = None
     secrets: EnvSecrets | None = None
 
     # extensible services
@@ -517,7 +520,9 @@ def build_default_container(
         redactor=None,
         metering=metering,
         rate_limiter=rate_limiter,
-        tracer=None,
+        tracer=EventLogTracer(event_log=eventlog, event_hub=event_hub)
+        if eventlog is not None
+        else NoopTracer(),
         settings=cfg,
     )
 
