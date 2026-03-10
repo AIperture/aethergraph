@@ -195,6 +195,8 @@ class DefaultContainer:
 
     # optional llm service
     llm: LLMService | None = None
+    llm_observation_sink: Any | None = None
+    llm_observation_path: str | None = None
     mcp: MCPService | None = None
     embed_service: EmbeddingService | None = None
     web_search: WebSearchService | None = None
@@ -338,6 +340,7 @@ def build_default_container(
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     obs_cfg = cfg.llm.observability
     llm_observation_sink = None
+    llm_observation_path: str | None = None
     if obs_cfg.enabled:
         if obs_cfg.sink == "console":
             llm_observation_sink = ConsoleLLMObservationSink(prompt_view=obs_cfg.prompt_view)
@@ -346,6 +349,7 @@ def build_default_container(
             if not obs_path.is_absolute():
                 obs_path = root_p / obs_path
             llm_observation_sink = JsonlLLMObservationSink(obs_path)
+            llm_observation_path = str(obs_path)
         else:
             raise ValueError(f"Unsupported LLM observability sink: {obs_cfg.sink!r}")
     llm_clients = build_llm_clients(
@@ -507,6 +511,8 @@ def build_default_container(
         eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
+        llm_observation_sink=llm_observation_sink,
+        llm_observation_path=llm_observation_path,
         embed_service=embed_service,
         web_search=web_search,
         mcp=mcp,

@@ -267,6 +267,16 @@ class RuntimeEnv:
             ),
             tracer=self.container.tracer or NoopTracer(),
         )
+        try:
+            from aethergraph.services.harness.overrides import wrap_node_services
+
+            services = wrap_node_services(
+                services,
+                graph_id=self.graph_id,
+                node_id=node.node_id,
+            )
+        except Exception:
+            pass
         return ExecutionContext(
             run_id=self.run_id,
             session_id=self.session_id,
