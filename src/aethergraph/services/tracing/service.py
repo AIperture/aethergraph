@@ -392,6 +392,9 @@ class EventLogTracer(BaseTracer):
             "scope_id": f"trace:run/{run_id}",
             "kind": "trace",
             "payload": payload,
+            "tags": list(payload.get("tags") or []),
+            "user_id": payload.get("user_id"),
+            "org_id": payload.get("org_id"),
         }
         await self.event_log.append(row)
         if self.event_hub is not None:

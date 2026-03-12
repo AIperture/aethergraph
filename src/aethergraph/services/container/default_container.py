@@ -47,6 +47,11 @@ from aethergraph.services.execution.local_python import LocalPythonExecutionServ
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
+from aethergraph.services.inspect import (
+    AgentEventTypeRegistry,
+    JsonlLLMObservationStore,
+    register_default_agent_event_types,
+)
 from aethergraph.services.knowledge.chunker import TextSplitter
 
 # ---- kv services ----
@@ -197,6 +202,7 @@ class DefaultContainer:
     llm: LLMService | None = None
     llm_observation_sink: Any | None = None
     llm_observation_path: str | None = None
+    llm_observation_store: Any | None = None
     mcp: MCPService | None = None
     embed_service: EmbeddingService | None = None
     web_search: WebSearchService | None = None
@@ -222,6 +228,7 @@ class DefaultContainer:
     metering: MeteringService | None = None
     rate_limiter: SimpleRateLimiter | None = None
     tracer: NoopTracer | EventLogTracer | None = None
+    agent_event_registry: AgentEventTypeRegistry | None = None
     secrets: EnvSecrets | None = None
 
     # extensible services
@@ -269,7 +276,8 @@ def build_default_container(
 
     # core services
     logger_factory = StdLoggerService.build(
-        LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs"))
+        LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs")),
+        event_log=eventlog,
     )
 
     clock = SystemClock()
@@ -341,6 +349,7 @@ def build_default_container(
     obs_cfg = cfg.llm.observability
     llm_observation_sink = None
     llm_observation_path: str | None = None
+    llm_observation_store = None
     if obs_cfg.enabled:
         if obs_cfg.sink == "console":
             llm_observation_sink = ConsoleLLMObservationSink(prompt_view=obs_cfg.prompt_view)
@@ -350,6 +359,7 @@ def build_default_container(
                 obs_path = root_p / obs_path
             llm_observation_sink = JsonlLLMObservationSink(obs_path)
             llm_observation_path = str(obs_path)
+            llm_observation_store = JsonlLLMObservationStore(obs_path)
         else:
             raise ValueError(f"Unsupported LLM observability sink: {obs_cfg.sink!r}")
     llm_clients = build_llm_clients(
@@ -451,6 +461,7 @@ def build_default_container(
 
     # skills registry
     skills_registry = SkillRegistry()
+    agent_event_registry = register_default_agent_event_types(AgentEventTypeRegistry())
 
     # trigger services
     doc_store = build_doc_store(cfg)
@@ -513,6 +524,7 @@ def build_default_container(
         llm=llm_service,
         llm_observation_sink=llm_observation_sink,
         llm_observation_path=llm_observation_path,
+        llm_observation_store=llm_observation_store,
         embed_service=embed_service,
         web_search=web_search,
         mcp=mcp,
@@ -529,6 +541,7 @@ def build_default_container(
         tracer=EventLogTracer(event_log=eventlog, event_hub=event_hub)
         if eventlog is not None
         else NoopTracer(),
+        agent_event_registry=agent_event_registry,
         settings=cfg,
     )
 

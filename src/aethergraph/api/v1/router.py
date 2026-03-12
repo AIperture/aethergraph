@@ -6,6 +6,7 @@ from .artifacts import router as artifacts_router
 from .channels import router as channels_router
 from .graphs import router as graphs_router
 from .identity import router as identity_router
+from .inspect import router as inspect_router
 from .memory import router as memory_router
 from .misc import router as misc_router
 from .registry import router as registry_router
@@ -21,6 +22,7 @@ router.include_router(graphs_router)
 router.include_router(artifacts_router)
 router.include_router(channels_router)
 router.include_router(memory_router)
+router.include_router(inspect_router)
 router.include_router(stats_router)
 router.include_router(identity_router)
 router.include_router(misc_router)

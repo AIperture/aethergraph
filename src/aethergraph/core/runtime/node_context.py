@@ -322,6 +322,37 @@ class NodeContext:
             run_id=self.run_id, node_id=self.node_id, graph_id=self.graph_id
         )
 
+    async def emit_agent_event(
+        self,
+        *,
+        event_type: str,
+        summary: str,
+        payload: dict[str, Any] | None = None,
+        status: str = "info",
+        tags: list[str] | None = None,
+        producer_name: str = "node_context",
+        producer_version: str | None = None,
+        payload_schema_name: str | None = None,
+        payload_schema_version: int | None = 1,
+        parent_event_id: str | None = None,
+        caused_by_event_id: str | None = None,
+    ) -> dict[str, Any]:
+        from aethergraph.services.inspect import emit_agent_event
+
+        return await emit_agent_event(
+            event_type=event_type,
+            summary=summary,
+            payload=payload,
+            status=status,
+            tags=tags,
+            producer_name=producer_name,
+            producer_version=producer_version,
+            payload_schema_name=payload_schema_name,
+            payload_schema_version=payload_schema_version,
+            parent_event_id=parent_event_id,
+            caused_by_event_id=caused_by_event_id,
+        )
+
     def ui_session_channel(self) -> "ChannelSession":
         """
         Creates a new ChannelSession for the current node context with session key as
