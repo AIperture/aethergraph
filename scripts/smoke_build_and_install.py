@@ -38,7 +38,12 @@ def run(cmd, cwd=None):
 def build_frontend():
     """Build the React frontend and copy dist/ into backend ui_static/."""
     if not FRONTEND_DIR.exists():
-        print(f"[frontend] Skipping: {FRONTEND_DIR} does not exist.")
+        print(f"[frontend] {FRONTEND_DIR} does not exist.")
+        proceed = input("Frontend directory not found. Proceed without copying frontend? [y/N]: ").strip().lower()
+        if proceed != "y":
+            print("Aborting.")
+            sys.exit(1)
+        print("[frontend] Skipping frontend build and copy step.")
         return
 
     print("[frontend] Building frontend bundle...")
