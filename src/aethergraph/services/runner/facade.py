@@ -10,6 +10,7 @@ from aethergraph.core.runtime.run_types import (
     RunRecord,
     RunVisibility,
 )
+from aethergraph.services.tracing import resolve_tracer
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -125,21 +126,43 @@ class RunFacade:
         effective_session_id = session_id or self.session_id
         effective_agent_id = agent_id if agent_id is not None else self.agent_id
         effective_app_id = app_id if app_id is not None else self.app_id
-
-        record = await self.run_manager.submit_run(
-            graph_id=graph_id,
-            inputs=inputs,
-            run_id=run_id,
-            session_id=effective_session_id,
-            tags=tags,
-            visibility=visibility or RunVisibility.normal,
-            origin=origin or (RunOrigin.agent if effective_agent_id is not None else RunOrigin.app),
-            importance=importance or RunImportance.normal,
-            agent_id=effective_agent_id,
-            app_id=effective_app_id,
-            identity=self.identity,
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="runner",
+            operation="spawn_run",
+            request={
+                "graph_id": graph_id,
+                "inputs": inputs,
+                "session_id": effective_session_id,
+                "tags": tags,
+                "run_id": run_id,
+            },
+            tags=["runner", "spawn"],
+            metadata={"target_run_id": run_id},
         )
-        return record.run_id
+        try:
+            record = await self.run_manager.submit_run(
+                graph_id=graph_id,
+                inputs=inputs,
+                run_id=run_id,
+                session_id=effective_session_id,
+                tags=tags,
+                visibility=visibility or RunVisibility.normal,
+                origin=origin
+                or (RunOrigin.agent if effective_agent_id is not None else RunOrigin.app),
+                importance=importance or RunImportance.normal,
+                agent_id=effective_agent_id,
+                app_id=effective_app_id,
+                identity=self.identity,
+            )
+            await span.finish(
+                response={"run_id": record.run_id},
+                metadata={"target_run_id": record.run_id},
+            )
+            return record.run_id
+        except Exception as exc:
+            await span.fail(exc, metadata={"target_run_id": run_id})
+            raise
 
     async def run_and_wait(
         self,
@@ -204,22 +227,55 @@ class RunFacade:
         effective_session_id = session_id or self.session_id
         effective_agent_id = agent_id if agent_id is not None else self.agent_id
         effective_app_id = app_id if app_id is not None else self.app_id
-
-        record, outputs, has_waits, continuations = await self.run_manager.run_and_wait(
-            graph_id,
-            inputs=inputs,
-            run_id=run_id,
-            session_id=effective_session_id,
-            tags=tags,
-            visibility=visibility or RunVisibility.normal,
-            origin=origin or (RunOrigin.agent if effective_agent_id is not None else RunOrigin.app),
-            importance=importance or RunImportance.normal,
-            agent_id=effective_agent_id,
-            app_id=effective_app_id,
-            identity=self.identity,
-            count_slot=False,
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="runner",
+            operation="run_and_wait",
+            request={
+                "graph_id": graph_id,
+                "inputs": inputs,
+                "session_id": effective_session_id,
+                "tags": tags,
+                "run_id": run_id,
+            },
+            tags=["runner", "wait"],
+            metadata={"target_run_id": run_id},
         )
-        return record.run_id, outputs, has_waits, continuations
+        try:
+            record, outputs, has_waits, continuations = await self.run_manager.run_and_wait(
+                graph_id,
+                inputs=inputs,
+                run_id=run_id,
+                session_id=effective_session_id,
+                tags=tags,
+                visibility=visibility or RunVisibility.normal,
+                origin=origin
+                or (RunOrigin.agent if effective_agent_id is not None else RunOrigin.app),
+                importance=importance or RunImportance.normal,
+                agent_id=effective_agent_id,
+                app_id=effective_app_id,
+                identity=self.identity,
+                count_slot=False,
+            )
+            if has_waits:
+                await span.wait(
+                    metadata={
+                        "target_run_id": record.run_id,
+                        "continuations": continuations,
+                    },
+                    request={"graph_id": graph_id},
+                )
+            await span.finish(
+                response={"outputs": outputs, "has_waits": has_waits},
+                metadata={
+                    "target_run_id": record.run_id,
+                    "continuations": continuations,
+                },
+            )
+            return record.run_id, outputs, has_waits, continuations
+        except Exception as exc:
+            await span.fail(exc, metadata={"target_run_id": run_id})
+            raise
 
     async def wait_run(
         self,
@@ -260,11 +316,25 @@ class RunFacade:
         Notes:
             Output availability depends on in-process execution context.
         """
-        return await self.run_manager.wait_run(
-            run_id,
-            timeout_s=timeout_s,
-            return_outputs=return_outputs,
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="runner",
+            operation="wait_run",
+            request={"run_id": run_id, "timeout_s": timeout_s, "return_outputs": return_outputs},
+            tags=["runner", "wait"],
+            metadata={"target_run_id": run_id},
         )
+        try:
+            result = await self.run_manager.wait_run(
+                run_id,
+                timeout_s=timeout_s,
+                return_outputs=return_outputs,
+            )
+            await span.finish(response=result, metadata={"target_run_id": run_id})
+            return result
+        except Exception as exc:
+            await span.fail(exc, metadata={"target_run_id": run_id})
+            raise
 
     async def cancel_run(self, run_id: str) -> None:
         """
@@ -294,4 +364,17 @@ class RunFacade:
             Cancellation may not be immediate; scheduler termination is
             best-effort.
         """
-        await self.run_manager.cancel_run(run_id)
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="runner",
+            operation="cancel_run",
+            request={"run_id": run_id},
+            tags=["runner", "cancel"],
+            metadata={"target_run_id": run_id},
+        )
+        try:
+            await self.run_manager.cancel_run(run_id)
+            await span.finish(response={"cancelled": True}, metadata={"target_run_id": run_id})
+        except Exception as exc:
+            await span.fail(exc, metadata={"target_run_id": run_id})
+            raise

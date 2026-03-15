@@ -13,6 +13,7 @@ from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.memory.facade.introspection import IntrospectionMixin
 from aethergraph.services.memory.facade.normalization import EventNormalizationMixin
 from aethergraph.services.scope.scope import Scope, ScopeLevel
+from aethergraph.services.tracing import resolve_tracer
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 from .chat import ChatMixin
@@ -135,6 +136,43 @@ class MemoryFacade(
             org_id=self.scope.org_id if self.scope else None,
         )
 
+    def _trace_meta(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        meta: dict[str, Any] = {
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "graph_id": self.graph_id,
+            "node_id": self.node_id,
+            "scope_id": self.memory_scope_id,
+            "timeline_id": self.timeline_id,
+        }
+        if self.scope is not None:
+            meta["app_id"] = getattr(self.scope, "app_id", None)
+            meta["agent_id"] = getattr(self.scope, "agent_id", None)
+            meta["user_id"] = getattr(self.scope, "user_id", None)
+            meta["org_id"] = getattr(self.scope, "org_id", None)
+        if extra:
+            meta.update({k: v for k, v in extra.items() if v is not None})
+        return meta
+
+    async def _start_trace(
+        self,
+        *,
+        operation: str,
+        request: Any | None = None,
+        tags: list[str] | None = None,
+        metrics: dict[str, Any] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ):
+        tracer = resolve_tracer()
+        return await tracer.start_span(
+            service="memory",
+            operation=operation,
+            request=request,
+            tags=tags or ["memory"],
+            metrics=metrics,
+            metadata=self._trace_meta(metadata),
+        )
+
     async def record_raw(
         self,
         *,
@@ -179,142 +217,137 @@ class MemoryFacade(
         Returns:
             Event: The fully constructed and persisted `Event` object.
         """
-        ts_iso = now_iso()
-        ts_num = time.time()  # numeric timestamp for created_at_ts
-
-        # Merge Scope dimensions
-        dims: dict[str, str] = {}
-        if self.scope is not None:
-            dims = self.scope.identity_labels()
-
-        run_id = base.get("run_id") or dims.get("run_id") or self.run_id
-        session_id = base.get("session_id") or dims.get("session_id") or self.session_id
-        scope_id = base.get("scope_id") or self.memory_scope_id or session_id or run_id
-
-        user_id = base.get("user_id") or dims.get("user_id")
-        org_id = base.get("org_id") or dims.get("org_id")
-        client_id = base.get("client_id") or dims.get("client_id")
-        graph_id = base.get("graph_id") or dims.get("graph_id") or self.graph_id
-        node_id = base.get("node_id") or dims.get("node_id") or self.node_id
-        app_id = base.get("app_id") or dims.get("app_id")
-        agent_id = base.get("agent_id") or dims.get("agent_id")
-
-        base.setdefault("run_id", run_id)
-        base.setdefault("scope_id", scope_id)
-        base.setdefault("session_id", session_id)
-        base.setdefault("run_id", run_id)
-        base.setdefault("graph_id", graph_id)
-        base.setdefault("node_id", node_id)
-        base.setdefault("app_id", app_id)
-        base.setdefault("agent_id", agent_id)
-        base.setdefault("user_id", user_id)
-        base.setdefault("org_id", org_id)
-        base.setdefault("client_id", client_id)
-        base.setdefault("session_id", session_id)
-        severity = int(base.get("severity", 2))
-
-        signal = base.get("signal")
-        if signal is None:
-            signal = self._estimate_signal(text=text, metrics=metrics, severity=severity)
-
-        kind = base.get("kind") or "misc"
-
-        eid = stable_event_id(
-            {
-                "ts": ts_iso,
-                "run_id": base["run_id"],
-                "kind": kind,
-                "text": (text or "")[:6000],
-                "tool": base.get("tool"),
-            }
-        )
-
-        evt = Event(
-            event_id=eid,
-            ts=ts_iso,
-            run_id=run_id,
-            scope_id=scope_id,
-            user_id=user_id,
-            org_id=org_id,
-            client_id=client_id,
-            session_id=session_id,
-            kind=kind,
-            stage=base.get("stage"),
-            text=text,
-            tags=base.get("tags"),
-            data=base.get("data"),
+        span = await self._start_trace(
+            operation="record_raw",
+            request={"base": base, "text": text, "metrics": metrics},
+            tags=["memory", "record"],
             metrics=metrics,
-            graph_id=graph_id,
-            node_id=node_id,
-            app_id=app_id,
-            agent_id=agent_id,
-            tool=base.get("tool"),
-            topic=base.get("topic"),
-            severity=severity,
-            signal=signal,
-            inputs=base.get("inputs"),
-            outputs=base.get("outputs"),
-            embedding=base.get("embedding"),
-            pii_flags=base.get("pii_flags"),
-            version=2,
         )
-
-        await self.hotlog.append(self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit)
-
-        await self.persistence.append_event(self.timeline_id, evt)
-
-        # wire memory event text into ScopedIndices for searchability
-        if self.scoped_indices is not None and self.scoped_indices.backend is not None:
-            try:
-                kind_val = getattr(evt.kind, "value", str(evt.kind))
-                preview = (text or "")[:500] if text else ""
-
-                extra_meta = {
-                    "run_id": evt.run_id,
-                    "scope_id": evt.scope_id,
-                    "session_id": evt.session_id,
-                    "app_id": evt.app_id,
-                    "agent_id": evt.agent_id,
-                    "graph_id": evt.graph_id,
-                    "node_id": evt.node_id,
-                    "stage": evt.stage,
-                    "tags": evt.tags or [],
-                    "severity": evt.severity,
-                    "signal": evt.signal,
-                    "tool": evt.tool,
-                    "topic": evt.topic,
-                    "preview": preview,  # short text preview
-                    "timeline_id": self.timeline_id,
+        try:
+            ts_iso = now_iso()
+            ts_num = time.time()
+            dims: dict[str, str] = {}
+            if self.scope is not None:
+                dims = self.scope.identity_labels()
+            run_id = base.get("run_id") or dims.get("run_id") or self.run_id
+            session_id = base.get("session_id") or dims.get("session_id") or self.session_id
+            scope_id = base.get("scope_id") or self.memory_scope_id or session_id or run_id
+            user_id = base.get("user_id") or dims.get("user_id")
+            org_id = base.get("org_id") or dims.get("org_id")
+            client_id = base.get("client_id") or dims.get("client_id")
+            graph_id = base.get("graph_id") or dims.get("graph_id") or self.graph_id
+            node_id = base.get("node_id") or dims.get("node_id") or self.node_id
+            app_id = base.get("app_id") or dims.get("app_id")
+            agent_id = base.get("agent_id") or dims.get("agent_id")
+            base.setdefault("run_id", run_id)
+            base.setdefault("scope_id", scope_id)
+            base.setdefault("session_id", session_id)
+            base.setdefault("graph_id", graph_id)
+            base.setdefault("node_id", node_id)
+            base.setdefault("app_id", app_id)
+            base.setdefault("agent_id", agent_id)
+            base.setdefault("user_id", user_id)
+            base.setdefault("org_id", org_id)
+            base.setdefault("client_id", client_id)
+            severity = int(base.get("severity", 2))
+            signal = base.get("signal")
+            if signal is None:
+                signal = self._estimate_signal(text=text, metrics=metrics, severity=severity)
+            kind = base.get("kind") or "misc"
+            eid = stable_event_id(
+                {
+                    "ts": ts_iso,
+                    "run_id": run_id,
+                    "kind": kind,
+                    "text": (text or "")[:6000],
+                    "tool": base.get("tool"),
                 }
-
-                meta = build_index_meta_from_scope(
-                    kind=kind_val,
-                    source="memory",
-                    ts=ts_iso,
-                    created_at_ts=ts_num,
-                    extra=extra_meta,
-                )
-
-                await self.scoped_indices.upsert(
-                    corpus="event",
-                    item_id=evt.event_id,
-                    text=evt.text or "",
-                    metadata=meta,
-                )
-
+            )
+            evt = Event(
+                event_id=eid,
+                ts=ts_iso,
+                run_id=run_id,
+                scope_id=scope_id,
+                user_id=user_id,
+                org_id=org_id,
+                client_id=client_id,
+                session_id=session_id,
+                kind=kind,
+                stage=base.get("stage"),
+                text=text,
+                tags=base.get("tags"),
+                data=base.get("data"),
+                metrics=metrics,
+                graph_id=graph_id,
+                node_id=node_id,
+                app_id=app_id,
+                agent_id=agent_id,
+                tool=base.get("tool"),
+                topic=base.get("topic"),
+                severity=severity,
+                signal=signal,
+                inputs=base.get("inputs"),
+                outputs=base.get("outputs"),
+                embedding=base.get("embedding"),
+                pii_flags=base.get("pii_flags"),
+                version=2,
+            )
+            await self.hotlog.append(
+                self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit
+            )
+            await self.persistence.append_event(self.timeline_id, evt)
+            if self.scoped_indices is not None and self.scoped_indices.backend is not None:
+                try:
+                    kind_val = getattr(evt.kind, "value", str(evt.kind))
+                    preview = (text or "")[:500] if text else ""
+                    extra_meta = {
+                        "run_id": evt.run_id,
+                        "scope_id": evt.scope_id,
+                        "session_id": evt.session_id,
+                        "app_id": evt.app_id,
+                        "agent_id": evt.agent_id,
+                        "graph_id": evt.graph_id,
+                        "node_id": evt.node_id,
+                        "stage": evt.stage,
+                        "tags": evt.tags or [],
+                        "severity": evt.severity,
+                        "signal": evt.signal,
+                        "tool": evt.tool,
+                        "topic": evt.topic,
+                        "preview": preview,
+                        "timeline_id": self.timeline_id,
+                    }
+                    meta = build_index_meta_from_scope(
+                        kind=kind_val,
+                        source="memory",
+                        ts=ts_iso,
+                        created_at_ts=ts_num,
+                        extra=extra_meta,
+                    )
+                    await self.scoped_indices.upsert(
+                        corpus="event",
+                        item_id=evt.event_id,
+                        text=evt.text or "",
+                        metadata=meta,
+                    )
+                except Exception:
+                    if self.logger:
+                        self.logger.exception("Error indexing memory event %s", evt.event_id)
+            try:
+                meter = current_metering()
+                await meter.record_event(scope=self.scope, scope_id=scope_id, kind=f"memory.{kind}")
             except Exception:
                 if self.logger:
-                    self.logger.exception("Error indexing memory event %s", evt.event_id)
-
-        # Metering hook
-        try:
-            meter = current_metering()
-            await meter.record_event(scope=self.scope, scope_id=scope_id, kind=f"memory.{kind}")
-        except Exception:
-            if self.logger:
-                self.logger.exception("Error recording metering event")
-
-        return evt
+                    self.logger.exception("Error recording metering event")
+            await span.finish(
+                response={"event_id": evt.event_id, "kind": evt.kind},
+                metadata=self._trace_meta({"event_id_ref": evt.event_id}),
+                metrics=metrics,
+            )
+            return evt
+        except Exception as exc:
+            await span.fail(exc, metadata=self._trace_meta(), metrics=metrics)
+            raise
 
     async def record(
         self,
@@ -505,75 +538,102 @@ class MemoryFacade(
                     - "outputs" (Any): Outputs generated by the tool.
                     - "tags" (list[str]): Tags associated with the tool event.
         """
-        long_term_text = ""
-        if include_long_term:
-            try:
-                summaries = await self.load_recent_summaries(
-                    summary_tag=summary_tag,
-                    summary_kind=summary_kind,
-                    limit=max_summaries,
-                    scope_id=summary_scope_id,
-                    level=level,
-                )
-            except Exception:
-                summaries = []
-
-            parts: list[str] = []
-            for s in summaries:
-                st = s.get("summary") or s.get("text") or s.get("body") or s.get("value") or ""
-                if st:
-                    parts.append(st)
-            if parts:
-                long_term_text = "\n\n".join(parts)
-
-        # 1) Recent chat (delegate tag filtering + correct "last N" to recent_chat)
-        recent_chat = await self.recent_chat(
-            limit=recent_chat_limit,
-            tags=recent_chat_tags,
-            include_tags=recent_chat_include_tags,
-            include_ts=recent_chat_include_ts,
-            level=level,
-            use_persistence=use_persistence,
+        span = await self._start_trace(
+            operation="build_prompt_segments",
+            request={
+                "recent_chat_limit": recent_chat_limit,
+                "include_long_term": include_long_term,
+                "summary_tag": summary_tag,
+                "summary_scope_id": summary_scope_id,
+                "summary_kind": summary_kind,
+                "max_summaries": max_summaries,
+                "include_recent_tools": include_recent_tools,
+                "tool": tool,
+                "tool_limit": tool_limit,
+                "level": level,
+                "use_persistence": use_persistence,
+            },
+            tags=["memory", "prompt_context"],
         )
+        try:
+            long_term_text = ""
+            if include_long_term:
+                try:
+                    summaries = await self.load_recent_summaries(
+                        summary_tag=summary_tag,
+                        summary_kind=summary_kind,
+                        limit=max_summaries,
+                        scope_id=summary_scope_id,
+                        level=level,
+                    )
+                except Exception:
+                    summaries = []
 
-        # 2) Recent tools
-        recent_tools: list[dict[str, Any]] = []
-        if include_recent_tools:
-            fetch_n = tool_limit
-            if recent_tool_tags or tool:
-                fetch_n = max(tool_limit * 5, 50)
+                parts: list[str] = []
+                for s in summaries:
+                    st = s.get("summary") or s.get("text") or s.get("body") or s.get("value") or ""
+                    if st:
+                        parts.append(st)
+                if parts:
+                    long_term_text = "\n\n".join(parts)
 
-            events = await self.recent_events(
-                kinds=["tool_result"],
-                tags=recent_tool_tags,
-                limit=fetch_n,
+            recent_chat = await self.recent_chat(
+                limit=recent_chat_limit,
+                tags=recent_chat_tags,
+                include_tags=recent_chat_include_tags,
+                include_ts=recent_chat_include_ts,
                 level=level,
                 use_persistence=use_persistence,
-                return_event=True,
             )
-            if tool is not None:
-                events = [e for e in events if getattr(e, "tool", None) == tool]
 
-            # IMPORTANT: keep the most recent tool events
-            events = events[-tool_limit:] if tool_limit else []
+            recent_tools: list[dict[str, Any]] = []
+            if include_recent_tools:
+                fetch_n = tool_limit
+                if recent_tool_tags or tool:
+                    fetch_n = max(tool_limit * 5, 50)
 
-            for e in events:
-                recent_tools.append(
-                    {
-                        "ts": getattr(e, "ts", None),
-                        "tool": getattr(e, "tool", None),
-                        "message": getattr(e, "text", None),
-                        "inputs": getattr(e, "inputs", None),
-                        "outputs": getattr(e, "outputs", None),
-                        "tags": list(e.tags or []),
-                    }
+                events = await self.recent_events(
+                    kinds=["tool_result"],
+                    tags=recent_tool_tags,
+                    limit=fetch_n,
+                    level=level,
+                    use_persistence=use_persistence,
+                    return_event=True,
                 )
+                if tool is not None:
+                    events = [e for e in events if getattr(e, "tool", None) == tool]
 
-        return {
-            "long_term": long_term_text,
-            "recent_chat": recent_chat,
-            "recent_tools": recent_tools,
-        }
+                events = events[-tool_limit:] if tool_limit else []
+
+                for e in events:
+                    recent_tools.append(
+                        {
+                            "ts": getattr(e, "ts", None),
+                            "tool": getattr(e, "tool", None),
+                            "message": getattr(e, "text", None),
+                            "inputs": getattr(e, "inputs", None),
+                            "outputs": getattr(e, "outputs", None),
+                            "tags": list(e.tags or []),
+                        }
+                    )
+
+            result = {
+                "long_term": long_term_text,
+                "recent_chat": recent_chat,
+                "recent_tools": recent_tools,
+            }
+            await span.finish(
+                response={
+                    "long_term_length": len(long_term_text),
+                    "recent_chat_count": len(recent_chat),
+                    "recent_tools_count": len(recent_tools),
+                },
+                metadata=self._trace_meta(),
+            )
+            return result
+        except Exception as exc:
+            await span.fail(exc, metadata=self._trace_meta())
+            raise
 
     # ----- Stubs for future memory facade features -----
     async def mark_event_important(

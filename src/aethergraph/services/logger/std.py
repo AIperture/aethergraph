@@ -10,6 +10,7 @@ import queue
 
 from aethergraph.config.config import AppSettings
 from aethergraph.core.graph.graph_refs import GRAPH_INPUTS_NODE_ID
+from aethergraph.services.inspect.logging import EventLogInspectionHandler, RuntimeContextFilter
 
 from .base import LogContext, LoggerService
 from .formatters import ColorFormatter, JsonFormatter, SafeFormatter
@@ -197,7 +198,7 @@ class StdLoggerService(LoggerService):
     # --- builder ---
 
     @staticmethod
-    def build(cfg: LoggingConfig | None = None) -> StdLoggerService:
+    def build(cfg: LoggingConfig | None = None, *, event_log=None) -> StdLoggerService:
         cfg = cfg or LoggingConfig.from_env()
 
         root = logging.getLogger(cfg.root_ns)
@@ -223,6 +224,7 @@ class StdLoggerService(LoggerService):
         console = logging.StreamHandler()
         console.setLevel(cfg._resolve_console_level())
         console.addFilter(HideGraphInputsFilter())
+        console.addFilter(RuntimeContextFilter())
         console.setFormatter(ColorFormatter(cfg.console_pattern))
         root.addHandler(console)
 
@@ -246,6 +248,7 @@ class StdLoggerService(LoggerService):
             else:
                 fh.setFormatter(SafeFormatter(cfg.file_pattern))
             fh.setLevel(cfg._resolve_file_level())
+            fh.addFilter(RuntimeContextFilter())
             listener = logging.handlers.QueueListener(q, fh, respect_handler_level=True)
             listener.daemon = True
             listener.start()
@@ -261,7 +264,16 @@ class StdLoggerService(LoggerService):
             else:
                 fh.setFormatter(SafeFormatter(cfg.file_pattern))
             fh.setLevel(cfg._resolve_file_level())
+            fh.addFilter(RuntimeContextFilter())
             root.addHandler(fh)
+
+        if event_log is not None:
+            root.addHandler(
+                EventLogInspectionHandler(
+                    event_log,
+                    level=cfg._resolve_file_level(),
+                )
+            )
 
         ext_level = getattr(logging, cfg.external_level.upper(), logging.WARNING)
         for name in cfg.quiet_loggers:

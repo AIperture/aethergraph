@@ -47,6 +47,11 @@ from aethergraph.services.execution.local_python import LocalPythonExecutionServ
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
+from aethergraph.services.inspect import (
+    AgentEventTypeRegistry,
+    JsonlLLMObservationStore,
+    register_default_agent_event_types,
+)
 from aethergraph.services.knowledge.chunker import TextSplitter
 
 # ---- kv services ----
@@ -54,7 +59,10 @@ from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBack
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
-from aethergraph.services.llm.observability import ConsoleLLMObservationSink, JsonlLLMObservationSink
+from aethergraph.services.llm.observability import (
+    ConsoleLLMObservationSink,
+    JsonlLLMObservationSink,
+)
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -79,7 +87,7 @@ from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.skills.skill_registry import SkillRegistry
-from aethergraph.services.tracing.noop import NoopTracer
+from aethergraph.services.tracing import EventLogTracer, NoopTracer
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
@@ -192,6 +200,9 @@ class DefaultContainer:
 
     # optional llm service
     llm: LLMService | None = None
+    llm_observation_sink: Any | None = None
+    llm_observation_path: str | None = None
+    llm_observation_store: Any | None = None
     mcp: MCPService | None = None
     embed_service: EmbeddingService | None = None
     web_search: WebSearchService | None = None
@@ -216,7 +227,8 @@ class DefaultContainer:
 
     metering: MeteringService | None = None
     rate_limiter: SimpleRateLimiter | None = None
-    tracer: NoopTracer | None = None
+    tracer: NoopTracer | EventLogTracer | None = None
+    agent_event_registry: AgentEventTypeRegistry | None = None
     secrets: EnvSecrets | None = None
 
     # extensible services
@@ -264,7 +276,8 @@ def build_default_container(
 
     # core services
     logger_factory = StdLoggerService.build(
-        LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs"))
+        LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs")),
+        event_log=eventlog,
     )
 
     clock = SystemClock()
@@ -335,6 +348,8 @@ def build_default_container(
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     obs_cfg = cfg.llm.observability
     llm_observation_sink = None
+    llm_observation_path: str | None = None
+    llm_observation_store = None
     if obs_cfg.enabled:
         if obs_cfg.sink == "console":
             llm_observation_sink = ConsoleLLMObservationSink(prompt_view=obs_cfg.prompt_view)
@@ -343,6 +358,8 @@ def build_default_container(
             if not obs_path.is_absolute():
                 obs_path = root_p / obs_path
             llm_observation_sink = JsonlLLMObservationSink(obs_path)
+            llm_observation_path = str(obs_path)
+            llm_observation_store = JsonlLLMObservationStore(obs_path)
         else:
             raise ValueError(f"Unsupported LLM observability sink: {obs_cfg.sink!r}")
     llm_clients = build_llm_clients(
@@ -444,6 +461,7 @@ def build_default_container(
 
     # skills registry
     skills_registry = SkillRegistry()
+    agent_event_registry = register_default_agent_event_types(AgentEventTypeRegistry())
 
     # trigger services
     doc_store = build_doc_store(cfg)
@@ -504,6 +522,9 @@ def build_default_container(
         eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
+        llm_observation_sink=llm_observation_sink,
+        llm_observation_path=llm_observation_path,
+        llm_observation_store=llm_observation_store,
         embed_service=embed_service,
         web_search=web_search,
         mcp=mcp,
@@ -517,7 +538,10 @@ def build_default_container(
         redactor=None,
         metering=metering,
         rate_limiter=rate_limiter,
-        tracer=None,
+        tracer=EventLogTracer(event_log=eventlog, event_hub=event_hub)
+        if eventlog is not None
+        else NoopTracer(),
+        agent_event_registry=agent_event_registry,
         settings=cfg,
     )
 

@@ -218,7 +218,7 @@ class SqliteArtifactIndexSync:
                 :session_id
             )
             ON CONFLICT(artifact_id) DO UPDATE SET
-                run_id        = excluded.run_id,
+                run_id        = COALESCE(artifacts.run_id, excluded.run_id),
                 graph_id      = excluded.graph_id,
                 node_id       = excluded.node_id,
                 tool_name     = excluded.tool_name,

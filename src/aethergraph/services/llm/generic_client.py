@@ -38,6 +38,7 @@ from aethergraph.services.llm.utils import (
     _strip_schema_enforced_json_fence,
     _validate_json_schema,
 )
+from aethergraph.services.tracing import resolve_tracer
 
 DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
@@ -405,6 +406,22 @@ class GenericLLMClient(
             extra_params=kw,
             trace_payload=trace_payload,
         )
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="llm",
+            operation="chat",
+            request={
+                "provider": self.provider,
+                "model": model,
+                "messages": messages,
+                "reasoning_effort": reasoning_effort,
+                "max_output_tokens": max_output_tokens,
+                "output_format": output_format,
+                "trace_payload": trace_payload,
+            },
+            tags=["llm", "chat"],
+            metadata=self._current_dimensions(),
+        )
 
         start = time.perf_counter()
         try:
@@ -447,12 +464,22 @@ class GenericLLMClient(
                 latency_ms=latency_ms,
             )
             await self._emit_observation(observation_record)
+            await span.finish(
+                response={"text": text, "usage": usage},
+                metadata=self._current_dimensions(),
+                metrics={**(usage or {}), "latency_ms": latency_ms},
+            )
             return text, usage
         except Exception as exc:
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)
             await self._emit_observation(observation_record)
+            await span.fail(
+                exc,
+                metadata=self._current_dimensions(),
+                metrics={"latency_ms": observation_record.latency_ms or 0},
+            )
             raise
 
     # ================================================================
@@ -552,6 +579,22 @@ class GenericLLMClient(
             extra_params=kw,
             trace_payload=trace_payload,
         )
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="llm",
+            operation="chat_stream",
+            request={
+                "provider": self.provider,
+                "model": model,
+                "messages": messages,
+                "reasoning_effort": reasoning_effort,
+                "max_output_tokens": max_output_tokens,
+                "output_format": output_format,
+                "trace_payload": trace_payload,
+            },
+            tags=["llm", "chat_stream"],
+            metadata=self._current_dimensions(),
+        )
         start = time.perf_counter()
 
         # Resolve thinking config: omitted -> profile default, explicit value -> per-call override.
@@ -627,12 +670,22 @@ class GenericLLMClient(
             self._enforce_llm_limits_for_run(usage=usage)
             await self._record_llm_usage(model=model, usage=usage, latency_ms=latency_ms)
             await self._emit_observation(observation_record)
+            await span.finish(
+                response={"text": text, "usage": usage},
+                metadata=self._current_dimensions(),
+                metrics={**(usage or {}), "latency_ms": latency_ms},
+            )
             return text, usage
         except Exception as exc:
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)
             await self._emit_observation(observation_record)
+            await span.fail(
+                exc,
+                metadata=self._current_dimensions(),
+                metrics={"latency_ms": observation_record.latency_ms or 0},
+            )
             raise
 
     # ================================================================
@@ -746,7 +799,7 @@ class GenericLLMClient(
         except Exception as e:
             raise RuntimeError(f"Model did not return valid JSON. Raw output:\n{text}") from e
 
-        if output_format == "json_schema" and json_schema is not None and strict_schema:
+        if json_schema is not None and strict_schema:
             _validate_json_schema(obj, json_schema)
 
         # Canonical JSON string output (makes downstream robust)
@@ -800,31 +853,58 @@ class GenericLLMClient(
         """
         await self._ensure_client()
         model = model or self.model
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="llm",
+            operation="generate_image",
+            request={
+                "provider": self.provider,
+                "model": model,
+                "prompt": prompt,
+                "n": n,
+                "size": size,
+            },
+            tags=["llm", "image"],
+            metadata=self._current_dimensions(),
+        )
 
         start = time.perf_counter()
 
-        result = await self._image_dispatch(
-            prompt,
-            model=model,
-            n=n,
-            size=size,
-            quality=quality,
-            style=style,
-            output_format=output_format,
-            response_format=response_format,
-            background=background,
-            input_images=input_images,
-            azure_api_version=azure_api_version,
-            **kw,
-        )
+        try:
+            result = await self._image_dispatch(
+                prompt,
+                model=model,
+                n=n,
+                size=size,
+                quality=quality,
+                style=style,
+                output_format=output_format,
+                response_format=response_format,
+                background=background,
+                input_images=input_images,
+                azure_api_version=azure_api_version,
+                **kw,
+            )
 
-        # Rate limits: count as a call; tokens are typically not reported for images
-        self._enforce_llm_limits_for_run(usage=result.usage or {})
+            self._enforce_llm_limits_for_run(usage=result.usage or {})
 
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        await self._record_llm_usage(model=model, usage=result.usage or {}, latency_ms=latency_ms)
-
-        return result
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            await self._record_llm_usage(
+                model=model, usage=result.usage or {}, latency_ms=latency_ms
+            )
+            await span.finish(
+                response={"usage": result.usage or {}, "images_count": len(result.images or [])},
+                metadata=self._current_dimensions(),
+                metrics={**(result.usage or {}), "latency_ms": latency_ms},
+            )
+            return result
+        except Exception as exc:
+            await span.fail(
+                exc,
+                metadata=self._current_dimensions(),
+                metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+            )
+            raise
 
     async def _image_dispatch(
         self,

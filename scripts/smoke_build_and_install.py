@@ -19,7 +19,8 @@ from pathlib import Path
 # ---- CONFIG: adjust paths if needed ----
 
 ROOT = Path(__file__).resolve().parent.parent  # assuming script is in ./scripts/
-FRONTEND_DIR = ROOT / "aethergraph-frontend"   # or whatever your frontend dir is
+REPO_ROOT = ROOT.parent                        # monorepo root (aethergraph-suite)
+FRONTEND_DIR = REPO_ROOT / "aethergraph-frontend"
 FRONTEND_DIST = FRONTEND_DIR / "dist"
 BACKEND_UI_STATIC = ROOT / "src" / "aethergraph" / "server" / "ui_static"
 DIST_DIR = ROOT / "dist"
@@ -37,7 +38,12 @@ def run(cmd, cwd=None):
 def build_frontend():
     """Build the React frontend and copy dist/ into backend ui_static/."""
     if not FRONTEND_DIR.exists():
-        print(f"[frontend] Skipping: {FRONTEND_DIR} does not exist.")
+        print(f"[frontend] {FRONTEND_DIR} does not exist.")
+        proceed = input("Frontend directory not found. Proceed without copying frontend? [y/N]: ").strip().lower()
+        if proceed != "y":
+            print("Aborting.")
+            sys.exit(1)
+        print("[frontend] Skipping frontend build and copy step.")
         return
 
     print("[frontend] Building frontend bundle...")

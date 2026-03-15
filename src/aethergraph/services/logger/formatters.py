@@ -17,7 +17,19 @@ class SafeFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         # Provide default values for our known keys so %()s doesn't KeyError
-        for k in ("run_id", "node_id", "graph_id", "agent_id"):
+        for k in (
+            "run_id",
+            "session_id",
+            "node_id",
+            "graph_id",
+            "agent_id",
+            "app_id",
+            "trace_id",
+            "span_id",
+            "user_id",
+            "org_id",
+            "client_id",
+        ):
             if not hasattr(record, k):
                 setattr(record, k, "-")
 
@@ -68,6 +80,13 @@ class JsonFormatter(logging.Formatter):
                 "node_id": getattr(record, "node_id", None),
                 "graph_id": getattr(record, "graph_id", None),
                 "agent_id": getattr(record, "agent_id", None),
+                "session_id": getattr(record, "session_id", None),
+                "app_id": getattr(record, "app_id", None),
+                "trace_id": getattr(record, "trace_id", None),
+                "span_id": getattr(record, "span_id", None),
+                "user_id": getattr(record, "user_id", None),
+                "org_id": getattr(record, "org_id", None),
+                "client_id": getattr(record, "client_id", None),
             }
         )
         if record.exc_info:

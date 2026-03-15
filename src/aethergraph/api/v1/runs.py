@@ -155,10 +155,6 @@ async def list_runs(
         offset=offset,
     )
 
-    print(
-        f"Listed {len(records)} runs from offset {offset} (graph_id={graph_id}, status={status}, flow_id={flow_id}, origin={origin})"
-    )
-
     # Filter by origin if requested
     if origin is not None:
         records = [rec for rec in records if rec.origin == origin]
@@ -294,6 +290,61 @@ def _coerce_node_status(value: Any, fallback: RunStatus) -> RunStatus:
     return fallback
 
 
+def _is_terminal_node_status(value: Any) -> bool:
+    status = str(value or "").upper()
+    return status in {"DONE", "FAILED", "CANCELLED", "CANCELED", "SKIPPED"}
+
+
+def _apply_state_events_to_nodes_state(
+    *,
+    nodes_state: dict[str, dict[str, Any]],
+    events: list[Any],
+) -> dict[str, dict[str, Any]]:
+    merged = {str(node_id): dict(state or {}) for node_id, state in nodes_state.items()}
+
+    def _ensure_node(node_id: str) -> dict[str, Any]:
+        return merged.setdefault(
+            str(node_id),
+            {
+                "status": "PENDING",
+                "started_at": None,
+                "finished_at": None,
+                "outputs": None,
+                "error": None,
+                "error_info": None,
+            },
+        )
+
+    ordered_events = sorted(
+        list(events or []),
+        key=lambda ev: (getattr(ev, "rev", -1), getattr(ev, "ts", 0.0)),
+    )
+    for ev in ordered_events:
+        kind = str(getattr(ev, "kind", "") or "").upper()
+        payload = getattr(ev, "payload", None) or {}
+        if not isinstance(payload, dict):
+            continue
+        node_id = payload.get("node_id")
+        if not node_id:
+            continue
+        node_state = _ensure_node(str(node_id))
+
+        if kind == "STATUS":
+            status = payload.get("status")
+            if status is not None:
+                node_state["status"] = status
+                event_dt = _coerce_ts_to_dt(getattr(ev, "ts", None))
+                event_iso = event_dt.isoformat() if event_dt is not None else None
+                if str(status).upper() == "RUNNING" and not node_state.get("started_at"):
+                    node_state["started_at"] = event_iso
+                if _is_terminal_node_status(status) and not node_state.get("finished_at"):
+                    node_state["finished_at"] = event_iso
+        elif kind == "OUTPUT":
+            node_state["outputs"] = payload.get("outputs")
+
+    return merged
+
+
 @router.get("/runs/{run_id}/snapshot", response_model=RunSnapshot)
 async def get_run_snapshot(
     run_id: str,
@@ -340,8 +391,12 @@ async def get_run_snapshot(
 
     # --- Load latest GraphSnapshot (if we have a state store) ---
     snap = None
+    incremental_events: list[Any] = []
     if state_store is not None:
         snap = await state_store.load_latest_snapshot(run_id)
+        from_rev = getattr(snap, "rev", -1) if snap is not None else -1
+        if hasattr(state_store, "load_events_since"):
+            incremental_events = await state_store.load_events_since(run_id, from_rev)
 
     # print(f"Run {run_id} snapshot: record status={rec.status}, graph_id={graph_id}, graph_kind={graph_kind}, flow_id={flow_id}, entrypoint={entrypoint}")
     # print(snap)
@@ -365,6 +420,12 @@ async def get_run_snapshot(
                 and (e.get("from") or e.get("source"))
                 and (e.get("to") or e.get("target"))
             ]
+
+    if incremental_events:
+        nodes_state = _apply_state_events_to_nodes_state(
+            nodes_state=nodes_state,
+            events=incremental_events,
+        )
 
     # --- Load static TaskGraph spec when snapshot does not include explicit edges ---
     spec = None

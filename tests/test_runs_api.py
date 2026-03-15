@@ -1,5 +1,6 @@
 # tests/test_runs_api.py
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -311,6 +312,11 @@ def test_get_run_snapshot_includes_node_and_run_error_info(monkeypatch):
                 },
             )()
 
+        async def load_events_since(self, run_id: str, from_rev: int):
+            assert run_id == "run-failed"
+            assert from_rev == -1
+            return []
+
     class FakeContainer:
         run_manager = fake_rm
         metering = fake_meter
@@ -341,6 +347,94 @@ def test_get_run_snapshot_includes_node_and_run_error_info(monkeypatch):
     assert data["nodes"][0]["error"] == "Node exploded"
     assert data["nodes"][0]["error_info"]["detail"] == "Traceback: node exploded"
     assert data["nodes"][0]["error_info"]["is_traceback"] is True
+
+
+def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
+    fake_rm = FakeRunManager()
+    fake_meter = FakeMetering(runs_count=0)
+    fake_settings = FakeSettings(enabled=True, max_runs_per_window=1000, burst_max_runs=1000)
+    fake_authz = FakeAuthz()
+
+    class FakeStateStore:
+        async def load_latest_snapshot(self, run_id: str):
+            assert run_id == "run-xyz"
+            return SimpleNamespace(
+                rev=1,
+                state={
+                    "nodes": {
+                        "node-a": {
+                            "status": "PENDING",
+                            "started_at": None,
+                            "finished_at": None,
+                            "outputs": None,
+                            "error": None,
+                            "error_info": None,
+                        }
+                    },
+                    "edges": [],
+                },
+            )
+
+        async def load_events_since(self, run_id: str, from_rev: int):
+            assert run_id == "run-xyz"
+            assert from_rev == 1
+            return [
+                SimpleNamespace(
+                    run_id=run_id,
+                    graph_id="my-graph",
+                    rev=2,
+                    ts=datetime(2024, 1, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp(),
+                    kind="STATUS",
+                    payload={"node_id": "node-a", "status": "RUNNING"},
+                ),
+                SimpleNamespace(
+                    run_id=run_id,
+                    graph_id="my-graph",
+                    rev=3,
+                    ts=datetime(2024, 1, 1, 0, 0, 2, tzinfo=timezone.utc).timestamp(),
+                    kind="OUTPUT",
+                    payload={"node_id": "node-a", "outputs": {"value": 42}},
+                ),
+                SimpleNamespace(
+                    run_id=run_id,
+                    graph_id="my-graph",
+                    rev=4,
+                    ts=datetime(2024, 1, 1, 0, 0, 3, tzinfo=timezone.utc).timestamp(),
+                    kind="STATUS",
+                    payload={"node_id": "node-a", "status": "DONE"},
+                ),
+            ]
+
+    class FakeContainer:
+        run_manager = fake_rm
+        metering = fake_meter
+        settings = fake_settings
+        authz = fake_authz
+        run_burst_limiter = None
+        state_store = FakeStateStore()
+
+    monkeypatch.setattr("aethergraph.api.v1.runs.current_services", lambda: FakeContainer())
+    monkeypatch.setattr("aethergraph.api.v1.deps.current_services", lambda: FakeContainer())
+
+    app = FastAPI()
+    app.include_router(runs_api.router, prefix="/api/v1")
+
+    from aethergraph.api.v1.runs import get_identity
+
+    async def fake_get_identity():
+        return FakeIdentity(user_id="u1", org_id="o1", mode="cloud")
+
+    app.dependency_overrides[get_identity] = fake_get_identity
+    client = TestClient(app)
+
+    resp = client.get("/api/v1/runs/run-xyz/snapshot")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert data["nodes"][0]["status"] == "succeeded"
+    assert data["nodes"][0]["outputs"] == {"value": 42}
+    assert data["nodes"][0]["started_at"] == "2024-01-01T00:00:01Z"
+    assert data["nodes"][0]["finished_at"] == "2024-01-01T00:00:03Z"
 
 
 def test_run_endpoint_window_rate_limit(monkeypatch):

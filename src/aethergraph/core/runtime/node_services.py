@@ -16,6 +16,7 @@ from aethergraph.services.planning.planner_service import PlannerService
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.skills.skill_registry import SkillRegistry
+from aethergraph.services.tracing import NoopTracer, TracerProtocol
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
@@ -47,3 +48,4 @@ class NodeServices:
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
     web_search: WebSearchFacade | None = None  # Web search facade
     registry: RegistryFacade | None = None  # Scope-bound runtime registry facade
+    tracer: TracerProtocol | NoopTracer | None = None
