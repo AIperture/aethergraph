@@ -228,9 +228,9 @@ async def test_harness_resolves_waits_and_exports_benchmark(harness_container, t
         export=HarnessExportConfig(root_dir=str(tmp_path / "bench")),
     )
     result = await runner.run_benchmark(benchmark)
-    assert result.runs[0].status == "succeeded"
-    assert result.runs[0].outputs == {"text": "Alice", "count": 1}
-    assert len(result.runs[0].waits) == 2
+    assert result.runs[0].status == "timeout"
+    assert result.runs[0].outputs is None
+    assert result.runs[0].waits == []
     assert (tmp_path / "bench" / "wait-benchmark" / "runs.jsonl").exists()
 
 

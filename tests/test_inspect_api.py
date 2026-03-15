@@ -406,7 +406,9 @@ def test_get_run_llm_calls(client: TestClient) -> None:
     item = resp.json()["items"][0]
     assert item["provider"] == "openai"
     assert item["messages_preview"]["count"] == 1
-    assert "messages" not in item
+    assert item["messages"] is None
+    assert item["raw_text"] is None
+    assert item["trace_payload"] is None
 
 
 def test_get_llm_call_detail_includes_full_payload(client: TestClient) -> None:
@@ -480,7 +482,7 @@ def test_list_global_logs_filters_and_ordering(client: TestClient) -> None:
 
 
 def test_list_agent_events_supports_time_window(client: TestClient) -> None:
-    resp = client.get("/api/v1/inspect/agent-events?from=2100-01-01T00:00:00+00:00")
+    resp = client.get("/api/v1/inspect/agent-events?from=2100-01-01T00:00:00Z")
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 0

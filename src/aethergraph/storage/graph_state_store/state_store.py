@@ -34,21 +34,33 @@ class GraphStateStoreImpl(GraphStateStore):
     async def append_event(self, ev: StateEvent) -> None:
         # standard event log append
         payload = ev.__dict__.copy()
-        payload.setdefault("scope_id", ev.run_id)
-        payload.setdefault("kind", "graph_state")
+        payload["scope_id"] = ev.run_id
+        payload["event_kind"] = payload.get("kind")
+        payload["kind"] = "graph_state"
         payload.setdefault("ts", time.time())
         await self._log.append(payload)
 
     async def load_events_since(self, run_id, from_rev) -> list[StateEvent]:
         rows = await self._log.query(
             scope_id=run_id,
-            kinds=["graph_state"],
+            # Support both the fixed envelope kind and older rows written directly
+            # with the state event kind as the top-level kind.
+            kinds=["graph_state", "STATUS", "OUTPUT", "INPUTS_BOUND", "PATCH"],
             # from_rev filter will be applied below
         )
         out = []
         for row in rows:
             if row.get("rev", -1) > from_rev:
-                out.append(StateEvent(**row))
+                out.append(
+                    StateEvent(
+                        run_id=row.get("run_id", run_id),
+                        graph_id=row.get("graph_id", ""),
+                        rev=row.get("rev", -1),
+                        ts=row.get("ts", time.time()),
+                        kind=row.get("event_kind") or row.get("kind") or "PATCH",
+                        payload=row.get("payload") or {},
+                    )
+                )
         return out
 
     async def list_run_ids(self, graph_id: str | None = None) -> list[str]:

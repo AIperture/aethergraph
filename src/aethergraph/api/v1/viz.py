@@ -69,8 +69,8 @@ async def get_run_viz(
     rows = await viz_service.query_run(run_id, kinds=kinds_filter)
 
     # Group into figures/tracks/points
-    # Key: (figure_id, track_id, viz_kind, node_id)
-    track_map: dict[tuple[str | None, str, str, str | None], dict[str, Any]] = {}
+    # Key: (figure_id, track_id, viz_kind)
+    track_map: dict[tuple[str | None, str, str], dict[str, Any]] = {}
     for row in rows:
         data: dict[str, Any] = row.get("data") or {}
         viz_kind: str = data.get("viz_kind")
@@ -83,19 +83,21 @@ async def get_run_viz(
             # skip malformed events
             continue
 
-        key = (figure_id, track_id, viz_kind, node_id)
+        key = (figure_id, track_id, viz_kind)
         agg = track_map.get(key)
         if agg is None:
             agg = {
                 "figure_id": figure_id,
                 "track_id": track_id,
                 "viz_kind": viz_kind,
-                "node_id": node_id,
+                "node_ids": [],
                 "mode": data.get("mode", "append"),
                 "meta": data.get("meta") or {},
                 "points": [],
             }
             track_map[key] = agg
+        if node_id and node_id not in agg["node_ids"]:
+            agg["node_ids"].append(node_id)
 
         # Mode/meta: keep the first one, but allow later events to update if you want
         # For now we just keep existing 'mode' and 'meta' if already set.
@@ -122,18 +124,21 @@ async def get_run_viz(
     # Build figures from grouping
     figures_map: dict[str | None, list[VizTrack]] = {}
 
-    for (fig_id, track_id, _, node_id), agg in track_map.items():
+    for (fig_id, track_id, _), agg in track_map.items():
         points: list[VizPoint] = agg["points"]
         # Sort points by step (and then by created_at as tiebreaker)
         points.sort(key=lambda p: (p.step, p.created_at or datetime.min))
 
+        track_meta = dict(agg["meta"] or {})
+        if agg["node_ids"]:
+            track_meta.setdefault("node_ids", list(agg["node_ids"]))
         track = VizTrack(
             track_id=track_id,
             figure_id=fig_id,
-            node_id=node_id,
+            node_id=None,
             viz_kind=agg["viz_kind"],
             mode=agg["mode"],
-            meta=agg["meta"],
+            meta=track_meta,
             points=points,
         )
 
