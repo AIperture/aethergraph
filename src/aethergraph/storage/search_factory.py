@@ -148,7 +148,7 @@ def build_search_backend(
       - "faiss_vector"   -> GenericSearchBackend + FAISSVectorIndex
                            (+ optional SQLite lexical index if cfg.search.enable_lexical)
     """
-    root = os.path.abspath(cfg.root)
+    root = os.path.abspath(cfg.workspace)
     return build_search_backend_from_settings(
         root=root,
         settings=cfg.search,
@@ -164,7 +164,7 @@ def build_kb_search_backend(
     """
     Build the SearchBackend used by the KnowledgeBackend / KB.
     """
-    root = os.path.abspath(cfg.root)
+    root = os.path.abspath(cfg.workspace)
     return build_search_backend_from_settings(
         root=root,
         settings=cfg.knowledge.search,

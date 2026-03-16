@@ -22,7 +22,7 @@ When the final graph file is known, the simplest local run path is:
 
 ```bash
 python -m aethergraph run ./aethergraph_graphs/my-workflow/workflow.py \
-  --workspace ./aethergraph_data \
+  --workspace ./aethergraph_workspace \
   --project-root . \
   --inputs '{"request_text":"summarize this"}'
 ```
@@ -38,7 +38,7 @@ Use this when the user wants a direct execution without a server:
 
 ```bash
 python -m aethergraph run my_workflow \
-  --workspace ./aethergraph_data \
+  --workspace ./aethergraph_workspace \
   --project-root . \
   --load-path ./aethergraph_graphs/my-workflow/workflow.py \
   --inputs '{"request_text":"summarize this"}'
@@ -63,7 +63,7 @@ For a graph file at `./aethergraph_graphs/my-workflow/workflow.py`:
 
 ```bash
 python -m aethergraph serve \
-  --workspace ./aethergraph_data \
+  --workspace ./aethergraph_workspace \
   --project-root . \
   --load-path ./aethergraph_graphs/my-workflow/workflow.py \
   --port 8745 \
@@ -80,7 +80,7 @@ If the user wants live reload during development:
 
 ```bash
 python -m aethergraph serve \
-  --workspace ./aethergraph_data \
+  --workspace ./aethergraph_workspace \
   --project-root . \
   --load-path ./aethergraph_graphs/my-workflow/workflow.py \
   --port 8745 \
@@ -93,7 +93,7 @@ If you want an explicit registration step before serving or running, use:
 
 ```bash
 python -m aethergraph register \
-  --workspace ./aethergraph_data \
+  --workspace ./aethergraph_workspace \
   --source file \
   --path ./aethergraph_graphs/my-workflow/workflow.py
 ```

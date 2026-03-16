@@ -27,7 +27,7 @@ def run(
     target: Any,
     *,
     inputs: dict[str, Any] | None = None,
-    workspace: str = "./aethergraph_data",
+    workspace: str = "./aethergraph_workspace",
     origin: str = "local",
 ) -> dict[str, Any] | None:
     """
@@ -53,7 +53,7 @@ async def run_async(
     target: Any,
     *,
     inputs: dict[str, Any] | None = None,
-    workspace: str = "./aethergraph_data",
+    workspace: str = "./aethergraph_workspace",
     origin: str = "local",
 ) -> dict[str, Any] | None:
     """Async version of run()."""
@@ -64,7 +64,7 @@ async def _run_async(
     target: Any,
     *,
     inputs: dict[str, Any] | None = None,
-    workspace: str = "./aethergraph_data",
+    workspace: str = "./aethergraph_workspace",
     origin: str = "local",
 ) -> dict[str, Any] | None:
     from aethergraph.api.v1.deps import RequestIdentity

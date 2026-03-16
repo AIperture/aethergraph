@@ -115,7 +115,9 @@ class ChannelSettings(BaseModel):
 
 
 class RAGSettings(BaseModel):
-    root: str = "./aethergraph_data/rag"  # base dir for rag; should not use it unless customized
+    root: str = (
+        "./aethergraph_workspace/rag"  # base dir for rag; should not use it unless customized
+    )
     backend: str = "sqlite"  # "sqlite" | "faiss"
     index_path: str | None = None  # defaults set at runtime if None
     dim: int | None = None  # only for faiss; optional
@@ -126,8 +128,8 @@ class AppSettings(BaseSettings):
         env_prefix="AETHERGRAPH_", env_nested_delimiter="__", extra="ignore", case_sensitive=False
     )
 
-    # top-level for workspace root
-    root: str = "./aethergraph_data"
+    # top-level workspace root directory
+    workspace: str = "./aethergraph_workspace"
 
     # Deployment mode controls identity resolution and tenant scoping.
     #

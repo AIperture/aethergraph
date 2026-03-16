@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 def create_app(
     *,
-    workspace: str = "./aethergraph_data",
+    workspace: str = "./aethergraph_workspace",
     cfg: Optional["AppSettings"] = None,
     log_level: str = "info",
 ) -> FastAPI:
@@ -278,7 +278,7 @@ def create_app_from_env() -> FastAPI:
     Reads workspace + graph load config from env, imports user graphs,
     then builds the FastAPI app.
     """
-    workspace = os.environ.get("AETHERGRAPH_WORKSPACE", "./aethergraph_data")
+    workspace = os.environ.get("AETHERGRAPH_WORKSPACE", "./aethergraph_workspace")
     log_level = os.environ.get("AETHERGRAPH_LOG_LEVEL", "warning")
 
     # 0) Load settings from env like `start_server` and CLI would (__main__.py)

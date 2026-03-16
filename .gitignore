@@ -70,6 +70,7 @@ env/
 # Aethergraph specific
 aeg_workspace/
 aethergraph_data/
+aethergraph_workspace/
 
 # all sqlite db files and faiss indexes
 *.sqlite3

@@ -66,7 +66,7 @@ def _make_uvicorn_server(app: FastAPI, host: str, port: int, log_level: str) -> 
 
 def start_server(
     *,
-    workspace: str = "./aethergraph_data",
+    workspace: str = "./aethergraph_workspace",
     host: str = "127.0.0.1",
     port: int = 8745,  # 0 = auto free port
     log_level: str = "warning",
@@ -88,13 +88,13 @@ def start_server(
     Examples:
       Basic usage to start a server and get its URL:
       ```python
-      url = start_server(workspace="./aethergraph_data", port=0)
+      url = start_server(workspace="./aethergraph_workspace", port=0)
       ```
 
       Loading user graphs before starting:
       ```python
       url = start_server(
-        workspace="./aethergraph_data",
+        workspace="./aethergraph_workspace",
         port=0,
         load_paths=["./my_graphs.py"],
         project_root=".",
@@ -103,7 +103,7 @@ def start_server(
 
       Starting and blocking until server exit (notebook/script mode):
       ```python
-      url, handle = start_server(workspace="./aethergraph_data", port=0, return_handle=True)
+      url, handle = start_server(workspace="./aethergraph_workspace", port=0, return_handle=True)
       print("Server running at", url)
       try:
         handle.block()
@@ -114,13 +114,13 @@ def start_server(
 
       Returning the dependency injection container for advanced use:
       ```python
-      url, container = start_server(workspace="./aethergraph_data", return_container=True)
+      url, container = start_server(workspace="./aethergraph_workspace", return_container=True)
       ```
 
       Returning both container and handle:
       ```python
       url, container, handle = start_server(
-        workspace="./aethergraph_data",
+        workspace="./aethergraph_workspace",
         return_container=True,
         return_handle=True,
       )

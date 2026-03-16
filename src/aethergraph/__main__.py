@@ -39,7 +39,7 @@ Why:
 Commands:
 
   1) Start the sidecar (blocking, recommended for "always-on" local server)
-       python -m aethergraph serve --workspace ./aethergraph_data --port 0 \
+       python -m aethergraph serve --workspace ./aethergraph_workspace --port 0 \
          --project-root . \
          --load-path ./graphs.py
 
@@ -51,7 +51,7 @@ Commands:
        - server.json is written under the workspace for discovery.
 
   2) Reuse detection (avoid starting multiple servers for the same workspace)
-       python -m aethergraph serve --workspace ./aethergraph_data --reuse
+       python -m aethergraph serve --workspace ./aethergraph_workspace --reuse
 
      Behavior:
        - If a server for this workspace is already running, print its URL and exit 0.
@@ -107,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         - `serve`: Command to start the AetherGraph server. If no other command is given, the server will only load default built-in agents/apps.
 
     Optional keywords:
-        - `workspace`: Path to the workspace folder (default: ./aethergraph_data).
+        - `workspace`: Path to the workspace folder (default: ./aethergraph_workspace).
         - `host`: Host address to bind (default: 127.0.0.1).
         - `port`: Port to bind (default: 8745; use 0 for auto-pick).
         - `log-level`: App log level (default: warning).
@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     serve = sub.add_parser("serve", help="Run the AetherGraph sidecar (blocking).")
-    serve.add_argument("--workspace", default="./aethergraph_data")
+    serve.add_argument("--workspace", default="./aethergraph_workspace")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8745, help="0 = auto free port")
     serve.add_argument("--log-level", default="warning")
@@ -193,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help=(
             "Glob pattern of files/dirs to exclude from auto-reload (repeatable). "
-            "Example: --reload-exclude 'aethergraph_data/**/*' --reload-exclude '*/__pycache__/*'"
+            "Example: --reload-exclude 'aethergraph_workspace/**/*' --reload-exclude '*/__pycache__/*'"
         ),
     )
 
@@ -230,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument(
         "--inputs", default="{}", help="JSON object of inputs to pass to the graph."
     )
-    run_cmd.add_argument("--workspace", default="./aethergraph_data")
+    run_cmd.add_argument("--workspace", default="./aethergraph_workspace")
     run_cmd.add_argument("--project-root", default=".")
     run_cmd.add_argument(
         "--load-module", action="append", default=[], help="Module to import (repeatable)."
@@ -258,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- register subcommand ----
     register = sub.add_parser("register", help="Register a local graph source into registry.")
-    register.add_argument("--workspace", default="./aethergraph_data")
+    register.add_argument("--workspace", default="./aethergraph_workspace")
     register.add_argument("--server-url", default=None)
     register.add_argument("--mode", choices=["auto", "api", "local"], default="auto")
     register.add_argument("--source", choices=["file", "artifact"], default="file")
@@ -313,9 +313,6 @@ def main(argv: list[str] | None = None) -> int:
 
             # Export them to environment so the worker factory can read them
             os.environ["AETHERGRAPH_WORKSPACE"] = args.workspace
-            os.environ.setdefault(
-                "AETHERGRAPH_ROOT", args.workspace
-            )  # AETHERGRAPH_ROOT is the workspace root in env
             os.environ["AETHERGRAPH_PROJECT_ROOT"] = str(project_root)
             os.environ["AETHERGRAPH_LOAD_MODULES"] = ",".join(modules)
             os.environ["AETHERGRAPH_LOAD_PATHS"] = os.pathsep.join(paths)
@@ -555,7 +552,6 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         os.environ.setdefault("AETHERGRAPH_WORKSPACE", args.workspace)
-        os.environ.setdefault("AETHERGRAPH_ROOT", args.workspace)
         os.environ.setdefault("AETHERGRAPH_LOG_LEVEL", args.log_level)
 
         if spec.modules or spec.paths:

@@ -32,7 +32,7 @@ Notes:
 from aethergraph import start_server
 
 url = start_server(
-    workspace="./aethergraph_data",
+    workspace="./aethergraph_workspace",
     port=0,
     load_paths=["./my_graphs.py"],
     project_root=".",
@@ -48,7 +48,7 @@ Useful options:
 Pattern for scripts:
 
 ```python
-url, handle = start_server(workspace="./aethergraph_data", port=0, return_handle=True)
+url, handle = start_server(workspace="./aethergraph_workspace", port=0, return_handle=True)
 print("Server:", url)
 handle.block()
 ```

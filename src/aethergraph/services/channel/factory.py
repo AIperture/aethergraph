@@ -30,7 +30,7 @@ def make_channel_adapters_from_env(
         adapters["tg"] = TelegramChannelAdapter(bot_token=cfg.telegram.bot_token.get_secret_value())
 
     # include default file adapter
-    file_root = os.path.join(cfg.root, "channel_files")
+    file_root = os.path.join(cfg.workspace, "channel_files")
     adapters["file"] = FileChannelAdapter(root=file_root)
 
     # include webhook adapter

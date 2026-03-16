@@ -247,7 +247,7 @@ def build_default_container(
     cfg: AppSettings | None = None,
 ) -> DefaultContainer:
     """Build the default service container with standard services.
-    if "root" is provided, use it as the base directory for storage; else use from cfg/root.
+    if "root" is provided, use it as the base directory for storage; else use from cfg.workspace.
     if cfg is not provided, load from default AppSettings.
     """
     if cfg is None:
@@ -257,12 +257,12 @@ def build_default_container(
         cfg = load_settings()
         set_current_settings(cfg)
 
-    root = root or cfg.root
-    # override root in cfg to match
-    cfg.root = root
+    root = root or cfg.workspace
+    # override workspace in cfg to match
+    cfg.workspace = root
 
     # we use user specified root if provided, else from config/env
-    root_p = Path(root).resolve() if root else Path(cfg.root).resolve()
+    root_p = Path(root).resolve() if root else Path(cfg.workspace).resolve()
     (root_p / "kv").mkdir(parents=True, exist_ok=True)
     (root_p / "index").mkdir(parents=True, exist_ok=True)
     (root_p / "memory").mkdir(parents=True, exist_ok=True)
@@ -435,7 +435,7 @@ def build_default_container(
 
     kb_search_backend = build_kb_search_backend(cfg, embedder=embed_client)
     kb_backend = LocalFSKnowledgeBackend(
-        corpus_root=os.path.join(os.path.abspath(cfg.root), cfg.knowledge.corpus_root),
+        corpus_root=os.path.join(os.path.abspath(cfg.workspace), cfg.knowledge.corpus_root),
         artifacts=artifacts,  # this is store, not Facade with auto-indexing, long doc has its own indexing method
         search_backend=kb_search_backend,
         embed_client=embed_client,
