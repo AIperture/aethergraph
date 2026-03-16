@@ -317,9 +317,10 @@ class ChannelIngress:
         normalized_attachments = [attachment_to_dict(a) for a in (msg.attachments or [])]
 
         if kind == "approval":
-            choice = (msg.choice or (msg.text or "")).strip() or "reject"
+            choice = (msg.choice or "").strip() or None
             payload: dict[str, Any] = {
                 "choice": choice,
+                "text": msg.text or "",
                 "channel_key": ch_key,
                 "thread_id": msg.thread_id,
                 "meta": meta,

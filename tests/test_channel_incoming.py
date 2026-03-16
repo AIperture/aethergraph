@@ -160,6 +160,41 @@ async def test_run_channel_incoming_resumes_continuation():
 
 
 @pytest.mark.asyncio
+async def test_run_channel_incoming_approval_preserves_text_without_promoting_to_choice():
+    cont = Continuation(
+        run_id="run-xyz",
+        node_id="node-abc",
+        token="tok-approval",
+        kind="approval",
+        channel="ui:run/run-xyz",
+        prompt={"title": "Approve plan?"},
+    )
+
+    container = FakeContainer(cont=cont)
+    app = build_app_with_container(container)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/runs/run-xyz/channel/incoming",
+        json={
+            "text": "change the delivery wording",
+            "meta": {"foo": "bar"},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["resumed"] is True
+
+    rr = container.resume_router
+    assert len(rr.calls) == 1
+    payload = rr.calls[0]["payload"]
+    assert payload["choice"] is None
+    assert payload["text"] == "change the delivery wording"
+    assert payload["meta"] == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
 async def test_run_channel_incoming_multipart_with_attachments_json():
     cont = Continuation(
         run_id="run-xyz",

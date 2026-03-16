@@ -12,6 +12,7 @@ from .misc import router as misc_router
 from .registry import router as registry_router
 from .runs import router as runs_router
 from .session import router as session_router
+from .settings import router as settings_router
 from .stats import router as stats_router
 from .triggers import router as triggers_router
 from .viz import router as viz_router
@@ -31,4 +32,5 @@ router.include_router(session_router)
 router.include_router(apps_router)
 router.include_router(agents_router)
 router.include_router(triggers_router)
+router.include_router(settings_router)
 router.include_router(registry_router)

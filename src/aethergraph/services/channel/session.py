@@ -1191,14 +1191,14 @@ class ChannelSession:
         Prompt for a button-style approval choice and return normalized result.
 
         Send an `approval` continuation with button labels, wait for the user's
-        selected choice, then derive `approved` from whether the first option
-        was selected (case-insensitive).
+        selected choice, preserve any typed text, then derive `approved` from
+        whether the first option was selected (case-insensitive).
 
         Examples:
             Use default approve/reject options:
             ```python
             result = await context.channel().ask_approval("Do you approve this action?")
-            # result: { "approved": True/False, "choice": "Approve"/"Reject" }
+            # result: { "approved": True/False, "choice": "Approve"/"Reject", "text": "" }
             ```
 
             Use custom options:
@@ -1220,7 +1220,7 @@ class ChannelSession:
             memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            dict[str, Any]: `{"approved": bool, "choice": Any}`.
+            dict[str, Any]: `{"approved": bool, "choice": Any, "text": str}`.
 
         Notes:
             If no choice is returned, or `options` is empty, `approved` is `False`.
@@ -1256,10 +1256,19 @@ class ChannelSession:
                 timeout_s=timeout_s,
             )
             choice = payload.get("choice")
-            if choice is not None:
+            text = str(payload.get("text", "") or "")
+            if choice is None and text and button_list:
+                text_norm = text.strip().lower()
+                matched = next(
+                    (option for option in button_list if str(option).strip().lower() == text_norm),
+                    None,
+                )
+                if matched is not None:
+                    choice = matched
+            if choice is not None or text:
                 await self._log_chat(
                     "user",
-                    f"Selected: {str(choice)}",
+                    f"Selected: {str(choice)}" + (f" | Text: {text}" if text else ""),
                     tags=[*(memory_tags or []), "ask_approval", "reply"],
                     enabled=memory_log_reply,
                     channel=channel,
@@ -1272,7 +1281,7 @@ class ChannelSession:
                 first_norm = str(button_list[0]).strip().lower()
                 approved = choice_norm == first_norm
 
-            result = {"approved": approved, "choice": choice}
+            result = {"approved": approved, "choice": choice, "text": text}
             await span.finish(
                 response=result,
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
