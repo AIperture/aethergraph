@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -35,14 +35,14 @@ class TriggerEngine:
     run_store: RunStore | None = None  # optional, for overlap checks
     logger: Any | None = None
 
-    _stop_event: asyncio.Event = asyncio.Event()  # for graceful shutdown
+    _stop_event: asyncio.Event | None = field(default=None, init=False, repr=False)
 
     async def run_forever(self, poll_interval_s: float = 5.0) -> None:
         """
         Main loop for time-based triggers. Call this from app startup
         in an asyncio.create_task.
         """
-        self._stop_event.clear()
+        self._stop_event = asyncio.Event()
         if self.logger:
             self.logger.info("TriggerEngine started")
         while not self._stop_event.is_set():
@@ -63,7 +63,8 @@ class TriggerEngine:
             self.logger.info("TriggerEngine stopped")
 
     async def stop(self) -> None:
-        self._stop_event.set()
+        if self._stop_event is not None:
+            self._stop_event.set()
 
     # --------- main logic for time-based triggers ---------
     async def _process_due_triggers(self, now: datetime) -> None:

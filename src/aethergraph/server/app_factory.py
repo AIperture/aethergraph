@@ -108,7 +108,7 @@ def create_app(
 
         # Register skills from the builtin path (optional, but keeps them together for now)
         logger.info(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
-        register_skills_from_path(builtin_agent_skills_path)
+        register_skills_from_path(builtin_agent_skills_path, overwrite=True)
 
         # Replay persisted source registrations (tenant/global manifests).
         replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (

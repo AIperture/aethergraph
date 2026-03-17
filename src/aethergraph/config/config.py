@@ -123,6 +123,16 @@ class RAGSettings(BaseModel):
     dim: int | None = None  # only for faiss; optional
 
 
+class AuthSettings(BaseModel):
+    cookie_name: str = "ag_auth_session"
+    cookie_secure: bool = False
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    session_ttl_seconds: int = 24 * 3600
+    demo_token_ttl_seconds: int = 7 * 24 * 3600
+    public_demo_fallback_enabled: bool = True
+    secret: SecretStr | None = None
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AETHERGRAPH_", env_nested_delimiter="__", extra="ignore", case_sensitive=False
@@ -162,6 +172,7 @@ class AppSettings(BaseSettings):
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
     rag: RAGSettings = RAGSettings()
+    auth: AuthSettings = AuthSettings()
     storage: StorageSettings = StorageSettings()
     search: SearchBackendSettings = SearchBackendSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()

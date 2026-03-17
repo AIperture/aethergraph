@@ -12,6 +12,9 @@ class IdentityResponse(BaseModel):
     org_id: str | None
     roles: list[str]
     client_id: str | None
+    grant_id: str | None = None
+    auth_source: str | None = None
+    catalog_scope: dict[str, list[str]] | None = None
 
 
 @router.get("/whoami", response_model=IdentityResponse)
@@ -22,4 +25,7 @@ def whoami(identity: RequestIdentity = Depends(get_identity)):  # noqa: B008
         org_id=identity.org_id,
         roles=identity.roles,
         client_id=identity.client_id,
+        grant_id=identity.grant_id,
+        auth_source=identity.auth_source,
+        catalog_scope=identity.catalog_scope,
     )

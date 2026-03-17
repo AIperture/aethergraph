@@ -28,7 +28,7 @@ from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 # ---- artifact services ----
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
-from aethergraph.services.auth.authn import DevTokenAuthn
+from aethergraph.services.auth.authn import AuthnService
 from aethergraph.services.auth.authz import AllowAllAuthz
 from aethergraph.services.channel.channel_bus import ChannelBus
 
@@ -221,7 +221,7 @@ class DefaultContainer:
     # optional services (not used by default)
     execution: ExecutionService | None = None
     event_bus: InMemoryEventBus | None = None
-    authn: DevTokenAuthn | None = None
+    authn: AuthnService | None = None
     authz: AllowAllAuthz | None = None
     redactor: RegexRedactor | None = None
 
@@ -419,7 +419,20 @@ def build_default_container(
     )
 
     # auth services
-    authn = DevTokenAuthn()
+    auth_secret = (
+        cfg.auth.secret.get_secret_value()
+        if cfg.auth.secret is not None
+        else "aethergraph-dev-secret"
+    )
+    authn = AuthnService(
+        secret=auth_secret,
+        cookie_name=cfg.auth.cookie_name,
+        cookie_secure=cfg.auth.cookie_secure,
+        cookie_samesite=cfg.auth.cookie_samesite,
+        session_ttl_seconds=cfg.auth.session_ttl_seconds,
+        demo_token_ttl_seconds=cfg.auth.demo_token_ttl_seconds,
+        public_demo_fallback_enabled=cfg.auth.public_demo_fallback_enabled,
+    )
     authz = AllowAllAuthz()
 
     # global scoped indices
