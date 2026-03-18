@@ -128,7 +128,7 @@ class AuthSettings(BaseModel):
     cookie_secure: bool = False
     cookie_samesite: Literal["lax", "strict", "none"] = "lax"
     session_ttl_seconds: int = 24 * 3600
-    demo_token_ttl_seconds: int = 7 * 24 * 3600
+    grant_ttl_seconds: int = 7 * 24 * 3600
     public_demo_fallback_enabled: bool = True
     secret: SecretStr | None = None
 

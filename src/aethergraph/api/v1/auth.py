@@ -9,13 +9,30 @@ from aethergraph.services.auth.authn import AuthnService, DemoGrant
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-class DemoExchangeRequest(BaseModel):
-    token: str = Field(..., min_length=1)
+class InviteRedeemRequest(BaseModel):
+    code: str = Field(..., min_length=1)
+
+
+class InviteCreateRequest(BaseModel):
+    grant_id: str = Field(..., min_length=1)
+    org_id: str = Field(..., min_length=1)
+    allowed_apps: list[str] = Field(default_factory=list)
+    allowed_agents: list[str] = Field(default_factory=list)
+    client_label: str | None = None
+    read_only: bool = False
+    max_uses: int | None = None
+    expires_in_hours: int = 24 * 7
+
+
+class InviteCreateResponse(BaseModel):
+    code: str
+    grant_id: str
+    max_uses: int | None
+    expires_at: str | None
 
 
 class AuthCapabilities(BaseModel):
     can_sign_in: bool = False
-    can_use_demo_links: bool = False
     demo_read_only: bool = False
 
 
@@ -52,25 +69,50 @@ def _build_me_response(authn: AuthnService, identity: RequestIdentity) -> AuthMe
         client_label=grant.client_label if grant else None,
         capabilities=AuthCapabilities(
             can_sign_in=False,
-            can_use_demo_links=True,
             demo_read_only=bool(grant.read_only) if grant else False,
         ),
     )
 
 
-@router.post("/demo/exchange", response_model=AuthMeResponse)
-async def demo_exchange(
-    body: DemoExchangeRequest,
+@router.post("/invite/create", response_model=InviteCreateResponse)
+async def invite_create(
+    body: InviteCreateRequest,
+    authn: AuthnService = Depends(get_authn),  # noqa: B008
+) -> InviteCreateResponse:
+    grant = DemoGrant(
+        grant_id=body.grant_id,
+        org_id=body.org_id,
+        allowed_apps=body.allowed_apps,
+        allowed_agents=body.allowed_agents,
+        client_label=body.client_label,
+        read_only=body.read_only,
+    )
+    invite = authn.create_invite_code(
+        grant,
+        max_uses=body.max_uses,
+        expires_in_seconds=body.expires_in_hours * 3600,
+    )
+    return InviteCreateResponse(
+        code=invite.code,
+        grant_id=grant.grant_id,
+        max_uses=invite.max_uses,
+        expires_at=invite.expires_at.isoformat() if invite.expires_at else None,
+    )
+
+
+@router.post("/invite/redeem", response_model=AuthMeResponse)
+async def invite_redeem(
+    body: InviteRedeemRequest,
     request: Request,
     response: Response,
     authn: AuthnService = Depends(get_authn),  # noqa: B008
 ) -> AuthMeResponse:
+    client_id = request.headers.get("X-Client-ID") or request.query_params.get("client_id")
     try:
-        grant = authn.parse_demo_token(body.token)
+        sess = authn.redeem_invite_code(body.code, client_id=client_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    client_id = request.headers.get("X-Client-ID") or request.query_params.get("client_id")
-    sess = authn.create_demo_session(grant=grant, client_id=client_id)
+    grant = authn.get_grant(sess.grant_id)
     response.set_cookie(
         key=authn.cookie_name,
         value=sess.session_id,
@@ -90,8 +132,8 @@ async def demo_exchange(
         catalog_scope={
             k: v
             for k, v in {
-                "apps": grant.allowed_apps,
-                "agents": grant.allowed_agents,
+                "apps": grant.allowed_apps if grant else [],
+                "agents": grant.allowed_agents if grant else [],
             }.items()
             if v
         }

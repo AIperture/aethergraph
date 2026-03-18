@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import base64
 from datetime import UTC, datetime, timedelta
-import hashlib
-import hmac
-import json
 import secrets
 from typing import Literal
 
@@ -22,6 +18,15 @@ class DemoGrant(BaseModel):
     revoked: bool = False
     read_only: bool = False
     expires_at: datetime | None = None
+
+
+class InviteCode(BaseModel):
+    code: str
+    grant_id: str
+    max_uses: int | None = None  # None = unlimited
+    uses: int = 0
+    expires_at: datetime | None = None
+    active: bool = True
 
 
 class AuthSession(BaseModel):
@@ -58,52 +63,19 @@ class AuthnService:
         cookie_secure: bool = False,
         cookie_samesite: Literal["lax", "strict", "none"] = "lax",
         session_ttl_seconds: int = 24 * 3600,
-        demo_token_ttl_seconds: int = 7 * 24 * 3600,
+        grant_ttl_seconds: int = 7 * 24 * 3600,
         public_demo_fallback_enabled: bool = True,
     ) -> None:
-        self.secret = secret.encode("utf-8")
+        self.secret = secret
         self.cookie_name = cookie_name
         self.cookie_secure = cookie_secure
         self.cookie_samesite = cookie_samesite
         self.session_ttl_seconds = session_ttl_seconds
-        self.demo_token_ttl_seconds = demo_token_ttl_seconds
+        self.grant_ttl_seconds = grant_ttl_seconds
         self.public_demo_fallback_enabled = public_demo_fallback_enabled
         self._sessions: dict[str, AuthSession] = {}
         self._grants: dict[str, DemoGrant] = {}
-
-    def issue_demo_token(self, grant: DemoGrant) -> str:
-        if grant.expires_at is None:
-            grant = grant.model_copy(
-                update={
-                    "expires_at": datetime.now(UTC) + timedelta(seconds=self.demo_token_ttl_seconds)
-                }
-            )
-        self._grants[grant.grant_id] = grant
-        payload = base64.urlsafe_b64encode(
-            json.dumps(grant.model_dump(mode="json"), separators=(",", ":")).encode("utf-8")
-        ).decode("utf-8")
-        sig = hmac.new(self.secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-        return f"{payload}.{sig}"
-
-    def parse_demo_token(self, token: str) -> DemoGrant:
-        try:
-            payload, sig = token.rsplit(".", 1)
-        except ValueError as exc:
-            raise ValueError("Malformed demo token") from exc
-        expected = hmac.new(self.secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(sig, expected):
-            raise ValueError("Invalid demo token signature")
-        try:
-            raw = base64.urlsafe_b64decode(payload.encode("utf-8"))
-            grant = DemoGrant.model_validate(json.loads(raw.decode("utf-8")))
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError("Invalid demo token payload") from exc
-        if grant.expires_at and grant.expires_at <= datetime.now(UTC):
-            raise ValueError("Demo token expired")
-        if grant.revoked:
-            raise ValueError("Demo token revoked")
-        self._grants[grant.grant_id] = grant
-        return grant
+        self._invite_codes: dict[str, InviteCode] = {}
 
     def create_demo_session(self, *, grant: DemoGrant, client_id: str | None = None) -> AuthSession:
         now = datetime.now(UTC)
@@ -150,6 +122,52 @@ class AuthnService:
         if grant.revoked:
             return None
         return grant
+
+    def create_invite_code(
+        self,
+        grant: DemoGrant,
+        *,
+        max_uses: int | None = None,
+        expires_in_seconds: int | None = None,
+    ) -> InviteCode:
+        if grant.expires_at is None:
+            grant = grant.model_copy(
+                update={"expires_at": datetime.now(UTC) + timedelta(seconds=self.grant_ttl_seconds)}
+            )
+        self._grants[grant.grant_id] = grant
+        code_suffix = secrets.token_urlsafe(6).upper().rstrip("=")
+        code = f"DEMO-{code_suffix}"
+        invite = InviteCode(
+            code=code,
+            grant_id=grant.grant_id,
+            max_uses=max_uses,
+            expires_at=(
+                datetime.now(UTC) + timedelta(seconds=expires_in_seconds)
+                if expires_in_seconds
+                else grant.expires_at
+            ),
+        )
+        self._invite_codes[code] = invite
+        return invite
+
+    def redeem_invite_code(self, code: str, *, client_id: str | None = None) -> AuthSession:
+        invite = self._invite_codes.get(code)
+        if invite is None:
+            raise ValueError("Invalid invite code")
+        if not invite.active:
+            raise ValueError("Invite code is deactivated")
+        if invite.expires_at and invite.expires_at <= datetime.now(UTC):
+            raise ValueError("Invite code expired")
+        if invite.max_uses is not None and invite.uses >= invite.max_uses:
+            raise ValueError("Invite code has reached its usage limit")
+        grant = self.get_grant(invite.grant_id)
+        if grant is None:
+            raise ValueError("Invite code grant is no longer valid")
+        invite.uses += 1
+        return self.create_demo_session(grant=grant, client_id=client_id)
+
+    def list_invite_codes(self) -> list[InviteCode]:
+        return list(self._invite_codes.values())
 
     def resolve(
         self,

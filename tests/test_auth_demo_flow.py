@@ -29,7 +29,8 @@ def auth_client(tmp_path) -> TestClient:
         yield client
 
 
-def _issue_demo_token(client: TestClient, *, grant_id: str = "grant-1") -> str:
+def _create_invite_and_redeem(client: TestClient, *, grant_id: str = "grant-1") -> dict:
+    """Create an invite code on the server and redeem it, returning the auth/me body."""
     authn = client.app.state.container.authn
     grant = DemoGrant(
         grant_id=grant_id,
@@ -38,18 +39,17 @@ def _issue_demo_token(client: TestClient, *, grant_id: str = "grant-1") -> str:
         allowed_agents=["allowed-agent"],
         client_label="Demo Client",
     )
-    return authn.issue_demo_token(grant)
-
-
-def test_demo_exchange_sets_guest_session_cookie_and_auth_me(auth_client: TestClient) -> None:
-    token = _issue_demo_token(auth_client)
-    resp = auth_client.post("/api/v1/auth/demo/exchange", json={"token": token})
+    invite = authn.create_invite_code(grant)
+    resp = client.post("/api/v1/auth/invite/redeem", json={"code": invite.code})
     assert resp.status_code == 200
-    body = resp.json()
+    return resp.json()
+
+
+def test_invite_redeem_sets_guest_session_cookie_and_auth_me(auth_client: TestClient) -> None:
+    body = _create_invite_and_redeem(auth_client)
     assert body["mode"] == "demo"
     assert body["grant_id"] == "grant-1"
     assert body["catalog_scope"]["apps"] == ["allowed-app"]
-    assert "ag_auth_session" in resp.cookies
 
     me = auth_client.get("/api/v1/auth/me")
     assert me.status_code == 200
@@ -59,10 +59,9 @@ def test_demo_exchange_sets_guest_session_cookie_and_auth_me(auth_client: TestCl
     assert me_body["user_id"].startswith("demo_guest:grant-1:")
 
 
-def test_same_demo_grant_mints_distinct_guest_users(auth_client: TestClient) -> None:
-    token = _issue_demo_token(auth_client, grant_id="grant-shared")
+def test_same_grant_creates_distinct_guest_users(auth_client: TestClient) -> None:
     authn = auth_client.app.state.container.authn
-    grant = authn.parse_demo_token(token)
+    grant = DemoGrant(grant_id="grant-shared", org_id="org-demo")
     sess_a = authn.create_demo_session(grant=grant)
     sess_b = authn.create_demo_session(grant=grant)
     assert sess_a.user_id != sess_b.user_id
@@ -99,9 +98,12 @@ def test_public_demo_fallback_uses_browser_client_id(tmp_path) -> None:
 
 
 def test_session_chat_history_requires_session_owner(auth_client: TestClient) -> None:
-    token_a = _issue_demo_token(auth_client, grant_id="grant-a")
+    authn = auth_client.app.state.container.authn
+    grant_a = DemoGrant(grant_id="grant-a", org_id="org-demo")
+    invite_a = authn.create_invite_code(grant_a)
+
     with TestClient(auth_client.app) as client_a:
-        client_a.post("/api/v1/auth/demo/exchange", json={"token": token_a})
+        client_a.post("/api/v1/auth/invite/redeem", json={"code": invite_a.code})
         me_a = client_a.get("/api/v1/auth/me").json()
 
         session_store = auth_client.app.state.container.session_store
@@ -117,17 +119,22 @@ def test_session_chat_history_requires_session_owner(auth_client: TestClient) ->
             )
         )
 
-    token_b = _issue_demo_token(auth_client, grant_id="grant-b")
+    grant_b = DemoGrant(grant_id="grant-b", org_id="org-demo")
+    invite_b = authn.create_invite_code(grant_b)
+
     with TestClient(auth_client.app) as client_b:
-        client_b.post("/api/v1/auth/demo/exchange", json={"token": token_b})
+        client_b.post("/api/v1/auth/invite/redeem", json={"code": invite_b.code})
         resp = client_b.get(f"/api/v1/sessions/{created.session_id}/chat/events")
         assert resp.status_code == 403
 
 
 def test_session_chat_websocket_rejects_other_guest(auth_client: TestClient) -> None:
-    token_a = _issue_demo_token(auth_client, grant_id="grant-ws-a")
+    authn = auth_client.app.state.container.authn
+    grant_a = DemoGrant(grant_id="grant-ws-a", org_id="org-demo")
+    invite_a = authn.create_invite_code(grant_a)
+
     with TestClient(auth_client.app) as client_a:
-        client_a.post("/api/v1/auth/demo/exchange", json={"token": token_a})
+        client_a.post("/api/v1/auth/invite/redeem", json={"code": invite_a.code})
         me_a = client_a.get("/api/v1/auth/me").json()
         session_store = auth_client.app.state.container.session_store
         created = __import__("asyncio").run(
@@ -141,9 +148,11 @@ def test_session_chat_websocket_rejects_other_guest(auth_client: TestClient) -> 
             )
         )
 
-    token_b = _issue_demo_token(auth_client, grant_id="grant-ws-b")
+    grant_b = DemoGrant(grant_id="grant-ws-b", org_id="org-demo")
+    invite_b = authn.create_invite_code(grant_b)
+
     with TestClient(auth_client.app) as client_b:
-        client_b.post("/api/v1/auth/demo/exchange", json={"token": token_b})
+        client_b.post("/api/v1/auth/invite/redeem", json={"code": invite_b.code})
         with (
             pytest.raises(Exception),  # noqa: B017
             client_b.websocket_connect(f"/api/v1/ws/sessions/{created.session_id}/chat"),

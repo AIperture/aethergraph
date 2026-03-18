@@ -430,7 +430,7 @@ def build_default_container(
         cookie_secure=cfg.auth.cookie_secure,
         cookie_samesite=cfg.auth.cookie_samesite,
         session_ttl_seconds=cfg.auth.session_ttl_seconds,
-        demo_token_ttl_seconds=cfg.auth.demo_token_ttl_seconds,
+        grant_ttl_seconds=cfg.auth.grant_ttl_seconds,
         public_demo_fallback_enabled=cfg.auth.public_demo_fallback_enabled,
     )
     authz = AllowAllAuthz()
