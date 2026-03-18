@@ -87,6 +87,11 @@ class RunChannelEvent(BaseModel):
     ts: float
 
 
+class RunChannelEventListResponse(BaseModel):
+    events: list[RunChannelEvent]
+    next_cursor: str | None = None
+
+
 class RunErrorInfo(BaseModel):
     message: str
     detail: str | None = None

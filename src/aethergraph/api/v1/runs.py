@@ -5,7 +5,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request  #     type: ignore
 
-from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
+from aethergraph.api.v1.pagination import (
+    decode_cursor,
+    decode_cursor_v2,
+    encode_cursor,
+    encode_keyset_cursor,
+)
 from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.core.runtime.run_manager import DuplicateRunIdError, RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
@@ -16,6 +21,7 @@ from .run_presenters import to_run_summary
 from .schemas.runs import (
     NodeSnapshot,
     RunChannelEvent,
+    RunChannelEventListResponse,
     RunCreateRequest,
     RunCreateResponse,
     RunListResponse,
@@ -544,18 +550,21 @@ async def get_run_snapshot(
     )
 
 
-@router.get("/runs/{run_id}/channel/events", response_model=list[RunChannelEvent])
+@router.get("/runs/{run_id}/channel/events", response_model=RunChannelEventListResponse)
 async def get_run_channel_events(
     run_id: str,
     request: Request,
     since_ts: float | None = None,
+    cursor: str | None = Query(None),  # noqa: B008
+    limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-):
+) -> RunChannelEventListResponse:
     """
     Fetch normalized UI channel events for a run.
 
     - Optionally enforces a demo-only `client_id` filter by checking the run's tags.
     - Frontend can poll with `since_ts` for incremental updates.
+    - Supports cursor-based pagination via `cursor` and `limit`.
     """
     container = request.app.state.container
     event_log = getattr(container, "eventlog", None)
@@ -569,13 +578,40 @@ async def get_run_channel_events(
     if since_ts is not None:
         since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
 
+    # Decode cursor
+    cursor_info = decode_cursor_v2(cursor)
+    after_id: int | None = None
+    query_offset: int = 0
+    if cursor_info is not None:
+        if cursor_info.kind == "keyset":
+            after_id = cursor_info.value
+        else:
+            query_offset = cursor_info.value
+
+    # Fetch limit+1 to detect next page
+    fetch_limit = limit + 1
+
     # Query only this run's channel events
     events = await event_log.query(
         scope_id=run_id,
         since=since_dt,
         kinds=["run_channel"],
-        limit=200,
+        limit=fetch_limit,
+        after_id=after_id,
+        offset=query_offset,
     )
+
+    # Determine next_cursor before trimming
+    has_more = len(events) > limit
+    events = events[:limit]
+
+    next_cursor: str | None = None
+    if has_more and events:
+        last_row_id = events[-1].get("_row_id")
+        if last_row_id is not None:
+            next_cursor = encode_keyset_cursor(last_row_id)
+        else:
+            next_cursor = encode_cursor(query_offset + limit)
 
     out: list[RunChannelEvent] = []
     for e in events:
@@ -595,4 +631,4 @@ async def get_run_channel_events(
 
     # Sort ascending by ts for stable UI
     out.sort(key=lambda ev: ev.ts)
-    return out
+    return RunChannelEventListResponse(events=out, next_cursor=next_cursor)

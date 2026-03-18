@@ -19,12 +19,19 @@ from aethergraph.api.v1.deps import (
     get_authn,
     get_identity,
 )
-from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
+from aethergraph.api.v1.pagination import (
+    decode_cursor,
+    decode_cursor_v2,
+    encode_cursor,
+    encode_keyset_before_cursor,
+    encode_keyset_cursor,
+)
 from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.api.v1.run_presenters import to_run_summary
 from aethergraph.api.v1.schemas.session import (
     Session,
     SessionChatEvent,
+    SessionChatEventListResponse,
     SessionCreateRequest,
     SessionListResponse,
     SessionRunsResponse,
@@ -134,6 +141,8 @@ async def get_session(
 async def get_session_runs(
     session_id: str,
     include_inline: bool = Query(False),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    limit: int = Query(50, ge=1, le=200),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> SessionRunsResponse:
     container = current_services()
@@ -148,23 +157,24 @@ async def get_session_runs(
     sess = await _get_session_or_404(session_id)
     _ensure_session_access(identity, sess)
 
-    # For now, just scan recent runs and filter by session_id
-    # Later, we need a dedicated index/query in RunStore
+    offset = decode_cursor(cursor)
+
+    # Over-fetch to compensate for Python-side visibility/importance filtering
+    fetch_limit = limit * 2
+
     records = await rm.list_records(
         graph_id=None,
         status=None,
         session_id=session_id,
         flow_id=None,
-        limit=1000,
-        offset=0,
+        limit=fetch_limit,
+        offset=offset,
     )
 
-    # 🔹 Visibility & importance policy for session views:
-    # - Always require importance == normal (ephemeral hidden for now).
-    # - If include_inline is False:
-    #       include only visibility == normal
-    #   Else:
-    #       include visibility in {normal, inline}
+    # Check if the store returned a full page (there might be more)
+    store_has_more = len(records) == fetch_limit
+
+    # Visibility & importance policy for session views
     visible_states = {RunVisibility.normal}
     if include_inline:
         visible_states.add(RunVisibility.inline)
@@ -175,10 +185,15 @@ async def get_session_runs(
         if rec.visibility in visible_states and rec.importance == RunImportance.normal
     ]
 
+    # Trim to requested limit
+    records = records[:limit]
+
     reg = scoped_registry(identity)
     summaries = [to_run_summary(rec, reg=reg) for rec in records]
 
-    return SessionRunsResponse(items=summaries)
+    next_cursor = encode_cursor(offset + fetch_limit) if store_has_more else None
+
+    return SessionRunsResponse(items=summaries, next_cursor=next_cursor)
 
 
 def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
@@ -274,7 +289,20 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
         initial_payload = [
             _row_to_session_chat_event(ev, session_id).model_dump() for ev in filtered
         ]
-        await websocket.send_json({"kind": "snapshot", "events": initial_payload})
+
+        # Include backward pagination cursor so the frontend can load older messages via REST
+        has_older = len(events) >= 200
+        older_cursor: str | None = None
+        if has_older and filtered:
+            oldest_row_id = filtered[0].get("_row_id")
+            if oldest_row_id is not None:
+                older_cursor = encode_keyset_before_cursor(oldest_row_id)
+
+        snapshot_msg: dict = {"kind": "snapshot", "events": initial_payload}
+        snapshot_msg["has_older"] = has_older
+        if older_cursor is not None:
+            snapshot_msg["older_cursor"] = older_cursor
+        await websocket.send_json(snapshot_msg)
 
     async def recv_until_disconnect() -> None:
         # Blocks until disconnect; does not require the client to send meaningful messages.
@@ -326,13 +354,15 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
                     await t
 
 
-@router.get("/sessions/{session_id}/chat/events", response_model=list[SessionChatEvent])
+@router.get("/sessions/{session_id}/chat/events", response_model=SessionChatEventListResponse)
 async def get_session_chat_events(
     session_id: str,
     request: Request,
     since_ts: float | None = Query(None),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> list[SessionChatEvent]:
+) -> SessionChatEventListResponse:
     DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
 
     container = current_services()
@@ -347,19 +377,64 @@ async def get_session_chat_events(
     if since_ts is not None:
         since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
 
+    # Decode cursor — supports keyset (after_id), keyset_before (before_id), and legacy offset
+    cursor_info = decode_cursor_v2(cursor)
+    after_id: int | None = None
+    before_id: int | None = None
+    query_offset: int = 0
+    is_backward = False
+    if cursor_info is not None:
+        if cursor_info.kind == "keyset":
+            after_id = cursor_info.value
+        elif cursor_info.kind == "keyset_before":
+            before_id = cursor_info.value
+            is_backward = True
+        else:
+            query_offset = cursor_info.value
+
+    # Fetch limit+1 to detect if there's a next page
+    fetch_limit = limit + 1
+
     events = await event_log.query(
         scope_id=session_id,
         since=since_dt,
         kinds=["session_chat"],
-        limit=1000,
+        limit=fetch_limit,
+        after_id=after_id,
+        before_id=before_id,
+        offset=query_offset,
     )
 
-    if since_ts is not None:
+    if since_ts is not None and after_id is None and not is_backward:
         # make cursor exclusive -- only return events after since_ts to avoid duplicates
         events = [ev for ev in events if (ev.get("ts") or 0) > since_ts]
 
     # Filter legacy persisted deltas/start
     events = [ev for ev in events if (ev.get("payload") or {}).get("type") not in DROP_FROM_HISTORY]
+
+    # Determine next_cursor before trimming
+    has_more = len(events) > limit
+    if is_backward:  # noqa: SIM108
+        # For backward pagination, the "extra" event is the oldest one (first in list)
+        # Trim from the front to keep the most recent ones
+        events = events[-limit:] if has_more else events
+    else:
+        events = events[:limit]
+
+    next_cursor: str | None = None
+    if has_more and events:
+        if is_backward:
+            # Next page goes further back — cursor points before the oldest returned event
+            first_row_id = events[0].get("_row_id")
+            if first_row_id is not None:
+                next_cursor = encode_keyset_before_cursor(first_row_id)
+        else:
+            last_row_id = events[-1].get("_row_id")
+            if last_row_id is not None:
+                next_cursor = encode_keyset_cursor(last_row_id)
+            else:
+                # Fallback to offset cursor
+                next_cursor = encode_cursor(query_offset + limit)
 
     out: list[SessionChatEvent] = []
     for ev in events:
@@ -382,7 +457,7 @@ async def get_session_chat_events(
         )
     out.sort(key=lambda e: e.ts)
 
-    return out
+    return SessionChatEventListResponse(events=out, next_cursor=next_cursor)
 
 
 @router.patch("/sessions/{session_id}", response_model=Session)

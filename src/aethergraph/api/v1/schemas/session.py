@@ -37,6 +37,7 @@ class SessionListResponse(BaseModel):
 
 class SessionRunsResponse(BaseModel):
     items: list[RunSummary]
+    next_cursor: str | None = None
 
 
 class SessionChatFile(BaseModel):
@@ -67,6 +68,11 @@ class SessionChatEvent(BaseModel):
     agent_id: str | None = None
     upsert_key: str | None = None
     rich: dict[str, Any] | None = None
+
+
+class SessionChatEventListResponse(BaseModel):
+    events: list[SessionChatEvent]
+    next_cursor: str | None = None
 
 
 class SessionUpdateRequest(BaseModel):

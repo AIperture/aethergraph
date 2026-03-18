@@ -30,6 +30,8 @@ class EventLog(Protocol):
         offset: int = 0,  # pagination offset
         user_id: str | None = None,
         org_id: str | None = None,
+        after_id: int | None = None,  # keyset cursor: return events with id > after_id
+        before_id: int | None = None,  # keyset cursor: return events with id < before_id (backward)
     ) -> list[dict]: ...
 
     async def get_many(
