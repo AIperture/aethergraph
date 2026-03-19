@@ -294,9 +294,7 @@ async def default_chat_agent(
             llm=llm,
             messages=messages,
             memory_tags=["session.chat"],
-            # Keep LLM thinking updates independent from other phase emitters.
             thinking_phase="thinking",
-            thinking_phase_key_suffix="phase:llm.thinking",
             thinking_label_active="Thinking...",
             thinking_label_done="Thinking",
         )

@@ -134,7 +134,6 @@ class ChannelSession:
 
     def _begin_reply_lifecycle(self) -> str:
         self._phase_group_counter += 1
-        self._phase_seq = 0
         self._phase_group_id = f"{self._run_id}:{self._node_id}:phase-group:{self._phase_group_counter}:{uuid.uuid4().hex[:8]}"
         return self._phase_group_id
 
@@ -143,7 +142,8 @@ class ChannelSession:
 
     def _close_reply_lifecycle(self) -> None:
         self._phase_group_id = None
-        self._phase_seq = 0
+        # Note: _phase_seq is intentionally NOT reset here.
+        # It is a monotonic counter for unique phase_event_ids across the run.
 
     def _inject_context_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         """
@@ -316,15 +316,14 @@ class ChannelSession:
         *,
         label: str | None = None,
         detail: str | None = None,
-        code: str | None = None,
         channel: str | None = None,
-        key_suffix: str | None = None,
     ) -> None:
         """
         Emit a phase-style progress update event.
 
-        Build a `rich` payload with phase metadata and publish it as
-        `agent.progress.update` with a stable upsert key for this run/node.
+        Phases are decoupled from the reply lifecycle. Each call creates a
+        unique timeline entry (no upsert) so the frontend can accumulate them
+        as pending phases until a message claims them.
 
         Examples:
             Send a pending phase update:
@@ -347,27 +346,22 @@ class ChannelSession:
             status: Phase status value. One of `"pending"`, `"active"`, `"done"`, `"failed"`, or `"skipped"`.
             label: Optional display label. Defaults to `phase.title()`.
             detail: Optional detail text. Defaults to an empty string.
-            code: Optional code string in the rich payload.
             channel: Optional target channel key.
-            key_suffix: Optional upsert-key suffix. Defaults to `f"phase:{phase}"`.
 
         Returns:
             None: Complete when the progress update is published.
 
         Notes:
             - Payload shape is UI-oriented and adapters may render or ignore it differently.
-            - The AG UI will continue showing the phase block until a new message arrives or "done"/"failed"/"skipped" status is received for the same phase (identified by upsert key).
+            - The frontend shows LivePulse while a phase is "active" and hides it on terminal status.
+            - Phases accumulate until the next terminal message claims them for InlinePhaseBlock display.
         """
         ch_key = self._resolve_key(channel)
-        # Stable upsert per phase per node/run
-        suffix = key_suffix or f"phase:{phase}"
-        upsert_key = f"{self._run_id}:{self._node_id}:{suffix}"
-
-        phase_group_id = self._ensure_reply_lifecycle()
         self._phase_seq += 1
         phase_seq = self._phase_seq
         phase_updated_at = time.time()
-        phase_event_id = f"{upsert_key}:{phase_seq}"
+        # Each emission is unique (no upsert — every call is a new timeline entry)
+        phase_event_id = f"{self._run_id}:{self._node_id}:phase:{phase_seq}"
 
         rich = {
             "kind": "phase",
@@ -375,21 +369,6 @@ class ChannelSession:
             "status": status,
             "label": label or phase.title(),
             "detail": detail or "",
-            "phase_group_id": phase_group_id,
-            "phase_seq": phase_seq,
-            "phase_event_id": phase_event_id,
-            "phase_updated_at": phase_updated_at,
-        }
-        if code:
-            rich["code"] = code
-
-        phase_meta = {
-            "kind": "phase",
-            "phase": phase,
-            "status": status,
-            "label": label or phase.title(),
-            "detail": detail or "",
-            "phase_group_id": phase_group_id,
             "phase_seq": phase_seq,
             "phase_event_id": phase_event_id,
             "phase_updated_at": phase_updated_at,
@@ -399,9 +378,15 @@ class ChannelSession:
             OutEvent(
                 type="agent.progress.update",
                 channel=ch_key,
-                upsert_key=upsert_key,
+                # No upsert_key — each emission creates a new event
                 rich=rich,
-                meta=self._inject_context_meta(phase_meta),
+                meta=self._inject_context_meta(
+                    {
+                        "kind": "phase",
+                        "phase": phase,
+                        "status": status,
+                    }
+                ),
             )
         )
 
@@ -1712,8 +1697,6 @@ class ChannelSession:
         thinking_label_done: str = "Thinking",
         thinking_detail_interval_s: float = 1.5,
         thinking_detail_tail_chars: int = 300,
-        thinking_phase_key_suffix: str | None = "phase:llm.thinking",
-        include_thinking_code: bool = True,
         emit_thinking_phase: bool = False,
         # Memory logging
         memory_log: bool = True,
@@ -1756,7 +1739,6 @@ class ChannelSession:
                             status="active",
                             label=thinking_label_active,
                             channel=channel,
-                            key_suffix=thinking_phase_key_suffix,
                         )
                     except Exception as e:
                         logger = logging.getLogger("aethergraph.services.channel.session")
@@ -1778,7 +1760,6 @@ class ChannelSession:
                             label=thinking_label_active,
                             detail=detail,
                             channel=channel,
-                            key_suffix=thinking_phase_key_suffix,
                         )
                     except Exception as e:
                         logger = logging.getLogger("aethergraph.services.channel.session")
@@ -1798,10 +1779,8 @@ class ChannelSession:
                             phase=thinking_phase,
                             status="done",
                             label=thinking_label_done,
-                            detail=f"Reasoned ({len(full)} chars)",
-                            code=(full if include_thinking_code else None),
+                            detail=full,
                             channel=channel,
-                            key_suffix=thinking_phase_key_suffix,
                         )
                     except Exception as e:
                         logger = logging.getLogger("aethergraph.services.channel.session")
@@ -1838,9 +1817,8 @@ class ChannelSession:
                         phase=thinking_phase,
                         status="done",
                         label=thinking_label_done,
-                        code=(full if include_thinking_code else None),
+                        detail=full,
                         channel=channel,
-                        key_suffix=thinking_phase_key_suffix,
                     )
                 except Exception as e:
                     logger = logging.getLogger("aethergraph.services.channel.session")
