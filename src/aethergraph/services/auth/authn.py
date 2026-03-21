@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import logging
 import secrets
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
+
+log = logging.getLogger(__name__)
 
 AuthSessionMode = Literal["local", "demo_guest", "cloud_proxy"]
 
@@ -65,6 +71,8 @@ class AuthnService:
         session_ttl_seconds: int = 24 * 3600,
         grant_ttl_seconds: int = 7 * 24 * 3600,
         public_demo_fallback_enabled: bool = True,
+        grant_store: SQLiteKVSync | None = None,
+        invite_store: SQLiteKVSync | None = None,
     ) -> None:
         self.secret = secret
         self.cookie_name = cookie_name
@@ -73,6 +81,8 @@ class AuthnService:
         self.session_ttl_seconds = session_ttl_seconds
         self.grant_ttl_seconds = grant_ttl_seconds
         self.public_demo_fallback_enabled = public_demo_fallback_enabled
+        self._grant_store = grant_store
+        self._invite_store = invite_store
         self._sessions: dict[str, AuthSession] = {}
         self._grants: dict[str, DemoGrant] = {}
         self._invite_codes: dict[str, InviteCode] = {}
@@ -92,8 +102,71 @@ class AuthnService:
             expires_at=now + timedelta(seconds=self.session_ttl_seconds),
         )
         self._sessions[session.session_id] = session
-        self._grants[grant.grant_id] = grant
+        self._persist_grant(grant)
         return session
+
+    # ---- persistence helpers ------------------------------------------------
+
+    def _persist_grant(self, grant: DemoGrant) -> None:
+        self._grants[grant.grant_id] = grant
+        if self._grant_store is not None:
+            ttl_s = (
+                int((grant.expires_at - datetime.now(UTC)).total_seconds())
+                if grant.expires_at
+                else None
+            )
+            self._grant_store.set(
+                grant.grant_id,
+                grant.model_dump(mode="json"),
+                ttl_s=ttl_s if ttl_s and ttl_s > 0 else None,
+            )
+
+    def _persist_invite(self, invite: InviteCode) -> None:
+        self._invite_codes[invite.code] = invite
+        if self._invite_store is not None:
+            ttl_s = (
+                int((invite.expires_at - datetime.now(UTC)).total_seconds())
+                if invite.expires_at
+                else None
+            )
+            self._invite_store.set(
+                invite.code,
+                invite.model_dump(mode="json"),
+                ttl_s=ttl_s if ttl_s and ttl_s > 0 else None,
+            )
+            # maintain index of all codes
+            index: list[str] = self._invite_store.get("_index", default=[]) or []
+            if invite.code not in index:
+                index.append(invite.code)
+                self._invite_store.set("_index", index)
+
+    def load_persisted(self) -> None:
+        """Hydrate in-memory caches from persistent stores on startup."""
+        if self._invite_store is None:
+            return
+        index: list[str] = self._invite_store.get("_index", default=[]) or []
+        loaded_invites = 0
+        for code in index:
+            raw = self._invite_store.get(code)
+            if raw:
+                invite = InviteCode.model_validate(raw)
+                self._invite_codes[invite.code] = invite
+                loaded_invites += 1
+        if self._grant_store is not None:
+            grant_ids = {inv.grant_id for inv in self._invite_codes.values()}
+            for gid in grant_ids:
+                raw = self._grant_store.get(gid)
+                if raw:
+                    grant = DemoGrant.model_validate(raw)
+                    self._grants[grant.grant_id] = grant
+        if loaded_invites:
+            log.info(
+                "Loaded %d persisted invite code(s) and %d grant(s)",
+                loaded_invites,
+                len(self._grants),
+            )
+
+    # ---- sessions (in-memory only) -----------------------------------------
 
     def get_session(self, session_id: str | None) -> AuthSession | None:
         if not session_id:
@@ -114,10 +187,17 @@ class AuthnService:
         if not grant_id:
             return None
         grant = self._grants.get(grant_id)
+        if grant is None and self._grant_store is not None:
+            raw = self._grant_store.get(grant_id)
+            if raw:
+                grant = DemoGrant.model_validate(raw)
+                self._grants[grant_id] = grant
         if grant is None:
             return None
         if grant.expires_at and grant.expires_at <= datetime.now(UTC):
             self._grants.pop(grant_id, None)
+            if self._grant_store is not None:
+                self._grant_store.delete(grant_id)
             return None
         if grant.revoked:
             return None
@@ -129,14 +209,19 @@ class AuthnService:
         *,
         max_uses: int | None = None,
         expires_in_seconds: int | None = None,
+        code: str | None = None,
     ) -> InviteCode:
         if grant.expires_at is None:
             grant = grant.model_copy(
                 update={"expires_at": datetime.now(UTC) + timedelta(seconds=self.grant_ttl_seconds)}
             )
-        self._grants[grant.grant_id] = grant
-        code_suffix = secrets.token_urlsafe(6).upper().rstrip("=")
-        code = f"DEMO-{code_suffix}"
+        self._persist_grant(grant)
+        if code is not None:
+            if code in self._invite_codes:
+                raise ValueError(f"Invite code already exists: {code}")
+        else:
+            code_suffix = secrets.token_urlsafe(6).upper().rstrip("=")
+            code = f"DEMO-{code_suffix}"
         invite = InviteCode(
             code=code,
             grant_id=grant.grant_id,
@@ -147,11 +232,16 @@ class AuthnService:
                 else grant.expires_at
             ),
         )
-        self._invite_codes[code] = invite
+        self._persist_invite(invite)
         return invite
 
     def redeem_invite_code(self, code: str, *, client_id: str | None = None) -> AuthSession:
         invite = self._invite_codes.get(code)
+        if invite is None and self._invite_store is not None:
+            raw = self._invite_store.get(code)
+            if raw:
+                invite = InviteCode.model_validate(raw)
+                self._invite_codes[code] = invite
         if invite is None:
             raise ValueError("Invalid invite code")
         if not invite.active:
@@ -164,6 +254,7 @@ class AuthnService:
         if grant is None:
             raise ValueError("Invite code grant is no longer valid")
         invite.uses += 1
+        self._persist_invite(invite)
         return self.create_demo_session(grant=grant, client_id=client_id)
 
     def list_invite_codes(self) -> list[InviteCode]:

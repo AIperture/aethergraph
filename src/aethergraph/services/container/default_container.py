@@ -112,6 +112,7 @@ from aethergraph.storage.factory import (
     build_session_store,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
+from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
 from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
@@ -424,6 +425,9 @@ def build_default_container(
         if cfg.auth.secret is not None
         else "aethergraph-dev-secret"
     )
+    auth_db_path = str(root_p / "auth" / "auth_kv.db")
+    auth_grant_store = SQLiteKVSync(auth_db_path, prefix="grant:")
+    auth_invite_store = SQLiteKVSync(auth_db_path, prefix="invite:")
     authn = AuthnService(
         secret=auth_secret,
         cookie_name=cfg.auth.cookie_name,
@@ -432,7 +436,10 @@ def build_default_container(
         session_ttl_seconds=cfg.auth.session_ttl_seconds,
         grant_ttl_seconds=cfg.auth.grant_ttl_seconds,
         public_demo_fallback_enabled=cfg.auth.public_demo_fallback_enabled,
+        grant_store=auth_grant_store,
+        invite_store=auth_invite_store,
     )
+    authn.load_persisted()
     authz = AllowAllAuthz()
 
     # global scoped indices

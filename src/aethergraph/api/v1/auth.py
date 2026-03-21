@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request, Response  # type: ignore
 from pydantic import BaseModel, Field
 
-from aethergraph.api.v1.deps import RequestIdentity, get_authn, get_identity
+from aethergraph.api.v1.deps import RequestIdentity, get_authn, get_identity, require_admin_key
 from aethergraph.services.auth.authn import AuthnService, DemoGrant
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -22,6 +22,7 @@ class InviteCreateRequest(BaseModel):
     read_only: bool = False
     max_uses: int | None = None
     expires_in_hours: int = 24 * 7
+    code: str | None = None  # custom invite code; if omitted, a random one is generated
 
 
 class InviteCreateResponse(BaseModel):
@@ -74,7 +75,11 @@ def _build_me_response(authn: AuthnService, identity: RequestIdentity) -> AuthMe
     )
 
 
-@router.post("/invite/create", response_model=InviteCreateResponse)
+@router.post(
+    "/invite/create",
+    response_model=InviteCreateResponse,
+    dependencies=[Depends(require_admin_key)],
+)
 async def invite_create(
     body: InviteCreateRequest,
     authn: AuthnService = Depends(get_authn),  # noqa: B008
@@ -91,6 +96,7 @@ async def invite_create(
         grant,
         max_uses=body.max_uses,
         expires_in_seconds=body.expires_in_hours * 3600,
+        code=body.code,
     )
     return InviteCreateResponse(
         code=invite.code,

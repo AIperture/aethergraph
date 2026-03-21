@@ -13,8 +13,9 @@ from aethergraph.api.v1 import (
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.config.config import AppSettings
 from aethergraph.server.app_factory import create_app
-from aethergraph.services.auth.authn import DemoGrant
+from aethergraph.services.auth.authn import AuthnService, DemoGrant
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
+from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
 
 
 @pytest.fixture()
@@ -246,3 +247,141 @@ def test_artifact_content_enforces_identity(monkeypatch) -> None:
     client = TestClient(app)
     resp = client.get("/api/v1/artifacts/art-1/content")
     assert resp.status_code == 404
+
+
+# ---- Persistence tests ---------------------------------------------------
+
+
+def test_invite_code_survives_service_restart(tmp_path) -> None:
+    """Invite codes persisted to SQLite survive AuthnService restart."""
+    db_path = str(tmp_path / "auth_kv.db")
+    grant_store = SQLiteKVSync(db_path, prefix="grant:")
+    invite_store = SQLiteKVSync(db_path, prefix="invite:")
+
+    authn1 = AuthnService(
+        secret="test-secret",
+        grant_store=grant_store,
+        invite_store=invite_store,
+    )
+    grant = DemoGrant(grant_id="persist-grant", org_id="org-persist")
+    invite = authn1.create_invite_code(grant, code="DEMO-PERSIST-TEST")
+    assert invite.code == "DEMO-PERSIST-TEST"
+
+    # Simulate server restart: new AuthnService, same stores
+    grant_store2 = SQLiteKVSync(db_path, prefix="grant:")
+    invite_store2 = SQLiteKVSync(db_path, prefix="invite:")
+    authn2 = AuthnService(
+        secret="test-secret",
+        grant_store=grant_store2,
+        invite_store=invite_store2,
+    )
+    authn2.load_persisted()
+
+    # Redeem the persisted invite code on the new instance
+    sess = authn2.redeem_invite_code("DEMO-PERSIST-TEST")
+    assert sess.org_id == "org-persist"
+    assert sess.user_id.startswith("demo_guest:persist-grant:")
+
+
+def test_invite_use_count_persists(tmp_path) -> None:
+    """Incremented use count is persisted to the store."""
+    db_path = str(tmp_path / "auth_kv.db")
+    grant_store = SQLiteKVSync(db_path, prefix="grant:")
+    invite_store = SQLiteKVSync(db_path, prefix="invite:")
+
+    authn = AuthnService(
+        secret="test-secret",
+        grant_store=grant_store,
+        invite_store=invite_store,
+    )
+    grant = DemoGrant(grant_id="uses-grant", org_id="org-uses")
+    authn.create_invite_code(grant, max_uses=3, code="DEMO-USES")
+
+    authn.redeem_invite_code("DEMO-USES")
+    authn.redeem_invite_code("DEMO-USES")
+
+    # Restart and verify uses count
+    grant_store2 = SQLiteKVSync(db_path, prefix="grant:")
+    invite_store2 = SQLiteKVSync(db_path, prefix="invite:")
+    authn2 = AuthnService(
+        secret="test-secret",
+        grant_store=grant_store2,
+        invite_store=invite_store2,
+    )
+    authn2.load_persisted()
+
+    # Should allow one more (uses=2, max=3)
+    authn2.redeem_invite_code("DEMO-USES")
+
+    # Should reject (uses=3, max=3)
+    with pytest.raises(ValueError, match="usage limit"):
+        authn2.redeem_invite_code("DEMO-USES")
+
+
+def test_custom_invite_code_collision_rejected(tmp_path) -> None:
+    """Creating a duplicate custom code raises ValueError."""
+    db_path = str(tmp_path / "auth_kv.db")
+    grant_store = SQLiteKVSync(db_path, prefix="grant:")
+    invite_store = SQLiteKVSync(db_path, prefix="invite:")
+
+    authn = AuthnService(
+        secret="test-secret",
+        grant_store=grant_store,
+        invite_store=invite_store,
+    )
+    grant = DemoGrant(grant_id="dup-grant", org_id="org-dup")
+    authn.create_invite_code(grant, code="DEMO-UNIQUE")
+
+    with pytest.raises(ValueError, match="already exists"):
+        authn.create_invite_code(grant, code="DEMO-UNIQUE")
+
+
+def test_admin_api_key_blocks_unauthorized(tmp_path) -> None:
+    """POST /invite/create is rejected when admin_api_key is set but not provided."""
+    cfg = AppSettings(
+        workspace=str(tmp_path),
+        deploy_mode="cloud",
+        auth={
+            "secret": "test-secret",
+            "admin_api_key": "my-admin-key",
+        },
+    )
+    app = create_app(workspace=str(tmp_path), cfg=cfg, log_level="warning")
+    with TestClient(app) as client:
+        # No key → rejected
+        resp = client.post(
+            "/api/v1/auth/invite/create",
+            json={
+                "grant_id": "g1",
+                "org_id": "o1",
+            },
+        )
+        assert resp.status_code == 403
+
+        # Wrong key → rejected
+        resp = client.post(
+            "/api/v1/auth/invite/create",
+            json={"grant_id": "g1", "org_id": "o1"},
+            headers={"Authorization": "Bearer wrong-key"},
+        )
+        assert resp.status_code == 403
+
+        # Correct key → allowed
+        resp = client.post(
+            "/api/v1/auth/invite/create",
+            json={"grant_id": "g1", "org_id": "o1"},
+            headers={"Authorization": "Bearer my-admin-key"},
+        )
+        assert resp.status_code == 200
+
+
+def test_no_admin_key_allows_open_access(auth_client: TestClient) -> None:
+    """When admin_api_key is not configured, /invite/create is open."""
+    resp = auth_client.post(
+        "/api/v1/auth/invite/create",
+        json={
+            "grant_id": "open-grant",
+            "org_id": "org-open",
+        },
+    )
+    assert resp.status_code == 200

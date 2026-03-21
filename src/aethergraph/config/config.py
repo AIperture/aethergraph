@@ -131,6 +131,7 @@ class AuthSettings(BaseModel):
     grant_ttl_seconds: int = 7 * 24 * 3600
     public_demo_fallback_enabled: bool = True
     secret: SecretStr | None = None
+    admin_api_key: SecretStr | None = None  # env: AETHERGRAPH_AUTH__ADMIN_API_KEY
 
 
 class AppSettings(BaseSettings):

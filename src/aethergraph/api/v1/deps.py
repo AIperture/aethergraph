@@ -57,6 +57,18 @@ def get_authn() -> AuthnService:
     return container.authn  # type: ignore[return-value]
 
 
+async def require_admin_key(request: Request) -> None:
+    """Gate admin endpoints behind an API key when configured."""
+    container = current_services()
+    settings = getattr(container, "settings", None)
+    key = getattr(settings, "auth", None) and settings.auth.admin_api_key
+    if key is None:
+        return  # No key configured = open access (local dev)
+    provided = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not provided or provided != key.get_secret_value():
+        raise HTTPException(status_code=403, detail="Admin API key required")
+
+
 def _catalog_scope_for_grant(grant: DemoGrant | None) -> dict[str, list[str]] | None:
     if grant is None:
         return None
