@@ -117,6 +117,7 @@ def client_from_profile(
     p: LLMProfile,
     secrets: Secrets,
     *,
+    profile_name: str | None = None,
     observation_sink: LLMObservationSink | None = None,
     observation_capture_mode: CaptureMode = "full",
 ) -> GenericLLMClient:
@@ -135,6 +136,7 @@ def client_from_profile(
         reasoning_summary=p.reasoning_summary,
         observation_sink=observation_sink,
         observation_capture_mode=observation_capture_mode,
+        profile_name=profile_name,
     )
 
 
@@ -160,6 +162,7 @@ def build_llm_clients(
         "default": client_from_profile(
             default_profile,
             secrets,
+            profile_name="default",
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
         )
@@ -176,6 +179,7 @@ def build_llm_clients(
         clients[name] = client_from_profile(
             prof,
             secrets,
+            profile_name=name,
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
         )

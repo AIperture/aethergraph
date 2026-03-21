@@ -101,6 +101,8 @@ class GenericLLMClient(
         # observability
         observation_sink: LLMObservationSink | None = None,
         observation_capture_mode: CaptureMode = "full",
+        # identity
+        profile_name: str | None = None,
     ):
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
@@ -146,6 +148,7 @@ class GenericLLMClient(
         self.reasoning_summary = reasoning_summary
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
+        self.profile_name = profile_name
 
     # ---------------- internal helpers for metering ----------------
     @staticmethod
@@ -278,6 +281,7 @@ class GenericLLMClient(
         validate_json: bool,
         extra_params: dict[str, Any],
         trace_payload: dict[str, Any] | None,
+        call_name: str | None = None,
     ) -> LLMObservationRecord:
         return LLMObservationRecord.new(
             call_type=call_type,
@@ -294,6 +298,8 @@ class GenericLLMClient(
             validate_json=validate_json,
             extra_params=extra_params,
             trace_payload=trace_payload,
+            profile_name=self.profile_name,
+            call_name=call_name,
         )
 
     async def _emit_observation(self, record: LLMObservationRecord) -> None:
@@ -392,6 +398,7 @@ class GenericLLMClient(
         await self._ensure_client()
         model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
+        call_name = kw.pop("call_name", None)
         observation_record = self._build_observation_record(
             call_type="chat",
             model=model,
@@ -405,7 +412,11 @@ class GenericLLMClient(
             validate_json=validate_json,
             extra_params=kw,
             trace_payload=trace_payload,
+            call_name=call_name,
         )
+        tags = ["llm", "chat"]
+        if call_name:
+            tags.append(call_name)
         tracer = resolve_tracer()
         span = await tracer.start_span(
             service="llm",
@@ -418,8 +429,9 @@ class GenericLLMClient(
                 "max_output_tokens": max_output_tokens,
                 "output_format": output_format,
                 "trace_payload": trace_payload,
+                "call_name": call_name,
             },
-            tags=["llm", "chat"],
+            tags=tags,
             metadata=self._current_dimensions(),
         )
 
@@ -565,6 +577,7 @@ class GenericLLMClient(
         await self._ensure_client()
         model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
+        call_name = kw.pop("call_name", None)
         observation_record = self._build_observation_record(
             call_type="chat_stream",
             model=model,
@@ -578,7 +591,11 @@ class GenericLLMClient(
             validate_json=validate_json,
             extra_params=kw,
             trace_payload=trace_payload,
+            call_name=call_name,
         )
+        tags = ["llm", "chat_stream"]
+        if call_name:
+            tags.append(call_name)
         tracer = resolve_tracer()
         span = await tracer.start_span(
             service="llm",
@@ -591,8 +608,9 @@ class GenericLLMClient(
                 "max_output_tokens": max_output_tokens,
                 "output_format": output_format,
                 "trace_payload": trace_payload,
+                "call_name": call_name,
             },
-            tags=["llm", "chat_stream"],
+            tags=tags,
             metadata=self._current_dimensions(),
         )
         start = time.perf_counter()

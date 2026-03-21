@@ -171,10 +171,12 @@ def _present_llm_row(row: dict[str, Any]) -> LLMCallRecord:
     scope.trace_id = row.get("trace_id")
     scope.span_id = row.get("span_id")
     status = "error" if row.get("error_type") else "ok"
+    call_name = row.get("call_name")
+    summary_prefix = f"[{call_name}] " if call_name else ""
     return LLMCallRecord(
         id=str(row.get("call_id")),
         ts=_parse_llm_ts(row.get("created_at")),
-        summary=f"{row.get('provider')}/{row.get('model')} {row.get('call_type')}",
+        summary=f"{summary_prefix}{row.get('provider')}/{row.get('model')} {row.get('call_type')}",
         severity="error" if row.get("error_type") else "info",
         status=status,
         producer=InspectProducer(family="llm", name=str(row.get("provider") or "unknown")),
@@ -192,6 +194,8 @@ def _present_llm_row(row: dict[str, Any]) -> LLMCallRecord:
         call_type=str(row.get("call_type") or "chat"),
         provider=str(row.get("provider") or "unknown"),
         model=str(row.get("model") or "unknown"),
+        profile_name=row.get("profile_name"),
+        call_name=row.get("call_name"),
         latency_ms=row.get("latency_ms"),
         usage=dict(row.get("usage") or {}),
         reasoning_effort=row.get("reasoning_effort"),

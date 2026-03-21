@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import json
+from pathlib import Path
 
 import pytest
 
@@ -10,9 +10,9 @@ from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.observability import (
+    ConsoleLLMObservationSink,
     JsonlLLMObservationSink,
     LLMObservationRecord,
-    ConsoleLLMObservationSink,
 )
 
 
@@ -48,7 +48,7 @@ async def test_console_sink_compact_view_renders_prompt_and_output(capsys) -> No
 
     await sink.emit(record, capture_mode="full")
     out = capsys.readouterr().out
-    assert "LLM CALL  openai/gpt-4o-mini" in out
+    assert "LLM CALL  [-] openai/gpt-4o-mini  profile=default" in out
     assert "[SYSTEM]" in out
     assert "[USER]" in out
     assert "[OUTPUT]" in out

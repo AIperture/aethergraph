@@ -96,6 +96,8 @@ class LLMCallRecord(BaseModel):
     call_type: str
     provider: str
     model: str
+    profile_name: str | None = None
+    call_name: str | None = None
     latency_ms: int | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     reasoning_effort: str | None = None
