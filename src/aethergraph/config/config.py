@@ -178,6 +178,10 @@ class AppSettings(BaseSettings):
     search: SearchBackendSettings = SearchBackendSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
 
+    # Optional path to demo-service directory (for admin routes).
+    # Set via env: AETHERGRAPH_DEMO_SERVICE_DIR=/path/to/demo-service
+    demo_service_dir: str | None = None
+
     # Future fields:
     # authn: ...
     # authz: ...

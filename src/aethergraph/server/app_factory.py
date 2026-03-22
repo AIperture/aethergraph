@@ -205,7 +205,7 @@ def create_app(
     # CORS
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173"],  # dev UI origin
+        allow_origins=["http://localhost:5173", "null"],  # dev UI + file:// admin page
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -213,6 +213,25 @@ def create_app(
 
     # Routers
     app.include_router(router=api_v1_router, prefix="/api/v1")
+
+    # Conditionally load demo admin routes (not part of OSS core)
+    _demo_svc_dir = (
+        str(Path(settings.demo_service_dir).resolve()) if settings.demo_service_dir else None
+    )
+    if _demo_svc_dir and Path(_demo_svc_dir).is_dir():
+        sys.path.insert(0, _demo_svc_dir)
+        try:
+            from admin_routes import router as demo_admin_router  # type: ignore[import-not-found]
+
+            app.include_router(demo_admin_router, prefix="/api/v1")
+            logger.info("Demo admin routes loaded from %s", _demo_svc_dir)
+        except ImportError:
+            logger.warning(
+                "AETHERGRAPH_DEMO_SERVICE_DIR set but admin_routes not found in %s",
+                _demo_svc_dir,
+            )
+        finally:
+            sys.path.pop(0)
 
     # Webui router
     from aethergraph.plugins.channel.routes.webui_routes import router as webui_router

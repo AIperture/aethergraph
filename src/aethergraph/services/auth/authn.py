@@ -260,6 +260,55 @@ class AuthnService:
     def list_invite_codes(self) -> list[InviteCode]:
         return list(self._invite_codes.values())
 
+    def deactivate_invite_code(self, code: str) -> InviteCode:
+        invite = self._invite_codes.get(code)
+        if invite is None:
+            raise ValueError(f"Invite code not found: {code}")
+        invite = invite.model_copy(update={"active": False})
+        self._persist_invite(invite)
+        return invite
+
+    def delete_invite_code(self, code: str) -> None:
+        self._invite_codes.pop(code, None)
+        if self._invite_store is not None:
+            self._invite_store.delete(code)
+            index: list[str] = self._invite_store.get("_index", default=[]) or []
+            if code in index:
+                index.remove(code)
+                self._invite_store.set("_index", index)
+
+    def update_invite_code(self, code: str, updates: dict) -> InviteCode:
+        invite = self._invite_codes.get(code)
+        if invite is None:
+            raise ValueError(f"Invite code not found: {code}")
+        invite = invite.model_copy(update=updates)
+        self._persist_invite(invite)
+        return invite
+
+    def list_grants(self) -> list[DemoGrant]:
+        return list(self._grants.values())
+
+    def revoke_grant(self, grant_id: str) -> DemoGrant:
+        grant = self._grants.get(grant_id)
+        if grant is None:
+            raise ValueError(f"Grant not found: {grant_id}")
+        grant = grant.model_copy(update={"revoked": True})
+        self._persist_grant(grant)
+        return grant
+
+    def delete_grant(self, grant_id: str) -> None:
+        self._grants.pop(grant_id, None)
+        if self._grant_store is not None:
+            self._grant_store.delete(grant_id)
+
+    def update_grant(self, grant_id: str, updates: dict) -> DemoGrant:
+        grant = self._grants.get(grant_id)
+        if grant is None:
+            raise ValueError(f"Grant not found: {grant_id}")
+        grant = grant.model_copy(update=updates)
+        self._persist_grant(grant)
+        return grant
+
     def resolve(
         self,
         *,
