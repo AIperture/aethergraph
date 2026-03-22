@@ -52,7 +52,7 @@ Documentation = "https://aiperture.github.io/aethergraph-docs/"
 Issues = "https://github.com/AIperture/aethergraph/issues"
 
 [project.scripts]
-aethergraph = "aethergraph.__main__:main"
+aethergraph = "aethergraph.cli.main:main"
 aethergraph-server = "aethergraph.server.server:main"
 
 

@@ -63,7 +63,7 @@ asyncio.run(main())
 from aethergraph import start_server
 
 url, handle = start_server(
-    workspace="./aethergraph_data",
+    workspace="./aethergraph_workspace",
     port=0,
     load_paths=["./my_graphs.py"],
     project_root=".",

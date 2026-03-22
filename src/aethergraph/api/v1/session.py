@@ -13,13 +13,25 @@ from fastapi import (  # type: ignore
     WebSocketDisconnect,
 )
 
-from aethergraph.api.v1.deps import RequestIdentity, get_identity
-from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
+from aethergraph.api.v1.deps import (
+    RequestIdentity,
+    ensure_identity_matches_owner,
+    get_authn,
+    get_identity,
+)
+from aethergraph.api.v1.pagination import (
+    decode_cursor,
+    decode_cursor_v2,
+    encode_cursor,
+    encode_keyset_before_cursor,
+    encode_keyset_cursor,
+)
 from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.api.v1.run_presenters import to_run_summary
 from aethergraph.api.v1.schemas.session import (
     Session,
     SessionChatEvent,
+    SessionChatEventListResponse,
     SessionCreateRequest,
     SessionListResponse,
     SessionRunsResponse,
@@ -30,6 +42,27 @@ from aethergraph.core.runtime.runtime_services import current_services
 
 router = APIRouter(tags=["sessions"])
 logger = logging.getLogger(__name__)
+
+
+def _ensure_session_access(identity: RequestIdentity, sess: Session) -> None:
+    ensure_identity_matches_owner(
+        identity,
+        user_id=sess.user_id,
+        org_id=sess.org_id,
+        missing_status=403,
+        missing_detail="Access denied",
+    )
+
+
+async def _get_session_or_404(session_id: str):
+    container = current_services()
+    ss = getattr(container, "session_store", None)
+    if ss is None:
+        raise HTTPException(status_code=500, detail="SessionStore not available")
+    sess = await ss.get(session_id)
+    if sess is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return sess
 
 
 @router.post("/sessions", response_model=Session)
@@ -99,17 +132,8 @@ async def get_session(
     if ss is None:
         raise HTTPException(status_code=500, detail="SessionStore not available")
 
-    sess = await ss.get(session_id)
-    if sess is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # Optional: enforce that the session belongs to the user/org
-    if identity.mode != "local":
-        if identity.user_id and sess.user_id is not None and sess.user_id != identity.user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-
-        if identity.org_id and sess.org_id is not None and sess.org_id != identity.org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+    sess = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, sess)
     return sess
 
 
@@ -117,6 +141,8 @@ async def get_session(
 async def get_session_runs(
     session_id: str,
     include_inline: bool = Query(False),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    limit: int = Query(50, ge=1, le=200),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> SessionRunsResponse:
     container = current_services()
@@ -128,33 +154,27 @@ async def get_session_runs(
         raise HTTPException(status_code=500, detail="RunManager not available")
 
     # Make sure the session exists and belongs to this user/org
-    sess = await ss.get(session_id)
-    if sess is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+    sess = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, sess)
 
-    if identity.mode != "local":
-        if identity.user_id and sess.user_id is not None and sess.user_id != identity.user_id:
-            raise HTTPException(status_code=403, detail="Access denied")
-        if identity.org_id and sess.org_id is not None and sess.org_id != identity.org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+    offset = decode_cursor(cursor)
 
-    # For now, just scan recent runs and filter by session_id
-    # Later, we need a dedicated index/query in RunStore
+    # Over-fetch to compensate for Python-side visibility/importance filtering
+    fetch_limit = limit * 2
+
     records = await rm.list_records(
         graph_id=None,
         status=None,
         session_id=session_id,
         flow_id=None,
-        limit=1000,
-        offset=0,
+        limit=fetch_limit,
+        offset=offset,
     )
 
-    # 🔹 Visibility & importance policy for session views:
-    # - Always require importance == normal (ephemeral hidden for now).
-    # - If include_inline is False:
-    #       include only visibility == normal
-    #   Else:
-    #       include visibility in {normal, inline}
+    # Check if the store returned a full page (there might be more)
+    store_has_more = len(records) == fetch_limit
+
+    # Visibility & importance policy for session views
     visible_states = {RunVisibility.normal}
     if include_inline:
         visible_states.add(RunVisibility.inline)
@@ -165,10 +185,15 @@ async def get_session_runs(
         if rec.visibility in visible_states and rec.importance == RunImportance.normal
     ]
 
+    # Trim to requested limit
+    records = records[:limit]
+
     reg = scoped_registry(identity)
     summaries = [to_run_summary(rec, reg=reg) for rec in records]
 
-    return SessionRunsResponse(items=summaries)
+    next_cursor = encode_cursor(offset + fetch_limit) if store_has_more else None
+
+    return SessionRunsResponse(items=summaries, next_cursor=next_cursor)
 
 
 def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
@@ -196,9 +221,51 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
     container = current_services()
     event_log = container.eventlog
     hub = getattr(container, "eventhub", None)
+    authn = get_authn()
 
     if hub is None or event_log is None:
         await websocket.close(code=1011)
+        return
+
+    roles_header = websocket.headers.get("x-roles")
+    roles = roles_header.split(",") if roles_header else []
+    client_id = websocket.headers.get("x-client-id")
+    resolved = authn.resolve(
+        deploy_mode=getattr(getattr(container, "settings", None), "deploy_mode", "local"),
+        session_id=websocket.cookies.get(authn.cookie_name),
+        client_id=client_id,
+        x_user_id=websocket.headers.get("x-user-id"),
+        x_org_id=websocket.headers.get("x-org-id"),
+        roles=roles,
+        x_mode=websocket.headers.get("x-mode"),
+    )
+    identity = RequestIdentity(
+        user_id=resolved.user_id,
+        org_id=resolved.org_id,
+        roles=resolved.roles,
+        client_id=resolved.client_id,
+        grant_id=resolved.session.grant_id if resolved.session else None,
+        auth_source=resolved.auth_source,
+        catalog_scope={
+            k: v
+            for k, v in {
+                "apps": list(resolved.grant.allowed_apps) if resolved.grant else [],
+                "agents": list(resolved.grant.allowed_agents) if resolved.grant else [],
+            }.items()
+            if v
+        }
+        or None,
+        mode="cloud"
+        if resolved.mode == "cloud_proxy"
+        else "demo"
+        if resolved.mode == "demo_guest"
+        else "local",
+    )
+    try:
+        sess = await _get_session_or_404(session_id)
+        _ensure_session_access(identity, sess)
+    except HTTPException as exc:
+        await websocket.close(code=1008, reason=str(exc.detail)[:120])
         return
 
     await websocket.accept()
@@ -222,7 +289,20 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
         initial_payload = [
             _row_to_session_chat_event(ev, session_id).model_dump() for ev in filtered
         ]
-        await websocket.send_json({"kind": "snapshot", "events": initial_payload})
+
+        # Include backward pagination cursor so the frontend can load older messages via REST
+        has_older = len(events) >= 200
+        older_cursor: str | None = None
+        if has_older and filtered:
+            oldest_row_id = filtered[0].get("_row_id")
+            if oldest_row_id is not None:
+                older_cursor = encode_keyset_before_cursor(oldest_row_id)
+
+        snapshot_msg: dict = {"kind": "snapshot", "events": initial_payload}
+        snapshot_msg["has_older"] = has_older
+        if older_cursor is not None:
+            snapshot_msg["older_cursor"] = older_cursor
+        await websocket.send_json(snapshot_msg)
 
     async def recv_until_disconnect() -> None:
         # Blocks until disconnect; does not require the client to send meaningful messages.
@@ -274,13 +354,15 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
                     await t
 
 
-@router.get("/sessions/{session_id}/chat/events", response_model=list[SessionChatEvent])
+@router.get("/sessions/{session_id}/chat/events", response_model=SessionChatEventListResponse)
 async def get_session_chat_events(
     session_id: str,
     request: Request,
     since_ts: float | None = Query(None),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> list[SessionChatEvent]:
+) -> SessionChatEventListResponse:
     DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
 
     container = current_services()
@@ -288,24 +370,71 @@ async def get_session_chat_events(
 
     if event_log is None:
         raise HTTPException(status_code=503, detail="EventLog not available")
+    sess = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, sess)
 
     since_dt: datetime | None = None
     if since_ts is not None:
         since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
 
+    # Decode cursor — supports keyset (after_id), keyset_before (before_id), and legacy offset
+    cursor_info = decode_cursor_v2(cursor)
+    after_id: int | None = None
+    before_id: int | None = None
+    query_offset: int = 0
+    is_backward = False
+    if cursor_info is not None:
+        if cursor_info.kind == "keyset":
+            after_id = cursor_info.value
+        elif cursor_info.kind == "keyset_before":
+            before_id = cursor_info.value
+            is_backward = True
+        else:
+            query_offset = cursor_info.value
+
+    # Fetch limit+1 to detect if there's a next page
+    fetch_limit = limit + 1
+
     events = await event_log.query(
         scope_id=session_id,
         since=since_dt,
         kinds=["session_chat"],
-        limit=1000,
+        limit=fetch_limit,
+        after_id=after_id,
+        before_id=before_id,
+        offset=query_offset,
     )
 
-    if since_ts is not None:
+    if since_ts is not None and after_id is None and not is_backward:
         # make cursor exclusive -- only return events after since_ts to avoid duplicates
         events = [ev for ev in events if (ev.get("ts") or 0) > since_ts]
 
     # Filter legacy persisted deltas/start
     events = [ev for ev in events if (ev.get("payload") or {}).get("type") not in DROP_FROM_HISTORY]
+
+    # Determine next_cursor before trimming
+    has_more = len(events) > limit
+    if is_backward:  # noqa: SIM108
+        # For backward pagination, the "extra" event is the oldest one (first in list)
+        # Trim from the front to keep the most recent ones
+        events = events[-limit:] if has_more else events
+    else:
+        events = events[:limit]
+
+    next_cursor: str | None = None
+    if has_more and events:
+        if is_backward:
+            # Next page goes further back — cursor points before the oldest returned event
+            first_row_id = events[0].get("_row_id")
+            if first_row_id is not None:
+                next_cursor = encode_keyset_before_cursor(first_row_id)
+        else:
+            last_row_id = events[-1].get("_row_id")
+            if last_row_id is not None:
+                next_cursor = encode_keyset_cursor(last_row_id)
+            else:
+                # Fallback to offset cursor
+                next_cursor = encode_cursor(query_offset + limit)
 
     out: list[SessionChatEvent] = []
     for ev in events:
@@ -328,7 +457,7 @@ async def get_session_chat_events(
         )
     out.sort(key=lambda e: e.ts)
 
-    return out
+    return SessionChatEventListResponse(events=out, next_cursor=next_cursor)
 
 
 @router.patch("/sessions/{session_id}", response_model=Session)
@@ -342,20 +471,8 @@ async def update_session(
     if ss is None:
         raise HTTPException(status_code=500, detail="SessionStore not available")
 
-    existing = await ss.get(session_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    # Enforce ownership for non-local modes
-    if identity.mode != "local":
-        if (
-            identity.user_id
-            and existing.user_id is not None
-            and existing.user_id != identity.user_id
-        ):
-            raise HTTPException(status_code=403, detail="Access denied")
-        if identity.org_id and existing.org_id is not None and existing.org_id != identity.org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+    existing = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, existing)
 
     updated = await ss.update(
         session_id,
@@ -383,15 +500,6 @@ async def delete_session(
     if existing is None:
         # 204 for idempotent delete
         return
-
-    if identity.mode != "local":
-        if (
-            identity.user_id
-            and existing.user_id is not None
-            and existing.user_id != identity.user_id
-        ):
-            raise HTTPException(status_code=403, detail="Access denied")
-        if identity.org_id and existing.org_id is not None and existing.org_id != identity.org_id:
-            raise HTTPException(status_code=403, detail="Access denied")
+    _ensure_session_access(identity, existing)
 
     await ss.delete(session_id)

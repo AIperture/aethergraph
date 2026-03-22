@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 def create_app(
     *,
-    workspace: str = "./aethergraph_data",
+    workspace: str = "./aethergraph_workspace",
     cfg: Optional["AppSettings"] = None,
     log_level: str = "info",
 ) -> FastAPI:
@@ -108,7 +108,7 @@ def create_app(
 
         # Register skills from the builtin path (optional, but keeps them together for now)
         logger.info(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
-        register_skills_from_path(builtin_agent_skills_path)
+        register_skills_from_path(builtin_agent_skills_path, overwrite=True)
 
         # Replay persisted source registrations (tenant/global manifests).
         replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (
@@ -205,7 +205,7 @@ def create_app(
     # CORS
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173"],  # dev UI origin
+        allow_origins=["http://localhost:5173", "null"],  # dev UI + file:// admin page
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -213,6 +213,25 @@ def create_app(
 
     # Routers
     app.include_router(router=api_v1_router, prefix="/api/v1")
+
+    # Conditionally load demo admin routes (not part of OSS core)
+    _demo_svc_dir = (
+        str(Path(settings.demo_service_dir).resolve()) if settings.demo_service_dir else None
+    )
+    if _demo_svc_dir and Path(_demo_svc_dir).is_dir():
+        sys.path.insert(0, _demo_svc_dir)
+        try:
+            from admin_routes import router as demo_admin_router  # type: ignore[import-not-found]
+
+            app.include_router(demo_admin_router, prefix="/api/v1")
+            logger.info("Demo admin routes loaded from %s", _demo_svc_dir)
+        except ImportError:
+            logger.warning(
+                "AETHERGRAPH_DEMO_SERVICE_DIR set but admin_routes not found in %s",
+                _demo_svc_dir,
+            )
+        finally:
+            sys.path.pop(0)
 
     # Webui router
     from aethergraph.plugins.channel.routes.webui_routes import router as webui_router
@@ -278,7 +297,7 @@ def create_app_from_env() -> FastAPI:
     Reads workspace + graph load config from env, imports user graphs,
     then builds the FastAPI app.
     """
-    workspace = os.environ.get("AETHERGRAPH_WORKSPACE", "./aethergraph_data")
+    workspace = os.environ.get("AETHERGRAPH_WORKSPACE", "./aethergraph_workspace")
     log_level = os.environ.get("AETHERGRAPH_LOG_LEVEL", "warning")
 
     # 0) Load settings from env like `start_server` and CLI would (__main__.py)

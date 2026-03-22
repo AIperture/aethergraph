@@ -13,7 +13,7 @@ from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.contracts.storage.artifact_index import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
 
-from .deps import RequestIdentity, get_identity
+from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
 from .schemas.artifacts import (
     ArtifactListResponse,
     ArtifactMeta,
@@ -213,6 +213,8 @@ async def get_artifact(
     artifact = await index.get(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+    if not artifact_belongs_to_identity(identity, artifact):
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
 
     meta = _artifact_to_meta(artifact)
     return meta
@@ -232,6 +234,8 @@ async def get_artifact_content(
 
     artifact = await index.get(artifact_id)
     if artifact is None:
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+    if not artifact_belongs_to_identity(identity, artifact):
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
 
     # If user provided a fully qualified preview URI (e.g. S3 signed URL)

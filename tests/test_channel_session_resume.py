@@ -34,7 +34,9 @@ class _FakeContext:
         raise AssertionError("create_continuation should not be called for replay resume payloads")
 
     def prepare_wait_for_resume(self, token: str):
-        raise AssertionError("prepare_wait_for_resume should not be called for replay resume payloads")
+        raise AssertionError(
+            "prepare_wait_for_resume should not be called for replay resume payloads"
+        )
 
 
 @pytest.mark.asyncio
@@ -72,3 +74,22 @@ async def test_ask_text_ignores_non_matching_resume_payload():
 
     assert matched is None
     assert getattr(ctx, "_channel_resume_payload_consumed", False) is False
+
+
+@pytest.mark.asyncio
+async def test_ask_approval_infers_choice_from_text_when_resume_payload_has_no_choice():
+    ctx = _FakeContext(
+        resume_payload={
+            "_channel_wait_kind": "approval",
+            "prompt": {"title": "Approve?", "buttons": ["Approve", "Cancel"]},
+            "text": "Approve",
+        }
+    )
+    chan = ChannelSession(ctx)
+
+    reply = await chan.ask_approval("Approve?", options=["Approve", "Cancel"])
+
+    assert reply["approved"] is True
+    assert reply["choice"] == "Approve"
+    assert reply["text"] == "Approve"
+    assert getattr(ctx, "_channel_resume_payload_consumed", False) is True

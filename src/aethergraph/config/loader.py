@@ -22,7 +22,9 @@ def load_settings() -> AppSettings:
     cwd = Path.cwd()
 
     # 3) workspace-level (if user sets it)
-    workspace = Path(os.getenv("AETHERGRAPH_ROOT", "./aethergraph_data")).expanduser().resolve()
+    workspace = (
+        Path(os.getenv("AETHERGRAPH_WORKSPACE", "./aethergraph_workspace")).expanduser().resolve()
+    )
 
     # 4) user config dir (~/.config/aethergraph/.env or XDG)
     xdg = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser().resolve()

@@ -129,6 +129,7 @@ def _format_search_snippets(event_results, artifact_results, max_total: int = 8)
         "mode": "chat_v1",
         "memory_level": "session",
         "memory_scope": "session.global",
+        "avatarUrl": "https://api.dicebear.com/9.x/rings/svg?seed=AetherGraph",
     },
 )
 async def default_chat_agent(
@@ -294,9 +295,7 @@ async def default_chat_agent(
             llm=llm,
             messages=messages,
             memory_tags=["session.chat"],
-            # Keep LLM thinking updates independent from other phase emitters.
             thinking_phase="thinking",
-            thinking_phase_key_suffix="phase:llm.thinking",
             thinking_label_active="Thinking...",
             thinking_label_done="Thinking",
         )

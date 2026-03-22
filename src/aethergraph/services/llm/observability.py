@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from pathlib import Path
 from textwrap import fill
 from typing import Any, Literal, Protocol
-import asyncio
-import json
 import uuid
 
 CaptureMode = Literal["metadata", "full"]
@@ -81,6 +81,8 @@ class LLMObservationRecord:
     node_id: str | None = None
     trace_id: str | None = None
     span_id: str | None = None
+    profile_name: str | None = None
+    call_name: str | None = None
     messages: list[dict[str, Any]] | None = None
     messages_preview: dict[str, Any] | None = None
     reasoning_effort: str | None = None
@@ -118,7 +120,9 @@ class LLMObservationRecord:
         validate_json: bool | None,
         extra_params: dict[str, Any],
         trace_payload: dict[str, Any] | None,
-    ) -> "LLMObservationRecord":
+        profile_name: str | None = None,
+        call_name: str | None = None,
+    ) -> LLMObservationRecord:
         return cls(
             call_id=str(uuid.uuid4()),
             created_at=utc_now_iso(),
@@ -135,6 +139,8 @@ class LLMObservationRecord:
             node_id=dimensions.get("node_id"),
             trace_id=dimensions.get("trace_id"),
             span_id=dimensions.get("span_id"),
+            profile_name=profile_name,
+            call_name=call_name,
             messages=sanitize_observation_value(messages),
             messages_preview=summarize_messages(messages),
             reasoning_effort=reasoning_effort,
@@ -173,7 +179,10 @@ class JsonlLLMObservationSink:
         self._lock = asyncio.Lock()
 
     async def emit(self, record: LLMObservationRecord, *, capture_mode: CaptureMode) -> None:
-        line = json.dumps(record.for_capture_mode(capture_mode), ensure_ascii=False, default=str) + "\n"
+        line = (
+            json.dumps(record.for_capture_mode(capture_mode), ensure_ascii=False, default=str)
+            + "\n"
+        )
         async with self._lock:
             await asyncio.to_thread(self._append_line, line)
 
@@ -248,7 +257,7 @@ def render_console_observation(
     status = "ERROR" if record.error_type else "OK"
     lines = [
         "=" * 80,
-        f"LLM CALL  {record.provider}/{record.model}",
+        f"LLM CALL  [{record.call_name or '-'}] {record.provider}/{record.model}  profile={record.profile_name or 'default'}",
         f"call_id: {record.call_id}",
         f"run_id:  {record.run_id or '-'}",
         f"graph:   {record.graph_id or '-'}",

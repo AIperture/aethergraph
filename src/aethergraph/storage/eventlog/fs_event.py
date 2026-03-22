@@ -74,6 +74,8 @@ class FSEventLog(EventLog):
         offset: int = 0,
         user_id: str | None = None,
         org_id: str | None = None,
+        after_id: int | None = None,
+        before_id: int | None = None,
     ) -> list[dict]:
         """
         FSEventLog reads the single events.jsonl file linearly, applies

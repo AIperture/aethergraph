@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 
-from aethergraph.api.v1.deps import RequestIdentity, get_identity
+from aethergraph.api.v1.deps import RequestIdentity, catalog_allows, get_identity
 from aethergraph.api.v1.registry_helpers import ensure_delete_identity, scoped_registry
 from aethergraph.api.v1.schemas.registry import AgentDescriptor
 
@@ -37,6 +37,8 @@ async def list_agents(
         # Only scope-owned (non-global) entries are deletable for this caller.
         scoped_meta = reg.get_meta(nspace="agent", name=name, include_global=False)
         agent_id = meta.get("id", name)
+        if not catalog_allows(identity, "agents", agent_id):
+            continue
 
         out.append(
             AgentDescriptor(
@@ -62,6 +64,8 @@ async def get_agent(
 
     meta = reg.get_meta(nspace="agent", name=agent_id, include_global=True)
     if not meta:
+        raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
+    if not catalog_allows(identity, "agents", meta.get("id", agent_id)):
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_id}")
 
     graph_id = meta.get("graph_id", meta.get("backing", {}).get("name", agent_id))

@@ -28,7 +28,7 @@ from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 # ---- artifact services ----
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
-from aethergraph.services.auth.authn import DevTokenAuthn
+from aethergraph.services.auth.authn import AuthnService
 from aethergraph.services.auth.authz import AllowAllAuthz
 from aethergraph.services.channel.channel_bus import ChannelBus
 
@@ -112,6 +112,7 @@ from aethergraph.storage.factory import (
     build_session_store,
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
+from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
 from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
@@ -221,7 +222,7 @@ class DefaultContainer:
     # optional services (not used by default)
     execution: ExecutionService | None = None
     event_bus: InMemoryEventBus | None = None
-    authn: DevTokenAuthn | None = None
+    authn: AuthnService | None = None
     authz: AllowAllAuthz | None = None
     redactor: RegexRedactor | None = None
 
@@ -247,7 +248,7 @@ def build_default_container(
     cfg: AppSettings | None = None,
 ) -> DefaultContainer:
     """Build the default service container with standard services.
-    if "root" is provided, use it as the base directory for storage; else use from cfg/root.
+    if "root" is provided, use it as the base directory for storage; else use from cfg.workspace.
     if cfg is not provided, load from default AppSettings.
     """
     if cfg is None:
@@ -257,12 +258,12 @@ def build_default_container(
         cfg = load_settings()
         set_current_settings(cfg)
 
-    root = root or cfg.root
-    # override root in cfg to match
-    cfg.root = root
+    root = root or cfg.workspace
+    # override workspace in cfg to match
+    cfg.workspace = root
 
     # we use user specified root if provided, else from config/env
-    root_p = Path(root).resolve() if root else Path(cfg.root).resolve()
+    root_p = Path(root).resolve() if root else Path(cfg.workspace).resolve()
     (root_p / "kv").mkdir(parents=True, exist_ok=True)
     (root_p / "index").mkdir(parents=True, exist_ok=True)
     (root_p / "memory").mkdir(parents=True, exist_ok=True)
@@ -419,7 +420,26 @@ def build_default_container(
     )
 
     # auth services
-    authn = DevTokenAuthn()
+    auth_secret = (
+        cfg.auth.secret.get_secret_value()
+        if cfg.auth.secret is not None
+        else "aethergraph-dev-secret"
+    )
+    auth_db_path = str(root_p / "auth" / "auth_kv.db")
+    auth_grant_store = SQLiteKVSync(auth_db_path, prefix="grant:")
+    auth_invite_store = SQLiteKVSync(auth_db_path, prefix="invite:")
+    authn = AuthnService(
+        secret=auth_secret,
+        cookie_name=cfg.auth.cookie_name,
+        cookie_secure=cfg.auth.cookie_secure,
+        cookie_samesite=cfg.auth.cookie_samesite,
+        session_ttl_seconds=cfg.auth.session_ttl_seconds,
+        grant_ttl_seconds=cfg.auth.grant_ttl_seconds,
+        public_demo_fallback_enabled=cfg.auth.public_demo_fallback_enabled,
+        grant_store=auth_grant_store,
+        invite_store=auth_invite_store,
+    )
+    authn.load_persisted()
     authz = AllowAllAuthz()
 
     # global scoped indices
@@ -435,7 +455,7 @@ def build_default_container(
 
     kb_search_backend = build_kb_search_backend(cfg, embedder=embed_client)
     kb_backend = LocalFSKnowledgeBackend(
-        corpus_root=os.path.join(os.path.abspath(cfg.root), cfg.knowledge.corpus_root),
+        corpus_root=os.path.join(os.path.abspath(cfg.workspace), cfg.knowledge.corpus_root),
         artifacts=artifacts,  # this is store, not Facade with auto-indexing, long doc has its own indexing method
         search_backend=kb_search_backend,
         embed_client=embed_client,

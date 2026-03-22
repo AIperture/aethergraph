@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 
 from aethergraph.api.v1.deps import (
     RequestIdentity,
+    catalog_allows,
     enforce_run_rate_limits,
     get_identity,
     require_runs_execute,
@@ -80,6 +81,8 @@ async def list_apps(
         # If present, this app is caller-owned and can be deleted.
         scoped_meta = reg.get_meta(nspace="app", name=name, include_global=False)
         app_id = meta.get("id", name)
+        if not catalog_allows(identity, "apps", app_id):
+            continue
         graph_id = _resolve_app_graph_id(meta, default=name) or name
         input_schema = merge_input_schema_overrides(
             resolve_graph_input_schema(reg, graph_id=graph_id),
@@ -115,6 +118,8 @@ async def get_app(
     # Resolve by app id (we store app_id as the registry `name`)
     meta = reg.get_meta(nspace="app", name=app_id, include_global=True)
     if not meta:
+        raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
+    if not catalog_allows(identity, "apps", meta.get("id", app_id)):
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
     graph_id = _resolve_app_graph_id(meta, default=app_id)
@@ -157,6 +162,8 @@ async def create_app_run(
     reg = scoped_registry(identity)
     app_meta = reg.get_meta(nspace="app", name=app_id, include_global=True)
     if not app_meta:
+        raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
+    if not catalog_allows(identity, "apps", app_meta.get("id", app_id)):
         raise HTTPException(status_code=404, detail=f"App not found: {app_id}")
 
     graph_id = _resolve_app_graph_id(app_meta)

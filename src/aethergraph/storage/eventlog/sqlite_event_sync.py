@@ -65,6 +65,11 @@ class SQLiteEventLogSync:
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_org_ts ON events(org_id, ts)")
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_events_run_ts ON events(run_id, ts)")
 
+        # Compound index for efficient keyset pagination on scoped event queries
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_scope_kind_id ON events(scope_id, kind, id)"
+        )
+
     def append(self, evt: dict) -> None:
         row = dict(evt)
         partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
@@ -125,9 +130,19 @@ class SQLiteEventLogSync:
         offset: int = 0,
         user_id: str | None = None,
         org_id: str | None = None,
+        after_id: int | None = None,
+        before_id: int | None = None,
     ) -> list[dict]:
         where: list[str] = []
         params: list[Any] = []
+
+        if after_id is not None:
+            where.append("id > ?")
+            params.append(after_id)
+
+        if before_id is not None:
+            where.append("id < ?")
+            params.append(before_id)
 
         if scope_id is not None:
             where.append("scope_id = ?")
@@ -153,27 +168,58 @@ class SQLiteEventLogSync:
             where.append("org_id = ?")
             params.append(org_id)
 
-        sql = "SELECT payload, tags_json FROM events"
+        # When keyset cursor is used, order by id for stable pagination.
+        # before_id uses DESC order (fetching older events), reversed at the end.
+        # Otherwise keep legacy ts ordering.
+        if before_id is not None:
+            order_col = "id"
+            order_dir = "DESC"
+        elif after_id is not None:
+            order_col = "id"
+            order_dir = "ASC"
+        else:
+            order_col = "ts"
+            order_dir = "ASC"
+
+        need_python_tag_filter = bool(tags)
+
+        # Build SQL – push LIMIT/OFFSET to SQL when no Python-side tag filtering
+        sql = "SELECT id, payload, tags_json FROM events"
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY ts ASC"
+        sql += f" ORDER BY {order_col} {order_dir}"
+
+        if not need_python_tag_filter:
+            if offset:
+                sql += f" LIMIT {limit if limit is not None else -1} OFFSET {offset}"
+            elif limit is not None:
+                sql += f" LIMIT {limit}"
 
         with self._lock:
             rows = self._db.execute(sql, params).fetchall()
 
         tags_set = set(tags or [])
         filtered: list[dict] = []
-        for payload_str, tags_json in rows:
+        for row_id, payload_str, tags_json_str in rows:
             evt = json.loads(payload_str)
-            if tags:
-                row_tags = set(json.loads(tags_json) or [])
+            if need_python_tag_filter:
+                row_tags = set(json.loads(tags_json_str) or [])
                 if not row_tags.issuperset(tags_set):
                     continue
+            # Inject row id so callers can build keyset cursors
+            evt["_row_id"] = row_id
             filtered.append(evt)
 
-        if offset:
-            filtered = filtered[offset:]
-        if limit is not None:
-            filtered = filtered[:limit]
+        # Apply offset/limit in Python only when tag filtering is active
+        if need_python_tag_filter:
+            if offset:
+                filtered = filtered[offset:]
+            if limit is not None:
+                filtered = filtered[:limit]
+
+        # When fetching backwards (before_id), results come in DESC order.
+        # Reverse to return in chronological (ASC) order.
+        if before_id is not None:
+            filtered.reverse()
 
         return filtered

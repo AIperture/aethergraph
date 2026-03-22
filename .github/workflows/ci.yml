@@ -56,7 +56,7 @@ jobs:
           AETHERGRAPH_LLM__DEFAULT__PROVIDER: "dummy"
           AETHERGRAPH_LLM__DEFAULT__MODEL: "dummy"
           AETHERGRAPH_LLM__DEFAULT__API_KEY: "dummy"
-          AETHERGRAPH_ROOT: "./.ci-workspace"
+          AETHERGRAPH_WORKSPACE: "./.ci-workspace"
         run: |
           mkdir -p .ci-workspace
           pytest -q --cov=src --cov-report=term-missing

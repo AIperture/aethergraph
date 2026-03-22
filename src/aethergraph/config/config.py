@@ -115,10 +115,23 @@ class ChannelSettings(BaseModel):
 
 
 class RAGSettings(BaseModel):
-    root: str = "./aethergraph_data/rag"  # base dir for rag; should not use it unless customized
+    root: str = (
+        "./aethergraph_workspace/rag"  # base dir for rag; should not use it unless customized
+    )
     backend: str = "sqlite"  # "sqlite" | "faiss"
     index_path: str | None = None  # defaults set at runtime if None
     dim: int | None = None  # only for faiss; optional
+
+
+class AuthSettings(BaseModel):
+    cookie_name: str = "ag_auth_session"
+    cookie_secure: bool = False
+    cookie_samesite: Literal["lax", "strict", "none"] = "lax"
+    session_ttl_seconds: int = 24 * 3600
+    grant_ttl_seconds: int = 7 * 24 * 3600
+    public_demo_fallback_enabled: bool = True
+    secret: SecretStr | None = None
+    admin_api_key: SecretStr | None = None  # env: AETHERGRAPH_AUTH__ADMIN_API_KEY
 
 
 class AppSettings(BaseSettings):
@@ -126,8 +139,8 @@ class AppSettings(BaseSettings):
         env_prefix="AETHERGRAPH_", env_nested_delimiter="__", extra="ignore", case_sensitive=False
     )
 
-    # top-level for workspace root
-    root: str = "./aethergraph_data"
+    # top-level workspace root directory
+    workspace: str = "./aethergraph_workspace"
 
     # Deployment mode controls identity resolution and tenant scoping.
     #
@@ -160,9 +173,14 @@ class AppSettings(BaseSettings):
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
     rag: RAGSettings = RAGSettings()
+    auth: AuthSettings = AuthSettings()
     storage: StorageSettings = StorageSettings()
     search: SearchBackendSettings = SearchBackendSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
+
+    # Optional path to demo-service directory (for admin routes).
+    # Set via env: AETHERGRAPH_DEMO_SERVICE_DIR=/path/to/demo-service
+    demo_service_dir: str | None = None
 
     # Future fields:
     # authn: ...

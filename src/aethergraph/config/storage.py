@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class DocStoreSettings(BaseModel):
     backend: Literal["sqlite", "fs"] = "sqlite"
-    # All paths are *relative* to AppSettings.root
+    # All paths are *relative* to AppSettings.workspace
     sqlite_path: str = "docs/doc_store.db"
     fs_dir: str = "docs/doc_store"
 
@@ -27,7 +27,7 @@ class KVStoreSettings(BaseModel):
 
 # --- Artifact storage backends ---
 class FSArtifactStoreSettings(BaseModel):
-    # Interpreted relative to AppSettings.root in the factory
+    # Interpreted relative to AppSettings.workspace in the factory
     base_dir: str = "artifacts"  # => <root>/artifacts by default
 
 
@@ -47,7 +47,7 @@ class ArtifactStorageSettings(BaseModel):
 
 
 class JsonlArtifactIndexSettings(BaseModel):
-    # Relative to AppSettings.root; we’ll join in the factory
+    # Relative to AppSettings.workspace; we’ll join in the factory
     path: str = "artifacts/index.jsonl"
     occurrences_path: str | None = None  # default: <stem>_occurrences.jsonl
 
@@ -67,31 +67,33 @@ class GraphStateStorageSettings(BaseModel):
     backend: Literal["fs", "sqlite"] = "sqlite"
 
     # FS backend
-    fs_root: str = "graph_state"  # under AppSettings.root
+    fs_root: str = "graph_state"  # under AppSettings.workspace
     # SQLite backend
-    sqlite_path: str = "graph_state/graph_state.db"  # relative to AppSettings.root
+    sqlite_path: str = "graph_state/graph_state.db"  # relative to AppSettings.workspace
 
 
 # --- Continuation Store ---
 class KVDocContinuationStoreSettings(BaseModel):
     # DocStore backend type for continuations
     doc_store_backend: Literal["sqlite", "fs"] = "sqlite"
-    sqlite_doc_store_path: str = "continuations/cont_doc_store.db"  # relative to AppSettings.root
-    fs_doc_store_dir: str = "continuations/cont_doc_store"  # relative to AppSettings.root
+    sqlite_doc_store_path: str = (
+        "continuations/cont_doc_store.db"  # relative to AppSettings.workspace
+    )
+    fs_doc_store_dir: str = "continuations/cont_doc_store"  # relative to AppSettings.workspace
 
     # AsyncKV backend type for token + correlator indexes
     kv_backend: Literal["sqlite", "inmem"] = "sqlite"
-    sqlite_kv_path: str = "continuations/cont_kv_store.db"  # relative to AppSettings.root
+    sqlite_kv_path: str = "continuations/cont_kv_store.db"  # relative to AppSettings.workspace
 
     # EventLog backend for continuation audit (optional)
     eventlog_backend: Literal["none", "sqlite", "fs"] = "fs"
-    sqlite_eventlog_path: str = "continuations/cont_events.db"  # relative to AppSettings.root
-    fs_eventlog_dir: str = "continuations/cont_events"  # relative to AppSettings.root
+    sqlite_eventlog_path: str = "continuations/cont_events.db"  # relative to AppSettings.workspace
+    fs_eventlog_dir: str = "continuations/cont_events"  # relative to AppSettings.workspace
 
 
 class FSContinuationStoreSettings(BaseModel):
     # Where to store the old filesystem layout (runs/index/...).
-    # Interpreted relative to AppSettings.root.
+    # Interpreted relative to AppSettings.workspace.
     root: str = "continuations/cont_fs_store"
 
 
@@ -123,19 +125,19 @@ class ContinuationStoreSettings(BaseModel):
 
 # --- Vector Index Storage ---
 class SQLiteVectorIndexSettings(BaseModel):
-    # Relative to AppSettings.root
+    # Relative to AppSettings.workspace
     dir: str = "vector_index/sqlite"
     filename: str = "index.sqlite"  # currently not used directly, but kept for flexibility
 
 
 class FAISSVectorIndexSettings(BaseModel):
-    # Relative to AppSettings.root
+    # Relative to AppSettings.workspace
     dir: str = "vector_index/faiss"
     dim: int | None = None  # optional default; can be inferred
 
 
 class ChromaVectorIndexSettings(BaseModel):
-    # Relative to AppSettings.root
+    # Relative to AppSettings.workspace
     persist_dir: str = "vector_index/chroma"
     collection_prefix: str = "vec_"
 
@@ -177,20 +179,20 @@ class MemorySettings(BaseModel):
 class RunStorageSettings(BaseModel):
     backend: Literal["memory", "fs", "sqlite"] = "sqlite"
 
-    # FS backend: relative to AppSettings.root
+    # FS backend: relative to AppSettings.workspace
     fs_root: str = "runs"  # will become <root>/runs
 
-    # SQLite backend: relative to AppSettings.root
+    # SQLite backend: relative to AppSettings.workspace
     sqlite_path: str = "runs/runs.db"
 
 
 class SessionStorageSettings(BaseModel):
     backend: Literal["memory", "fs", "sqlite"] = "sqlite"
 
-    # FS backend: relative to AppSettings.root
+    # FS backend: relative to AppSettings.workspace
     fs_root: str = "sessions"  # will become <root>/sessions
 
-    # SQLite backend: relative to AppSettings.root
+    # SQLite backend: relative to AppSettings.workspace
     sqlite_path: str = "sessions/sessions.db"
 
 

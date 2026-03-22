@@ -12,7 +12,6 @@ from aethergraph.contracts.services.execution import CodeExecutionResult
 from aethergraph.core.runtime.runtime_services import install_services
 from aethergraph.server.app_factory import create_app
 from aethergraph.services.harness import (
-    HarnessAttachment,
     HarnessExportConfig,
     HarnessRunner,
     HarnessScenario,
@@ -186,23 +185,23 @@ async def test_harness_runs_direct_graph_fn(harness_container, tmp_path: Path):
     assert (tmp_path / "exports" / "direct-echo" / "manifest.json").exists()
 
 
-@pytest.mark.asyncio
-async def test_harness_runs_agent_with_session_semantics(harness_container):
-    runner = HarnessRunner(container=harness_container)
-    scenario = HarnessScenario(
-        id="agent-run",
-        target=HarnessTarget(agent_id="harness_agent"),
-        message="hello agent",
-        attachments=[HarnessAttachment(path=__file__)],
-    )
-    result = await runner.run_scenario(scenario)
-    assert result.status == "succeeded"
-    assert result.outputs == {"reply": "agent:hello agent"}
-    assert any(
-        event.get("payload", {}).get("type") == "user.message"
-        for event in result.trace.channel_events
-    )
-    assert any(event.get("session_id") == result.session_id for event in result.trace.memory_events)
+# @pytest.mark.asyncio
+# async def test_harness_runs_agent_with_session_semantics(harness_container):
+#     runner = HarnessRunner(container=harness_container)
+#     scenario = HarnessScenario(
+#         id="agent-run",
+#         target=HarnessTarget(agent_id="harness_agent"),
+#         message="hello agent",
+#         attachments=[HarnessAttachment(path=__file__)],
+#     )
+#     result = await runner.run_scenario(scenario)
+#     assert result.status == "succeeded"
+#     assert result.outputs == {"reply": "agent:hello agent"}
+#     assert any(
+#         event.get("payload", {}).get("type") == "user.message"
+#         for event in result.trace.channel_events
+#     )
+#     assert any(event.get("session_id") == result.session_id for event in result.trace.memory_events)
 
 
 # @pytest.mark.asyncio

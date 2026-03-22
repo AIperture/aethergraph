@@ -21,7 +21,7 @@ def build_doc_store(cfg: AppSettings) -> DocStore:
       - Continuations (if you choose to share it)
       - Anything else that wants "document-ish" JSON blobs.
     """
-    root = Path(cfg.root).resolve()
+    root = Path(cfg.workspace).resolve()
     dc = cfg.storage.docs
 
     if dc.backend == "sqlite":
@@ -49,7 +49,7 @@ def build_event_log(cfg: AppSettings, service_name: str | None = None) -> EventL
       - Memory (EventLogPersistence)
       - Continuations audit (optional)
     """
-    root = Path(cfg.root).resolve()
+    root = Path(cfg.workspace).resolve()
     ec = cfg.storage.eventlog
 
     if ec.backend == "none":
@@ -85,7 +85,7 @@ def build_kv_store(cfg: AppSettings, *, extra_prefix: str = "") -> AsyncKV:
     extra_prefix lets subsystems (memory, continuations, etc.) add their own
     namespace on top of the global storage.kv.prefix.
     """
-    root = Path(cfg.root).resolve()
+    root = Path(cfg.workspace).resolve()
     kc = cfg.storage.kv
 
     full_prefix = f"{kc.prefix}{extra_prefix}"
@@ -110,7 +110,7 @@ def build_artifact_store(cfg: AppSettings) -> AsyncArtifactStore:
     Decide which artifact store backend to use based on AppSettings.storage.artifacts.
     """
     art_cfg = cfg.storage.artifacts
-    root = os.path.abspath(cfg.root)
+    root = os.path.abspath(cfg.workspace)
 
     if art_cfg.backend == "fs":
         from aethergraph.storage.artifacts.fs_cas import FSArtifactStore
@@ -140,7 +140,7 @@ def build_artifact_store(cfg: AppSettings) -> AsyncArtifactStore:
 
 def build_artifact_index(cfg: AppSettings) -> AsyncArtifactIndex:
     idx_cfg = cfg.storage.artifact_index
-    root = os.path.abspath(cfg.root)
+    root = os.path.abspath(cfg.workspace)
 
     if idx_cfg.backend == "jsonl":
         from aethergraph.storage.artifacts.artifact_index_jsonl import JsonlArtifactIndex
@@ -171,14 +171,14 @@ def build_graph_state_store(cfg: AppSettings) -> GraphStateStore:
         from aethergraph.storage.docstore.fs_doc import FSDocStore
         from aethergraph.storage.eventlog.fs_event import FSEventLog
 
-        base = os.path.join(cfg.root, gs_cfg.fs_root)
+        base = os.path.join(cfg.workspace, gs_cfg.fs_root)
         docs = FSDocStore(os.path.join(base, "docs"))
         log = FSEventLog(os.path.join(base, "events"))
     elif gs_cfg.backend == "sqlite":
         from aethergraph.storage.docstore.sqlite_doc import SqliteDocStore
         from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 
-        db_path = os.path.join(cfg.root, gs_cfg.sqlite_path)
+        db_path = os.path.join(cfg.workspace, gs_cfg.sqlite_path)
         docs = SqliteDocStore(db_path)
         log = SqliteEventLog(db_path)
     else:
@@ -206,7 +206,7 @@ def build_run_store(cfg: AppSettings) -> RunStore:
         from aethergraph.storage.docstore.fs_doc import FSDocStore
         from aethergraph.storage.runs.doc_store import DocRunStore
 
-        base = os.path.join(cfg.root, rs_cfg.fs_root)
+        base = os.path.join(cfg.workspace, rs_cfg.fs_root)
         docs = FSDocStore(base)
         return DocRunStore(
             docs, prefix="run-"
@@ -215,7 +215,7 @@ def build_run_store(cfg: AppSettings) -> RunStore:
     if rs_cfg.backend == "sqlite":
         from aethergraph.storage.runs.sqlite_run_store import SQLiteRunStore
 
-        db_path = os.path.join(cfg.root, rs_cfg.sqlite_path)
+        db_path = os.path.join(cfg.workspace, rs_cfg.sqlite_path)
         return SQLiteRunStore(path=db_path)
 
     raise ValueError(f"Unknown run storage backend: {rs_cfg.backend!r}")
@@ -242,14 +242,14 @@ def build_session_store(cfg: AppSettings):
         from aethergraph.storage.docstore.fs_doc import FSDocStore
         from aethergraph.storage.sessions.doc_store import DocSessionStore
 
-        base = os.path.join(cfg.root, ss_cfg.fs_root)
+        base = os.path.join(cfg.workspace, ss_cfg.fs_root)
         docs = FSDocStore(base)
         return DocSessionStore(docs, prefix="session-")  # windows-safe
 
     if ss_cfg.backend == "sqlite":
         from aethergraph.storage.sessions.sqlite_session_store import SQLiteSessionStore
 
-        db_path = os.path.join(cfg.root, ss_cfg.sqlite_path)
+        db_path = os.path.join(cfg.workspace, ss_cfg.sqlite_path)
         return SQLiteSessionStore(path=db_path)
     raise ValueError(f"Unknown session storage backend: {ss_cfg.backend!r}")
 
@@ -331,7 +331,7 @@ def build_continuation_store(cfg: AppSettings) -> AsyncContinuationStore:
 
     Mirrors `build_artifact_store(cfg)` in style.
     """
-    root = Path(cfg.root).resolve()
+    root = Path(cfg.workspace).resolve()
     cont_cfg: ContinuationStoreSettings = cfg.storage.continuation
     secret = _secret_bytes(cont_cfg.secret_key)
 
@@ -359,7 +359,7 @@ def build_vector_index(cfg: AppSettings):
     Build a VectorIndex based on cfg.storage.vector_index.
     """
     vcfg = cfg.storage.vector_index
-    root = os.path.abspath(cfg.root)
+    root = os.path.abspath(cfg.workspace)
 
     if vcfg.backend == "sqlite":
         from aethergraph.storage.vector_index.sqlite_index import SQLiteVectorIndex
@@ -398,7 +398,7 @@ def build_vector_index(cfg: AppSettings):
 
 def build_memory_persistence(cfg: AppSettings) -> Persistence:
     mp = cfg.storage.memory.persistence
-    root = cfg.root
+    root = cfg.workspace
 
     if mp.backend == "fs":
         from aethergraph.storage.memory.fs_persist import FSPersistence

@@ -125,7 +125,7 @@ my_project/
   demos/
     __init__.py
     chat_demo.py
-  aethergraph_data/   # workspace (created automatically as needed)
+  aethergraph_workspace/   # workspace (created automatically as needed)
 ```
 
 Example `chat_demo.py`:
@@ -176,7 +176,7 @@ You should see log lines like:
 [AetherGraph] 🚀  Server started at:  http://127.0.0.1:8745
 [AetherGraph] 🖥️  UI:                 http://127.0.0.1:8745/ui
 [AetherGraph] 📡  API:                http://127.0.0.1:8745/api/v1/
-[AetherGraph] 📂  Workspace:          ./aethergraph_data
+[AetherGraph] 📂  Workspace:          ./aethergraph_workspace
 [AetherGraph] ♻️  Auto-reload:        enabled
 ```
 
@@ -195,7 +195,7 @@ from aethergraph import start_server
 
 if __name__ == "__main__":
     start_server(
-        workspace="./aethergraph_data",
+        workspace="./aethergraph_workspace",
         project_root=".",
         load_module=["demos"],
         host="127.0.0.1",

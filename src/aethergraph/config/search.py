@@ -14,7 +14,7 @@ from .storage import FAISSVectorIndexSettings, SQLiteVectorIndexSettings
 class SQLiteLexicalSearchSettings(BaseModel):
     """
     Settings for SQLite-based lexical search backend.
-    Paths are relative to AppSettings.root.
+    Paths are relative to AppSettings.workspace.
     """
 
     dir: str = "search/sqlite_lexical"
