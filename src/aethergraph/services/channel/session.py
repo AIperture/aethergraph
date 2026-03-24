@@ -559,6 +559,107 @@ class ChannelSession:
         )
         self._close_reply_lifecycle()
 
+    async def send_run_card(
+        self,
+        run_id: str,
+        *,
+        graph_id: str | None = None,
+        title: str | None = None,
+        subtitle: str | None = None,
+        session_id: str | None = None,
+        show_preview: bool = True,
+        show_actions: bool = True,
+        poll_ms: int | None = None,
+        meta: dict[str, Any] | None = None,
+        channel: str | None = None,
+        memory_log: bool = True,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
+    ) -> None:
+        """
+        Send a live run-monitor card into a rich-capable UI session.
+
+        The emitted rich payload is declarative. The frontend owns live polling
+        from `run_id` and should not expect this helper to stream updates.
+
+        Examples:
+            Send a default live run card:
+            ```python
+            await context.channel("ui:session").send_run_card(run_id="run_123")
+            ```
+
+            Send a card with custom title and disabled preview:
+            ```python
+            await context.channel("ui:session").send_run_card(
+                run_id="run_123",
+                graph_id="demo.graph",
+                title="Training run",
+                show_preview=False,
+            )
+            ```
+
+        Args:
+            run_id: Concrete run identifier to bind the live card to.
+            graph_id: Optional graph identifier for display metadata.
+            title: Optional display title override.
+            subtitle: Optional display subtitle override.
+            session_id: Optional session identifier to include in rich props.
+            show_preview: Whether the frontend should attempt lightweight preview rendering.
+            show_actions: Whether the frontend should render action links.
+            poll_ms: Optional frontend polling hint in milliseconds.
+            meta: Optional outbound event metadata.
+            channel: Optional target channel key.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured data for the memory record.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
+
+        Returns:
+            None: Complete when the rich message is published.
+        """
+        if not run_id:
+            raise ValueError("send_run_card requires a non-empty run_id")
+
+        fallback_text = f"This is a live run: {run_id}"
+        rich: dict[str, Any] = {
+            "kind": "component",
+            "payload": {
+                "component_type": "ag.ui.run_card.v1",
+                "props": {
+                    "version": "run_card.v1",
+                    "run_id": run_id,
+                    "graph_id": graph_id,
+                    "title": title,
+                    "subtitle": subtitle,
+                    "session_id": session_id,
+                    "view": {
+                        "show_preview": bool(show_preview),
+                        "show_actions": bool(show_actions),
+                        "poll_ms": poll_ms,
+                    },
+                    "fallback": {"text": fallback_text},
+                },
+            },
+        }
+
+        await self.send_rich(
+            text=fallback_text,
+            rich=rich,
+            meta=meta,
+            channel=channel,
+            memory_log=memory_log,
+            memory_role=memory_role,
+            memory_tags=memory_tags,
+            memory_data=memory_data,
+            memory_severity=memory_severity,
+            memory_signal=memory_signal,
+        )
+
     async def send_image(
         self,
         url: str | None = None,
