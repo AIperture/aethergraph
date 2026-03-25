@@ -5,6 +5,7 @@ import json
 import os
 import threading
 from typing import Any, Literal
+import uuid
 
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
@@ -22,6 +23,7 @@ class JsonlArtifactIndexSync:
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         self._by_id: dict[str, dict[str, Any]] = {}
+        self._occurrences: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
         if os.path.exists(self.path):
@@ -31,6 +33,12 @@ class JsonlArtifactIndexSync:
                         continue
                     rec = json.loads(line)
                     self._by_id[rec["artifact_id"]] = rec
+        if os.path.exists(self.occ_path):
+            with open(self.occ_path, encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    self._occurrences.append(json.loads(line))
 
     # -------- core operations --------
 
@@ -43,6 +51,24 @@ class JsonlArtifactIndexSync:
 
     def list_for_run(self, run_id: str) -> list[Artifact]:
         return [Artifact(**r) for r in self._by_id.values() if r.get("run_id") == run_id]
+
+    def list_occurrences_for_run(
+        self,
+        run_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return self._list_occurrences("run_id", run_id, limit=limit, offset=offset)
+
+    def list_occurrences_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return self._list_occurrences("session_id", session_id, limit=limit, offset=offset)
 
     def search(
         self,
@@ -139,7 +165,9 @@ class JsonlArtifactIndexSync:
                 f.write(json.dumps(rec) + "\n")
 
     def record_occurrence(self, a: Artifact, extra_labels: dict | None = None) -> None:
+        labels = {**(a.labels or {}), **(extra_labels or {})}
         row = {
+            "occurrence_id": a.occurrence_id or uuid.uuid4().hex,
             "artifact_id": a.artifact_id,
             "run_id": a.run_id,
             "graph_id": a.graph_id,
@@ -147,8 +175,16 @@ class JsonlArtifactIndexSync:
             "tool_name": a.tool_name,
             "tool_version": a.tool_version,
             "created_at": a.created_at,
-            "labels": {**(a.labels or {}), **(extra_labels or {})},
+            "labels": labels,
+            "kind": a.kind,
+            "mime": a.mime,
+            "bytes": a.bytes,
+            "uri": a.uri,
+            "preview_uri": a.preview_uri,
+            "session_id": a.session_id,
+            "filename": labels.get("filename"),
         }
+        self._occurrences.append(row)
         with open(self.occ_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
 
@@ -156,6 +192,62 @@ class JsonlArtifactIndexSync:
         if artifact_id in self._by_id:
             return Artifact(**self._by_id[artifact_id])
         return None
+
+    def _list_occurrences(
+        self,
+        field: str,
+        value: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        rows = [row for row in self._occurrences if str(row.get(field) or "") == str(value)]
+        rows.sort(
+            key=lambda row: (str(row.get("created_at") or ""), str(row.get("occurrence_id") or "")),
+            reverse=True,
+        )
+        if offset:
+            rows = rows[offset:]
+        if limit is not None:
+            rows = rows[:limit]
+        out: list[Artifact] = []
+        for row in rows:
+            labels = dict(row.get("labels") or {})
+            filename = row.get("filename")
+            if filename and "filename" not in labels:
+                labels["filename"] = filename
+            artifact = self.get(str(row.get("artifact_id") or ""))
+            out.append(
+                Artifact(
+                    artifact_id=str(row.get("artifact_id") or ""),
+                    run_id=row.get("run_id"),
+                    graph_id=row.get("graph_id"),
+                    node_id=row.get("node_id"),
+                    tool_name=row.get("tool_name"),
+                    tool_version=row.get("tool_version"),
+                    kind=row.get("kind") or (artifact.kind if artifact else None),
+                    sha256=artifact.sha256 if artifact else str(row.get("artifact_id") or ""),
+                    bytes=row.get("bytes")
+                    if row.get("bytes") is not None
+                    else (artifact.bytes if artifact else None),
+                    mime=row.get("mime") or (artifact.mime if artifact else None),
+                    created_at=row.get("created_at"),
+                    tags=labels.get("tags"),
+                    labels=labels,
+                    metrics=artifact.metrics if artifact else None,
+                    pinned=artifact.pinned if artifact else False,
+                    uri=row.get("uri") or (artifact.uri if artifact else None),
+                    preview_uri=row.get("preview_uri")
+                    or (artifact.preview_uri if artifact else None),
+                    org_id=artifact.org_id if artifact else None,
+                    user_id=artifact.user_id if artifact else None,
+                    client_id=artifact.client_id if artifact else None,
+                    app_id=artifact.app_id if artifact else None,
+                    session_id=row.get("session_id") or (artifact.session_id if artifact else None),
+                    occurrence_id=row.get("occurrence_id"),
+                )
+            )
+        return out
 
 
 class JsonlArtifactIndex(AsyncArtifactIndex):
@@ -169,6 +261,34 @@ class JsonlArtifactIndex(AsyncArtifactIndex):
 
     async def list_for_run(self, run_id: str) -> list[Artifact]:
         return await asyncio.to_thread(self._sync.list_for_run, run_id)
+
+    async def list_occurrences_for_run(
+        self,
+        run_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return await asyncio.to_thread(
+            self._sync.list_occurrences_for_run,
+            run_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_occurrences_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return await asyncio.to_thread(
+            self._sync.list_occurrences_for_session,
+            session_id,
+            limit=limit,
+            offset=offset,
+        )
 
     async def search(self, **kwargs) -> list[Artifact]:
         return await asyncio.to_thread(self._sync.search, **kwargs)

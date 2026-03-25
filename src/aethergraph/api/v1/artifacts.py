@@ -120,6 +120,7 @@ def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
     labels = a.labels or {}
 
     out = ArtifactMeta(
+        occurrence_id=getattr(a, "occurrence_id", None),
         artifact_id=a.artifact_id,
         kind=a.kind,
         mime_type=_guess_mime(a),
@@ -314,11 +315,18 @@ async def list_run_artifacts(
     label_filters.update(_tenant_label_filters(identity))
 
     started_at = perf_counter()
-    artifacts = await index.search(
-        labels=label_filters,
-        limit=limit,
-        offset=offset,
-    )
+    list_occurrences_for_run = getattr(index, "list_occurrences_for_run", None)
+    if callable(list_occurrences_for_run):
+        artifacts = await list_occurrences_for_run(run_id, limit=limit, offset=offset)
+        artifacts = [
+            artifact for artifact in artifacts if artifact_belongs_to_identity(identity, artifact)
+        ]
+    else:
+        artifacts = await index.search(
+            labels=label_filters,
+            limit=limit,
+            offset=offset,
+        )
 
     metas = [_artifact_to_meta(a) for a in artifacts]
     if response is not None:
@@ -348,11 +356,18 @@ async def list_session_artifacts(
     label_filters.update(_tenant_label_filters(identity))
 
     started_at = perf_counter()
-    artifacts = await index.search(
-        labels=label_filters,
-        limit=limit,
-        offset=offset,
-    )
+    list_occurrences_for_session = getattr(index, "list_occurrences_for_session", None)
+    if callable(list_occurrences_for_session):
+        artifacts = await list_occurrences_for_session(session_id, limit=limit, offset=offset)
+        artifacts = [
+            artifact for artifact in artifacts if artifact_belongs_to_identity(identity, artifact)
+        ]
+    else:
+        artifacts = await index.search(
+            labels=label_filters,
+            limit=limit,
+            offset=offset,
+        )
 
     metas = [_artifact_to_meta(a) for a in artifacts]
     if response is not None:

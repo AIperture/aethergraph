@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field  # type: ignore
 
 
 class ArtifactMeta(BaseModel):
+    occurrence_id: str | None = None
     artifact_id: str
     kind: str
     mime_type: str | None = None
