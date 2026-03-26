@@ -235,6 +235,7 @@ class RuntimeEnv:
             session_id=self.session_id,
             agent_id=self.agent_id,
             app_id=self.app_id,
+            current_run_id=self.run_id,
         )
 
         services = NodeServices(

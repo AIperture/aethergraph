@@ -38,7 +38,7 @@ class NodeStatus:
         return status.startswith("WAITING_")
 
 
-TERMINAL_STATES = {NodeStatus.DONE, NodeStatus.FAILED, NodeStatus.SKIPPED}
+TERMINAL_STATES = {NodeStatus.DONE, NodeStatus.FAILED, NodeStatus.SKIPPED, NodeStatus.CANCELLED}
 WAITING_STATES = {
     NodeStatus.WAITING_HUMAN,
     NodeStatus.WAITING_ROBOT,

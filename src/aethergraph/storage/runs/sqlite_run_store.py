@@ -169,6 +169,7 @@ class SQLiteRunStoreSync:
         *,
         finished_at: datetime | None = None,
         error: str | None = None,
+        meta_update: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             row = self._db.execute(
@@ -184,6 +185,10 @@ class SQLiteRunStoreSync:
                 data["finished_at"] = finished_at.isoformat()
             if error is not None:
                 data["error"] = error
+            if meta_update:
+                meta = dict(data.get("meta") or {})
+                meta.update(meta_update)
+                data["meta"] = meta
 
             payload = json.dumps(data, ensure_ascii=False)
             finished_ts = _dt_to_ts(finished_at)
@@ -348,6 +353,7 @@ class SQLiteRunStore(RunStore):
         *,
         finished_at: datetime | None = None,
         error: str | None = None,
+        meta_update: dict[str, Any] | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._sync.update_status,
@@ -355,6 +361,7 @@ class SQLiteRunStore(RunStore):
             status,
             finished_at=finished_at,
             error=error,
+            meta_update=meta_update,
         )
 
     async def get(self, run_id: str) -> RunRecord | None:

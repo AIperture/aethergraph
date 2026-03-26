@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import functools
 import inspect
 import traceback
 from typing import Any
 
 from aethergraph.contracts.services.channel import OutEvent
+from aethergraph.core.runtime.run_cancellation import RunCancellationRequestedError
 from aethergraph.services.continuations.continuation import Continuation
 
 from ..graph.task_node import NodeStatus, TaskNodeRuntime
@@ -260,6 +261,23 @@ async def step_forward(
             node=node, ctx=ctx, node_ctx=node_ctx, lg=lg, spec=w.to_dict(), attempts=attempts
         )
 
+    except RunCancellationRequestedError as e:
+        if lg:
+            lg.info("tool cancelled")
+        return StepResult(
+            status=NodeStatus.CANCELLED,
+            error=str(e),
+            error_info={
+                "message": str(e),
+                "detail": None,
+                "kind": "cancellation",
+                "stage": "node_execution",
+                "code": "run_cancel_requested",
+                "hints": [],
+                "is_traceback": False,
+            },
+        )
+
     except Exception as e:
         if lg:
             lg.exception("tool error")
@@ -311,7 +329,7 @@ def normalize_wait_spec(spec: dict[str, Any], *, node_ctx: "NodeContext") -> dic
     NOTE: in channel, we only allow kind to be "approval" or "user_input" for external interaction. Other kinds will
     simply push a notification without expecting a user response.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     out = dict(spec or {})
     out["kind"] = out.get("kind") or "external"
@@ -331,7 +349,7 @@ def normalize_wait_spec(spec: dict[str, Any], *, node_ctx: "NodeContext") -> dic
     if now_fn is None:
 
         def now_fn():
-            return datetime.now(timezone.utc)
+            return datetime.now(UTC)
 
     out["deadline"] = _parse_deadline(out.get("deadline"), now_fn)
 

@@ -26,6 +26,7 @@ from aethergraph.contracts.storage.trigger_store import TriggerStore
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
+from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
 from aethergraph.services.auth.authn import AuthnService
@@ -211,6 +212,7 @@ class DefaultContainer:
     # run controls -- for http endpoints and run manager
     run_store: RunStore | None = None
     run_manager: RunManager | None = None  # RunManager
+    run_cancellation_registry: RunCancellationRegistry | None = None
     session_store: SessionStore | None = None  # SessionStore
 
     # planner
@@ -404,10 +406,12 @@ def build_default_container(
 
     # run store and manager
     run_store = build_run_store(cfg)
+    run_cancellation_registry = RunCancellationRegistry()
     run_manager = RunManager(
         run_store=run_store,
         registry=registry,
         sched_registry=sched_registry,
+        cancellation_registry=run_cancellation_registry,
         max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
     )
     session_store = build_session_store(cfg)
@@ -550,6 +554,7 @@ def build_default_container(
         mcp=mcp,
         run_store=run_store,
         run_manager=run_manager,
+        run_cancellation_registry=run_cancellation_registry,
         session_store=session_store,
         secrets=secrets,
         event_bus=None,

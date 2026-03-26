@@ -204,6 +204,7 @@ class DocRunStore(RunStore):
         *,
         finished_at: datetime | None = None,
         error: str | None = None,
+        meta_update: dict[str, Any] | None = None,
     ) -> None:
         doc_id = self._doc_id(run_id)
         async with self._lock:
@@ -217,6 +218,10 @@ class DocRunStore(RunStore):
                 doc["finished_at"] = _encode_dt(finished_at)
             if error is not None:
                 doc["error"] = error
+            if meta_update:
+                meta = dict(doc.get("meta") or {})
+                meta.update(meta_update)
+                doc["meta"] = meta
 
             await self._ds.put(doc_id, doc)
 

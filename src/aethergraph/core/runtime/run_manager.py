@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 import traceback
 from typing import Any
@@ -12,6 +12,11 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.execution.forward_scheduler import ForwardScheduler
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
+from aethergraph.core.runtime.run_cancellation import (
+    RunCancellationHandle,
+    RunCancellationRegistry,
+    get_run_cancellation_registry,
+)
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
@@ -28,7 +33,7 @@ from aethergraph.services.scope.tenant import registry_tenant_from_identity
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 def _is_task_graph(obj: Any) -> bool:
@@ -71,11 +76,13 @@ class RunManager:
         run_store: RunStore | None = None,
         registry: UnifiedRegistry | None = None,
         sched_registry: Any | None = None,  # placeholder for future use
+        cancellation_registry: RunCancellationRegistry | None = None,
         max_concurrent_runs: int | None = None,
     ):
         self._store = run_store
         self._registry = registry
         self._sched_registry = sched_registry
+        self._cancellation_registry = cancellation_registry
         self._max_concurrent_runs = max_concurrent_runs
         self._running = 0
         self._lock = asyncio.Lock()
@@ -282,6 +289,7 @@ class RunManager:
         has_waits = False
         continuations: list[dict[str, Any]] = []
         error_msg: str | None = None
+        handle = await self._ensure_cancellation_handle(record.run_id)
 
         try:
             result = await run_or_resume_async(
@@ -315,6 +323,8 @@ class RunManager:
             # Cancellation path: scheduler.terminate() or external cancel.
             import logging
 
+            backend_state = await handle.backend_state()
+            handle.mark_backend_stopped(backend_state=backend_state)
             record.status = RunStatus.canceled
             record.finished_at = _utcnow()
             error_msg = "Run cancelled by user"
@@ -401,12 +411,14 @@ class RunManager:
             )
 
         # Persist status update
+        record.meta.update({k: v for k, v in handle.metadata().items() if v is not None})
         if self._store is not None:
             await self._store.update_status(
                 record.run_id,
                 record.status,
                 finished_at=record.finished_at,
                 error=error_msg,
+                meta_update={k: v for k, v in handle.metadata().items() if v is not None},
             )
 
         # Metering
@@ -446,6 +458,9 @@ class RunManager:
             logging.getLogger("aethergraph.runtime.run_manager").exception(
                 "Error resolving run future for run_id=%s", record.run_id
             )
+
+        if record.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
+            await self._get_cancellation_registry().pop(record.run_id)
 
         return record, outputs, has_waits, continuations
 
@@ -539,6 +554,7 @@ class RunManager:
 
             if record is None:
                 raise RuntimeError("Failed to create run record")
+            await self._ensure_cancellation_handle(record.run_id)
 
             async def _bg():
                 try:
@@ -643,6 +659,7 @@ class RunManager:
 
             if self._store is not None:
                 await self._store.create(record)
+            await self._ensure_cancellation_handle(record.run_id)
 
             finalize_kwargs = {
                 "record": record,
@@ -700,6 +717,18 @@ class RunManager:
             return None
         return getattr(container, "sched_registry", None)
 
+    def _get_cancellation_registry(self) -> RunCancellationRegistry:
+        if self._cancellation_registry is not None:
+            return self._cancellation_registry
+        try:
+            container = current_services()
+        except Exception:
+            container = None
+        return get_run_cancellation_registry(container)
+
+    async def _ensure_cancellation_handle(self, run_id: str) -> RunCancellationHandle:
+        return await self._get_cancellation_registry().create(run_id)
+
     async def cancel_run(self, run_id: str) -> RunRecord | None:
         """
         Best-effort cancellation for a run.
@@ -718,35 +747,48 @@ class RunManager:
         record: RunRecord | None = None
         if self._store is not None:
             record = await self._store.get(run_id)
+        handle = await self._get_cancellation_registry().get(run_id)
 
         # Helper: scheduler-level termination
-        async def _terminate_scheduler() -> None:
+        async def _terminate_scheduler() -> dict[str, Any] | None:
             reg = self._get_sched_registry()
             if reg is None:
-                return
+                return None
             sched = reg.get(run_id)
             if sched is None:
-                return
+                return None
 
             try:
                 # if local scheduler -> terminate
                 # if global scheduler -> terminate_run(run_id)
                 if isinstance(sched, GlobalForwardScheduler):
                     await sched.terminate_run(run_id)
-                    return
+                    return {
+                        "kind": sched.__class__.__name__,
+                        "run_id": run_id,
+                        "state": "cancellation_requested",
+                    }
                 elif isinstance(sched, ForwardScheduler):
                     await sched.terminate()
-                    return
+                    return {
+                        "kind": sched.__class__.__name__,
+                        "run_id": run_id,
+                        "state": "cancellation_requested",
+                    }
             except Exception:  # noqa: BLE001
                 import logging
 
                 logging.getLogger("aethergraph.runtime.run_manager").exception(
                     "Error terminating scheduler for run_id=%s", run_id
                 )
+                return None
 
         # No record in store – still try to terminate scheduler, then bail
         if record is None:
-            await _terminate_scheduler()
+            if handle is not None:
+                await handle.request_cancel()
+            else:
+                await _terminate_scheduler()
             return None
 
         # If already terminal, don't change status
@@ -757,6 +799,10 @@ class RunManager:
         }:
             return record
 
+        if handle is None:
+            handle = await self._ensure_cancellation_handle(run_id)
+
+        was_waiting = record.status == RunStatus.waiting
         # Mark cancellation requested so UI can react immediately
         record.status = RunStatus.cancellation_requested
         if self._store is not None:
@@ -765,10 +811,36 @@ class RunManager:
                 RunStatus.cancellation_requested,
                 finished_at=None,
                 error=None,
+                meta_update={k: v for k, v in handle.metadata().items() if v is not None}
+                if handle is not None
+                else None,
             )
 
-        # Ask the scheduler to stop
-        await _terminate_scheduler()
+        await handle.request_cancel(reason="user_requested")
+        if handle.adapter_kind is None:
+            backend_state = await _terminate_scheduler()
+            if backend_state:
+                handle.backend_state_value = dict(backend_state)
+        else:
+            backend_state = await handle.backend_state()
+        record.meta.update({k: v for k, v in handle.metadata().items() if v is not None})
+
+        if was_waiting:
+            handle.mark_backend_stopped(backend_state=backend_state)
+            record.status = RunStatus.canceled
+            record.finished_at = _utcnow()
+            record.error = "Run cancelled by user"
+            record.meta.update({k: v for k, v in handle.metadata().items() if v is not None})
+            if self._store is not None:
+                await self._store.update_status(
+                    run_id,
+                    RunStatus.canceled,
+                    finished_at=record.finished_at,
+                    error=record.error,
+                    meta_update={k: v for k, v in handle.metadata().items() if v is not None},
+                )
+            await self._resolve_run_future(run_id, (record, None))
+            await self._get_cancellation_registry().pop(run_id)
 
         return record
 
@@ -971,6 +1043,7 @@ class RunManager:
 
         if self._store is not None:
             await self._store.create(record)
+        await self._ensure_cancellation_handle(record.run_id)
 
         finalize_kwargs = {
             "record": record,

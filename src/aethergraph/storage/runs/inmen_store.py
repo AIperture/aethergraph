@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 from datetime import datetime
+from typing import Any
 
 from aethergraph.contracts.services.runs import RunStore
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
@@ -30,6 +31,7 @@ class InMemoryRunStore(RunStore):
         *,
         finished_at: datetime | None = None,
         error: str | None = None,
+        meta_update: dict[str, Any] | None = None,
     ) -> None:
         async with self._lock:
             rec = self._records.get(run_id)
@@ -41,6 +43,8 @@ class InMemoryRunStore(RunStore):
                 rec.finished_at = finished_at
             if error is not None:
                 rec.error = error
+            if meta_update:
+                rec.meta.update(meta_update)
 
     async def get(self, run_id: str) -> RunRecord | None:
         async with self._lock:

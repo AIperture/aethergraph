@@ -202,6 +202,7 @@ class ForwardScheduler(BaseScheduler):
 
         # termination flag
         self._cancelled = False
+        self._cancel_requested = False
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop | None = None):
         """Bind an event loop to this scheduler (for cross-thread resume calls)."""
@@ -220,7 +221,7 @@ class ForwardScheduler(BaseScheduler):
 
     async def _try_start_immediately(self, node_id: str) -> bool:
         """Try to start node now if waiting + capacity available; return True if started."""
-        if self._capacity() <= 0 or node_id in self.running_tasks:
+        if self._cancel_requested or self._capacity() <= 0 or node_id in self.running_tasks:
             return False
         node = self._runtime(node_id)
         if not node:
@@ -294,6 +295,11 @@ class ForwardScheduler(BaseScheduler):
 
             running = list(self.running_tasks.values())
 
+            if self._cancel_requested and not running:
+                await self._cancel_remaining_nodes()
+                self._terminated = True
+                break
+
             # 3) no work currently running or scheduled
             if not running and scheduled == 0:
                 nothing_pending = (not self._backoff_tasks) and (not self._resume_pending)
@@ -351,15 +357,16 @@ class ForwardScheduler(BaseScheduler):
 
     async def terminate(self):
         """Terminate execution; running tasks will complete but no new tasks will be started."""
-        self._terminated = True
+        self._cancel_requested = True
         self._cancelled = True
 
         # cancel backoff tasks
         for task in self._backoff_tasks.values():
             task.cancel()
-        # cancel running tasks
-        for task in self.running_tasks.values():
-            task.cancel()
+        self._resume_pending.clear()
+        self._ready_pending.clear()
+        self._nudge.set()
+        await self._events.put(WakeupEvent("__cancel__"))
 
     async def run_node(self, node):
         """Explicitly run a specific node (e.g. for testing)."""
@@ -476,6 +483,8 @@ class ForwardScheduler(BaseScheduler):
 
     # --------- internal methods ---------
     async def _schedule_ready(self) -> int:
+        if self._cancel_requested:
+            return 0
         available = self._capacity()
         if available <= 0:
             return 0
@@ -692,6 +701,8 @@ class ForwardScheduler(BaseScheduler):
 
     async def _start_node(self, node: TaskNodeRuntime):
         node_id = node.node_id
+        if self._cancel_requested:
+            return
 
         # attach resume payload if any (WAITING_* -> RUNNING)
         resume_payload = self._resume_payloads.pop(node_id, None)
@@ -800,6 +811,28 @@ class ForwardScheduler(BaseScheduler):
                         timestamp=datetime.utcnow().timestamp(),
                     )
                     await self._emit(event)
+                elif result.status == NodeStatus.CANCELLED:
+                    node.state.error = result.error or "Run cancelled by user"
+                    node.state.error_info = result.error_info or {
+                        "message": node.state.error,
+                        "detail": None,
+                        "kind": "cancellation",
+                        "stage": "node_execution",
+                        "code": "run_cancel_requested",
+                        "hints": [],
+                        "is_traceback": False,
+                    }
+                    await self.graph.set_node_status(node_id, NodeStatus.CANCELLED)
+                    await self._emit(
+                        NodeEvent(
+                            run_id=self.env.run_id,
+                            graph_id=getattr(self.graph.spec, "graph_id", "inline"),
+                            node_id=node.node_id,
+                            status=str(NodeStatus.CANCELLED),
+                            outputs=node.outputs or {},
+                            timestamp=datetime.utcnow().timestamp(),
+                        )
+                    )
 
                 # record memory after step
                 # record_after_step(self.env, node, result)
@@ -849,6 +882,16 @@ class ForwardScheduler(BaseScheduler):
             pass
         finally:
             self._backoff_tasks.pop(node.node_id, None)
+
+    async def _cancel_remaining_nodes(self) -> None:
+        for node in self.graph.nodes:
+            if _is_plan(node):
+                continue
+            if node.node_id in self.running_tasks:
+                continue
+            if node.state.status in TERMINAL_STATES:
+                continue
+            await self.graph.set_node_status(node.node_id, NodeStatus.CANCELLED)
 
     async def _handle_events(self, ev):
         """Handle control events (e.g., resume, wakeup).
