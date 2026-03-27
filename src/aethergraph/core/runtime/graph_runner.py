@@ -28,6 +28,10 @@ from ..execution.forward_scheduler import ForwardScheduler
 from ..execution.retry_policy import RetryPolicy
 from ..graph.graph_fn import GraphFunction
 from ..graph.graph_refs import resolve_any as _resolve_any
+from ..runtime.run_cancellation import (
+    LocalSchedulerCancellationAdapter,
+    get_run_cancellation_registry,
+)
 from ..runtime.runtime_env import RuntimeEnv
 from ..runtime.runtime_metering import current_meter_context
 from ..runtime.runtime_services import ensure_services_installed
@@ -680,6 +684,12 @@ async def run_async(
         stop_on_first_error=True,
         logger=logger,
     )
+    cancel_registry = get_run_cancellation_registry(env.container)
+    cancel_handle = await cancel_registry.create(env.run_id)
+    cancel_handle.register_adapter(
+        LocalSchedulerCancellationAdapter(sched),
+        adapter_kind="local_scheduler",
+    )
 
     # Register for resumes and run
     token = _register_metering_context(env, target)  # set metering context
@@ -705,6 +715,12 @@ async def run_async(
                         include_wait_spec=True,
                     )
                     await store.save_snapshot(snap)
+                if cancel_handle.is_cancel_requested():
+                    backend_state = await cancel_handle.backend_state()
+                    cancel_handle.mark_backend_stopped(
+                        backend_state=backend_state,
+                        terminal_status="canceled",
+                    )
 
         # Resolve graph-level outputs (will raise  if waits)
         return await _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)

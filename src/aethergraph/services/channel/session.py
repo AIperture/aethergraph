@@ -255,6 +255,21 @@ class ChannelSession:
         # NEW: alias → canonical resolution
         return self._bus.resolve_channel_key(raw)
 
+    def _extract_ui_session_id(self, channel: str | None = None) -> str:
+        channel_key = self._resolve_key(channel)
+        prefix = "ui:session/"
+        if not channel_key.startswith(prefix):
+            raise RuntimeError(
+                "ChannelSession.work_status() requires a ui:session channel; "
+                f"got {channel_key!r}."
+            )
+        session_id = channel_key[len(prefix) :]
+        if not session_id:
+            raise RuntimeError(
+                "ChannelSession.work_status() requires a resolved ui:session/<session_id> channel."
+            )
+        return session_id
+
     def _ensure_channel(self, event: "OutEvent", channel: str | None = None) -> "OutEvent":
         """
         Ensure event.channel is set to a concrete channel key before publishing.
@@ -308,6 +323,72 @@ class ChannelSession:
         # merge context meta
         event.meta = self._inject_context_meta(event.meta)
         await self._bus.publish(event)
+
+    class _SessionWorkStatusHandle:
+        def __init__(
+            self,
+            outer: "ChannelSession",
+            *,
+            session_id: str,
+            channel_key: str,
+            workflow_id: str | None = None,
+        ) -> None:
+            self._outer = outer
+            self._session_id = session_id
+            self._channel_key = channel_key
+            self._workflow_id = workflow_id
+
+        def _meta(self) -> dict[str, Any]:
+            return self._outer._inject_context_meta({"channel_key": self._channel_key})
+
+        async def replace(self, work_status: dict[str, Any]) -> dict[str, Any]:
+            from aethergraph.services.channel.session_work_status import replace_session_work_status
+
+            return await replace_session_work_status(
+                session_id=self._session_id,
+                work_status=work_status,
+                meta=self._meta(),
+            )
+
+        async def patch(
+            self,
+            *,
+            workflow_id: str | None = None,
+            status: str | None = None,
+            summary: str | None = None,
+            active_item_id: str | None = None,
+            item_updates: list[dict[str, Any]] | None = None,
+        ) -> dict[str, Any]:
+            from aethergraph.services.channel.session_work_status import patch_session_work_status
+
+            resolved_workflow_id = workflow_id if workflow_id is not None else self._workflow_id
+            return await patch_session_work_status(
+                session_id=self._session_id,
+                workflow_id=resolved_workflow_id,
+                status=status,
+                summary=summary,
+                active_item_id=active_item_id,
+                item_updates=item_updates,
+                meta=self._meta(),
+            )
+
+        async def clear(self) -> dict[str, Any]:
+            from aethergraph.services.channel.session_work_status import clear_session_work_status
+
+            return await clear_session_work_status(
+                session_id=self._session_id,
+                meta=self._meta(),
+            )
+
+    def work_status(self, *, workflow_id: str | None = None) -> "_SessionWorkStatusHandle":
+        channel_key = self._resolve_key()
+        session_id = self._extract_ui_session_id(channel_key)
+        return ChannelSession._SessionWorkStatusHandle(
+            self,
+            session_id=session_id,
+            channel_key=channel_key,
+            workflow_id=workflow_id,
+        )
 
     async def send_phase(
         self,
@@ -558,6 +639,107 @@ class ChannelSession:
             )
         )
         self._close_reply_lifecycle()
+
+    async def send_run_card(
+        self,
+        run_id: str,
+        *,
+        graph_id: str | None = None,
+        title: str | None = None,
+        subtitle: str | None = None,
+        session_id: str | None = None,
+        show_preview: bool = True,
+        show_actions: bool = True,
+        poll_ms: int | None = None,
+        meta: dict[str, Any] | None = None,
+        channel: str | None = None,
+        memory_log: bool = True,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
+    ) -> None:
+        """
+        Send a live run-monitor card into a rich-capable UI session.
+
+        The emitted rich payload is declarative. The frontend owns live polling
+        from `run_id` and should not expect this helper to stream updates.
+
+        Examples:
+            Send a default live run card:
+            ```python
+            await context.channel("ui:session").send_run_card(run_id="run_123")
+            ```
+
+            Send a card with custom title and disabled preview:
+            ```python
+            await context.channel("ui:session").send_run_card(
+                run_id="run_123",
+                graph_id="demo.graph",
+                title="Training run",
+                show_preview=False,
+            )
+            ```
+
+        Args:
+            run_id: Concrete run identifier to bind the live card to.
+            graph_id: Optional graph identifier for display metadata.
+            title: Optional display title override.
+            subtitle: Optional display subtitle override.
+            session_id: Optional session identifier to include in rich props.
+            show_preview: Whether the frontend should attempt lightweight preview rendering.
+            show_actions: Whether the frontend should render action links.
+            poll_ms: Optional frontend polling hint in milliseconds.
+            meta: Optional outbound event metadata.
+            channel: Optional target channel key.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured data for the memory record.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
+
+        Returns:
+            None: Complete when the rich message is published.
+        """
+        if not run_id:
+            raise ValueError("send_run_card requires a non-empty run_id")
+
+        fallback_text = f"This is a live run: {run_id}"
+        rich: dict[str, Any] = {
+            "kind": "component",
+            "payload": {
+                "component_type": "ag.ui.run_card.v1",
+                "props": {
+                    "version": "run_card.v1",
+                    "run_id": run_id,
+                    "graph_id": graph_id,
+                    "title": title,
+                    "subtitle": subtitle,
+                    "session_id": session_id,
+                    "view": {
+                        "show_preview": bool(show_preview),
+                        "show_actions": bool(show_actions),
+                        "poll_ms": poll_ms,
+                    },
+                    "fallback": {"text": fallback_text},
+                },
+            },
+        }
+
+        await self.send_rich(
+            text=fallback_text,
+            rich=rich,
+            meta=meta,
+            channel=channel,
+            memory_log=memory_log,
+            memory_role=memory_role,
+            memory_tags=memory_tags,
+            memory_data=memory_data,
+            memory_severity=memory_severity,
+            memory_signal=memory_signal,
+        )
 
     async def send_image(
         self,

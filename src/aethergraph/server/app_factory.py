@@ -32,7 +32,7 @@ from aethergraph.plugins.agents.chat_agent.default_chat_agent import *  # noqa: 
 # from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
 # from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 # channel routes
-from aethergraph.server.loading import GraphLoader, LoadSpec
+from aethergraph.server.loading import GraphLoader, LoadSpec, emit_load_errors
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.utils.optdeps import require
@@ -281,6 +281,12 @@ def _load_user_graphs_from_env() -> None:
 
     loader = GraphLoader()
     report = loader.load(spec)
+    if report.errors:
+        emit_load_errors(
+            report.errors,
+            strict_load=strict,
+            prefix="[AetherGraph worker load error]",
+        )
 
     # Optional: log report.loaded / report.errors here if you like
     print("🚀 [worker] Loaded user graphs:", report.loaded)

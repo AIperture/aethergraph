@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.core.runtime.run_cancellation import get_run_cancellation_registry
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
@@ -63,6 +65,7 @@ class RunFacade:
     session_id: str | None = None
     agent_id: str | None = None
     app_id: str | None = None
+    current_run_id: str | None = None
 
     async def spawn_run(
         self,
@@ -378,3 +381,22 @@ class RunFacade:
         except Exception as exc:
             await span.fail(exc, metadata={"target_run_id": run_id})
             raise
+
+    async def is_cancel_requested(self) -> bool:
+        if not self.current_run_id:
+            return False
+        handle = await get_run_cancellation_registry().get(self.current_run_id)
+        return bool(handle and handle.is_cancel_requested())
+
+    async def raise_if_cancel_requested(self) -> None:
+        if not self.current_run_id:
+            return
+        handle = await get_run_cancellation_registry().get(self.current_run_id)
+        if handle is not None:
+            handle.raise_if_cancel_requested()
+
+    async def thread_cancel_event(self) -> Event:
+        if not self.current_run_id:
+            raise RuntimeError("RunFacade.thread_cancel_event() requires a bound current run id.")
+        handle = await get_run_cancellation_registry().create(self.current_run_id)
+        return handle.thread_cancel_event()

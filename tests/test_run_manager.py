@@ -3,9 +3,11 @@ import asyncio
 import pytest
 
 from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
+from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
+from aethergraph.services.runner.facade import RunFacade
 from aethergraph.storage.runs.inmen_store import InMemoryRunStore
 
 
@@ -370,3 +372,86 @@ async def test_run_manager_submit_run_persists_launch_metadata_and_run_config(
     assert persisted.meta["resume_mode"] == "failed_nodes"
     assert captured_kwargs["resume_from_run_id"] == "run-old"
     assert captured_kwargs["resume_mode"] == "failed_nodes"
+
+
+@pytest.mark.asyncio
+async def test_run_manager_cancel_run_stays_cancellation_requested_until_worker_exits(
+    monkeypatch, dummy_meter
+):
+    store = InMemoryRunStore()
+    reg = UnifiedRegistry()
+    cancel_registry = RunCancellationRegistry()
+    rm = RunManager(
+        run_store=store,
+        registry=reg,
+        cancellation_registry=cancel_registry,
+        max_concurrent_runs=10,
+    )
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        del target, inputs, kwargs
+        handle = await cancel_registry.get(run_id)
+        assert handle is not None
+        while not handle.is_cancel_requested():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.03)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record = await rm.submit_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+        identity=Identity(user_id="u1", org_id="o1"),
+    )
+    await asyncio.sleep(0.01)
+
+    await rm.cancel_run(record.run_id)
+    interim = await store.get(record.run_id)
+    assert interim is not None
+    assert interim.status == RunStatus.cancellation_requested
+
+    await asyncio.sleep(0.08)
+    final = await store.get(record.run_id)
+    assert final is not None
+    assert final.status == RunStatus.canceled
+    assert final.meta["cancel_reason"] == "user_requested"
+    assert final.meta["cancel_backend_kind"] is not None
+
+
+@pytest.mark.asyncio
+async def test_run_facade_bound_cancellation_helpers(monkeypatch):
+    cancel_registry = RunCancellationRegistry()
+
+    class FakeRunManager:
+        async def cancel_run(self, run_id: str) -> None:
+            handle = await cancel_registry.create(run_id)
+            await handle.request_cancel()
+
+    monkeypatch.setattr(
+        "aethergraph.services.runner.facade.get_run_cancellation_registry",
+        lambda: cancel_registry,
+    )
+
+    facade = RunFacade(run_manager=FakeRunManager(), current_run_id="run-abc")
+    event = await facade.thread_cancel_event()
+    assert event.is_set() is False
+    assert await facade.is_cancel_requested() is False
+
+    handle = await cancel_registry.create("run-abc")
+    await handle.request_cancel()
+
+    assert await facade.is_cancel_requested() is True
+    with pytest.raises(RuntimeError, match="cancellation requested"):
+        await facade.raise_if_cancel_requested()

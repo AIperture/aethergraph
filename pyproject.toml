@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aethergraph"
-version = "0.1.0a8"
+version = "0.1.0a9"
 description = "Python-first agentic DAG execution framework"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -124,7 +124,7 @@ aethergraph = [
 line-length = 100
 target-version = "py311"
 lint.select = ["E","F","I","B","UP","SIM"]
-lint.ignore = ["E203", "E266", "E501", "UP038", "SIM103"]  # E501 handled by formatter
+lint.ignore = ["E203", "E266", "E501", "UP038", "SIM103", "SIM118"]  # E501 handled by formatter
 extend-exclude = ["docs", "scripts", "examples"]
 
 [tool.ruff.lint.isort]

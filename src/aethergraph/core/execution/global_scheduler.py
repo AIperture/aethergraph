@@ -63,6 +63,7 @@ class RunState:
     backoff_tasks: dict[str, asyncio.Task] = field(default_factory=dict)  # node_id -> sleeper task
     terminated: bool = False
     cancelled: bool = False
+    cancel_requested: bool = False
 
     def capacity(self) -> int:
         return max(0, self.settings.max_concurrency - len(self.running_tasks))
@@ -163,12 +164,11 @@ class GlobalForwardScheduler:
 
         # mark runs as terminated & cancel sleepers/runners
         for rs in self._runs.values():
-            rs.terminated = True
+            rs.cancel_requested = True
             rs.cancelled = True
             for t in list(rs.backoff_tasks.values()):
                 t.cancel()
-            for t in list(rs.running_tasks.values()):
-                t.cancel()
+            await self._events.put(GlobalWakeupEvent(run_id=rs.run_id, node_id="__cancel__"))
 
         # wake the driver if it's blocked on events.get()
         try:
@@ -186,13 +186,12 @@ class GlobalForwardScheduler:
         rs = self._runs.get(run_id)
         if not rs:
             return
-        rs.terminated = True
+        rs.cancel_requested = True
         rs.cancelled = True
 
         for t in list(rs.backoff_tasks.values()):
             t.cancel()
-        for t in list(rs.running_tasks.values()):
-            t.cancel()
+        await self._events.put(GlobalWakeupEvent(run_id=run_id, node_id="__cancel__"))
 
     # external resume/wakeup API (called by ResumeBus)
     async def on_resume_event(self, run_id: str, node_id: str, payload: dict[str, Any]):
@@ -222,6 +221,11 @@ class GlobalForwardScheduler:
 
             # 2) Attempt to schedule work
             scheduled_any = await self._schedule_global()
+
+            for rs in self._runs.values():
+                if rs.cancel_requested and not rs.running_tasks:
+                    await self._cancel_remaining_nodes(rs)
+                    rs.terminated = True
 
             # 3) Check termination conditions
             if block_until == "all_done":
@@ -315,6 +319,8 @@ class GlobalForwardScheduler:
 
         # phase 1: resumed waiters first (global)
         for rs in self._runs.values():
+            if rs.cancel_requested:
+                continue
             while rs.resume_pending and rs.capacity() > 0 and global_capacity_left() > 0:
                 nid = rs.resume_pending.pop()
                 node = rs.graph.node(nid)
@@ -324,6 +330,8 @@ class GlobalForwardScheduler:
 
         # phase 2: explicit pending (from run_one-style requests)
         for rs in self._runs.values():
+            if rs.cancel_requested:
+                continue
             while rs.ready_pending and rs.capacity() > 0 and global_capacity_left() > 0:
                 nid = rs.ready_pending.pop()
                 node = rs.graph.node(nid)
@@ -341,6 +349,8 @@ class GlobalForwardScheduler:
         if any_capacity and global_capacity_left() > 0:
             # simple round-robin by iterating runs and taking up to run capacity
             for rs in self._runs.values():
+                if rs.cancel_requested:
+                    continue
                 if rs.capacity() <= 0:
                     continue
                 ready = list(self._compute_ready(rs))
@@ -395,7 +405,7 @@ class GlobalForwardScheduler:
 
         if isinstance(ev, GlobalResumeEvent):
             rs = self._runs.get(ev.run_id)
-            if not rs or rs.terminated:
+            if not rs or rs.terminated or rs.cancel_requested:
                 return
             rs.resume_payloads[ev.node_id] = ev.payload
             # cancel any backoff
@@ -410,13 +420,13 @@ class GlobalForwardScheduler:
 
         if isinstance(ev, GlobalWakeupEvent):
             rs = self._runs.get(ev.run_id)
-            if not rs or rs.terminated:
+            if not rs or rs.terminated or rs.cancel_requested:
                 return
             await self._try_start_immediately(rs, ev.node_id)
             return
 
     async def _try_start_immediately(self, rs: RunState, node_id: str) -> bool:
-        if rs.capacity() <= 0:
+        if rs.cancel_requested or rs.capacity() <= 0:
             return False
         node = rs.graph.node(node_id)
         if not node:
@@ -430,7 +440,7 @@ class GlobalForwardScheduler:
     async def _start_node(self, rs: RunState, node: TaskNodeRuntime):
         from .step_forward import step_forward
 
-        if rs.terminated:
+        if rs.terminated or rs.cancel_requested:
             return
         node_id = node.node_id
         resume_payload = rs.resume_payloads.pop(node_id, None)
@@ -518,6 +528,28 @@ class GlobalForwardScheduler:
                             timestamp=datetime.utcnow().timestamp(),
                         )
                     )
+                elif result.status == NodeStatus.CANCELLED:
+                    node.state.error = result.error or "Run cancelled by user"
+                    node.state.error_info = result.error_info or {
+                        "message": node.state.error,
+                        "detail": None,
+                        "kind": "cancellation",
+                        "stage": "node_execution",
+                        "code": "run_cancel_requested",
+                        "hints": [],
+                        "is_traceback": False,
+                    }
+                    await rs.graph.set_node_status(node_id, NodeStatus.CANCELLED)
+                    await self._emit(
+                        NodeEvent(
+                            run_id=rs.env.run_id,
+                            graph_id=getattr(rs.graph.spec, "graph_id", "inline"),
+                            node_id=node.node_id,
+                            status=str(NodeStatus.CANCELLED),
+                            outputs=node.outputs or {},
+                            timestamp=datetime.utcnow().timestamp(),
+                        )
+                    )
             except asyncio.CancelledError:
                 try:
                     node.state.error = "Run cancelled by user"
@@ -552,6 +584,16 @@ class GlobalForwardScheduler:
             pass
         finally:
             rs.backoff_tasks.pop(node.node_id, None)
+
+    async def _cancel_remaining_nodes(self, rs: RunState) -> None:
+        for node in rs.graph.nodes:
+            if node.spec.type == "plan":
+                continue
+            if node.node_id in rs.running_tasks:
+                continue
+            if node.state.status in TERMINAL_STATES:
+                continue
+            await rs.graph.set_node_status(node.node_id, NodeStatus.CANCELLED)
 
     async def _skip_dependents(self, rs: RunState, failed_node_id: str):
         q = [failed_node_id]
@@ -603,6 +645,7 @@ class GlobalForwardScheduler:
             str(NodeStatus.DONE),
             str(NodeStatus.FAILED),
             str(NodeStatus.SKIPPED),
+            str(NodeStatus.CANCELLED),
         )
 
         async def _once(ev):

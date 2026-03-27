@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
 
@@ -21,6 +21,7 @@ class RunStore(Protocol):
         *,
         finished_at: datetime | None = None,
         error: str | None = None,
+        meta_update: dict[str, Any] | None = None,
     ) -> None: ...
     async def get(self, run_id: str) -> RunRecord | None: ...
     async def list(

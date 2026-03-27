@@ -25,6 +25,26 @@ class AsyncArtifactIndex(Protocol):
         """Return all artifacts for a given run_id."""
         ...
 
+    async def list_occurrences_for_run(
+        self,
+        run_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        """Return artifact occurrences for a run, ordered by occurrence creation time."""
+        ...
+
+    async def list_occurrences_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        """Return artifact occurrences for a session, ordered by occurrence creation time."""
+        ...
+
     async def search(
         self,
         *,

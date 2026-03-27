@@ -353,6 +353,50 @@ class NodeContext:
             caused_by_event_id=caused_by_event_id,
         )
 
+    async def replace_work_status(self, *, work_status: dict[str, Any]) -> dict[str, Any]:
+        warnings.warn(
+            "NodeContext.replace_work_status() is deprecated; "
+            "use context.channel('ui:session').work_status().replace().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.channel("ui:session").work_status().replace(work_status)
+
+    async def patch_work_status(
+        self,
+        *,
+        workflow_id: str | None = None,
+        status: str | None = None,
+        summary: str | None = None,
+        active_item_id: str | None = None,
+        item_updates: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        warnings.warn(
+            "NodeContext.patch_work_status() is deprecated; "
+            "use context.channel('ui:session').work_status(...).patch().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return (
+            await self.channel("ui:session")
+            .work_status(workflow_id=workflow_id)
+            .patch(
+                status=status,
+                summary=summary,
+                active_item_id=active_item_id,
+                item_updates=item_updates,
+            )
+        )
+
+    async def clear_work_status(self) -> dict[str, Any]:
+        warnings.warn(
+            "NodeContext.clear_work_status() is deprecated; "
+            "use context.channel('ui:session').work_status().clear().",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.channel("ui:session").work_status().clear()
+
     def ui_session_channel(self) -> "ChannelSession":
         """
         Creates a new ChannelSession for the current node context with session key as

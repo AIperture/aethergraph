@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 from typing import Any, Literal
+import uuid
 
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
@@ -62,6 +63,7 @@ class SqliteArtifactIndexSync:
             """
             CREATE TABLE IF NOT EXISTS artifact_occurrences (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurrence_id TEXT,
                 artifact_id TEXT,
                 run_id TEXT,
                 graph_id TEXT,
@@ -69,7 +71,14 @@ class SqliteArtifactIndexSync:
                 tool_name TEXT,
                 tool_version TEXT,
                 created_at TEXT,
-                labels_json TEXT
+                labels_json TEXT,
+                kind TEXT,
+                mime TEXT,
+                bytes INTEGER,
+                uri TEXT,
+                preview_uri TEXT,
+                session_id TEXT,
+                filename TEXT
             )
             """
         )
@@ -95,12 +104,40 @@ class SqliteArtifactIndexSync:
         if "session_id" not in cols:
             cur.execute("ALTER TABLE artifacts ADD COLUMN session_id TEXT")
 
+        cur.execute("PRAGMA table_info(artifact_occurrences)")
+        occ_cols = {row["name"] for row in cur.fetchall()}
+        if "occurrence_id" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN occurrence_id TEXT")
+        if "kind" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN kind TEXT")
+        if "mime" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN mime TEXT")
+        if "bytes" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN bytes INTEGER")
+        if "uri" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN uri TEXT")
+        if "preview_uri" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN preview_uri TEXT")
+        if "session_id" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN session_id TEXT")
+        if "filename" not in occ_cols:
+            cur.execute("ALTER TABLE artifact_occurrences ADD COLUMN filename TEXT")
+
         # Existing indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_run ON artifacts(run_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_kind ON artifacts(kind)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_sha ON artifacts(sha256)")
         cur.execute(
             "CREATE INDEX IF NOT EXISTS idx_occ_artifact ON artifact_occurrences(artifact_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_occ_run_created ON artifact_occurrences(run_id, created_at)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_occ_session_created ON artifact_occurrences(session_id, created_at)"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_occ_occurrence_id ON artifact_occurrences(occurrence_id)"
         )
 
         # 🔹 NEW tenant-oriented indexes (tune as needed)
@@ -281,6 +318,24 @@ class SqliteArtifactIndexSync:
             rows = cur.fetchall()
         return [self._row_to_artifact(r) for r in rows]
 
+    def list_occurrences_for_run(
+        self,
+        run_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return self._list_occurrences("run_id", run_id, limit=limit, offset=offset)
+
+    def list_occurrences_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return self._list_occurrences("session_id", session_id, limit=limit, offset=offset)
+
     def search(
         self,
         *,
@@ -430,15 +485,20 @@ class SqliteArtifactIndexSync:
     def record_occurrence(self, a: Artifact, extra_labels: dict | None = None) -> None:
         labels = {**(a.labels or {}), **(extra_labels or {})}
         labels_json = json.dumps(labels, ensure_ascii=False)
+        occurrence_id = str(a.occurrence_id or uuid.uuid4().hex)
+        filename = labels.get("filename")
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO artifact_occurrences (
+                    occurrence_id,
                     artifact_id, run_id, graph_id, node_id,
-                    tool_name, tool_version, created_at, labels_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    tool_name, tool_version, created_at, labels_json,
+                    kind, mime, bytes, uri, preview_uri, session_id, filename
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    occurrence_id,
                     a.artifact_id,
                     a.run_id,
                     a.graph_id,
@@ -447,6 +507,13 @@ class SqliteArtifactIndexSync:
                     a.tool_version,
                     a.created_at,
                     labels_json,
+                    a.kind,
+                    a.mime,
+                    a.bytes,
+                    a.uri,
+                    a.preview_uri,
+                    a.session_id,
+                    str(filename) if filename is not None else None,
                 ),
             )
             self._conn.commit()
@@ -482,6 +549,79 @@ class SqliteArtifactIndexSync:
             pinned=bool(row["pinned"]),
             uri=row["uri"],  #  real URI
             preview_uri=row["preview_uri"],  # real preview URI (may be None)
+            org_id=row["org_id"] if "org_id" in row.keys() else None,  # noqa: SIM 118
+            user_id=row["user_id"] if "user_id" in row.keys() else None,  # noqa: SIM 118
+            client_id=row["client_id"] if "client_id" in row.keys() else None,  # noqa: SIM 118
+            app_id=row["app_id"] if "app_id" in row.keys() else None,  # noqa: SIM 118
+            session_id=row["session_id"] if "session_id" in row.keys() else None,  # noqa: SIM 118
+            occurrence_id=row["occurrence_id"] if "occurrence_id" in row.keys() else None,  # noqa: SIM 118
+        )
+
+    def _list_occurrences(
+        self,
+        column: str,
+        value: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        sql = (
+            "SELECT * FROM artifact_occurrences "
+            f"WHERE {column} = ? "
+            "ORDER BY created_at DESC, id DESC"
+        )
+        params: list[Any] = [value]
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._occurrence_row_to_artifact(row) for row in rows]
+
+    def _occurrence_row_to_artifact(self, row: sqlite3.Row) -> Artifact:
+        labels = json.loads(row["labels_json"] or "{}")
+        filename = row["filename"] if "filename" in row.keys() else None  # noqa: SIM 118
+        if filename and "filename" not in labels:
+            labels["filename"] = filename
+
+        raw_tags = labels.get("tags")
+        tags: list[str] | None = None
+        if isinstance(raw_tags, list):
+            tags = [str(t) for t in raw_tags]
+        elif isinstance(raw_tags, str):
+            tags = [raw_tags]
+
+        artifact = self.get(str(row["artifact_id"]))
+
+        return Artifact(
+            artifact_id=row["artifact_id"],
+            run_id=row["run_id"],
+            graph_id=row["graph_id"],
+            node_id=row["node_id"],
+            tool_name=row["tool_name"],
+            tool_version=row["tool_version"],
+            kind=row["kind"] or (artifact.kind if artifact else None),
+            sha256=artifact.sha256 if artifact else row["artifact_id"],
+            bytes=row["bytes"]
+            if row["bytes"] is not None
+            else (artifact.bytes if artifact else None),
+            mime=row["mime"] or (artifact.mime if artifact else None),
+            created_at=row["created_at"],
+            labels=labels or (artifact.labels if artifact else {}),
+            tags=tags if tags is not None else (artifact.tags if artifact else None),
+            metrics=artifact.metrics if artifact else None,
+            pinned=artifact.pinned if artifact else False,
+            uri=row["uri"] or (artifact.uri if artifact else None),
+            preview_uri=row["preview_uri"] or (artifact.preview_uri if artifact else None),
+            org_id=artifact.org_id if artifact else None,
+            user_id=artifact.user_id if artifact else None,
+            client_id=artifact.client_id if artifact else None,
+            app_id=artifact.app_id if artifact else None,
+            session_id=row["session_id"] or (artifact.session_id if artifact else None),
+            occurrence_id=row["occurrence_id"] if "occurrence_id" in row.keys() else None,  # noqa: SIM 118
         )
 
     def get(self, artifact_id: str) -> Artifact | None:
@@ -505,6 +645,34 @@ class SqliteArtifactIndex(AsyncArtifactIndex):
 
     async def list_for_run(self, run_id: str) -> list[Artifact]:
         return await asyncio.to_thread(self._sync.list_for_run, run_id)
+
+    async def list_occurrences_for_run(
+        self,
+        run_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return await asyncio.to_thread(
+            self._sync.list_occurrences_for_run,
+            run_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_occurrences_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]:
+        return await asyncio.to_thread(
+            self._sync.list_occurrences_for_session,
+            session_id,
+            limit=limit,
+            offset=offset,
+        )
 
     async def search(self, **kwargs) -> list[Artifact]:
         return await asyncio.to_thread(self._sync.search, **kwargs)

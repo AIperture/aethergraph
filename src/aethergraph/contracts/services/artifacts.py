@@ -66,6 +66,7 @@ class Artifact:
     client_id: str | None = None
     app_id: str | None = None
     session_id: str | None = None
+    occurrence_id: str | None = None
 
     # ---- alias: mimetype <-> mime ----
     @property
@@ -101,6 +102,7 @@ class Artifact:
             "client_id": self.client_id,
             "app_id": self.app_id,
             "session_id": self.session_id,
+            "occurrence_id": self.occurrence_id,
         }
 
         # optional: additive for new clients (won’t break old ones)
@@ -192,6 +194,20 @@ class AsyncArtifactStore(Protocol):
 class AsyncArtifactIndex(Protocol):
     async def upsert(self, a: Artifact) -> None: ...
     async def list_for_run(self, run_id: str) -> list[Artifact]: ...
+    async def list_occurrences_for_run(
+        self,
+        run_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]: ...
+    async def list_occurrences_for_session(
+        self,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Artifact]: ...
     async def search(
         self,
         *,
