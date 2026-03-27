@@ -13,7 +13,7 @@ import uvicorn
 
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-from aethergraph.server.loading import GraphLoader, LoadSpec
+from aethergraph.server.loading import GraphLoader, LoadSpec, emit_load_errors
 from aethergraph.server.server_state import (
     get_running_url_if_any,
     pick_free_port,
@@ -188,6 +188,8 @@ def start_server(
             report = _loader.load(spec)
             # Optional: stash report for debugging. We'll attach it to app below.
             _loader.last_report = report
+            if report.errors:
+                emit_load_errors(report.errors, strict_load=bool(strict_load))
 
         # Build app (installs services inside create_app)
         cfg = load_settings()

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import sys
+
+from aethergraph.server.loading import emit_load_errors
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -31,12 +32,7 @@ def print_load_intro(spec) -> None:
 
 
 def print_load_errors(errors, *, strict_load: bool) -> None:
-    for err in errors:
-        print(f"[load error] {err.source}: {err.error}", file=sys.stderr)
-        if not strict_load:
-            print("  (continuing despite load error; use --strict-load to fail)", file=sys.stderr)
-        if err.traceback:
-            print(err.traceback, file=sys.stderr)
+    emit_load_errors(errors, strict_load=strict_load)
 
 
 def print_load_complete() -> None:

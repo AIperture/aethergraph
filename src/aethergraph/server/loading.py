@@ -115,3 +115,21 @@ class GraphLoader:
                         raise
         self.last_report = report
         return report
+
+
+def emit_load_errors(
+    errors: list[LoadError],
+    *,
+    strict_load: bool,
+    stream=None,
+    prefix: str = "[load error]",
+) -> None:
+    out = stream or sys.stderr
+    for err in errors:
+        print(f"{prefix} {err.source}: {err.error}", file=out, flush=True)
+        if not strict_load:
+            print(
+                "  (continuing despite load error; use --strict-load to fail)", file=out, flush=True
+            )
+        if err.traceback:
+            print(err.traceback, file=out, flush=True)
