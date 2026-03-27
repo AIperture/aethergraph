@@ -255,6 +255,21 @@ class ChannelSession:
         # NEW: alias → canonical resolution
         return self._bus.resolve_channel_key(raw)
 
+    def _extract_ui_session_id(self, channel: str | None = None) -> str:
+        channel_key = self._resolve_key(channel)
+        prefix = "ui:session/"
+        if not channel_key.startswith(prefix):
+            raise RuntimeError(
+                "ChannelSession.work_status() requires a ui:session channel; "
+                f"got {channel_key!r}."
+            )
+        session_id = channel_key[len(prefix) :]
+        if not session_id:
+            raise RuntimeError(
+                "ChannelSession.work_status() requires a resolved ui:session/<session_id> channel."
+            )
+        return session_id
+
     def _ensure_channel(self, event: "OutEvent", channel: str | None = None) -> "OutEvent":
         """
         Ensure event.channel is set to a concrete channel key before publishing.
@@ -308,6 +323,72 @@ class ChannelSession:
         # merge context meta
         event.meta = self._inject_context_meta(event.meta)
         await self._bus.publish(event)
+
+    class _SessionWorkStatusHandle:
+        def __init__(
+            self,
+            outer: "ChannelSession",
+            *,
+            session_id: str,
+            channel_key: str,
+            workflow_id: str | None = None,
+        ) -> None:
+            self._outer = outer
+            self._session_id = session_id
+            self._channel_key = channel_key
+            self._workflow_id = workflow_id
+
+        def _meta(self) -> dict[str, Any]:
+            return self._outer._inject_context_meta({"channel_key": self._channel_key})
+
+        async def replace(self, work_status: dict[str, Any]) -> dict[str, Any]:
+            from aethergraph.services.channel.session_work_status import replace_session_work_status
+
+            return await replace_session_work_status(
+                session_id=self._session_id,
+                work_status=work_status,
+                meta=self._meta(),
+            )
+
+        async def patch(
+            self,
+            *,
+            workflow_id: str | None = None,
+            status: str | None = None,
+            summary: str | None = None,
+            active_item_id: str | None = None,
+            item_updates: list[dict[str, Any]] | None = None,
+        ) -> dict[str, Any]:
+            from aethergraph.services.channel.session_work_status import patch_session_work_status
+
+            resolved_workflow_id = workflow_id if workflow_id is not None else self._workflow_id
+            return await patch_session_work_status(
+                session_id=self._session_id,
+                workflow_id=resolved_workflow_id,
+                status=status,
+                summary=summary,
+                active_item_id=active_item_id,
+                item_updates=item_updates,
+                meta=self._meta(),
+            )
+
+        async def clear(self) -> dict[str, Any]:
+            from aethergraph.services.channel.session_work_status import clear_session_work_status
+
+            return await clear_session_work_status(
+                session_id=self._session_id,
+                meta=self._meta(),
+            )
+
+    def work_status(self, *, workflow_id: str | None = None) -> "_SessionWorkStatusHandle":
+        channel_key = self._resolve_key()
+        session_id = self._extract_ui_session_id(channel_key)
+        return ChannelSession._SessionWorkStatusHandle(
+            self,
+            session_id=session_id,
+            channel_key=channel_key,
+            workflow_id=workflow_id,
+        )
 
     async def send_phase(
         self,

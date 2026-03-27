@@ -45,6 +45,9 @@ from .session import (
     SessionListResponse,
     SessionRunsResponse,
     SessionUpdateRequest,
+    SessionWorkStatus,
+    SessionWorkStatusItem,
+    SessionWorkStatusResponse,
 )
 from .stats import (
     ArtifactStats,
@@ -110,6 +113,9 @@ __all__ = [
     "SessionCreateRequest",
     "SessionListResponse",
     "SessionRunsResponse",
+    "SessionWorkStatus",
+    "SessionWorkStatusItem",
+    "SessionWorkStatusResponse",
     "SessionUpdateRequest",
     "SlashCommandDescriptor",
     "StatsOverview",

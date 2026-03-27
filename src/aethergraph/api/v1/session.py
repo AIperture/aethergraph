@@ -1,6 +1,6 @@
 import asyncio
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import logging
 
 from fastapi import (  # type: ignore
@@ -36,9 +36,15 @@ from aethergraph.api.v1.schemas.session import (
     SessionListResponse,
     SessionRunsResponse,
     SessionUpdateRequest,
+    SessionWorkStatus,
+    SessionWorkStatusResponse,
 )
 from aethergraph.core.runtime.run_types import RunImportance, RunVisibility, SessionKind
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.services.channel.session_work_status import (
+    WORK_STATUS_EVENT_KIND,
+    get_session_work_status,
+)
 
 router = APIRouter(tags=["sessions"])
 logger = logging.getLogger(__name__)
@@ -214,6 +220,14 @@ def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
     )
 
 
+def _row_to_session_work_status(row: dict) -> SessionWorkStatus | None:
+    payload = dict(row.get("payload") or {})
+    raw = payload.get("work_status")
+    if not raw:
+        return None
+    return SessionWorkStatus.model_validate(raw)
+
+
 @router.websocket("/ws/sessions/{session_id}/chat")
 async def ws_session_chat(websocket: WebSocket, session_id: str):
     DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
@@ -277,6 +291,12 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
             since=None,
             limit=200,
         )
+        work_status_rows = await event_log.query(
+            scope_id=session_id,
+            kinds=[WORK_STATUS_EVENT_KIND],
+            since=None,
+            limit=200,
+        )
         filtered = []
         for ev in events:
             payload = ev.get("payload") or {}
@@ -299,6 +319,12 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
                 older_cursor = encode_keyset_before_cursor(oldest_row_id)
 
         snapshot_msg: dict = {"kind": "snapshot", "events": initial_payload}
+        latest_work_status = (
+            _row_to_session_work_status(work_status_rows[-1]) if work_status_rows else None
+        )
+        snapshot_msg["work_status"] = (
+            latest_work_status.model_dump() if latest_work_status else None
+        )
         snapshot_msg["has_older"] = has_older
         if older_cursor is not None:
             snapshot_msg["older_cursor"] = older_cursor
@@ -312,10 +338,35 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
                 return
 
     async def send_live() -> None:
-        # If you kept old hub shape, you'd do async for row in hub.subscribe(scope_id=session_id)
-        async for row in hub.subscribe(scope_id=session_id, kind="session_chat"):
-            ev = _row_to_session_chat_event(row, session_id)
-            await websocket.send_json({"kind": "event", "event": ev.model_dump()})
+        async def _send_chat() -> None:
+            async for row in hub.subscribe(scope_id=session_id, kind="session_chat"):
+                ev = _row_to_session_chat_event(row, session_id)
+                await websocket.send_json({"kind": "event", "event": ev.model_dump()})
+
+        async def _send_work_status() -> None:
+            async for row in hub.subscribe(scope_id=session_id, kind=WORK_STATUS_EVENT_KIND):
+                work_status = _row_to_session_work_status(row)
+                await websocket.send_json(
+                    {
+                        "kind": "work_status",
+                        "work_status": work_status.model_dump() if work_status else None,
+                    }
+                )
+
+        chat_task = asyncio.create_task(_send_chat())
+        work_status_task = asyncio.create_task(_send_work_status())
+        done, pending = await asyncio.wait(
+            {chat_task, work_status_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                raise exc
 
     recv_task = send_task = None
     try:
@@ -375,7 +426,7 @@ async def get_session_chat_events(
 
     since_dt: datetime | None = None
     if since_ts is not None:
-        since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
+        since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
 
     # Decode cursor — supports keyset (after_id), keyset_before (before_id), and legacy offset
     cursor_info = decode_cursor_v2(cursor)
@@ -458,6 +509,19 @@ async def get_session_chat_events(
     out.sort(key=lambda e: e.ts)
 
     return SessionChatEventListResponse(events=out, next_cursor=next_cursor)
+
+
+@router.get("/sessions/{session_id}/work-status", response_model=SessionWorkStatusResponse)
+async def get_session_work_status_api(
+    session_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> SessionWorkStatusResponse:
+    sess = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, sess)
+    work_status = await get_session_work_status(session_id)
+    return SessionWorkStatusResponse(
+        work_status=SessionWorkStatus.model_validate(work_status) if work_status else None
+    )
 
 
 @router.patch("/sessions/{session_id}", response_model=Session)

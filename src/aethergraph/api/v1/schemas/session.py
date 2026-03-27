@@ -75,6 +75,43 @@ class SessionChatEventListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class SessionWorkStatusRunRef(BaseModel):
+    run_id: str | None = None
+    graph_id: str | None = None
+
+
+class SessionWorkStatusArtifactRef(BaseModel):
+    artifact_id: str | None = None
+    name: str | None = None
+    kind: str | None = None
+
+
+class SessionWorkStatusItem(BaseModel):
+    id: str
+    label: str
+    kind: str
+    status: str
+    detail: str = ""
+    order: int = 0
+    run_ref: SessionWorkStatusRunRef | None = None
+    artifact_ref: SessionWorkStatusArtifactRef | None = None
+
+
+class SessionWorkStatus(BaseModel):
+    workflow_id: str
+    title: str
+    kind: str
+    status: str
+    summary: str = ""
+    active_item_id: str | None = None
+    updated_at: str
+    items: list[SessionWorkStatusItem] = Field(default_factory=list)
+
+
+class SessionWorkStatusResponse(BaseModel):
+    work_status: SessionWorkStatus | None = None
+
+
 class SessionUpdateRequest(BaseModel):
     title: str | None = None
     external_ref: str | None = None
