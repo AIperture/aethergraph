@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 import shutil
 from typing import Any
@@ -15,9 +15,9 @@ from starlette.responses import JSONResponse
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.registry_helpers import scoped_registry
-from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.plugins.channel.mime_detect import detect_mime_for_path
+from aethergraph.plugins.channel.utils.turn_dispatch import dispatch_channel_turn_run
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.channel.attachments import (
     InputAttachment,
@@ -288,7 +288,7 @@ async def run_channel_incoming(
             incoming_files.append(_attachment_to_incoming_file(attachment))
 
         if text:
-            now_ts = datetime.now(timezone.utc).timestamp()
+            now_ts = datetime.now(UTC).timestamp()
             await event_log.append(
                 {
                     "id": str(uuid4()),
@@ -320,6 +320,7 @@ async def run_channel_incoming(
                 files=incoming_files or None,
                 attachments=attachments or None,
                 choice=choice,
+                conversation_id=f"ui:run/{run_id}",
                 meta=meta,
             )
         )
@@ -344,7 +345,6 @@ async def session_chat_incoming(
     container = current_services()
     ingress = container.channel_ingress
     registry = scoped_registry(identity)
-    rm = container.run_manager
     event_log = container.eventlog
 
     meta: dict[str, Any] = {}
@@ -402,7 +402,7 @@ async def session_chat_incoming(
         incoming_files.append(_attachment_to_incoming_file(attachment))
 
     if text or incoming_files:
-        now_ts = datetime.now(timezone.utc).timestamp()
+        now_ts = datetime.now(UTC).timestamp()
         files_payload = []
         for f in incoming_files:
             payload_file = dataclasses.asdict(f)
@@ -439,6 +439,7 @@ async def session_chat_incoming(
             text=text,
             files=incoming_files or None,
             attachments=attachments or None,
+            conversation_id=f"ui:session/{session_id}",
             meta={
                 **meta,
                 "_drop_stale_continuation": True,
@@ -454,44 +455,20 @@ async def session_chat_incoming(
                 detail="agent_id is required when no continuation is resumed",
             )
 
-        agent_meta = registry.get_meta(nspace="agent", name=agent_id)
-        if not agent_meta:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Agent not found: {agent_id}",
-            )
-
-        run_vis = RunVisibility(agent_meta.get("run_visibility", RunVisibility.inline.value))
-        run_imp = RunImportance(agent_meta.get("run_importance", RunImportance.ephemeral.value))
-
-        backing = agent_meta.get("backing", {})
-        if backing.get("type") != "graphfn":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unsupported agent backing type: {backing.get('type')}. Only 'graphfn' is supported in v1.",
-            )
-
-        graph_id = backing["name"]
-        inputs = {
-            "message": text,
-            "attachments": [attachment_to_dict(a) for a in attachments],
-            "session_id": session_id,
-            "user_meta": meta or {},
-        }
-
-        record = await rm.submit_run(
-            graph_id=graph_id,
-            inputs=inputs,
-            session_id=session_id,
+        _ = registry  # kept to avoid changing route wiring; dispatch helper resolves through the same facade
+        run_id = await dispatch_channel_turn_run(
+            container=container,
             identity=identity,
-            origin=RunOrigin.chat,
-            visibility=run_vis,
-            importance=run_imp,
             agent_id=agent_id,
-            app_id=agent_meta.get("app_id"),
+            text=text,
+            attachments=attachments,
+            session_id=session_id,
+            user_meta={
+                **(meta or {}),
+                "conversation_id": f"ui:session/{session_id}",
+            },
             tags=["session:" + session_id, "agent:" + agent_id],
         )
-        run_id = record.run_id
 
     return JSONResponse(
         {

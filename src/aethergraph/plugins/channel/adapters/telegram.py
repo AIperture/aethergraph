@@ -181,26 +181,43 @@ class TelegramChannelAdapter(ChannelAdapter):
         if event.type in ("session.need_approval", "link.buttons"):
             buttons = getattr(event, "buttons", None) or []
             if not buttons:
-                opts = (event.meta or {}).get("options", ["Approve", "Reject"])
+                opts = (event.meta or {}).get("choices") or (event.meta or {}).get(
+                    "options", ["Approve", "Reject"]
+                )
                 buttons = [
                     type(
-                        "B", (), {"label": opts[0], "value": "approve", "style": None, "url": None}
+                        "B",
+                        (),
+                        {
+                            "label": opts[0].get("label") if isinstance(opts[0], dict) else opts[0],
+                            "value": opts[0].get("id") if isinstance(opts[0], dict) else opts[0],
+                            "style": None,
+                            "url": None,
+                        },
                     ),
                     type(
-                        "B", (), {"label": opts[-1], "value": "reject", "style": None, "url": None}
+                        "B",
+                        (),
+                        {
+                            "label": opts[-1].get("label")
+                            if isinstance(opts[-1], dict)
+                            else opts[-1],
+                            "value": opts[-1].get("id") if isinstance(opts[-1], dict) else opts[-1],
+                            "style": None,
+                            "url": None,
+                        },
                     ),
                 ]
 
-            # Compact callback data: "c=<choice>|k=<resume_key>"  (<< 64 bytes)
+            # Compact callback data: "i=<index>|k=<resume_key>"  (<< 64 bytes)
             resume_key = (event.meta or {}).get("resume_key") or ""
             rows = []
-            for b in buttons[:8]:
+            for idx, b in enumerate(buttons[:8], start=1):
                 label = b.label
-                val = getattr(b, "value", None) or label
                 if getattr(b, "url", None):
                     rows.append([{"text": label, "url": b.url}])
                 else:
-                    data = f"c={str(val)[:20]}|k={resume_key}"
+                    data = f"i={idx}|k={resume_key}"
                     rows.append([{"text": label, "callback_data": data}])
 
             reply_markup = {"inline_keyboard": rows}

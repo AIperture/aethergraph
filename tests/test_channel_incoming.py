@@ -41,11 +41,16 @@ class FakeContinuationStore:
     def __init__(self, cont: Continuation | None):
         self._cont = cont
         self.last_corr: Correlator | None = None
+        self.deleted: list[tuple[str, str]] = []
 
     async def find_by_correlator(self, corr: Correlator) -> Continuation | None:
         # Record for inspection; always return the same continuation in this test
         self.last_corr = corr
         return self._cont
+
+    async def delete(self, run_id: str, node_id: str) -> None:
+        self.deleted.append((run_id, node_id))
+        self._cont = None
 
 
 class FakeResumeRouter:
@@ -165,9 +170,15 @@ async def test_run_channel_incoming_approval_preserves_text_without_promoting_to
         run_id="run-xyz",
         node_id="node-abc",
         token="tok-approval",
-        kind="approval",
+        kind="choice",
         channel="ui:run/run-xyz",
-        prompt={"title": "Approve plan?"},
+        prompt={
+            "title": "Approve plan?",
+            "choices": [
+                {"id": "approve", "label": "Approve"},
+                {"id": "reject", "label": "Reject"},
+            ],
+        },
     )
 
     container = FakeContainer(cont=cont)
@@ -190,8 +201,50 @@ async def test_run_channel_incoming_approval_preserves_text_without_promoting_to
     assert len(rr.calls) == 1
     payload = rr.calls[0]["payload"]
     assert payload["choice"] is None
+    assert payload["choice_label"] is None
+    assert payload["matched"] is False
     assert payload["text"] == "change the delivery wording"
     assert payload["meta"] == {"foo": "bar"}
+
+
+@pytest.mark.asyncio
+async def test_run_channel_incoming_choice_normalizes_lowercase_ui_choice_to_canonical_id():
+    cont = Continuation(
+        run_id="run-xyz",
+        node_id="node-abc",
+        token="tok-choice",
+        kind="choice",
+        channel="ui:run/run-xyz",
+        prompt={
+            "title": "Pick one",
+            "choices": [
+                {"id": "ApprovePlan", "label": "Approve Plan"},
+                {"id": "RejectPlan", "label": "Reject Plan"},
+            ],
+        },
+    )
+
+    container = FakeContainer(cont=cont)
+    app = build_app_with_container(container)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/v1/runs/run-xyz/channel/incoming",
+        json={
+            "choice": "approve plan",
+            "meta": {"foo": "bar"},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["resumed"] is True
+
+    payload = container.resume_router.calls[0]["payload"]
+    assert payload["choice"] == "ApprovePlan"
+    assert payload["choice_label"] == "Approve Plan"
+    assert payload["matched"] is True
+    assert payload["text"] == ""
 
 
 @pytest.mark.asyncio

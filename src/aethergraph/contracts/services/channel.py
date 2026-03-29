@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypedDict
 
 EventType = Literal[
@@ -57,6 +57,13 @@ class Button:
     value: str | None = None
     url: str | None = None
     style: Literal["primary", "danger", "default"] | None = None  # for slack buttons
+
+
+@dataclass(frozen=True)
+class ChoiceOption:
+    id: str
+    label: str
+    aliases: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass

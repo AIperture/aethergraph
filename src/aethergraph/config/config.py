@@ -80,6 +80,7 @@ class SlackSettings(BaseModel):
     default_team_id: str | None = None  # e.g. 'T...'
     default_channel_id: str | None = None  # e.g. 'C...'
     default_channel_key: str | None = None  # e.g. 'slack:team/T...:chan/C...'
+    default_agent_id: str | None = None
 
 
 class TelegramSettings(BaseModel):
@@ -95,6 +96,7 @@ class TelegramSettings(BaseModel):
 
     # default chat key
     default_chat_id: str | None = None
+    default_agent_id: str | None = None
 
 
 class ContinuationStoreSettings(BaseModel):

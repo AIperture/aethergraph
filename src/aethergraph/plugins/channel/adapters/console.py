@@ -51,22 +51,33 @@ class ConsoleChannelAdapter(ChannelAdapter):
 
         # Interactive: approval
         if event.type == "session.need_approval":
-            labels = [b.label for b in (event.buttons or [])] or (event.meta or {}).get(
-                "options", []
-            )
-            if not labels:
-                labels = ["Approve", "Reject"]
+            buttons = list(event.buttons or [])
+            if not buttons:
+                buttons = [
+                    type("B", (), {"label": label, "value": label})
+                    for label in ((event.meta or {}).get("options", []) or ["Approve", "Reject"])
+                ]
 
             print((event.text or "Choose an option:").strip())
-            for i, label in enumerate(labels, 1):
-                print(f"  {i}. {label}")
+            for i, button in enumerate(buttons, 1):
+                print(f"  {i}. {button.label}")
 
             try:
                 ans = await self._readline("Reply with number or label: ")
-                by_num = {str(i): label for i, label in enumerate(labels, 1)}
-                choice_label = by_num.get(ans, ans).strip()
-                approved = choice_label.lower() in {"approve", "approved", "yes", "y", "ok"}
-                return {"payload": {"approved": approved, "choice": choice_label}}
+                by_num = {str(i): button for i, button in enumerate(buttons, 1)}
+                matched = by_num.get(ans)
+                if matched is not None:
+                    return {
+                        "payload": {
+                            "choice": getattr(matched, "value", None) or matched.label,
+                            "choice_label": matched.label,
+                            "matched": True,
+                            "text": "",
+                        }
+                    }
+                return {
+                    "payload": {"choice": None, "choice_label": None, "matched": False, "text": ans}
+                }
             except _NoInlineInput:
                 print(
                     "\n[console] (no choice captured; will persist a continuation and wait for resume)"

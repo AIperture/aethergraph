@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
+from aethergraph.services.channel.choices import normalize_choice_reply
 from aethergraph.services.continuations.continuation import Correlator
 
 router = APIRouter()
@@ -49,33 +50,17 @@ async def console_resume(request: Request, req: ConsoleResume):
         else None
     )
 
-    if cont and getattr(cont, "kind", "") == "approval":
+    if cont and getattr(cont, "kind", "") in {"approval", "choice"}:
         # If client already parsed the choice, don't override it
         if "choice" in payload or "approved" in payload:
             pass  # trust the client (console watcher)
         else:
-            raw = str(payload.get("text", "")).strip()
-            # Try to use mappings echoed by the client (if any)
-            options_map = payload.get("options_map") or {}
-            label_map = payload.get("options_label_to_value") or {}
-
-            # Otherwise reconstruct from the Continuation.prompt
-            if not options_map and isinstance(cont.prompt, dict):
-                labels = cont.prompt.get("buttons") or cont.prompt.get("options") or []
-                options_map = {
-                    str(i + 1): str(lbl).lower() for i, lbl in enumerate(labels, start=1)
-                }
-                label_map = {str(lbl).lower(): str(lbl).lower() for lbl in labels}
-
-            if raw.isdigit() and raw in options_map:
-                choice = options_map[raw]
-            else:
-                choice = label_map.get(raw.lower(), raw.lower())
-
-            payload = {
-                "approved": choice in {"approve", "approved", "yes", "y"},
-                "choice": choice,
-            }
+            normalized = normalize_choice_reply(
+                prompt=getattr(cont, "prompt", None),
+                raw_choice=payload.get("choice"),
+                raw_text=payload.get("text", ""),
+            )
+            payload = normalized
 
     await c.resume_router.resume(req.run_id, req.node_id, req.token, payload)
 

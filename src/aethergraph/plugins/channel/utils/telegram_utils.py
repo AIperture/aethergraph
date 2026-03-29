@@ -1,10 +1,16 @@
 import hmac
+import inspect
 import json
 from typing import Any
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request
 
+from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.plugins.channel.utils.turn_dispatch import (
+    attachments_from_incoming_files,
+    dispatch_channel_turn_run,
+)
 from aethergraph.services.channel.ingress import (
     ChannelIngress,
     IncomingFile,
@@ -111,12 +117,10 @@ async def _process_update(container, payload: dict, token: str):
             except Exception:
                 try:
                     parts = dict(p.split("=", 1) for p in data_raw.split("|") if "=" in p)
-                    choice = parts.get("c", "reject")
+                    choice = parts.get("c", parts.get("i", "reject"))
                     resume_key = parts.get("k")
                 except Exception:
                     choice = str(data_raw)
-
-            choice_l = choice.lower()
 
             tok = None
             run_id = None
@@ -124,10 +128,12 @@ async def _process_update(container, payload: dict, token: str):
 
             # Preferred: resolve alias → token
             if resume_key and hasattr(container.cont_store, "token_from_alias"):
-                tok = container.cont_store.token_from_alias(resume_key)
+                maybe_tok = container.cont_store.token_from_alias(resume_key)
+                tok = await maybe_tok if inspect.isawaitable(maybe_tok) else maybe_tok
 
             if tok and hasattr(container.cont_store, "get_by_token"):
-                cont = container.cont_store.get_by_token(tok)
+                maybe_cont = container.cont_store.get_by_token(tok)
+                cont = await maybe_cont if inspect.isawaitable(maybe_cont) else maybe_cont
                 if cont:
                     run_id, node_id = cont.run_id, cont.node_id
 
@@ -143,13 +149,35 @@ async def _process_update(container, payload: dict, token: str):
                 if cont:
                     run_id, node_id, tok = cont.run_id, cont.node_id, cont.token
 
-            if tok and run_id and node_id:
+            resumed = await ingress.handle(
+                IncomingMessage(
+                    scheme="tg",
+                    channel_id=f"chat/{int(chat_id)}"
+                    + (f":topic/{int(topic_id)}" if topic_id is not None else ""),
+                    thread_id=str(topic_id or ""),
+                    text="",
+                    choice=choice,
+                    conversation_id=f"tg:chat/{int(chat_id)}"
+                    + (f":topic/{int(topic_id)}" if topic_id is not None else ""),
+                    meta={
+                        "telegram": {
+                            "callback_id": cq.get("id"),
+                            "message_id": msg.get("message_id"),
+                            "chat_id": chat_id,
+                        },
+                    },
+                )
+            )
+
+            if (not resumed) and tok and run_id and node_id:
                 await container.resume_router.resume(
                     run_id=run_id,
                     node_id=node_id,
                     token=tok,
                     payload={
-                        "choice": choice_l,
+                        "choice": choice,
+                        "matched": True,
+                        "text": "",
                         "telegram": {
                             "callback_id": cq.get("id"),
                             "message_id": msg.get("message_id"),
@@ -279,9 +307,32 @@ async def _process_update(container, payload: dict, token: str):
                 thread_id=str(topic_id or ""),
                 text=text,
                 files=incoming_files or None,
+                conversation_id=f"tg:{channel_id}",
                 meta=meta,
             )
         )
+
+        if (not resumed) and (text or incoming_files):
+            default_agent_id = getattr(getattr(container, "settings", None), "telegram", None)
+            default_agent_id = getattr(default_agent_id, "default_agent_id", None)
+            if default_agent_id:
+                await dispatch_channel_turn_run(
+                    container=container,
+                    identity=RequestIdentity(user_id="local", org_id="local", mode="local"),
+                    agent_id=default_agent_id,
+                    text=text,
+                    attachments=attachments_from_incoming_files(tg_files, source="telegram_upload"),
+                    user_meta={
+                        **meta,
+                        "channel_key": ch_key,
+                        "conversation_id": f"tg:{channel_id}",
+                    },
+                    tags=[
+                        f"channel:{ch_key}",
+                        f"conversation:tg:{channel_id}",
+                        f"agent:{default_agent_id}",
+                    ],
+                )
 
         container.logger and container.logger.for_run().debug(
             f"[TG] inbound: text={text!r} files={len(incoming_files)} resumed={resumed}"

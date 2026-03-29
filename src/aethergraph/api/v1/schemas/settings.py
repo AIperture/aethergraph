@@ -99,22 +99,26 @@ class SlackView(BaseModel):
     enabled: bool = False
     bot_token: str | None = None  # masked
     signing_secret: str | None = None  # masked
+    default_agent_id: str | None = None
 
 
 class SlackPayload(BaseModel):
     enabled: bool | None = None
     bot_token: str | None = None
     signing_secret: str | None = None
+    default_agent_id: str | None = None
 
 
 class TelegramView(BaseModel):
     enabled: bool = False
     bot_token: str | None = None  # masked
+    default_agent_id: str | None = None
 
 
 class TelegramPayload(BaseModel):
     enabled: bool | None = None
     bot_token: str | None = None
+    default_agent_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -142,10 +142,12 @@ async def get_settings(
             enabled=cfg.slack.enabled,
             bot_token=_mask_secret(_secret_str_value(cfg.slack.bot_token)),
             signing_secret=_mask_secret(_secret_str_value(cfg.slack.signing_secret)),
+            default_agent_id=cfg.slack.default_agent_id,
         ),
         telegram=TelegramView(
             enabled=cfg.telegram.enabled,
             bot_token=_mask_secret(_secret_str_value(cfg.telegram.bot_token)),
+            default_agent_id=cfg.telegram.default_agent_id,
         ),
     )
 
@@ -210,6 +212,8 @@ def _collect_slack_env(payload: SlackPayload) -> dict[str, str]:
         env[_env_key("SLACK", "BOT_TOKEN")] = payload.bot_token
     if payload.signing_secret is not None and not _is_masked(payload.signing_secret):
         env[_env_key("SLACK", "SIGNING_SECRET")] = payload.signing_secret
+    if payload.default_agent_id is not None:
+        env[_env_key("SLACK", "DEFAULT_AGENT_ID")] = payload.default_agent_id
     return env
 
 
@@ -219,6 +223,8 @@ def _collect_telegram_env(payload: TelegramPayload) -> dict[str, str]:
         env[_env_key("TELEGRAM", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
         env[_env_key("TELEGRAM", "BOT_TOKEN")] = payload.bot_token
+    if payload.default_agent_id is not None:
+        env[_env_key("TELEGRAM", "DEFAULT_AGENT_ID")] = payload.default_agent_id
     return env
 
 
@@ -283,6 +289,8 @@ def _hot_reload_slack(payload: SlackPayload) -> None:
         from pydantic import SecretStr
 
         cfg.slack.signing_secret = SecretStr(payload.signing_secret)
+    if payload.default_agent_id is not None:
+        cfg.slack.default_agent_id = payload.default_agent_id
 
 
 def _hot_reload_telegram(payload: TelegramPayload) -> None:
@@ -294,6 +302,8 @@ def _hot_reload_telegram(payload: TelegramPayload) -> None:
         from pydantic import SecretStr
 
         cfg.telegram.bot_token = SecretStr(payload.bot_token)
+    if payload.default_agent_id is not None:
+        cfg.telegram.default_agent_id = payload.default_agent_id
 
 
 @router.put("", response_model=SettingsGetResponse)
