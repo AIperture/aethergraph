@@ -143,6 +143,9 @@ def _runrecord_to_doc(record: RunRecord) -> dict[str, Any]:
     d["status"] = _encode_status(record.status)
     d["started_at"] = _encode_dt(record.started_at)
     d["finished_at"] = _encode_dt(record.finished_at)
+    d["first_artifact_at"] = _encode_dt(record.first_artifact_at)
+    d["last_artifact_at"] = _encode_dt(record.last_artifact_at)
+    d["result_updated_at"] = _encode_dt(record.result_updated_at)
     d["origin"] = _encode_origin(record.origin)
     d["visibility"] = _encode_visibility(record.visibility)
     d["importance"] = _encode_importance(record.importance)
@@ -168,6 +171,12 @@ def _doc_to_runrecord(doc: dict[str, Any]) -> RunRecord:
         importance=_decode_importance(doc.get("importance")),
         app_id=doc.get("app_id"),
         agent_id=doc.get("agent_id"),
+        artifact_count=int(doc.get("artifact_count", 0) or 0),
+        first_artifact_at=_decode_dt(doc.get("first_artifact_at")),
+        last_artifact_at=_decode_dt(doc.get("last_artifact_at")),
+        recent_artifact_ids=list(doc.get("recent_artifact_ids") or []),
+        result_available=bool(doc.get("result_available", False)),
+        result_updated_at=_decode_dt(doc.get("result_updated_at")),
     )
 
 
@@ -205,6 +214,7 @@ class DocRunStore(RunStore):
         finished_at: datetime | None = None,
         error: str | None = None,
         meta_update: dict[str, Any] | None = None,
+        field_updates: dict[str, Any] | None = None,
     ) -> None:
         doc_id = self._doc_id(run_id)
         async with self._lock:
@@ -222,6 +232,12 @@ class DocRunStore(RunStore):
                 meta = dict(doc.get("meta") or {})
                 meta.update(meta_update)
                 doc["meta"] = meta
+            if field_updates:
+                for key, value in field_updates.items():
+                    if isinstance(value, datetime):
+                        doc[key] = _encode_dt(value)
+                    else:
+                        doc[key] = value
 
             await self._ds.put(doc_id, doc)
 

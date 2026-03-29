@@ -71,4 +71,6 @@ def to_run_summary(rec: Any, *, reg: Any, flow_id_override: str | None = None) -
         importance=rec.importance,
         artifact_count=rec.get("artifact_count"),
         last_artifact_at=rec.get("last_artifact_at"),
+        result_available=rec.get("result_available"),
+        result_updated_at=rec.get("result_updated_at"),
     )

@@ -32,6 +32,7 @@ class InMemoryRunStore(RunStore):
         finished_at: datetime | None = None,
         error: str | None = None,
         meta_update: dict[str, Any] | None = None,
+        field_updates: dict[str, Any] | None = None,
     ) -> None:
         async with self._lock:
             rec = self._records.get(run_id)
@@ -45,6 +46,9 @@ class InMemoryRunStore(RunStore):
                 rec.error = error
             if meta_update:
                 rec.meta.update(meta_update)
+            if field_updates:
+                for key, value in field_updates.items():
+                    setattr(rec, key, value)
 
     async def get(self, run_id: str) -> RunRecord | None:
         async with self._lock:

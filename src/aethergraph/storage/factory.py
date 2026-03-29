@@ -5,7 +5,7 @@ from aethergraph.config.config import AppSettings, ContinuationStoreSettings
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.kv import AsyncKV
 from aethergraph.contracts.services.memory import HotLog, Persistence
-from aethergraph.contracts.services.runs import RunStore
+from aethergraph.contracts.services.runs import RunResultStore, RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
@@ -219,6 +219,31 @@ def build_run_store(cfg: AppSettings) -> RunStore:
         return SQLiteRunStore(path=db_path)
 
     raise ValueError(f"Unknown run storage backend: {rs_cfg.backend!r}")
+
+
+def build_run_result_store(cfg: AppSettings) -> RunResultStore:
+    rs_cfg = cfg.storage.runs
+
+    if rs_cfg.backend == "memory":
+        from aethergraph.storage.runs.result_store import InMemoryRunResultStore
+
+        return InMemoryRunResultStore()
+
+    if rs_cfg.backend == "fs":
+        from aethergraph.storage.docstore.fs_doc import FSDocStore
+        from aethergraph.storage.runs.result_store import DocRunResultStore
+
+        base = os.path.join(cfg.workspace, rs_cfg.fs_root)
+        docs = FSDocStore(base)
+        return DocRunResultStore(docs, prefix="run-result-")
+
+    if rs_cfg.backend == "sqlite":
+        from aethergraph.storage.runs.sqlite_result_store import SQLiteRunResultStore
+
+        db_path = os.path.join(cfg.workspace, rs_cfg.sqlite_path)
+        return SQLiteRunResultStore(path=db_path)
+
+    raise ValueError(f"Unknown run result storage backend: {rs_cfg.backend!r}")
 
 
 def build_session_store(cfg: AppSettings):

@@ -43,6 +43,8 @@ class RunSummary(BaseModel):
     importance: RunImportance | None = None
     artifact_count: int | None = None
     last_artifact_at: datetime | None = None
+    result_available: bool | None = None
+    result_updated_at: datetime | None = None
 
     class Config:
         populate_by_name = True

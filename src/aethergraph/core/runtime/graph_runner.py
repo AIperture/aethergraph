@@ -693,12 +693,20 @@ async def run_async(
 
     # Register for resumes and run
     token = _register_metering_context(env, target)  # set metering context
+    resolved_result: dict[str, Any] | None = None
     try:
         with RunRegistrationGuard(run_id=env.run_id, scheduler=sched, container=env.container):
             try:
                 await sched.run()
             except asyncio.CancelledError:
                 raise
+            else:
+                resolved_result = await _resolve_graph_outputs_or_waits(
+                    graph,
+                    inputs,
+                    env,
+                    raise_on_waits=False,
+                )
             finally:
                 # FINAL SNAPSHOT on normal or cancelled exit (if store exists)
                 if store and obs:
@@ -714,6 +722,8 @@ async def run_async(
                         allow_externalize=False,  # FIXME: artifact writer async loop error; set False to *avoid* writing artifacts during snapshot
                         include_wait_spec=True,
                     )
+                    if resolved_result and resolved_result.get("status") != "waiting":
+                        snap.state["graph_outputs"] = resolved_result
                     await store.save_snapshot(snap)
                 if cancel_handle.is_cancel_requested():
                     backend_state = await cancel_handle.backend_state()
@@ -722,7 +732,15 @@ async def run_async(
                         terminal_status="canceled",
                     )
 
-        # Resolve graph-level outputs (will raise  if waits)
+        if resolved_result is not None:
+            if resolved_result.get("status") == "waiting":
+                raise GraphHasPendingWaits(
+                    "Graph quiesced with pending waits; outputs are not yet resolvable.",
+                    waiting_nodes=list(resolved_result.get("waiting_nodes") or []),
+                    continuations=list(resolved_result.get("continuations") or []),
+                )
+            return resolved_result
+        # Resolve graph-level outputs (will raise if waits)
         return await _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
     finally:
         # reset metering context

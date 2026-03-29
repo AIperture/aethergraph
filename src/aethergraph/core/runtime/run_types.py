@@ -77,12 +77,29 @@ class RunRecord:
 
     # Optional: keep a small rolling window of recent artifact IDs
     recent_artifact_ids: list[str] = field(default_factory=list)
+    result_available: bool = False
+    result_updated_at: datetime | None = None
 
     def __item__(self, key: str) -> Any:
         return getattr(self, key)
 
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
+
+
+@dataclass
+class RunResult:
+    """Durable final outputs for a succeeded run."""
+
+    run_id: str
+    graph_id: str
+    session_id: str | None
+    status: RunStatus
+    outputs: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    source: str = "direct"
+    snapshot_rev: int | None = None
 
 
 # Session-related run types

@@ -9,7 +9,8 @@ from uuid import uuid4
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
-from aethergraph.contracts.services.runs import RunStore
+from aethergraph.contracts.services.runs import RunResultStore, RunStore
+from aethergraph.contracts.services.state_stores import GraphStateStore
 from aethergraph.core.execution.forward_scheduler import ForwardScheduler
 from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 from aethergraph.core.runtime.run_cancellation import (
@@ -21,6 +22,7 @@ from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
     RunRecord,
+    RunResult,
     RunStatus,
     RunVisibility,
     _make_preview,
@@ -74,12 +76,16 @@ class RunManager:
         self,
         *,
         run_store: RunStore | None = None,
+        result_store: RunResultStore | None = None,
+        state_store: GraphStateStore | None = None,
         registry: UnifiedRegistry | None = None,
         sched_registry: Any | None = None,  # placeholder for future use
         cancellation_registry: RunCancellationRegistry | None = None,
         max_concurrent_runs: int | None = None,
     ):
         self._store = run_store
+        self._result_store = result_store
+        self._state_store = state_store
         self._registry = registry
         self._sched_registry = sched_registry
         self._cancellation_registry = cancellation_registry
@@ -115,6 +121,155 @@ class RunManager:
 
     def registry(self) -> UnifiedRegistry:
         return self._registry or current_registry()
+
+    def _get_result_store(self) -> RunResultStore | None:
+        if self._result_store is not None:
+            return self._result_store
+        try:
+            container = current_services()
+        except Exception:
+            return None
+        return getattr(container, "run_result_store", None)
+
+    def _get_state_store(self) -> GraphStateStore | None:
+        if self._state_store is not None:
+            return self._state_store
+        try:
+            container = current_services()
+        except Exception:
+            return None
+        return getattr(container, "state_store", None)
+
+    @staticmethod
+    def _identity_for_record(record: RunRecord) -> RequestIdentity:
+        return RequestIdentity(
+            user_id=record.user_id,
+            org_id=record.org_id,
+            mode="local",
+        )
+
+    async def _persist_run_result(
+        self,
+        *,
+        record: RunRecord,
+        outputs: dict[str, Any],
+        source: str,
+        snapshot_rev: int | None = None,
+    ) -> RunResult | None:
+        result_store = self._get_result_store()
+        if result_store is None:
+            return None
+        try:
+            now = _utcnow()
+            existing = await result_store.get(record.run_id)
+            result = RunResult(
+                run_id=record.run_id,
+                graph_id=record.graph_id,
+                session_id=record.session_id,
+                status=RunStatus.succeeded,
+                outputs=dict(outputs),
+                created_at=existing.created_at if existing is not None else now,
+                updated_at=now,
+                source=source,
+                snapshot_rev=snapshot_rev,
+            )
+            await result_store.save(record.run_id, result)
+            record.result_available = True
+            record.result_updated_at = result.updated_at
+            if self._store is not None:
+                await self._store.update_status(
+                    record.run_id,
+                    record.status,
+                    finished_at=record.finished_at,
+                    error=record.error,
+                    field_updates={
+                        "result_available": True,
+                        "result_updated_at": result.updated_at,
+                    },
+                )
+            return result
+        except Exception:
+            import logging
+
+            logging.getLogger("aethergraph.runtime.run_manager").exception(
+                "Error persisting durable run outputs for run_id=%s", record.run_id
+            )
+            return None
+
+    async def _recover_outputs_from_snapshot(
+        self,
+        record: RunRecord,
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        store = self._get_state_store()
+        if store is None:
+            return None, None
+        snap = await store.load_latest_snapshot(record.run_id)
+        if snap is None:
+            return None, None
+        graph_outputs = snap.state.get("graph_outputs")
+        if isinstance(graph_outputs, dict):
+            return dict(graph_outputs), snap.rev
+
+        from aethergraph.core.runtime.graph_runner import (
+            _materialize_task_graph,
+            _resolve_graph_outputs,
+            _seed_outputs_from_snapshot,
+        )
+        from aethergraph.core.runtime.runtime_env import RuntimeEnv
+        from aethergraph.services.container.default_container import build_default_container
+
+        identity = self._identity_for_record(record)
+        self._resolve_target_identity = identity
+        try:
+            target = await self._resolve_target(record.graph_id)
+        finally:
+            self._resolve_target_identity = None
+        try:
+            graph = _materialize_task_graph(target)
+        except Exception:
+            return None, snap.rev
+
+        inputs = dict((record.meta or {}).get("original_inputs") or {})
+        try:
+            container = current_services()
+        except Exception:
+            container = build_default_container()
+        env = RuntimeEnv(
+            run_id=record.run_id,
+            graph_id=record.graph_id,
+            session_id=record.session_id,
+            identity=identity,
+            graph_inputs=inputs,
+            outputs_by_node={},
+            container=container,
+            agent_id=record.agent_id,
+            app_id=record.app_id,
+        )
+        _seed_outputs_from_snapshot(env, snap)
+        outputs = await _resolve_graph_outputs(graph, inputs, env)
+        return outputs, snap.rev
+
+    async def _durable_outputs_for_record(self, record: RunRecord) -> dict[str, Any] | None:
+        if record.status != RunStatus.succeeded:
+            return None
+        result_store = self._get_result_store()
+        if result_store is not None:
+            existing = await result_store.get(record.run_id)
+            if existing is not None:
+                record.result_available = True
+                record.result_updated_at = existing.updated_at
+                return dict(existing.outputs)
+
+        outputs, snapshot_rev = await self._recover_outputs_from_snapshot(record)
+        if outputs is None:
+            return None
+        await self._persist_run_result(
+            record=record,
+            outputs=outputs,
+            source="snapshot_recovered",
+            snapshot_rev=snapshot_rev,
+        )
+        return outputs
 
     async def _resolve_target(self, graph_id: str) -> Any:
         reg = self.registry()
@@ -318,6 +473,11 @@ class RunManager:
                 logging.getLogger("aethergraph.runtime.run_manager").exception(
                     "Error creating output preview for run_id=%s", record.run_id
                 )
+            await self._persist_run_result(
+                record=record,
+                outputs=outputs,
+                source="direct",
+            )
 
         except asyncio.CancelledError:
             # Cancellation path: scheduler.terminate() or external cancel.
@@ -419,6 +579,10 @@ class RunManager:
                 finished_at=record.finished_at,
                 error=error_msg,
                 meta_update={k: v for k, v in handle.metadata().items() if v is not None},
+                field_updates={
+                    "result_available": record.result_available,
+                    "result_updated_at": record.result_updated_at,
+                },
             )
 
         # Metering
@@ -858,15 +1022,21 @@ class RunManager:
         - If return_outputs=False (default), returns RunRecord (backwards compatible).
         - If return_outputs=True, returns (RunRecord, outputs_dict_or_none).
 
-        NOTE:
-        - outputs are only guaranteed when the run was executed in THIS process
-          via RunManager. If the run is already terminal in the store and no
-          in-process outputs exist, outputs will be None.
+        Output semantics when return_outputs=True:
+        - succeeded: returns durable final graph outputs when available
+          (prefer in-memory completion data, then persisted run results, then
+          snapshot-based recovery as a fallback)
+        - failed / canceled: returns (record, None)
+
+        This keeps wait_run useful across process boundaries instead of limiting
+        output retrieval to only in-process waiters.
         """
         # Fast path: already terminal in store
         rec = await self.get_record(run_id)
         if rec and rec.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
             if return_outputs:
+                if rec.status == RunStatus.succeeded:
+                    return rec, await self._durable_outputs_for_record(rec)
                 return rec, None
             return rec
 
@@ -887,6 +1057,8 @@ class RunManager:
 
         rec2, outputs = result
         if return_outputs:
+            if rec2.status == RunStatus.succeeded and outputs is None:
+                outputs = await self._durable_outputs_for_record(rec2)
             return rec2, outputs
         return rec2
 
