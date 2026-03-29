@@ -158,7 +158,7 @@ def validate_graph_source(
                             end_line=getattr(n, "end_lineno", None),
                             end_col=getattr(n, "end_col_offset", None),
                             symbol=node.name,
-                            suggestion="Move orchestration into @graphify/@graph_fn.",
+                            suggestion="Move orchestration into @graphify or plain Python/@graph_fn.",
                         )
                     )
 
@@ -376,6 +376,8 @@ def validate_graph_source(
                         )
                     )
             else:
+                # `graph_fn` is a native runtime wrapper, so validation intentionally
+                # stops at decorator-shape checks and source compilation.
                 graphfn_names.append(explicit_name or node.name)
 
     if not saw_decorator:

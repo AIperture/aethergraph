@@ -13,7 +13,6 @@ from aethergraph.core.graph.graphify_validation import (
     validate_graph_source,
     warnings_as_errors_enabled,
 )
-from aethergraph.core.runtime.run_registration import RunRegistrationGuard
 from aethergraph.services.registry.agent_app_meta import (
     AgentConfig,
     AppConfig,
@@ -21,14 +20,12 @@ from aethergraph.services.registry.agent_app_meta import (
     build_app_meta,
 )
 
-from ..execution.retry_policy import RetryPolicy
 from ..runtime.injection import pop_explicit_node_context, resolve_node_context_param
 from ..runtime.runtime_env import RuntimeEnv
-from ..runtime.runtime_registry import current_registry  # ContextVar accessor
-from .graph_builder import graph  # context manager
-from .graph_refs import GRAPH_INPUTS_NODE_ID
-from .interpreter import Interpreter
+from ..runtime.runtime_registry import current_registry
 from .node_spec import TaskNodeSpec
+
+GRAPH_FN_ROOT_NODE_ID = "__graph_fn_root__"
 
 
 class GraphFunction:
@@ -49,35 +46,26 @@ class GraphFunction:
         self.outputs = outputs or []
         self.version = version
         self.registry_key: str | None = None
-        self.last_graph = None
-        self.last_context = None
-        self.last_memory_snapshot = None
         self.agent_id = agent_id
         self.app_id = app_id
         self._node_context_param = resolve_node_context_param(fn)
 
-    async def run(
-        self,
-        *,
-        env: RuntimeEnv | None = None,
-        retry: RetryPolicy | None = None,
-        max_concurrency: int = 1,
-        **inputs,
-    ):
+    async def run(self, *, env: RuntimeEnv | None = None, **inputs):
         """
-        Build a fresh TaskGraph and execute this function via the Interpreter.
-        If a single supported NodeContext parameter is declared, inject a NodeContext.
+        Execute this graph function directly as native Python with a synthetic root context.
+
+        `graph_fn` is a runtime wrapper, not a DAG builder. It does not materialize a
+        TaskGraph or register a scheduler, and it does not support wait/resume.
         """
-        # Build env if not provided (use runner’s builder for consistency)
         if env is None:
-            from ..runtime.graph_runner import _build_env  # internal helper
+            from ..runtime.graph_runner import _build_env
 
             inherited_identity = None
             env_inputs = dict(inputs)
             parent_ctx = pop_explicit_node_context(env_inputs)
             if parent_ctx is not None:
                 inherited_identity = getattr(parent_ctx, "identity", None)
-            env, retry, max_concurrency = await _build_env(
+            env, _retry, _max_concurrency = await _build_env(
                 self,
                 env_inputs,
                 identity=inherited_identity,
@@ -86,56 +74,38 @@ class GraphFunction:
                 agent_id=getattr(parent_ctx, "agent_id", None),
                 app_id=getattr(parent_ctx, "app_id", None),
             )
-        if retry is None:
-            retry = RetryPolicy()
 
         node_spec = TaskNodeSpec(
-            node_id=GRAPH_INPUTS_NODE_ID, type="inputs", metadata={"synthetic": True}
+            node_id=GRAPH_FN_ROOT_NODE_ID,
+            type="graph_fn_root",
+            metadata={"synthetic": True},
+            tool_name=self.name,
+            tool_version=self.version,
         )
         runtime_ctx = env.make_ctx(
             node=node_spec, resume_payload=getattr(env, "resume_payload", None)
         )
         node_ctx = runtime_ctx.create_node_context(node=node_spec)
 
-        with graph(name=self.graph_id, agent_id=self.agent_id, app_id=self.app_id) as G:
-            interp = Interpreter(G, env, retry=retry, max_concurrency=max_concurrency)
-            run_id = env.run_id
+        call_kwargs = dict(inputs)
+        parent_ctx = pop_explicit_node_context(call_kwargs)
+        if self._node_context_param is not None:
+            call_kwargs.setdefault(self._node_context_param, parent_ctx or node_ctx)
 
-            # Register the scheduler for this run_id
-            with RunRegistrationGuard(
-                run_id=run_id, scheduler=interp.scheduler, container=env.container
-            ):
-                call_kwargs = dict(inputs)
-                parent_ctx = pop_explicit_node_context(call_kwargs)
-                if self._node_context_param is not None:
-                    # Preserve explicitly provided parent context for nested graph calls.
-                    call_kwargs[self._node_context_param] = parent_ctx or node_ctx
+        res = self.fn(**call_kwargs)
+        if inspect.isawaitable(res):
+            res = await res
 
-                with interp.enter():
-                    res = self.fn(**call_kwargs)
-                    if inspect.isawaitable(res):
-                        res = await res
+        return _normalize_graph_fn_outputs(res, self.outputs)
 
-            self.last_graph = G
-
-        res = _normalize_and_expose(G, res, self.outputs)
-        return res
-
-    # --- Syntactic sugar ---
     async def __call__(self, **inputs):
-        """Async call to run the graph function.
-        Usage:
-           result = await my_graph_fn(input1=value1, input2=value2)
-        """
+        """Async call to run the graph function."""
         from ..runtime.graph_runner import run_async
 
         return await run_async(self, inputs)
 
     def sync(self, **inputs):
-        """Synchronous wrapper around async run(). Useful for quick tests or scripts.
-        Usage:
-           result = my_graph_fn.sync(input1=value1, input2=value2)
-        """
+        """Synchronous wrapper around async run(). Useful for quick tests or scripts."""
         from ..runtime.graph_runner import run
 
         return run(self, inputs)
@@ -144,27 +114,21 @@ class GraphFunction:
         """
         Infer typed IO based on decorator inputs/outputs and Python annotations.
 
-        Rule of thumbs:
-        - Inputs: use decorator list; if missing, use all params except 'context'.
-        - Outputs: use decorator list; if missing, use return annotation if any.
-
+        This metadata is used for registration and UI surfaces only. `graph_fn`
+        execution itself is plain Python at runtime.
         """
         sig = inspect.signature(self.fn)
         hints = get_type_hints(self.fn)
 
-        # --- Inputs ---
         if self.inputs is not None:
             input_names = list(self.inputs)
         else:
-            # fallback: all params except the injected NodeContext parameter
             input_names = [p for p in sig.parameters if p != self._node_context_param]
 
         input_slots: list[IOSlot] = []
         for name in input_names:
             param = sig.parameters.get(name)
             if param is None:
-                # decorator said it's a input but not in signature
-                # treat as unknown, required
                 input_slots.append(IOSlot(name=name, type=None, required=True))
                 continue
 
@@ -182,7 +146,6 @@ class GraphFunction:
                 )
             )
 
-        # --- Outputs ---
         output_slots: list[IOSlot] = []
         out_names = list(self.outputs or [])
 
@@ -192,11 +155,9 @@ class GraphFunction:
                 j_type = _map_py_type_to_json_type(ret_anno)
                 output_slots.append(IOSlot(name=out_names[0], type=j_type, required=True))
             else:
-                # Multi-output or no return type: names only
                 for name in out_names:
                     output_slots.append(IOSlot(name=name, type=None, required=True))
         elif ret_anno is not None:
-            # No explicit output names but we *do* know the type: create a single output
             j_type = _map_py_type_to_json_type(ret_anno)
             output_slots.append(IOSlot(name="result", type=j_type, required=True))
 
@@ -211,73 +172,40 @@ def _is_nodehandle(x: object) -> bool:
     return hasattr(x, "node_id") and hasattr(x, "output_keys")
 
 
-def _expose_from_handle(G, prefix: str, handle) -> dict:
-    oks = list(getattr(handle, "output_keys", []))
-    if not oks:
-        raise ValueError(f"NodeHandle '{getattr(handle, 'node_id', '?')}' has no output_keys")
-    out = {}
-    if prefix and len(oks) == 1:
-        # collapse single output to the provided key
-        k = oks[0]
-        ref = getattr(handle, k)
-        G.expose(prefix, ref)
-        out[prefix] = ref
-    else:
-        # multi-output (or top-level handle)
-        for k in oks:
-            key = f"{prefix}.{k}" if prefix else k
-            ref = getattr(handle, k)
-            G.expose(key, ref)
-            out[key] = ref
-    return out
+def _assert_plain_runtime_value(value: object, *, key: str | None = None) -> None:
+    if _is_ref(value) or _is_nodehandle(value):
+        label = f" for output '{key}'" if key else ""
+        raise ValueError(
+            "graph_fn_plain_runtime_only: graph_fn must return plain Python values"
+            f"{label}. NodeHandle/ref outputs are only supported in @graphify."
+        )
 
 
-def _normalize_and_expose(G, ret, declared_outputs: list[str] | None) -> dict:
+def _normalize_graph_fn_outputs(ret, declared_outputs: list[str] | None) -> dict:
     """
-    Normalize user return into {key: Ref or literal}.
-    - Dict of NodeHandles/Refs/literals supported
-    - Single NodeHandle supported
-    - Single literal supported (needs 1 declared output)
-    Also exposes Refs on G as boundary outputs.
+    Normalize graph_fn return values into a plain outputs dict.
 
-    Examples:
-    - return {"result": ref(...), "summary": node_handle(...), "count": 42}
-    - return node_handle(...)
+    If exactly one output is declared, a single return value is allowed and mapped
+    to that output key. Otherwise graph_fn must return a dict.
     """
-    result = {}
-
     if isinstance(ret, dict):
         for k, v in ret.items():
-            if _is_ref(v):
-                G.expose(k, v)
-                result[k] = v
-            elif _is_nodehandle(v):
-                result.update(_expose_from_handle(G, k, v))
-            else:
-                # literal stays literal; no expose
-                result[k] = v
-
-    elif _is_nodehandle(ret):
-        result.update(_expose_from_handle(G, "", ret))
-
+            _assert_plain_runtime_value(v, key=k)
+        result = dict(ret)
     else:
-        # single literal/ref case
+        _assert_plain_runtime_value(ret)
         if declared_outputs and len(declared_outputs) == 1:
-            key = declared_outputs[0]
-            if _is_ref(ret):
-                G.expose(key, ret)
-            result[key] = ret
+            result = {declared_outputs[0]: ret}
+        elif not declared_outputs:
+            result = {"result": ret}
         else:
             raise ValueError(
-                "Returning a single literal but outputs are not declared or >1. "
-                "Declare exactly one output or return a dict."
+                "graph_fn_result_shape_invalid: graph_fn must return a dict unless exactly "
+                "one output is declared."
             )
 
-    # If outputs were declared, restrict to those keys (keep order)
     if declared_outputs:
         result = {k: result[k] for k in declared_outputs if k in result}
-
-        # Validate presence
         missing = [k for k in declared_outputs if k not in result]
         if missing:
             raise ValueError(f"Missing declared outputs: {missing}")
@@ -299,121 +227,11 @@ def graph_fn(
     description: str | None = None,
 ) -> Callable[[Callable], GraphFunction]:
     """
-    Decorator to define a graph function and optionally register it as an agent or app.
+    Decorator to define a runtime graph function and optionally register it as an agent or app.
 
-    This decorator wraps a Python function as a `GraphFunction`, enabling it to be executed
-    as a node-based graph with runtime context, retry policy, and concurrency controls.
-    It also supports rich metadata registration for agent and app discovery.
-
-    Examples:
-        Basic usage:
-        ```python
-        @graph_fn(
-            name="add_numbers",
-            inputs=["a", "b"],
-            outputs=["sum"],
-        )
-        async def add_numbers(a: int, b: int):
-            return {"sum": a + b}
-        ```
-
-        Registering as an agent with metadata:
-        ```python
-        @graph_fn(
-            name="chat_agent",
-            inputs=["message", "attachments", "session_id", "user_meta"],
-            outputs=["response"],
-            as_agent={
-                "id": "chatbot",
-                "title": "Chat Agent",
-                "description": "Conversational AI agent.",
-                "mode": "chat_v1",
-                "icon": "chat",
-                "tags": ["chat", "nlp"],
-            },
-        )
-        async def chat_agent(...):
-            ...
-        ```
-
-        Registering as an app:
-        ```python
-        @graph_fn(
-            name="summarizer",
-            inputs=[],
-            outputs=["summary"],
-            as_app={
-                "id": "summarizer-app",
-                "name": "Text Summarizer",
-                "description": "Summarizes input text.",
-                "category": "Productivity",
-                "tags": ["nlp", "summary"],
-            },
-        )
-        async def summarizer():
-            ...
-        ```
-
-        Typed app inputs inferred from signature + UI schema override:
-        ```python
-        @graph_fn(
-            name="generic_fn_workflow_v1",
-            inputs=["query", "top_k", "include_meta", "config"],
-            outputs=["result", "meta"],
-            as_app={
-                "id": "generic-fn-app",
-                "name": "Generic Function App",
-                "input_schema": [
-                    {"name": "top_k", "label": "Top K", "widget": "number"},
-                    {"name": "include_meta", "label": "Include Metadata", "widget": "switch"},
-                    {"name": "config", "label": "Config JSON", "widget": "json"},
-                ],
-            },
-        )
-        async def generic_fn_workflow(
-            query: str,
-            top_k: int = 20,                  # optional/default inferred
-            include_meta: bool = True,        # optional/default inferred
-            config: dict[str, str] | None = None,  # object/nullable inferred
-        ):
-            ...
-        ```
-
-    Args:
-        name: Unique name for the graph function.
-        inputs: Optional list of input parameter names to expose. If omitted, the
-            runtime can infer names from the function signature in IO surfaces.
-            If provided with `as_agent` mode `chat_v1`, this must match
-            `["message", "attachments", "session_id", "user_meta"]`.
-            Type/required/default inference for IO schema comes from function
-            annotations and default values in the function signature.
-        outputs: List of output keys returned by the function.
-        version: Version string for the graph function (default: "0.1.0").
-        entrypoint: If True, marks this graph as the main entrypoint for a flow.  [Currently unused]
-        flow_id: Optional flow identifier for grouping related graphs.
-        tags: List of string tags for discovery and categorization.
-        as_agent: Optional dictionary defining agent metadata. Used when running through Aethergraph UI. See additional information below.
-        as_app: Optional dictionary defining app metadata. Used when running through Aethergraph UI.
-            Supports optional `input_schema` UI overrides. Each entry is matched
-            by `name` and can provide UI hints such as `label`, `placeholder`,
-            `widget`, `description`, and `default`.
-        description: Optional human-readable description of the graph function.
-
-    Returns:
-        Callable: A decorator that wraps the function as a `GraphFunction` and registers it
-        in the runtime registry, with agent/app metadata if provided.
-
-    Notes:
-        - as_agent and as_app are not needed to define a graph; they are only for registration purposes for use in Aethergraph UI.
-        - When registering as an agent, the `as_agent` dictionary should include at least an "id" key.
-        - When registering as an app, the `as_app` dictionary should include at least an "id" key.
-        - The decorated function can be either synchronous or asynchronous.
-        - For `graph_fn`, optional/default input behavior is inferred from function
-          parameter defaults (`param=...`) and used by IO schema surfaces.
-        - UI defaults are shown only when available in API input schema and can be
-          overridden by `as_app.input_schema` defaults.
-        - Field types are inferred from function annotations and normalized to
-          JSON-like types (string/number/boolean/object/array/any).
+    `graph_fn` is the flexible runtime surface for native Python orchestration with
+    injected `NodeContext`. Use `@graphify` for rigid DAG execution, persistence, and
+    wait/resume behavior.
     """
 
     def decorator(fn: Callable) -> GraphFunction:
@@ -424,7 +242,6 @@ def graph_fn(
             strict=True,
             warnings_as_errors=warnings_as_errors_enabled(),
         )
-        # log_validation_issues(validation, filename=source_name)
         if not validation.ok:
             error_result = type(validation)(
                 ok=False,
@@ -464,12 +281,9 @@ def graph_fn(
         registry = current_registry()
 
         if registry is None:
-            # no registry available, just return the graph function
             return gf
 
         base_tags = tags or []
-
-        # prefer explicit description; then docstring; else name
         doc_desc = inspect.getdoc(fn) or None
         eff_description = description or doc_desc or name
 
@@ -491,8 +305,6 @@ def graph_fn(
             meta=graph_meta,
         )
 
-        # Register as agent if requested
-        # 4Agent meta (if any)
         agent_meta = build_agent_meta(
             graph_name=name,
             version=version,
@@ -508,7 +320,6 @@ def graph_fn(
                 meta=agent_meta,
             )
 
-        # 5) App meta (if any)
         app_meta = build_app_meta(
             graph_name=name,
             version=version,
