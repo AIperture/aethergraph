@@ -1,8 +1,10 @@
+import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 import inspect
 import logging
 from pathlib import Path, PurePath
+import random
 import time
 from typing import Any, Literal
 import uuid
@@ -505,6 +507,10 @@ class ChannelSession:
         *,
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
+        prefer_stream: bool = False,
+        stream_threshold_chars: int | None = None,
+        stream_chars_per_second: float | None = None,
+        stream_target_chunk_chars: int | None = None,
         # memory logging handled separately
         memory_log: bool = True,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
@@ -538,6 +544,10 @@ class ChannelSession:
             text: Message body to send.
             meta: Optional outbound event metadata.
             channel: Optional target channel key.
+            prefer_stream: When True, attempt to stream longer text with a typing effect.
+            stream_threshold_chars: Minimum text length required before streaming is attempted.
+            stream_chars_per_second: Optional override for streaming typing speed.
+            stream_target_chunk_chars: Optional override for average streaming chunk size.
             memory_log: Enable chat-memory logging for this call.
             memory_role: Role used for the memory record.
             memory_tags: Optional tags for the memory record.
@@ -551,6 +561,30 @@ class ChannelSession:
         Notes:
             Set adapter-specific display hints in `meta` (for example `name` or `agent_id`).
         """
+        if text and prefer_stream:
+            threshold = stream_threshold_chars if stream_threshold_chars is not None else 500
+            if len(text) >= max(1, threshold):
+                try:
+                    stream_kwargs: dict[str, Any] = {
+                        "channel": channel,
+                        "memory_log": memory_log,
+                        "memory_tags": memory_tags,
+                        "memory_data": memory_data,
+                        "memory_role": memory_role,
+                        "memory_severity": memory_severity,
+                        "memory_signal": memory_signal,
+                    }
+                    if stream_chars_per_second is not None:
+                        stream_kwargs["chars_per_second"] = stream_chars_per_second
+                    if stream_target_chunk_chars is not None:
+                        stream_kwargs["target_chunk_chars"] = stream_target_chunk_chars
+                    await self.stream_text(text, **stream_kwargs)
+                    return
+                except Exception:
+                    logging.getLogger("aethergraph.services.channel.session").debug(
+                        "send_text streaming fallback triggered",
+                        exc_info=True,
+                    )
 
         await self._log_chat(
             memory_role,
@@ -1969,6 +2003,96 @@ class ChannelSession:
         finally:
             # No auto-end; caller decides when to end()
             pass
+
+    async def stream_text(
+        self,
+        full_text: str,
+        *,
+        channel: str | None = None,
+        memory_log: bool = True,
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,
+        memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
+        # pacing knobs
+        chars_per_second: float = 18.0,
+        target_chunk_chars: int = 28,
+        min_delay: float = 0.05,
+        max_delay: float = 0.15,
+    ) -> None:
+        """
+        Stream pre-existing text with a typing animation effect.
+
+        Splits ``full_text`` on paragraph boundaries (``\\n\\n``), then sends
+        ``~target_chunk_chars`` characters per delta with a delay derived from
+        ``chars_per_second``, clamped to ``[min_delay, max_delay]``.  The UI
+        assembles and renders the content (markdown is supported); this method
+        only sends text deltas.
+
+        Examples:
+            Stream a static summary::
+
+                await chan.stream_text("## Summary\\n\\nAll checks passed.")
+
+            Stream with slower pacing and custom memory tags::
+
+                await chan.stream_text(
+                    report_text,
+                    chars_per_second=10,
+                    memory_tags=["report"],
+                )
+
+        Args:
+            full_text: The complete text to stream.
+            channel: Optional target channel key override.
+            memory_log: Whether to log the completed text to memory.
+            memory_tags: Tags attached to the memory entry.
+            memory_data: Structured data attached to the memory entry.
+            memory_role: Memory role for the logged entry.
+            memory_severity: Memory severity level.
+            memory_signal: Optional memory signal value.
+            chars_per_second: Target typing speed used to derive inter-delta delay.
+            target_chunk_chars: Mean size (in characters) of each delta chunk.
+            min_delay: Minimum delay in seconds between deltas.
+            max_delay: Maximum delay in seconds between deltas.
+        """
+        if not full_text:
+            return
+
+        paragraphs = full_text.split("\n\n")
+
+        async with self.stream(channel=channel) as s:
+            for p_idx, para in enumerate(paragraphs):
+                if p_idx > 0:
+                    para = "\n\n" + para
+
+                i = 0
+                n = len(para)
+                while i < n:
+                    chunk_len = max(
+                        8,
+                        int(random.gauss(target_chunk_chars, target_chunk_chars * 0.2)),
+                    )
+                    chunk = para[i : i + chunk_len]
+                    i += len(chunk)
+
+                    await s.delta(chunk)
+
+                    ideal_delay = len(chunk) / max(chars_per_second, 1.0)
+                    delay = ideal_delay * random.uniform(0.8, 1.2)
+                    delay = max(min_delay, min(max_delay, delay))
+                    await asyncio.sleep(delay)
+
+            await s.end(
+                full_text=full_text,
+                memory_log=memory_log,
+                memory_tags=memory_tags,
+                memory_data=memory_data,
+                memory_role=memory_role,
+                memory_severity=memory_severity,
+                memory_signal=memory_signal,
+            )
 
     async def chat_and_stream(
         self,
