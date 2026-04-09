@@ -8,6 +8,7 @@ from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 
 # ---- artifact services ----
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.services.agent_state import AgentStateFacade
 
 # ---- channel services ----
 from aethergraph.services.channel.channel_bus import ChannelBus
@@ -248,6 +249,7 @@ class RuntimeEnv:
             kv=self.container.kv_hot,  # keep using hot kv for ephemeral
             memory=self.memory_factory,  # factory (for other sessions if needed)
             memory_facade=mem,  # bound memory for this run/node
+            agent_state=AgentStateFacade(memory=mem),
             viz=vis_facade,
             llm=self.llm_service,  # LLMService
             mcp=self.mcp_service,  # MCPService

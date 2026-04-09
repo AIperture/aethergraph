@@ -16,6 +16,7 @@ from aethergraph.core.runtime.run_types import (
     RunVisibility,
 )
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
+from aethergraph.services.agent_state import AgentStateBackend, AgentStateHandle
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
@@ -488,6 +489,31 @@ class NodeContext:
         if not self.services.memory_facade:
             raise RuntimeError("MemoryFacade not bound")
         return self.services.memory_facade
+
+    def state(
+        self,
+        key: str,
+        *,
+        model: type | None = None,
+        default_factory: Any | None = None,
+        level: str | None = None,
+        backend: AgentStateBackend = "hybrid",
+        tags: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+        kind: str = "state.snapshot",
+    ) -> AgentStateHandle:
+        if not self.services.agent_state:
+            raise RuntimeError("Agent state facade not bound")
+        return self.services.agent_state.bind(
+            key=key,
+            model=model,
+            default_factory=default_factory,
+            level=level,
+            backend=backend,
+            tags=tags,
+            meta=meta,
+            kind=kind,
+        )
 
     # Back-compat: old ctx.mem() -> To be deprecated
     def mem(self) -> BoundMemoryAdapter:
