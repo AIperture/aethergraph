@@ -3,7 +3,7 @@ from aethergraph.contracts.services.metering import MeteringService
 
 class NoopMeteringService(MeteringService):
     async def record_llm(self, **kwargs):
-        print("NoopMeteringService.record_llm called")
+        return {}
 
     async def record_embedding(self, **kwargs): ...
     async def record_run(self, **kwargs): ...

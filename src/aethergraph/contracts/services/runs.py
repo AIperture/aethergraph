@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Protocol
 
-from aethergraph.core.runtime.run_types import RunRecord, RunStatus
+from aethergraph.core.runtime.run_types import RunRecord, RunResult, RunStatus
 
 
 class RunStore(Protocol):
@@ -22,6 +22,7 @@ class RunStore(Protocol):
         finished_at: datetime | None = None,
         error: str | None = None,
         meta_update: dict[str, Any] | None = None,
+        field_updates: dict[str, Any] | None = None,
     ) -> None: ...
     async def get(self, run_id: str) -> RunRecord | None: ...
     async def list(
@@ -49,3 +50,11 @@ class RunStore(Protocol):
 
         No-op if run_id does not exist.
         """
+
+
+class RunResultStore(Protocol):
+    """Abstract interface for durable succeeded-run outputs keyed by run_id."""
+
+    async def save(self, run_id: str, result: RunResult) -> None: ...
+    async def get(self, run_id: str) -> RunResult | None: ...
+    async def delete(self, run_id: str) -> None: ...

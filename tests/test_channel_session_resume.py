@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from aethergraph.contracts.services.channel import ChoiceOption
 from aethergraph.services.channel.session import ChannelSession
 
 
@@ -80,8 +81,14 @@ async def test_ask_text_ignores_non_matching_resume_payload():
 async def test_ask_approval_infers_choice_from_text_when_resume_payload_has_no_choice():
     ctx = _FakeContext(
         resume_payload={
-            "_channel_wait_kind": "approval",
-            "prompt": {"title": "Approve?", "buttons": ["Approve", "Cancel"]},
+            "_channel_wait_kind": "choice",
+            "prompt": {
+                "title": "Approve?",
+                "choices": [
+                    {"id": "approve", "label": "Approve"},
+                    {"id": "cancel", "label": "Cancel"},
+                ],
+            },
             "text": "Approve",
         }
     )
@@ -91,5 +98,39 @@ async def test_ask_approval_infers_choice_from_text_when_resume_payload_has_no_c
 
     assert reply["approved"] is True
     assert reply["choice"] == "Approve"
+    assert reply["choice_label"] == "Approve"
     assert reply["text"] == "Approve"
     assert getattr(ctx, "_channel_resume_payload_consumed", False) is True
+
+
+@pytest.mark.asyncio
+async def test_ask_choices_returns_canonical_choice_and_label():
+    ctx = _FakeContext(
+        resume_payload={
+            "_channel_wait_kind": "choice",
+            "prompt": {
+                "title": "Choose deployment mode",
+                "choices": [
+                    {"id": "safe_mode", "label": "Safe Mode", "aliases": ["safe"]},
+                    {"id": "fast_mode", "label": "Fast Mode", "aliases": ["fast"]},
+                ],
+            },
+            "text": "safe",
+        }
+    )
+    chan = ChannelSession(ctx)
+
+    reply = await chan.ask_choices(
+        "Choose deployment mode",
+        options=[
+            ChoiceOption(id="safe_mode", label="Safe Mode", aliases=("safe",)),
+            ChoiceOption(id="fast_mode", label="Fast Mode", aliases=("fast",)),
+        ],
+    )
+
+    assert reply == {
+        "choice": "safe_mode",
+        "choice_label": "Safe Mode",
+        "text": "safe",
+        "matched": True,
+    }

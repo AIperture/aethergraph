@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from aethergraph.services.agent_state import AgentStateFacade
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.stores.fs_store import FSContinuationStore
@@ -36,6 +37,7 @@ class NodeServices:
     kv: Any | None = None
     memory: Any | None = None  # MemoryFactory (for cross-session needs)
     memory_facade: MemoryFacade | None = None  # bound memory for this node
+    agent_state: AgentStateFacade | None = None  # experimental bound agent state facade
     viz: VizFacade | None = None  # VizFacade
     llm: LLMService | None = None  # LLMService
     mcp: MCPService | None = None  # MCPService

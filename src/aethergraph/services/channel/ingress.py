@@ -7,6 +7,7 @@ from typing import Any
 import aiohttp
 
 from aethergraph.services.channel.attachments import InputAttachment, attachment_to_dict
+from aethergraph.services.channel.choices import normalize_choice_reply
 from aethergraph.services.continuations.continuation import Continuation, Correlator
 
 
@@ -50,6 +51,7 @@ class IncomingMessage:
 
     # For approval
     choice: str | None = None  # User's choice/response
+    conversation_id: str | None = None
 
     # Optional structured metadata
     meta: dict[str, Any] | None = None
@@ -94,6 +96,18 @@ class ChannelIngress:
         # Slack: channel_id = "team/T:chan/C" => "slack:team/T:chan/C"
         # Telegram: channel_id = "chat/<id>[:topic/<topic_id>]" => "tg:chat/..."
         return f"{scheme}:{channel_id}"
+
+    def _conversation_id(
+        self,
+        *,
+        msg: IncomingMessage,
+        ch_key: str,
+    ) -> str:
+        if msg.conversation_id:
+            return msg.conversation_id
+        if msg.thread_id:
+            return f"{ch_key}#thread:{msg.thread_id}"
+        return ch_key
 
     def _log(self, level: str, msg: str, **kwargs):
         if not self.logger:
@@ -265,6 +279,7 @@ class ChannelIngress:
         """
         scheme = msg.scheme
         ch_key = self._channel_key(scheme, msg.channel_id)
+        conversation_id = self._conversation_id(msg=msg, ch_key=ch_key)
 
         cont = await self._find_continuation(
             scheme=scheme,
@@ -316,12 +331,19 @@ class ChannelIngress:
         meta = msg.meta or {}
         normalized_attachments = [attachment_to_dict(a) for a in (msg.attachments or [])]
 
-        if kind == "approval":
-            choice = (msg.choice or "").strip() or None
+        if kind in ("approval", "choice"):
+            normalized = normalize_choice_reply(
+                prompt=getattr(cont, "prompt", None),
+                raw_choice=msg.choice,
+                raw_text=msg.text or "",
+            )
             payload: dict[str, Any] = {
-                "choice": choice,
-                "text": msg.text or "",
+                "choice": normalized.get("choice"),
+                "choice_label": normalized.get("choice_label"),
+                "text": normalized.get("text", ""),
+                "matched": bool(normalized.get("matched")),
                 "channel_key": ch_key,
+                "conversation_id": conversation_id,
                 "thread_id": msg.thread_id,
                 "meta": meta,
             }
@@ -331,6 +353,7 @@ class ChannelIngress:
                 "files": file_refs,
                 "attachments": normalized_attachments,
                 "channel_key": ch_key,
+                "conversation_id": conversation_id,
                 "thread_id": msg.thread_id,
                 "meta": meta,
             }
@@ -339,6 +362,7 @@ class ChannelIngress:
                 "text": msg.text or "",
                 "attachments": normalized_attachments,
                 "channel_key": ch_key,
+                "conversation_id": conversation_id,
                 "thread_id": msg.thread_id,
                 "meta": meta,
             }

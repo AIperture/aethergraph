@@ -12,7 +12,7 @@ from aethergraph.contracts.services.execution import ExecutionService
 # ---- optional services (not used by default) ----
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
 from aethergraph.contracts.services.metering import MeteringService
-from aethergraph.contracts.services.runs import RunStore
+from aethergraph.contracts.services.runs import RunResultStore, RunStore
 from aethergraph.contracts.services.sessions import SessionStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
 
@@ -109,6 +109,7 @@ from aethergraph.storage.factory import (
     build_graph_state_store,
     build_memory_hotlog,
     build_memory_persistence,
+    build_run_result_store,
     build_run_store,
     build_session_store,
 )
@@ -211,6 +212,7 @@ class DefaultContainer:
 
     # run controls -- for http endpoints and run manager
     run_store: RunStore | None = None
+    run_result_store: RunResultStore | None = None
     run_manager: RunManager | None = None  # RunManager
     run_cancellation_registry: RunCancellationRegistry | None = None
     session_store: SessionStore | None = None  # SessionStore
@@ -406,9 +408,12 @@ def build_default_container(
 
     # run store and manager
     run_store = build_run_store(cfg)
+    run_result_store = build_run_result_store(cfg)
     run_cancellation_registry = RunCancellationRegistry()
     run_manager = RunManager(
         run_store=run_store,
+        result_store=run_result_store,
+        state_store=state_store,
         registry=registry,
         sched_registry=sched_registry,
         cancellation_registry=run_cancellation_registry,
@@ -553,6 +558,7 @@ def build_default_container(
         web_search=web_search,
         mcp=mcp,
         run_store=run_store,
+        run_result_store=run_result_store,
         run_manager=run_manager,
         run_cancellation_registry=run_cancellation_registry,
         session_store=session_store,

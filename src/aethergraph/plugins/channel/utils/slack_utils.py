@@ -6,6 +6,11 @@ import time
 import aiohttp
 from fastapi import HTTPException, Request
 
+from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.plugins.channel.utils.turn_dispatch import (
+    attachments_from_incoming_files,
+    dispatch_channel_turn_run,
+)
 from aethergraph.services.channel.ingress import (
     ChannelIngress,
     IncomingFile,
@@ -201,9 +206,31 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                 thread_id=str(thread_ts or ""),
                 text=text,
                 files=incoming_files or None,
+                conversation_id=f"slack:{channel_id}#thread:{thread_ts or ''}",
                 meta=meta,
             )
         )
+
+        if (not resumed) and (text or incoming_files):
+            default_agent_id = getattr(settings.slack, "default_agent_id", None)
+            if default_agent_id:
+                await dispatch_channel_turn_run(
+                    container=container,
+                    identity=RequestIdentity(user_id="local", org_id="local", mode="local"),
+                    agent_id=default_agent_id,
+                    text=text,
+                    attachments=attachments_from_incoming_files(file_refs, source="slack_upload"),
+                    user_meta={
+                        **meta,
+                        "channel_key": ch_key,
+                        "conversation_id": f"slack:{channel_id}#thread:{thread_ts or ''}",
+                    },
+                    tags=[
+                        f"channel:{ch_key}",
+                        f"conversation:slack:{channel_id}#thread:{thread_ts or ''}",
+                        f"agent:{default_agent_id}",
+                    ],
+                )
 
         if container.logger:
             container.logger.for_run().debug(
@@ -277,9 +304,44 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                 thread_id=str(thread_ts or ""),
                 text="",  # no text; just a file drop
                 files=[incoming_file],
+                conversation_id=f"slack:{channel_id}#thread:{thread_ts or ''}",
                 meta=meta,
             )
         )
+
+        if not resumed:
+            default_agent_id = getattr(settings.slack, "default_agent_id", None)
+            if default_agent_id:
+                await dispatch_channel_turn_run(
+                    container=container,
+                    identity=RequestIdentity(user_id="local", org_id="local", mode="local"),
+                    agent_id=default_agent_id,
+                    text="",
+                    attachments=attachments_from_incoming_files(
+                        [
+                            {
+                                "id": incoming_file.id,
+                                "name": incoming_file.name,
+                                "mimetype": incoming_file.mimetype,
+                                "size": incoming_file.size,
+                                "uri": incoming_file.uri,
+                                "url": incoming_file.url,
+                                "extra": incoming_file.extra,
+                            }
+                        ],
+                        source="slack_upload",
+                    ),
+                    user_meta={
+                        **meta,
+                        "channel_key": ch_key,
+                        "conversation_id": f"slack:{channel_id}#thread:{thread_ts or ''}",
+                    },
+                    tags=[
+                        f"channel:{ch_key}",
+                        f"conversation:slack:{channel_id}#thread:{thread_ts or ''}",
+                        f"agent:{default_agent_id}",
+                    ],
+                )
 
         if container.logger:
             container.logger.for_run().debug(
@@ -313,19 +375,43 @@ async def handle_slack_interactive_common(container, payload: dict) -> dict:
     except Exception:
         meta = {"choice": meta_raw}  # super defensive fallback
 
-    choice = meta.get("choice", "reject")
+    thread_ts = (
+        (payload.get("message") or {}).get("thread_ts")
+        or (payload.get("message") or {}).get("ts")
+        or (payload.get("container") or {}).get("thread_ts")
+        or (payload.get("container") or {}).get("message_ts")
+    )
+    ingress: ChannelIngress = c.channel_ingress
+    resumed = await ingress.handle(
+        IncomingMessage(
+            scheme="slack",
+            channel_id=f"team/{team}:chan/{chan}",
+            thread_id=str(thread_ts or ""),
+            text="",
+            choice=meta.get("choice"),
+            conversation_id=f"slack:team/{team}:chan/{chan}#thread:{thread_ts or ''}",
+            meta={
+                "raw": payload,
+                "channel_key": ch_key,
+                "choice_label": meta.get("choice_label"),
+            },
+        )
+    )
 
-    # value contains {"choice", "run_id", "node_id", "token", "sig" (optional)}
+    # Fallback for older button payloads or message-specific interactions
     token = meta.get("token")
     run_id = meta.get("run_id")
     node_id = meta.get("node_id")
-    if token and run_id and node_id:
+    if (not resumed) and token and run_id and node_id:
         await c.resume_router.resume(
             run_id=run_id,
             node_id=node_id,
             token=token,
             payload={
-                "choice": choice,
+                "choice": meta.get("choice"),
+                "choice_label": meta.get("choice_label"),
+                "matched": True,
+                "text": "",
                 "slack_ts": (payload.get("message") or {}).get("ts"),
                 "channel_key": ch_key,
             },

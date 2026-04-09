@@ -61,6 +61,7 @@ def _decode_run(data: dict[str, Any]) -> RunRecord:
         "finished_at",
         "first_artifact_at",
         "last_artifact_at",
+        "result_updated_at",
     ):
         if key in data:
             parsed = _parse_dt(data[key])
@@ -170,6 +171,7 @@ class SQLiteRunStoreSync:
         finished_at: datetime | None = None,
         error: str | None = None,
         meta_update: dict[str, Any] | None = None,
+        field_updates: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             row = self._db.execute(
@@ -189,6 +191,12 @@ class SQLiteRunStoreSync:
                 meta = dict(data.get("meta") or {})
                 meta.update(meta_update)
                 data["meta"] = meta
+            if field_updates:
+                for key, value in field_updates.items():
+                    if isinstance(value, datetime):
+                        data[key] = value.isoformat()
+                    else:
+                        data[key] = value
 
             payload = json.dumps(data, ensure_ascii=False)
             finished_ts = _dt_to_ts(finished_at)
@@ -354,6 +362,7 @@ class SQLiteRunStore(RunStore):
         finished_at: datetime | None = None,
         error: str | None = None,
         meta_update: dict[str, Any] | None = None,
+        field_updates: dict[str, Any] | None = None,
     ) -> None:
         await asyncio.to_thread(
             self._sync.update_status,
@@ -362,6 +371,7 @@ class SQLiteRunStore(RunStore):
             finished_at=finished_at,
             error=error,
             meta_update=meta_update,
+            field_updates=field_updates,
         )
 
     async def get(self, run_id: str) -> RunRecord | None:

@@ -35,6 +35,7 @@ from ..runtime.run_cancellation import (
 from ..runtime.runtime_env import RuntimeEnv
 from ..runtime.runtime_metering import current_meter_context
 from ..runtime.runtime_services import ensure_services_installed
+from .injection import pop_explicit_node_context
 from .run_registration import RunRegistrationGuard
 
 
@@ -449,8 +450,8 @@ async def run_async(
             - session_id (str): Session identifier for grouping runs.
             - agent_id (str): Agent identifier for provenance.
             - app_id (str): Application identifier for provenance.
-            - retry (RetryPolicy): Custom retry policy.
-            - max_concurrency (int): Maximum number of concurrent tasks.
+            - retry (RetryPolicy): Custom retry policy for TaskGraph execution.
+            - max_concurrency (int): Maximum concurrent tasks for TaskGraph execution.
             - Any additional container attributes supported by your environment.
 
     Returns:
@@ -462,7 +463,9 @@ async def run_async(
 
     Notes:
         - Speficially for GraphFunctions, you can directly use `await graph_fn(**inputs)` without needing `run_async`.
+        - `graph_fn` runs as native Python with a synthetic root `NodeContext`; it does not build a DAG or use a scheduler.
         - `graph_fn` is not resumable; use TaskGraphs for persistence and recovery features.
+        - `retry` and `max_concurrency` apply to TaskGraph execution only and are ignored for `graph_fn`.
         - when using `graph` for persistence/resumability, ensure your outputs are JSON-serializable, for examples:
             - primitive types (str, int, float, bool, None)
             - lists/dicts of primitive types
@@ -503,32 +506,19 @@ async def run_async(
         inherited_identity = identity
         inherited_overrides = dict(rt_overrides)
 
-        parent_ctx = inputs.get("context")
+        inputs_for_inheritance = dict(inputs)
+        parent_ctx = pop_explicit_node_context(inputs_for_inheritance)
         if parent_ctx is not None:
-            # Prefer explicit context overrides, but also attempt to inherit from parent_ctx if available (e.g. for nested graph_fn calls within a graph run)
             if inherited_identity is None:
                 inherited_identity = getattr(parent_ctx, "identity", None)
             for key in ("run_id", "session_id", "agent_id", "app_id"):
                 value = getattr(parent_ctx, key, None)
                 if value is not None:
                     inherited_overrides.setdefault(key, value)
-        else:
-            # If no explicit context is provided, attempt to inherit from current interpreter's env if available (e.g. for nested graph_fn calls within a graph run)
-            from ..graph.interpreter import current_interpreter
-
-            interp = current_interpreter()
-            parent_env = getattr(interp, "env", None) if interp is not None else None
-            if parent_env is not None:
-                if inherited_identity is None:
-                    inherited_identity = getattr(parent_env, "identity", None)
-                for key in ("run_id", "session_id", "agent_id", "app_id"):
-                    value = getattr(parent_env, key, None)
-                    if value is not None:
-                        inherited_overrides.setdefault(key, value)
 
         env_inputs = dict(inputs)
-        env_inputs.pop("context", None)
-        env, retry, max_conc = await _build_env(
+        pop_explicit_node_context(env_inputs)
+        env, _retry, _max_conc = await _build_env(
             target,
             env_inputs,
             identity=inherited_identity,
@@ -536,7 +526,7 @@ async def run_async(
         )
         token = _register_metering_context(env, target)  # set metering context
         try:
-            return await target.run(env=env, max_concurrency=max_conc, **inputs)
+            return await target.run(env=env, **inputs)
         finally:
             # reset metering context
             current_meter_context.reset(token)
@@ -693,12 +683,20 @@ async def run_async(
 
     # Register for resumes and run
     token = _register_metering_context(env, target)  # set metering context
+    resolved_result: dict[str, Any] | None = None
     try:
         with RunRegistrationGuard(run_id=env.run_id, scheduler=sched, container=env.container):
             try:
                 await sched.run()
             except asyncio.CancelledError:
                 raise
+            else:
+                resolved_result = await _resolve_graph_outputs_or_waits(
+                    graph,
+                    inputs,
+                    env,
+                    raise_on_waits=False,
+                )
             finally:
                 # FINAL SNAPSHOT on normal or cancelled exit (if store exists)
                 if store and obs:
@@ -714,6 +712,8 @@ async def run_async(
                         allow_externalize=False,  # FIXME: artifact writer async loop error; set False to *avoid* writing artifacts during snapshot
                         include_wait_spec=True,
                     )
+                    if resolved_result and resolved_result.get("status") != "waiting":
+                        snap.state["graph_outputs"] = resolved_result
                     await store.save_snapshot(snap)
                 if cancel_handle.is_cancel_requested():
                     backend_state = await cancel_handle.backend_state()
@@ -722,7 +722,15 @@ async def run_async(
                         terminal_status="canceled",
                     )
 
-        # Resolve graph-level outputs (will raise  if waits)
+        if resolved_result is not None:
+            if resolved_result.get("status") == "waiting":
+                raise GraphHasPendingWaits(
+                    "Graph quiesced with pending waits; outputs are not yet resolvable.",
+                    waiting_nodes=list(resolved_result.get("waiting_nodes") or []),
+                    continuations=list(resolved_result.get("continuations") or []),
+                )
+            return resolved_result
+        # Resolve graph-level outputs (will raise if waits)
         return await _resolve_graph_outputs_or_waits(graph, inputs, env, raise_on_waits=True)
     finally:
         # reset metering context

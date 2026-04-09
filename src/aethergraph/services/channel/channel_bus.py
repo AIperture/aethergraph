@@ -3,6 +3,7 @@ from __future__ import annotations
 import warnings
 
 from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
+from aethergraph.services.channel.choices import build_choice_options, prompt_choices_from_prompt
 from aethergraph.services.continuations.continuation import Correlator
 
 
@@ -125,16 +126,17 @@ class ChannelBus:
                         or str(getattr(b, "value", "") or "").title()
                         or "Option"
                     )
-                    val = getattr(b, "value", None) or str(lbl).lower()
+                    val = getattr(b, "value", None) or str(lbl)
                     opts.append({"label": str(lbl), "value": str(val)})
             else:
-                for o in (event.meta or {}).get("options", []):
-                    s = str(o)
-                    opts.append({"label": s, "value": s.lower()})
+                for o in build_choice_options(
+                    (event.meta or {}).get("choices") or (event.meta or {}).get("options", [])
+                ):
+                    opts.append({"label": o.label, "value": o.id})
             if not opts:
                 opts = [
-                    {"label": "Approve", "value": "approve"},
-                    {"label": "Reject", "value": "reject"},
+                    {"label": "Approve", "value": "Approve"},
+                    {"label": "Reject", "value": "Reject"},
                 ]
             lines = [f"{i + 1}. {o['label']}" for i, o in enumerate(opts)]
             hint = "Reply with the number or the label."
@@ -142,6 +144,7 @@ class ChannelBus:
             meta = dict(event.meta or {})
             meta["options"] = [o["label"] for o in opts]
             meta["options_map"] = {str(i + 1): o["value"] for i, o in enumerate(opts)}
+            meta["choices"] = [{"id": o["value"], "label": o["label"]} for o in opts]
             meta["options_label_to_value"] = {o["label"].lower(): o["value"] for o in opts}
             return OutEvent(type="agent.message", channel=event.channel, text=txt, meta=meta)
 
@@ -252,19 +255,23 @@ class ChannelBus:
             event = OutEvent(type="session.need_input", channel=ch, text=txt, meta=meta)
             needed_cap = "input"
 
-        elif kind == "approval":
-            labels: list[str] = []
+        elif kind in ("approval", "choice"):
+            choices = []
             if isinstance(prompt, dict):
                 txt = prompt.get("title") or prompt.get("prompt") or "Approve?"
-                labels = prompt.get("buttons") or prompt.get("options") or []
+                choices = prompt_choices_from_prompt(prompt)
             elif isinstance(prompt, str):
                 txt = prompt or "Approve?"
             else:
                 txt = "Approve?"
-            if not labels:
-                labels = ["Approve", "Reject"]
-            btns = [Button(label=str(lab), value=str(lab).lower()) for lab in labels]
-            meta["options"] = labels
+            if not choices:
+                choices = build_choice_options(["Approve", "Reject"])
+            btns = [Button(label=choice.label, value=choice.id) for choice in choices]
+            meta["options"] = [choice.label for choice in choices]
+            meta["choices"] = [
+                {"id": choice.id, "label": choice.label, "aliases": list(choice.aliases)}
+                for choice in choices
+            ]
             meta["_prompt"] = True
             event = OutEvent(
                 type="session.need_approval", channel=ch, text=txt, buttons=btns, meta=meta

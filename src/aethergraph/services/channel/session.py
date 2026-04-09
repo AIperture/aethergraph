@@ -1,14 +1,22 @@
+import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 import inspect
 import logging
 from pathlib import Path, PurePath
+import random
 import time
 from typing import Any, Literal
 import uuid
 
 from aethergraph.contracts.services.artifacts import Artifact
-from aethergraph.contracts.services.channel import Button, FileRef, OutEvent
+from aethergraph.contracts.services.channel import Button, ChoiceOption, FileRef, OutEvent
+from aethergraph.services.channel.choices import (
+    build_choice_options,
+    choice_prompt_payload,
+    normalize_choice_reply,
+    prompt_choices_from_prompt,
+)
 from aethergraph.services.continuations.continuation import Correlator
 from aethergraph.services.tracing import resolve_tracer
 
@@ -279,6 +287,28 @@ class ChannelSession:
             event.channel = self._resolve_key(channel)
         return event
 
+    class _ChannelResult(dict):
+        """
+        Dict-compatible result that also supports tuple-style unpacking.
+
+        This preserves backward compatibility for call sites that expect mapping
+        access while allowing:
+
+        ```python
+        approved, choice, choice_label, text, matched = await context.channel().ask_approval(...)
+        ```
+        """
+
+        __slots__ = ("_iter_keys",)
+
+        def __init__(self, *args, iter_keys: tuple[str, ...], **kwargs):
+            super().__init__(*args, **kwargs)
+            self._iter_keys = iter_keys
+
+        def __iter__(self):
+            for key in self._iter_keys:
+                yield self.get(key)
+
     @property
     def _inbox_kv_key(self) -> str:
         """Key for this channel's inbox in ephemeral KV store (legacy helper)."""
@@ -477,6 +507,10 @@ class ChannelSession:
         *,
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
+        prefer_stream: bool = False,
+        stream_threshold_chars: int | None = None,
+        stream_chars_per_second: float | None = None,
+        stream_target_chunk_chars: int | None = None,
         # memory logging handled separately
         memory_log: bool = True,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
@@ -510,6 +544,10 @@ class ChannelSession:
             text: Message body to send.
             meta: Optional outbound event metadata.
             channel: Optional target channel key.
+            prefer_stream: When True, attempt to stream longer text with a typing effect.
+            stream_threshold_chars: Minimum text length required before streaming is attempted.
+            stream_chars_per_second: Optional override for streaming typing speed.
+            stream_target_chunk_chars: Optional override for average streaming chunk size.
             memory_log: Enable chat-memory logging for this call.
             memory_role: Role used for the memory record.
             memory_tags: Optional tags for the memory record.
@@ -523,6 +561,30 @@ class ChannelSession:
         Notes:
             Set adapter-specific display hints in `meta` (for example `name` or `agent_id`).
         """
+        if text and prefer_stream:
+            threshold = stream_threshold_chars if stream_threshold_chars is not None else 500
+            if len(text) >= max(1, threshold):
+                try:
+                    stream_kwargs: dict[str, Any] = {
+                        "channel": channel,
+                        "memory_log": memory_log,
+                        "memory_tags": memory_tags,
+                        "memory_data": memory_data,
+                        "memory_role": memory_role,
+                        "memory_severity": memory_severity,
+                        "memory_signal": memory_signal,
+                    }
+                    if stream_chars_per_second is not None:
+                        stream_kwargs["chars_per_second"] = stream_chars_per_second
+                    if stream_target_chunk_chars is not None:
+                        stream_kwargs["target_chunk_chars"] = stream_target_chunk_chars
+                    await self.stream_text(text, **stream_kwargs)
+                    return
+                except Exception:
+                    logging.getLogger("aethergraph.services.channel.session").debug(
+                        "send_text streaming fallback triggered",
+                        exc_info=True,
+                    )
 
         await self._log_chat(
             memory_role,
@@ -1188,11 +1250,18 @@ class ChannelSession:
             return None
 
         resume_kind = resume_payload.get("_channel_wait_kind")
-        if resume_kind is not None and resume_kind != kind:
+        compatible_kinds = {
+            kind,
+            "approval" if kind == "choice" else kind,
+            "choice" if kind == "approval" else kind,
+        }
+        if resume_kind is not None and resume_kind not in compatible_kinds:
             return None
 
         expected_prompt = expected_payload.get("prompt")
-        if "prompt" in resume_payload and resume_payload.get("prompt") != expected_prompt:
+        if "prompt" in resume_payload and not self._channel_prompts_match(
+            resume_payload.get("prompt"), expected_prompt
+        ):
             return None
 
         for key in ("accept", "multiple"):
@@ -1201,6 +1270,35 @@ class ChannelSession:
 
         self.ctx._channel_resume_payload_consumed = True
         return resume_payload
+
+    def _channel_prompts_match(self, actual_prompt: Any, expected_prompt: Any) -> bool:
+        if actual_prompt == expected_prompt:
+            return True
+
+        if not isinstance(actual_prompt, dict) or not isinstance(expected_prompt, dict):
+            return False
+
+        actual_title = actual_prompt.get("title") or actual_prompt.get("prompt")
+        expected_title = expected_prompt.get("title") or expected_prompt.get("prompt")
+        if actual_title != expected_title:
+            return False
+
+        actual_choices = prompt_choices_from_prompt(actual_prompt)
+        expected_choices = prompt_choices_from_prompt(expected_prompt)
+        if not actual_choices and not expected_choices:
+            return True
+        if len(actual_choices) != len(expected_choices):
+            return False
+
+        actual_norm = [
+            (choice.label.strip().lower(), tuple(a.strip().lower() for a in choice.aliases))
+            for choice in actual_choices
+        ]
+        expected_norm = [
+            (choice.label.strip().lower(), tuple(a.strip().lower() for a in choice.aliases))
+            for choice in expected_choices
+        ]
+        return actual_norm == expected_norm
 
     # ------------------ Public ask_* APIs (race-free, normalized) ------------------
     async def ask_text(
@@ -1355,6 +1453,8 @@ class ChannelSession:
         memory_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         """
+        Deprecated wrapper over `ask_choices()`.
+
         Prompt for a button-style approval choice and return normalized result.
 
         Send an `approval` continuation with button labels, wait for the user's
@@ -1392,18 +1492,61 @@ class ChannelSession:
         Notes:
             If no choice is returned, or `options` is empty, `approved` is `False`.
         """
+        result = await self.ask_choices(
+            prompt,
+            options=options,
+            timeout_s=timeout_s,
+            channel=channel,
+            memory_log_prompt=memory_log_prompt,
+            memory_log_reply=memory_log_reply,
+            memory_tags=memory_tags,
+        )
+        choice_options = build_choice_options(options)
+        approved = bool(choice_options) and result.get("choice") == choice_options[0].id
+        return ChannelSession._ChannelResult(
+            {
+                "approved": approved,
+                "choice": result.get("choice"),
+                "choice_label": result.get("choice_label"),
+                "text": result.get("text", ""),
+                "matched": result.get("matched", False),
+            },
+            iter_keys=("approved", "choice", "choice_label", "text", "matched"),
+        )
+
+    async def ask_choices(
+        self,
+        prompt: str,
+        options: Iterable[str | ChoiceOption | dict[str, Any]],
+        *,
+        timeout_s: int = 3600,
+        channel: str | None = None,
+        memory_log_prompt: bool = True,
+        memory_log_reply: bool = True,
+        memory_tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Prompt for a choice selection and return a normalized response.
+
+        Returns a dict with canonical `choice`, human-facing `choice_label`,
+        the raw freeform `text`, and `matched` indicating whether the reply
+        resolved to one of the configured options.
+        """
         channel_key = self._resolve_key(channel)
-        button_list = list(options)
+        choice_options = build_choice_options(options)
         span = await self._tracer.start_span(
             service="channel",
-            operation="ask_approval",
+            operation="ask_choices",
             request={
                 "prompt": prompt,
-                "options": button_list,
+                "options": [
+                    {"id": choice.id, "label": choice.label, "aliases": list(choice.aliases)}
+                    for choice in choice_options
+                ],
                 "timeout_s": timeout_s,
                 "channel_key": channel_key,
             },
-            tags=["channel", "ask", "approval"],
+            tags=["channel", "ask", "choice"],
             metadata=self._inject_context_meta({"channel_key": channel_key}),
         )
         try:
@@ -1411,44 +1554,50 @@ class ChannelSession:
                 await self._log_chat(
                     "assistant",
                     prompt,
-                    tags=[*(memory_tags or []), "ask_approval", "prompt"],
+                    tags=[*(memory_tags or []), "ask_choices", "prompt"],
                     enabled=memory_log_prompt,
                     channel=channel,
                 )
 
             payload = await self._ask_core(
-                kind="approval",
-                payload={"prompt": {"title": prompt, "buttons": button_list}},
+                kind="choice",
+                payload={"prompt": choice_prompt_payload(prompt, options=choice_options)},
                 channel=channel,
                 timeout_s=timeout_s,
             )
-            choice = payload.get("choice")
-            text = str(payload.get("text", "") or "")
-            if choice is None and text and button_list:
-                text_norm = text.strip().lower()
-                matched = next(
-                    (option for option in button_list if str(option).strip().lower() == text_norm),
-                    None,
-                )
-                if matched is not None:
-                    choice = matched
-            if choice is not None or text:
+            normalized = normalize_choice_reply(
+                prompt=choice_prompt_payload(prompt, options=choice_options),
+                raw_choice=payload.get("choice"),
+                raw_text=payload.get("text", ""),
+            )
+            if payload.get("choice_label") and normalized.get("choice_label") is None:
+                normalized["choice_label"] = payload.get("choice_label")
+            if payload.get("matched") is not None and not normalized.get("matched"):
+                normalized["matched"] = bool(payload.get("matched"))
+            if normalized.get("choice") is not None or normalized.get("text"):
                 await self._log_chat(
                     "user",
-                    f"Selected: {str(choice)}" + (f" | Text: {text}" if text else ""),
-                    tags=[*(memory_tags or []), "ask_approval", "reply"],
+                    f"Selected: {str(normalized.get('choice'))}"
+                    + (
+                        f" ({normalized.get('choice_label')})"
+                        if normalized.get("choice_label")
+                        else ""
+                    )
+                    + (f" | Text: {normalized.get('text')}" if normalized.get("text") else ""),
+                    tags=[*(memory_tags or []), "ask_choices", "reply"],
                     enabled=memory_log_reply,
                     channel=channel,
                 )
 
-            if choice is None or not button_list:
-                approved = False
-            else:
-                choice_norm = str(choice).strip().lower()
-                first_norm = str(button_list[0]).strip().lower()
-                approved = choice_norm == first_norm
-
-            result = {"approved": approved, "choice": choice, "text": text}
+            result = ChannelSession._ChannelResult(
+                {
+                    "choice": normalized.get("choice"),
+                    "choice_label": normalized.get("choice_label"),
+                    "text": normalized.get("text", ""),
+                    "matched": bool(normalized.get("matched")),
+                },
+                iter_keys=("choice", "choice_label", "text", "matched"),
+            )
             await span.finish(
                 response=result,
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
@@ -1854,6 +2003,96 @@ class ChannelSession:
         finally:
             # No auto-end; caller decides when to end()
             pass
+
+    async def stream_text(
+        self,
+        full_text: str,
+        *,
+        channel: str | None = None,
+        memory_log: bool = True,
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,
+        memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
+        # pacing knobs
+        chars_per_second: float = 18.0,
+        target_chunk_chars: int = 28,
+        min_delay: float = 0.05,
+        max_delay: float = 0.15,
+    ) -> None:
+        """
+        Stream pre-existing text with a typing animation effect.
+
+        Splits ``full_text`` on paragraph boundaries (``\\n\\n``), then sends
+        ``~target_chunk_chars`` characters per delta with a delay derived from
+        ``chars_per_second``, clamped to ``[min_delay, max_delay]``.  The UI
+        assembles and renders the content (markdown is supported); this method
+        only sends text deltas.
+
+        Examples:
+            Stream a static summary::
+
+                await chan.stream_text("## Summary\\n\\nAll checks passed.")
+
+            Stream with slower pacing and custom memory tags::
+
+                await chan.stream_text(
+                    report_text,
+                    chars_per_second=10,
+                    memory_tags=["report"],
+                )
+
+        Args:
+            full_text: The complete text to stream.
+            channel: Optional target channel key override.
+            memory_log: Whether to log the completed text to memory.
+            memory_tags: Tags attached to the memory entry.
+            memory_data: Structured data attached to the memory entry.
+            memory_role: Memory role for the logged entry.
+            memory_severity: Memory severity level.
+            memory_signal: Optional memory signal value.
+            chars_per_second: Target typing speed used to derive inter-delta delay.
+            target_chunk_chars: Mean size (in characters) of each delta chunk.
+            min_delay: Minimum delay in seconds between deltas.
+            max_delay: Maximum delay in seconds between deltas.
+        """
+        if not full_text:
+            return
+
+        paragraphs = full_text.split("\n\n")
+
+        async with self.stream(channel=channel) as s:
+            for p_idx, para in enumerate(paragraphs):
+                if p_idx > 0:
+                    para = "\n\n" + para
+
+                i = 0
+                n = len(para)
+                while i < n:
+                    chunk_len = max(
+                        8,
+                        int(random.gauss(target_chunk_chars, target_chunk_chars * 0.2)),
+                    )
+                    chunk = para[i : i + chunk_len]
+                    i += len(chunk)
+
+                    await s.delta(chunk)
+
+                    ideal_delay = len(chunk) / max(chars_per_second, 1.0)
+                    delay = ideal_delay * random.uniform(0.8, 1.2)
+                    delay = max(min_delay, min(max_delay, delay))
+                    await asyncio.sleep(delay)
+
+            await s.end(
+                full_text=full_text,
+                memory_log=memory_log,
+                memory_tags=memory_tags,
+                memory_data=memory_data,
+                memory_role=memory_role,
+                memory_severity=memory_severity,
+                memory_signal=memory_signal,
+            )
 
     async def chat_and_stream(
         self,

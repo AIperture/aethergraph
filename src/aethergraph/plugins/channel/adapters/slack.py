@@ -116,18 +116,38 @@ class SlackChannelAdapter(ChannelAdapter):
             buttons = getattr(event, "buttons", None) or []
             if not buttons:
                 # fallback to meta options
-                opts = (event.meta or {}).get("options", ["Approve", "Reject"])
+                opts = (event.meta or {}).get("choices") or (event.meta or {}).get(
+                    "options", ["Approve", "Reject"]
+                )
                 buttons = [
                     # mimic button objects;
                     type(
                         "B",
                         (),
-                        {"label": opts[0], "value": "approve", "style": "primary", "url": None},
+                        {
+                            "label": getattr(opts[0], "get", lambda x, y=None: None)("label")
+                            if isinstance(opts[0], dict)
+                            else opts[0],
+                            "value": getattr(opts[0], "get", lambda x, y=None: None)("id")
+                            if isinstance(opts[0], dict)
+                            else opts[0],
+                            "style": "primary",
+                            "url": None,
+                        },
                     ),
                     type(
                         "B",
                         (),
-                        {"label": opts[-1], "value": "reject", "style": "danger", "url": None},
+                        {
+                            "label": getattr(opts[-1], "get", lambda x, y=None: None)("label")
+                            if isinstance(opts[-1], dict)
+                            else opts[-1],
+                            "value": getattr(opts[-1], "get", lambda x, y=None: None)("id")
+                            if isinstance(opts[-1], dict)
+                            else opts[-1],
+                            "style": "danger",
+                            "url": None,
+                        },
                     ),
                 ]
 
@@ -151,6 +171,7 @@ class SlackChannelAdapter(ChannelAdapter):
                     # pack choice + correlators into value for /slack/interact
                     value_payload = {
                         "choice": getattr(b, "value", None) or b.label,
+                        "choice_label": b.label,
                     }
                     # if passing correlators via event.meta
                     if event.meta:

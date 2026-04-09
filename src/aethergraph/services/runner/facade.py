@@ -317,7 +317,8 @@ class RunFacade:
                 Final run record, or `(record, outputs)` when requested.
 
         Notes:
-            Output availability depends on in-process execution context.
+            When `return_outputs=True`, succeeded runs now resolve durable outputs
+            even after process boundaries when persisted results are available.
         """
         tracer = resolve_tracer()
         span = await tracer.start_span(

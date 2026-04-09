@@ -9,6 +9,7 @@ End-to-end local smoke test:
 5) import aethergraph and print some basic info
 """
 
+import argparse
 import os
 import shutil
 import subprocess
@@ -26,7 +27,14 @@ BACKEND_UI_STATIC = ROOT / "src" / "aethergraph" / "server" / "ui_static"
 DIST_DIR = ROOT / "dist"
 VENV_DIR = ROOT / ".venv-ag-test"
 
-BUILD_FRONTEND = False  # flip to True if you want frontend build in this flow
+UI_BUILD_COMMANDS = {
+    "oss": ["npm", "run", "build:oss"],
+}
+
+
+def npm_executable() -> str:
+    """Return the platform-appropriate npm executable name."""
+    return "npm.cmd" if os.name == "nt" else "npm"
 
 
 def run(cmd, cwd=None):
@@ -35,27 +43,48 @@ def run(cmd, cwd=None):
     subprocess.run(cmd, cwd=cwd, check=True)
 
 
-def build_frontend():
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the smoke-build flow."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--ui-build",
+        action="store_true",
+        help="Build the frontend bundle and copy it into src/aethergraph/server/ui_static before packaging.",
+    )
+    parser.add_argument(
+        "--ui-app",
+        choices=sorted(UI_BUILD_COMMANDS),
+        default="oss",
+        help="Frontend build target to use with --ui-build (default: oss).",
+    )
+    return parser.parse_args()
+
+
+def build_frontend(ui_app: str):
     """Build the React frontend and copy dist/ into backend ui_static/."""
     if not FRONTEND_DIR.exists():
-        print(f"[frontend] {FRONTEND_DIR} does not exist.")
-        proceed = input("Frontend directory not found. Proceed without copying frontend? [y/N]: ").strip().lower()
-        if proceed != "y":
-            print("Aborting.")
-            sys.exit(1)
-        print("[frontend] Skipping frontend build and copy step.")
-        return
+        raise FileNotFoundError(f"[frontend] Frontend directory does not exist: {FRONTEND_DIR}")
 
-    print("[frontend] Building frontend bundle...")
-    run(["npm", "install"], cwd=FRONTEND_DIR)
-    run(["npm", "run", "build", "--", "--base=/ui/"], cwd=FRONTEND_DIR)
+    npm_cmd = npm_executable()
+    build_cmd = [npm_cmd, *UI_BUILD_COMMANDS[ui_app][1:]]
+
+    print(f"[frontend] Building frontend bundle for '{ui_app}'...")
+    run([npm_cmd, "install"], cwd=FRONTEND_DIR)
+    run(build_cmd, cwd=FRONTEND_DIR)
+
+    if not FRONTEND_DIST.exists():
+        raise RuntimeError(f"[frontend] Build completed but dist/ was not created: {FRONTEND_DIST}")
+
+    dist_items = list(FRONTEND_DIST.iterdir())
+    if not dist_items:
+        raise RuntimeError(f"[frontend] Build completed but dist/ is empty: {FRONTEND_DIST}")
 
     if BACKEND_UI_STATIC.exists():
         shutil.rmtree(BACKEND_UI_STATIC)
     BACKEND_UI_STATIC.mkdir(parents=True, exist_ok=True)
 
     print(f"[frontend] Copying dist/ -> {BACKEND_UI_STATIC}")
-    for item in FRONTEND_DIST.iterdir():
+    for item in dist_items:
         target = BACKEND_UI_STATIC / item.name
         if item.is_dir():
             shutil.copytree(item, target)
@@ -140,12 +169,13 @@ main()
 
 
 def main():
+    args = parse_args()
     print(f"[info] Project root: {ROOT}")
 
-    if BUILD_FRONTEND:
-        build_frontend()
+    if args.ui_build:
+        build_frontend(args.ui_app)
     else:
-        print("[frontend] BUILD_FRONTEND=False, skipping frontend build step")
+        print("[frontend] --ui-build not set, skipping frontend build step")
 
     build_python_package()
     venv_python = create_fresh_venv()
