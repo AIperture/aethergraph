@@ -355,18 +355,25 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
 
         chat_task = asyncio.create_task(_send_chat())
         work_status_task = asyncio.create_task(_send_work_status())
-        done, pending = await asyncio.wait(
-            {chat_task, work_status_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-        for task in done:
-            exc = task.exception()
-            if exc is not None:
-                raise exc
+        try:
+            done, pending = await asyncio.wait(
+                {chat_task, work_status_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            for task in done:
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
+        finally:
+            for task in (chat_task, work_status_task):
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
 
     recv_task = send_task = None
     try:
