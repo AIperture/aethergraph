@@ -33,6 +33,8 @@ from aethergraph.api.v1.schemas.session import (
     SessionChatEvent,
     SessionChatEventListResponse,
     SessionCreateRequest,
+    SessionDashboardState,
+    SessionDashboardStateResponse,
     SessionListResponse,
     SessionRunsResponse,
     SessionUpdateRequest,
@@ -41,6 +43,11 @@ from aethergraph.api.v1.schemas.session import (
 )
 from aethergraph.core.runtime.run_types import RunImportance, RunVisibility, SessionKind
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.services.channel.session_dashboard_state import (
+    DASHBOARD_STATE_EVENT_KIND,
+    get_session_dashboard_state,
+    list_session_dashboard_states,
+)
 from aethergraph.services.channel.session_work_status import (
     WORK_STATUS_EVENT_KIND,
     get_session_work_status,
@@ -228,6 +235,20 @@ def _row_to_session_work_status(row: dict) -> SessionWorkStatus | None:
     return SessionWorkStatus.model_validate(raw)
 
 
+def _row_to_session_dashboard_state(row: dict) -> SessionDashboardState | None:
+    payload = dict(row.get("payload") or {})
+    raw = payload.get("dashboard")
+    if not raw:
+        return None
+    return SessionDashboardState.model_validate(raw)
+
+
+def _row_to_session_dashboard_patch(row: dict) -> dict | None:
+    payload = dict(row.get("payload") or {})
+    patch = payload.get("patch")
+    return dict(patch or {}) if isinstance(patch, dict) else None
+
+
 @router.websocket("/ws/sessions/{session_id}/chat")
 async def ws_session_chat(websocket: WebSocket, session_id: str):
     DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
@@ -297,6 +318,12 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
             since=None,
             limit=200,
         )
+        dashboard_rows = await event_log.query(
+            scope_id=session_id,
+            kinds=[DASHBOARD_STATE_EVENT_KIND],
+            since=None,
+            limit=500,
+        )
         filtered = []
         for ev in events:
             payload = ev.get("payload") or {}
@@ -325,6 +352,13 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
         snapshot_msg["work_status"] = (
             latest_work_status.model_dump() if latest_work_status else None
         )
+        latest_dashboards: dict[str, dict] = {}
+        for row in dashboard_rows:
+            dashboard = _row_to_session_dashboard_state(row)
+            if dashboard is None:
+                continue
+            latest_dashboards[dashboard.dashboard_id] = dashboard.model_dump()
+        snapshot_msg["dashboards"] = list(latest_dashboards.values())
         snapshot_msg["has_older"] = has_older
         if older_cursor is not None:
             snapshot_msg["older_cursor"] = older_cursor
@@ -353,11 +387,23 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
                     }
                 )
 
+        async def _send_dashboard_state() -> None:
+            async for row in hub.subscribe(scope_id=session_id, kind=DASHBOARD_STATE_EVENT_KIND):
+                dashboard = _row_to_session_dashboard_state(row)
+                await websocket.send_json(
+                    {
+                        "kind": "dashboard_state",
+                        "dashboard": dashboard.model_dump() if dashboard else None,
+                        "patch": _row_to_session_dashboard_patch(row),
+                    }
+                )
+
         chat_task = asyncio.create_task(_send_chat())
         work_status_task = asyncio.create_task(_send_work_status())
+        dashboard_task = asyncio.create_task(_send_dashboard_state())
         try:
             done, pending = await asyncio.wait(
-                {chat_task, work_status_task},
+                {chat_task, work_status_task, dashboard_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for task in pending:
@@ -529,6 +575,34 @@ async def get_session_work_status_api(
     return SessionWorkStatusResponse(
         work_status=SessionWorkStatus.model_validate(work_status) if work_status else None
     )
+
+
+@router.get("/sessions/{session_id}/dashboard-states", response_model=SessionDashboardStateResponse)
+async def get_session_dashboard_states_api(
+    session_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> SessionDashboardStateResponse:
+    sess = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, sess)
+    dashboards = await list_session_dashboard_states(session_id)
+    return SessionDashboardStateResponse(
+        dashboards=[SessionDashboardState.model_validate(item) for item in dashboards]
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/dashboard-states/{dashboard_id}",
+    response_model=SessionDashboardState | None,
+)
+async def get_session_dashboard_state_api(
+    session_id: str,
+    dashboard_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> SessionDashboardState | None:
+    sess = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, sess)
+    dashboard = await get_session_dashboard_state(session_id, dashboard_id)
+    return SessionDashboardState.model_validate(dashboard) if dashboard else None
 
 
 @router.patch("/sessions/{session_id}", response_model=Session)

@@ -410,6 +410,65 @@ class ChannelSession:
                 meta=self._meta(),
             )
 
+    class _SessionDashboardStateHandle:
+        def __init__(
+            self,
+            outer: "ChannelSession",
+            *,
+            session_id: str,
+            channel_key: str,
+            dashboard_id: str,
+        ) -> None:
+            self._outer = outer
+            self._session_id = session_id
+            self._channel_key = channel_key
+            self._dashboard_id = dashboard_id
+
+        def _meta(self) -> dict[str, Any]:
+            return self._outer._inject_context_meta({"channel_key": self._channel_key})
+
+        async def replace(self, state: dict[str, Any]) -> dict[str, Any]:
+            from aethergraph.services.channel.session_dashboard_state import (
+                replace_session_dashboard_state,
+            )
+
+            return await replace_session_dashboard_state(
+                session_id=self._session_id,
+                dashboard_state=state,
+                meta=self._meta(),
+            )
+
+        async def patch(
+            self,
+            *,
+            revision: int | None = None,
+            status: str | None = None,
+            ops: list[dict[str, Any]] | None = None,
+        ) -> dict[str, Any]:
+            from aethergraph.services.channel.session_dashboard_state import (
+                patch_session_dashboard_state,
+            )
+
+            return await patch_session_dashboard_state(
+                session_id=self._session_id,
+                dashboard_id=self._dashboard_id,
+                revision=revision,
+                status=status,
+                ops=ops,
+                meta=self._meta(),
+            )
+
+        async def clear(self) -> dict[str, Any]:
+            from aethergraph.services.channel.session_dashboard_state import (
+                clear_session_dashboard_state,
+            )
+
+            return await clear_session_dashboard_state(
+                session_id=self._session_id,
+                dashboard_id=self._dashboard_id,
+                meta=self._meta(),
+            )
+
     def work_status(self, *, workflow_id: str | None = None) -> "_SessionWorkStatusHandle":
         channel_key = self._resolve_key()
         session_id = self._extract_ui_session_id(channel_key)
@@ -418,6 +477,18 @@ class ChannelSession:
             session_id=session_id,
             channel_key=channel_key,
             workflow_id=workflow_id,
+        )
+
+    def dashboard_state(self, *, dashboard_id: str) -> "_SessionDashboardStateHandle":
+        if not dashboard_id:
+            raise ValueError("dashboard_state requires a non-empty dashboard_id")
+        channel_key = self._resolve_key()
+        session_id = self._extract_ui_session_id(channel_key)
+        return ChannelSession._SessionDashboardStateHandle(
+            self,
+            session_id=session_id,
+            channel_key=channel_key,
+            dashboard_id=dashboard_id,
         )
 
     async def send_phase(
