@@ -9,11 +9,14 @@ from aethergraph.core.runtime.run_types import SessionKind
 
 from .runs import RunSummary
 
+SessionTitleSource = Literal["manual", "auto"]
+
 
 class Session(BaseModel):
     session_id: str
     kind: SessionKind
     title: str | None = None
+    title_source: SessionTitleSource | None = None
     user_id: str | None = None
     org_id: str | None = None
     source: str = "webui"
@@ -140,3 +143,24 @@ class SessionDashboardStateResponse(BaseModel):
 class SessionUpdateRequest(BaseModel):
     title: str | None = None
     external_ref: str | None = None
+
+
+class SessionInferTitleRequest(BaseModel):
+    force: bool = False
+    mode: Literal["initial", "refresh"] = "initial"
+
+
+class SessionInferTitleResponse(BaseModel):
+    session_id: str
+    title: str | None = None
+    updated: bool = False
+    reason: (
+        Literal[
+            "generated",
+            "skipped_has_title",
+            "skipped_manual",
+            "skipped_no_context",
+            "skipped_disabled_llm",
+        ]
+        | None
+    ) = None

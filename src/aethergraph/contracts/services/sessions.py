@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 from aethergraph.api.v1.schemas import Session
 from aethergraph.core.runtime.run_types import SessionKind
@@ -57,6 +57,7 @@ class SessionStore(Protocol):
         session_id: str,
         *,
         title: str | None = None,
+        title_source: Literal["manual", "auto"] | None = None,
         external_ref: str | None = None,
     ) -> Session | None:
         """

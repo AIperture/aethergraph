@@ -2,6 +2,8 @@ import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime
 import logging
+import re
+from typing import Any
 
 from fastapi import (  # type: ignore
     APIRouter,
@@ -35,6 +37,8 @@ from aethergraph.api.v1.schemas.session import (
     SessionCreateRequest,
     SessionDashboardState,
     SessionDashboardStateResponse,
+    SessionInferTitleRequest,
+    SessionInferTitleResponse,
     SessionListResponse,
     SessionRunsResponse,
     SessionUpdateRequest,
@@ -55,6 +59,16 @@ from aethergraph.services.channel.session_work_status import (
 
 router = APIRouter(tags=["sessions"])
 logger = logging.getLogger(__name__)
+DROP_SESSION_HISTORY_TYPES = {"agent.stream.start", "agent.stream.delta"}
+VISIBLE_ASSISTANT_TYPES = {
+    "agent.message",
+    "agent.message.update",
+    "agent.stream.end",
+    "agent.message.error",
+    "session.need_input",
+    "session.need_approval",
+    "session.waiting",
+}
 
 
 def _ensure_session_access(identity: RequestIdentity, sess: Session) -> None:
@@ -249,10 +263,152 @@ def _row_to_session_dashboard_patch(row: dict) -> dict | None:
     return dict(patch or {}) if isinstance(patch, dict) else None
 
 
+def _normalize_session_title(raw: str, *, max_len: int = 64) -> str:
+    title = re.sub(r"\s+", " ", raw).strip()
+    title = re.sub(r"^(title\s*:\s*)", "", title, flags=re.IGNORECASE)
+    title = title.strip().strip("\"'`").strip()
+    title = re.sub(r"\s+", " ", title).strip()
+    return title[:max_len].rstrip(" .,:;!-")
+
+
+def _is_nonempty_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _extract_initial_title_context(events: list[SessionChatEvent]) -> tuple[str | None, str | None]:
+    first_user_text: str | None = None
+    first_assistant_text: str | None = None
+
+    for event in events:
+        event_type = event.type or ""
+        if (
+            first_user_text is None
+            and event_type == "user.message"
+            and _is_nonempty_text(event.text)
+        ):
+            first_user_text = event.text.strip()
+            continue
+
+        if (
+            first_user_text is not None
+            and first_assistant_text is None
+            and event_type in VISIBLE_ASSISTANT_TYPES
+            and _is_nonempty_text(event.text)
+        ):
+            first_assistant_text = event.text.strip()
+            break
+
+    return first_user_text, first_assistant_text
+
+
+def _extract_refresh_title_context(events: list[SessionChatEvent]) -> list[dict[str, str]]:
+    meaningful: list[dict[str, str]] = []
+    for event in events:
+        event_type = event.type or ""
+        text = event.text.strip() if _is_nonempty_text(event.text) else None
+        if not text:
+            continue
+        if event_type == "user.message":
+            meaningful.append({"role": "user", "content": text})
+        elif event_type in VISIBLE_ASSISTANT_TYPES:
+            meaningful.append({"role": "assistant", "content": text})
+
+    if len(meaningful) < 2:
+        return []
+
+    anchor = meaningful[:2]
+    recent = meaningful[-6:]
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in anchor + recent:
+        key = (item["role"], item["content"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+async def _query_session_chat_events(
+    session_id: str, *, limit: int = 100
+) -> list[SessionChatEvent]:
+    container = current_services()
+    event_log = getattr(container, "eventlog", None)
+    if event_log is None:
+        return []
+
+    rows = await event_log.query(
+        scope_id=session_id,
+        kinds=["session_chat"],
+        since=None,
+        limit=limit,
+    )
+    rows = [
+        row
+        for row in rows
+        if ((row.get("payload") or {}).get("type") or "agent.message")
+        not in DROP_SESSION_HISTORY_TYPES
+    ]
+    rows.sort(key=lambda row: row.get("ts") or 0)
+    return [_row_to_session_chat_event(row, session_id) for row in rows]
+
+
+async def _infer_session_title_from_events(
+    session_id: str,
+    *,
+    mode: str = "initial",
+) -> str | None:
+    events = await _query_session_chat_events(session_id, limit=100)
+
+    container = current_services()
+    llm_service = getattr(container, "llm", None)
+    if llm_service is None:
+        raise RuntimeError("LLM service not available")
+
+    client = llm_service.get("default")
+    if mode == "refresh":
+        context_messages = _extract_refresh_title_context(events)
+        if not context_messages:
+            return None
+        prompt = (
+            "Generate a concise workspace title for this conversation.\n"
+            "Return only the title.\n"
+            "Use 3 to 7 words.\n"
+            "Prefer the current topic of the conversation, not generic labels.\n"
+            "Do not use quotes."
+        )
+        messages = [
+            {"role": "system", "content": "You create short, precise conversation titles."},
+            {"role": "user", "content": prompt},
+            *context_messages,
+        ]
+    else:
+        user_text, assistant_text = _extract_initial_title_context(events)
+        if not user_text or not assistant_text:
+            return None
+        prompt = (
+            "Generate a concise workspace title for this conversation.\n"
+            "Return only the title.\n"
+            "Use 3 to 7 words.\n"
+            "Do not use quotes.\n\n"
+            f"User: {user_text}\n"
+            f"Assistant: {assistant_text}"
+        )
+        messages = [
+            {"role": "system", "content": "You create short, precise conversation titles."},
+            {"role": "user", "content": prompt},
+        ]
+    text, _usage = await client.chat(
+        messages=messages,
+        max_output_tokens=32,
+        call_name="session_infer_title",
+    )
+    title = _normalize_session_title(text)
+    return title or None
+
+
 @router.websocket("/ws/sessions/{session_id}/chat")
 async def ws_session_chat(websocket: WebSocket, session_id: str):
-    DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
-
     container = current_services()
     event_log = container.eventlog
     hub = getattr(container, "eventhub", None)
@@ -328,7 +484,7 @@ async def ws_session_chat(websocket: WebSocket, session_id: str):
         for ev in events:
             payload = ev.get("payload") or {}
             t = payload.get("type") or "agent.message"
-            if t in DROP_FROM_HISTORY:
+            if t in DROP_SESSION_HISTORY_TYPES:
                 continue
             filtered.append(ev)
 
@@ -467,8 +623,6 @@ async def get_session_chat_events(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> SessionChatEventListResponse:
-    DROP_FROM_HISTORY = {"agent.stream.start", "agent.stream.delta"}
-
     container = current_services()
     event_log = container.eventlog
 
@@ -514,7 +668,11 @@ async def get_session_chat_events(
         events = [ev for ev in events if (ev.get("ts") or 0) > since_ts]
 
     # Filter legacy persisted deltas/start
-    events = [ev for ev in events if (ev.get("payload") or {}).get("type") not in DROP_FROM_HISTORY]
+    events = [
+        ev
+        for ev in events
+        if (ev.get("payload") or {}).get("type") not in DROP_SESSION_HISTORY_TYPES
+    ]
 
     # Determine next_cursor before trimming
     has_more = len(events) > limit
@@ -562,6 +720,71 @@ async def get_session_chat_events(
     out.sort(key=lambda e: e.ts)
 
     return SessionChatEventListResponse(events=out, next_cursor=next_cursor)
+
+
+@router.post("/sessions/{session_id}/infer-title", response_model=SessionInferTitleResponse)
+async def infer_session_title(
+    session_id: str,
+    body: SessionInferTitleRequest,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> SessionInferTitleResponse:
+    container = current_services()
+    ss = getattr(container, "session_store", None)
+    if ss is None:
+        raise HTTPException(status_code=500, detail="SessionStore not available")
+
+    session = await _get_session_or_404(session_id)
+    _ensure_session_access(identity, session)
+
+    if session.title_source == "manual" and not body.force:
+        return SessionInferTitleResponse(
+            session_id=session_id,
+            title=session.title,
+            updated=False,
+            reason="skipped_manual",
+        )
+
+    if session.title and not body.force:
+        return SessionInferTitleResponse(
+            session_id=session_id,
+            title=session.title,
+            updated=False,
+            reason="skipped_has_title",
+        )
+
+    try:
+        title = await _infer_session_title_from_events(session_id, mode=body.mode)
+    except RuntimeError:
+        return SessionInferTitleResponse(
+            session_id=session_id,
+            title=session.title,
+            updated=False,
+            reason="skipped_disabled_llm",
+        )
+    except Exception as exc:
+        logger.exception("Failed to infer title for session %s", session_id)
+        raise HTTPException(
+            status_code=502, detail=f"Failed to infer session title: {exc}"
+        ) from exc
+
+    if not title:
+        return SessionInferTitleResponse(
+            session_id=session_id,
+            title=session.title,
+            updated=False,
+            reason="skipped_no_context",
+        )
+
+    updated = await ss.update(session_id, title=title, title_source="auto")
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    return SessionInferTitleResponse(
+        session_id=session_id,
+        title=updated.title,
+        updated=True,
+        reason="generated",
+    )
 
 
 @router.get("/sessions/{session_id}/work-status", response_model=SessionWorkStatusResponse)
@@ -622,6 +845,7 @@ async def update_session(
     updated = await ss.update(
         session_id,
         title=body.title,
+        title_source="manual" if body.title is not None else None,
         external_ref=body.external_ref,
     )
     if updated is None:
