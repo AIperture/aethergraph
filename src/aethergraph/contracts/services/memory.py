@@ -132,6 +132,59 @@ class MemoryFacadeProtocol(Protocol):
         metrics: dict[str, float] | None = None,
     ) -> Event: ...
 
+    async def append_event(
+        self,
+        *,
+        kind: str,
+        data: Any,
+        tags: list[str] | None = None,
+        severity: int = 2,
+        stage: str | None = None,
+        inputs=None,
+        outputs=None,
+        metrics: dict[str, float] | None = None,
+        signal: float | None = None,
+        text: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
+    ) -> Event: ...
+
+    async def append_chat_turn(
+        self,
+        role: Literal["user", "assistant", "system", "tool"],
+        text: str,
+        *,
+        tags: list[str] | None = None,
+        data: dict[str, Any] | None = None,
+        severity: int = 2,
+        signal: float | None = None,
+    ) -> Event: ...
+
+    async def append_tool_result(
+        self,
+        *,
+        tool: str,
+        inputs: list[dict[str, Any]] | None = None,
+        outputs: list[dict[str, Any]] | None = None,
+        tags: list[str] | None = None,
+        metrics: dict[str, float] | None = None,
+        message: str | None = None,
+        severity: int = 3,
+    ) -> Event: ...
+
+    async def append_state_snapshot(
+        self,
+        key: str,
+        value: Any,
+        *,
+        tags: list[str] | None = None,
+        meta: dict[str, Any] | None = None,
+        severity: int = 2,
+        signal: float | None = None,
+        kind: str = "state.snapshot",
+        stage: str | None = None,
+    ) -> Event: ...
+
     async def record(
         self,
         kind: str,
@@ -186,6 +239,67 @@ class MemoryFacadeProtocol(Protocol):
         return_event: bool = True,
     ) -> list[Any]: ...
 
+    async def query_events(
+        self,
+        *,
+        kinds: list[str] | None = None,
+        tags: list[str] | None = None,
+        limit: int = 50,
+        level: str | None = None,
+        use_persistence: bool = False,
+        since: str | None = None,
+        until: str | None = None,
+        offset: int = 0,
+        return_event: bool = True,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        client_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
+    ) -> list[Any]: ...
+
+    async def get_latest_state(
+        self,
+        key: str,
+        *,
+        tags=None,
+        level: str | None = None,
+        use_persistence: bool = False,
+        kind: str = "state.snapshot",
+    ) -> Any | None: ...
+
+    async def list_state_history(
+        self,
+        key: str,
+        *,
+        tags=None,
+        limit: int = 50,
+        level: str | None = None,
+        kind: str = "state.snapshot",
+        use_persistence: bool = False,
+    ) -> list[Event]: ...
+
+    async def search_state(
+        self,
+        query: str,
+        *,
+        key: str | None = None,
+        tags=None,
+        top_k: int = 10,
+        time_window: str | None = None,
+        created_at_min: float | None = None,
+        created_at_max: float | None = None,
+    ) -> list[Any]: ...
+
+    async def distill_summary(self, **kwargs) -> dict[str, Any]: ...
+
+    async def list_summaries(self, **kwargs) -> list[dict[str, Any]]: ...
+
+    async def get_latest_summary(self, *args, **kwargs) -> dict[str, Any] | None: ...
+
 
 class HotLog(Protocol):
     async def append(self, timeline_id: str, evt: Event, *, ttl_s: int, limit: int) -> None: ...
@@ -204,6 +318,11 @@ class HotLog(Protocol):
         session_id: str | None = None,
         run_id: str | None = None,
         agent_id: str | None = None,
+        client_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Event]: ...
@@ -231,6 +350,11 @@ class Persistence(Protocol):
         session_id: str | None = None,
         run_id: str | None = None,
         agent_id: str | None = None,
+        client_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Event]: ...

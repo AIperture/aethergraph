@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import uuid
 
 from aethergraph.api.v1.schemas import Session
@@ -23,12 +23,13 @@ class InMemorySessionStore(SessionStore):
         external_ref: str | None = None,
     ) -> Session:
         async with self._lock:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             session_id = f"sess_{uuid.uuid4().hex[:8]}"
             sess = Session(
                 session_id=session_id,
                 kind=kind,
                 title=title,
+                title_source="manual" if (title or "").strip() else None,
                 user_id=user_id,
                 org_id=org_id,
                 source=source,
@@ -81,13 +82,14 @@ class InMemorySessionStore(SessionStore):
             sess = self._sessions.get(session_id)
             if not sess:
                 return
-            sess.updated_at = updated_at or datetime.now(timezone.utc)
+            sess.updated_at = updated_at or datetime.now(UTC)
 
     async def update(
         self,
         session_id: str,
         *,
         title: str | None = None,
+        title_source: str | None = None,
         external_ref: str | None = None,
     ) -> Session | None:
         async with self._lock:
@@ -98,10 +100,11 @@ class InMemorySessionStore(SessionStore):
             # Mutate in-place (Session is a Pydantic model or similar)
             if title is not None:
                 sess.title = title
+                sess.title_source = title_source or "manual"
             if external_ref is not None:
                 sess.external_ref = external_ref
 
-            sess.updated_at = datetime.now(timezone.utc)
+            sess.updated_at = datetime.now(UTC)
             self._sessions[session_id] = sess
             return sess
 

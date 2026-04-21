@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -21,7 +21,7 @@ def _dt_to_ts(dt: datetime | None) -> float | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.timestamp()
 
 
@@ -37,7 +37,7 @@ def _parse_dt(val: Any) -> datetime | None:
             return None
     if isinstance(val, int | float):
         try:
-            return datetime.fromtimestamp(float(val), tz=timezone.utc)
+            return datetime.fromtimestamp(float(val), tz=UTC)
         except Exception:
             return None
     return None
@@ -185,11 +185,12 @@ class SQLiteSessionStoreSync:
         source: str = "webui",
         external_ref: str | None = None,
     ) -> Session:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         sess = Session(
             session_id=str(uuid.uuid4()),
             kind=kind,
             title=title,
+            title_source="manual" if (title or "").strip() else None,
             user_id=user_id,
             org_id=org_id,
             source=source,
@@ -258,7 +259,7 @@ class SQLiteSessionStoreSync:
         sess = self.get(session_id)
         if not sess:
             return
-        sess.updated_at = updated_at or datetime.now(timezone.utc)
+        sess.updated_at = updated_at or datetime.now(UTC)
         self._upsert(sess)
 
     def update(
@@ -266,6 +267,7 @@ class SQLiteSessionStoreSync:
         session_id: str,
         *,
         title: str | None = None,
+        title_source: str | None = None,
         external_ref: str | None = None,
     ) -> Session | None:
         sess = self.get(session_id)
@@ -273,9 +275,10 @@ class SQLiteSessionStoreSync:
             return None
         if title is not None:
             sess.title = title
+            sess.title_source = title_source or "manual"
         if external_ref is not None:
             sess.external_ref = external_ref
-        sess.updated_at = datetime.now(timezone.utc)
+        sess.updated_at = datetime.now(UTC)
         return self._upsert(sess)
 
     def record_artifact(
@@ -292,7 +295,7 @@ class SQLiteSessionStoreSync:
         if not sess:
             return
 
-        ts = created_at or datetime.now(timezone.utc)
+        ts = created_at or datetime.now(UTC)
 
         sess.artifact_count = (sess.artifact_count or 0) + 1
         if sess.last_artifact_at is None or ts > sess.last_artifact_at:
@@ -302,7 +305,7 @@ class SQLiteSessionStoreSync:
         if ts > sess.updated_at:
             sess.updated_at = ts
         else:
-            sess.updated_at = datetime.now(timezone.utc)
+            sess.updated_at = datetime.now(UTC)
 
         self._upsert(sess)
 
@@ -370,12 +373,14 @@ class SQLiteSessionStore(SessionStore):
         session_id: str,
         *,
         title: str | None = None,
+        title_source: str | None = None,
         external_ref: str | None = None,
     ) -> Session | None:
         return await asyncio.to_thread(
             self._sync.update,
             session_id,
             title=title,
+            title_source=title_source,
             external_ref=external_ref,
         )
 

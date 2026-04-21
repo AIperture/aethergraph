@@ -25,6 +25,26 @@ def short_hash(s: str, n: int = 8) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:n]
 
 
+def normalize_tags(tags: list[str] | None) -> list[str]:
+    """
+    Normalize tags by trimming whitespace, dropping empties, and de-duplicating
+    while preserving first-seen order.
+    """
+    if not tags:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in tags:
+        if not tag:
+            continue
+        value = str(tag).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
 def slug(s: str) -> str:
     s = unicodedata.normalize("NFKC", str(s)).strip()
     s = s.replace(" ", "-")

@@ -117,6 +117,11 @@ class EventLogPersistence(Persistence):
         session_id: str | None = None,
         run_id: str | None = None,
         agent_id: str | None = None,
+        client_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Event]:
@@ -125,11 +130,19 @@ class EventLogPersistence(Persistence):
             since=since,
             until=until,
             kinds=kinds,
-            tags=None,
-            limit=None,
-            offset=0,
+            tags=tags,
+            limit=limit,
+            offset=offset,
             user_id=tenant.get("user_id") if tenant else None,
             org_id=tenant.get("org_id") if tenant else None,
+            client_id=client_id,
+            session_id=session_id,
+            run_id=run_id,
+            agent_id=agent_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            topic=topic,
+            tool=tool,
         )
         events = [
             self._event_from_row(row)
@@ -144,13 +157,14 @@ class EventLogPersistence(Persistence):
                 session_id=session_id,
                 run_id=run_id,
                 agent_id=agent_id,
+                client_id=client_id,
+                graph_id=graph_id,
+                node_id=node_id,
+                topic=topic,
+                tool=tool,
             )
         ]
         events.sort(key=lambda e: (event_time(e), e.event_id))
-        if offset:
-            events = events[offset:]
-        if limit is not None:
-            events = events[:limit]
         return events
 
     async def query_events_view(

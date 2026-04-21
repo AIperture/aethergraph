@@ -18,7 +18,6 @@ from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.resume.router import ResumeRouter
 
 from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID, RESERVED_INJECTABLES
-from .bound_memory import BoundMemoryAdapter
 from .node_context import NodeContext
 from .node_services import NodeServices
 
@@ -40,8 +39,6 @@ class ExecutionContext:
     should_run_fn: Callable[[], bool] | None = None
     resume_router: ResumeRouter | None = None  # ResumeRouter
     scope: Scope | None = None  # Node Scope
-    # Back-compat shim
-    bound_memory: BoundMemoryAdapter | None = None
 
     def create_node_context(self, node: TaskNodeRuntime) -> NodeContext:
         return NodeContext(
@@ -55,8 +52,6 @@ class ExecutionContext:
             scope=self.scope,
             agent_id=self.agent_id,
             app_id=self.app_id,
-            # back-compat for old ctx.mem()
-            bound_memory=self.bound_memory,
         )
 
     # ----- helpers used by step forward() -----

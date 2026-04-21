@@ -9,11 +9,14 @@ from aethergraph.core.runtime.run_types import SessionKind
 
 from .runs import RunSummary
 
+SessionTitleSource = Literal["manual", "auto"]
+
 
 class Session(BaseModel):
     session_id: str
     kind: SessionKind
     title: str | None = None
+    title_source: SessionTitleSource | None = None
     user_id: str | None = None
     org_id: str | None = None
     source: str = "webui"
@@ -112,6 +115,52 @@ class SessionWorkStatusResponse(BaseModel):
     work_status: SessionWorkStatus | None = None
 
 
+class SessionDashboardPatchOp(BaseModel):
+    op: Literal["replace", "add", "remove", "append"]
+    path: str
+    value: Any | None = None
+
+
+class SessionDashboardState(BaseModel):
+    dashboard_id: str
+    dashboard_type: str
+    workflow_id: str
+    revision: int
+    status: str
+    updated_at: str
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionDashboardEnvelope(BaseModel):
+    dashboard: SessionDashboardState | None = None
+    patch: dict[str, Any] | None = None
+
+
+class SessionDashboardStateResponse(BaseModel):
+    dashboards: list[SessionDashboardState] = Field(default_factory=list)
+
+
 class SessionUpdateRequest(BaseModel):
     title: str | None = None
     external_ref: str | None = None
+
+
+class SessionInferTitleRequest(BaseModel):
+    force: bool = False
+    mode: Literal["initial", "refresh"] = "initial"
+
+
+class SessionInferTitleResponse(BaseModel):
+    session_id: str
+    title: str | None = None
+    updated: bool = False
+    reason: (
+        Literal[
+            "generated",
+            "skipped_has_title",
+            "skipped_manual",
+            "skipped_no_context",
+            "skipped_disabled_llm",
+        ]
+        | None
+    ) = None

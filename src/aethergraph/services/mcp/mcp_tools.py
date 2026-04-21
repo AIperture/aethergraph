@@ -13,8 +13,8 @@ async def mcp_call(server: str, tool_name: str, args: dict | None = None, *, con
 @tool(outputs=["tools"], name="mcp.list_tools", version="0.1.0")
 async def mcp_list_tools(server: str, *, context: NodeContext):
     tools = await context.mcp(server).list_tools()
-    await context.mem().write_result(
-        topic=f"mcp.{server}.list_tools",
+    await context.memory().append_tool_result(
+        tool=f"mcp.{server}.list_tools",
         outputs=[{"name": "tools", "kind": "json", "value": tools}],
         tags=["mcp"],
     )

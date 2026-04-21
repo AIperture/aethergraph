@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 import uuid
 
@@ -69,12 +69,13 @@ class DocSessionStore(SessionStore):
         source: str = "webui",
         external_ref: str | None = None,
     ) -> Session:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         session_id = f"sess_{uuid.uuid4().hex[:8]}"
         sess = Session(
             session_id=session_id,
             kind=kind,
             title=title,
+            title_source="manual" if (title or "").strip() else None,
             user_id=user_id,
             org_id=org_id,
             source=source,
@@ -150,7 +151,7 @@ class DocSessionStore(SessionStore):
             doc = await self._ds.get(doc_id)
             if doc is None:
                 return
-            doc["updated_at"] = _encode_dt(updated_at or datetime.now(timezone.utc))
+            doc["updated_at"] = _encode_dt(updated_at or datetime.now(UTC))
             await self._ds.put(doc_id, doc)
 
     async def update(
@@ -158,6 +159,7 @@ class DocSessionStore(SessionStore):
         session_id: str,
         *,
         title: str | None = None,
+        title_source: str | None = None,
         external_ref: str | None = None,
     ) -> Session | None:
         doc_id = self._doc_id(session_id)
@@ -168,11 +170,12 @@ class DocSessionStore(SessionStore):
 
             if title is not None:
                 doc["title"] = title
+                doc["title_source"] = title_source or "manual"
             if external_ref is not None:
                 doc["external_ref"] = external_ref
 
             # Always bump updated_at
-            doc["updated_at"] = _encode_dt(datetime.now(timezone.utc))
+            doc["updated_at"] = _encode_dt(datetime.now(UTC))
 
             await self._ds.put(doc_id, doc)
 
