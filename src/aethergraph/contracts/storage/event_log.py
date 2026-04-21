@@ -30,6 +30,14 @@ class EventLog(Protocol):
         offset: int = 0,  # pagination offset
         user_id: str | None = None,
         org_id: str | None = None,
+        client_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
         after_id: int | None = None,  # keyset cursor: return events with id > after_id
         before_id: int | None = None,  # keyset cursor: return events with id < before_id (backward)
     ) -> list[dict]: ...

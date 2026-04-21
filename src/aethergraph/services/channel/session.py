@@ -238,14 +238,19 @@ class ChannelSession:
         if not mem:
             return
 
-        await mem.record_chat(
-            role,
-            text,
-            tags=self._default_chat_tags(tags, channel=channel),
-            data=data,
-            severity=severity,
-            signal=signal,
-        )
+        payload = {
+            "tags": self._default_chat_tags(tags, channel=channel),
+            "data": data,
+            "severity": severity,
+            "signal": signal,
+        }
+        append_chat_turn = getattr(mem, "append_chat_turn", None)
+        if callable(append_chat_turn):
+            await append_chat_turn(role, text, **payload)
+            return
+        record_chat = getattr(mem, "record_chat", None)
+        if callable(record_chat):
+            await record_chat(role, text, **payload)
 
     def _resolve_default_key(self) -> str:
         """Unified default resolver (bus default → console)."""

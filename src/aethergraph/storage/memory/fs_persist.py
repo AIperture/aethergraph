@@ -132,6 +132,11 @@ class FSPersistence(Persistence):
         session_id: str | None = None,
         run_id: str | None = None,
         agent_id: str | None = None,
+        client_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Event]:
@@ -155,6 +160,11 @@ class FSPersistence(Persistence):
                             session_id=session_id,
                             run_id=run_id,
                             agent_id=agent_id,
+                            client_id=client_id,
+                            graph_id=graph_id,
+                            node_id=node_id,
+                            topic=topic,
+                            tool=tool,
                         ):
                             continue
                         out.append(self._event_from_row(data))

@@ -35,7 +35,6 @@ from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.websearch.facade import WebSearchFacade
 
 from .base_service import _ServiceHandle
-from .bound_memory import BoundMemoryAdapter
 from .node_services import NodeServices
 
 
@@ -51,8 +50,6 @@ class NodeContext:
     scope: Scope | None = None
     agent_id: str | None = None  # for agent-invoked runs
     app_id: str | None = None  # for app-invoked runs
-    bound_memory: BoundMemoryAdapter | None = None  # back-compat
-
     _planner_facade: NodePlanner | None = None  # lazy init
 
     # --- accessors (compatible names) ---
@@ -515,11 +512,9 @@ class NodeContext:
             kind=kind,
         )
 
-    # Back-compat: old ctx.mem() -> To be deprecated
-    def mem(self) -> BoundMemoryAdapter:
-        if not self.bound_memory:
-            raise RuntimeError("BoundMemory adapter not available")
-        return self.bound_memory
+    # Back-compat: old ctx.mem() now returns the bound MemoryFacade directly.
+    def mem(self) -> MemoryFacade:
+        return self.memory()
 
     # Artifacts / index
     def artifacts(self) -> ArtifactFacade:

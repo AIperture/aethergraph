@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 import threading
@@ -26,13 +26,13 @@ def _to_ts_float(v) -> float | None:
             s = v.replace("Z", "+00:00") if v.endswith("Z") else v
             dt = datetime.fromisoformat(s)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return dt.timestamp()
         except Exception:
             return None
     if isinstance(v, datetime):
         if v.tzinfo is None:
-            v = v.replace(tzinfo=timezone.utc)
+            v = v.replace(tzinfo=UTC)
         return v.timestamp()
     return None
 
@@ -74,6 +74,14 @@ class FSEventLog(EventLog):
         offset: int = 0,
         user_id: str | None = None,
         org_id: str | None = None,
+        client_id: str | None = None,
+        session_id: str | None = None,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
         after_id: int | None = None,
         before_id: int | None = None,
     ) -> list[dict]:
@@ -121,6 +129,22 @@ class FSEventLog(EventLog):
                     if user_id is not None and row.get("user_id") != user_id:
                         continue
                     if org_id is not None and row.get("org_id") != org_id:
+                        continue
+                    if client_id is not None and row.get("client_id") != client_id:
+                        continue
+                    if session_id is not None and row.get("session_id") != session_id:
+                        continue
+                    if run_id is not None and row.get("run_id") != run_id:
+                        continue
+                    if agent_id is not None and row.get("agent_id") != agent_id:
+                        continue
+                    if graph_id is not None and row.get("graph_id") != graph_id:
+                        continue
+                    if node_id is not None and row.get("node_id") != node_id:
+                        continue
+                    if topic is not None and row.get("topic") != topic:
+                        continue
+                    if tool is not None and row.get("tool") != tool:
                         continue
 
                     out.append(row)

@@ -32,7 +32,6 @@ from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.websearch.facade import WebSearchFacade
 
 from ..graph.task_node import TaskNodeRuntime
-from .bound_memory import BoundMemoryAdapter
 from .execution_context import ExecutionContext
 from .node_services import NodeServices
 
@@ -124,13 +123,13 @@ class RuntimeEnv:
     def make_ctx(
         self, *, node: "TaskNodeRuntime", resume_payload: dict[str, Any] | None = None
     ) -> Any:
-        defaults = {
-            "run_id": self.run_id,
-            "graph_id": self.graph_id,
-            "node_id": node.node_id,
-            "tags": [],
-            "entities": [],
-        }
+        # defaults = {
+        #     "run_id": self.run_id,
+        #     "graph_id": self.graph_id,
+        #     "node_id": node.node_id,
+        #     "tags": [],
+        #     "entities": [],
+        # }
 
         node_scope = (
             self.container.scope_factory.for_node(
@@ -295,8 +294,6 @@ class RuntimeEnv:
             resume_payload=resume_payload,
             should_run_fn=self.should_run_fn,
             scope=node_scope,
-            # Back-compat shim for old ctx.mem()
-            bound_memory=BoundMemoryAdapter(mem, defaults),
             resume_router=self.resume_router,
         )
 

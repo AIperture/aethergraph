@@ -21,6 +21,16 @@ def _to_serializable(value: Any) -> Any:
     return value
 
 
+async def _call_memory_method(memory: Any, primary: str, fallback: str, /, *args, **kwargs):
+    method = getattr(memory, primary, None)
+    if callable(method):
+        return await method(*args, **kwargs)
+    fallback_method = getattr(memory, fallback, None)
+    if callable(fallback_method):
+        return await fallback_method(*args, **kwargs)
+    raise AttributeError(f"Memory object has neither {primary!r} nor {fallback!r}")
+
+
 class AgentStateHandle(Generic[T]):
     def __init__(
         self,
@@ -76,10 +86,13 @@ class AgentStateHandle(Generic[T]):
         if self.backend == "local":
             self._cached = self._default()
             return self._cached
-        raw = await self.memory.latest_state(
+        raw = await _call_memory_method(
+            self.memory,
+            "get_latest_state",
+            "latest_state",
             self.key,
             level=self.level,
-            user_persistence=user_persistence,
+            use_persistence=user_persistence,
             kind=self.kind,
         )
         self._cached = self._hydrate(raw)
@@ -109,7 +122,10 @@ class AgentStateHandle(Generic[T]):
             merged_meta["reason"] = reason
         if stage_id:
             merged_meta["stage_id"] = stage_id
-        return await self.memory.record_state(
+        return await _call_memory_method(
+            self.memory,
+            "append_state_snapshot",
+            "record_state",
             key=self.key,
             value=_to_serializable(state),
             tags=[*self.tags, *list(tags or [])],
@@ -168,7 +184,10 @@ class AgentStateHandle(Generic[T]):
             "patch": dict(patch or {}),
         }
         text = summary or f"agent state changed: {self.key} {reason}".strip()
-        return await self.memory.record(
+        return await _call_memory_method(
+            self.memory,
+            "append_event",
+            "record",
             kind="agent.state.change",
             text=text,
             data=data,
@@ -193,7 +212,10 @@ class AgentStateHandle(Generic[T]):
         kind: str | None = None,
         use_persistence: bool = False,
     ) -> list[Any]:
-        return await self.memory.state_history(
+        return await _call_memory_method(
+            self.memory,
+            "list_state_history",
+            "state_history",
             self.key,
             tags=tags,
             limit=limit,
