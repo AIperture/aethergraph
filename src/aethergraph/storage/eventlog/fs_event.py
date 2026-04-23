@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import threading
 import time
+from typing import Literal
 
 from aethergraph.contracts.storage.event_log import EventLog
 
@@ -84,6 +85,7 @@ class FSEventLog(EventLog):
         tool: str | None = None,
         after_id: int | None = None,
         before_id: int | None = None,
+        order_dir: Literal["asc", "desc"] = "desc",
     ) -> list[dict]:
         """
         FSEventLog reads the single events.jsonl file linearly, applies
@@ -96,23 +98,21 @@ class FSEventLog(EventLog):
         if not self._log_path.exists():
             return []
 
+        direction = "asc" if str(order_dir).lower() == "asc" else "desc"
+
         def _read() -> list[dict]:
-            out: list[dict] = []
+            out: list[tuple[float, int, dict]] = []
             t_min = since.timestamp() if since else None
             t_max = until.timestamp() if until else None
 
-            # If we want to early-break, we need enough rows to cover offset+limit.
-            needed = None
-            if limit is not None:
-                needed = (offset or 0) + limit
-
             with self._lock, self._log_path.open("r", encoding="utf-8") as f:
-                for line in f:
+                for seq, line in enumerate(f):
                     if not line.strip():
                         continue
                     row = json.loads(line)
 
                     ts_val = _to_ts_float(row.get("ts"))
+                    sort_ts = ts_val if ts_val is not None else 0.0
 
                     if t_min is not None and ts_val is not None and ts_val < t_min:
                         continue
@@ -147,18 +147,15 @@ class FSEventLog(EventLog):
                     if tool is not None and row.get("tool") != tool:
                         continue
 
-                    out.append(row)
+                    out.append((sort_ts, seq, row))
 
-                    # Only break early when we've collected enough to satisfy offset+limit
-                    if needed is not None and len(out) >= needed:
-                        break
-
-            # Apply offset/limit on the filtered rows
+            out.sort(key=lambda item: (item[0], item[1]), reverse=direction == "desc")
+            rows = [row for _, _, row in out]
             if offset > 0:
-                out = out[offset:]
+                rows = rows[offset:]
             if limit is not None:
-                out = out[:limit]
+                rows = rows[:limit]
 
-            return out
+            return rows
 
         return await asyncio.to_thread(_read)

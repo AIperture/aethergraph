@@ -259,6 +259,7 @@ class MemoryFacadeProtocol(Protocol):
         node_id: str | None = None,
         topic: str | None = None,
         tool: str | None = None,
+        order_dir: Literal["asc", "desc"] = "desc",
     ) -> list[Any]: ...
 
     async def get_latest_state(
@@ -325,6 +326,7 @@ class HotLog(Protocol):
         tool: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        order_dir: Literal["asc", "desc"] = "desc",
     ) -> list[Event]: ...
 
 
@@ -357,6 +359,7 @@ class Persistence(Protocol):
         tool: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        order_dir: Literal["asc", "desc"] = "desc",
     ) -> list[Event]: ...
     async def query_summaries(
         self,

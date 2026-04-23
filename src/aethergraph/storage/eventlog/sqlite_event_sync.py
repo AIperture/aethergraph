@@ -6,7 +6,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 
 class SQLiteEventLogSync:
@@ -171,7 +171,9 @@ class SQLiteEventLogSync:
         tool: str | None = None,
         after_id: int | None = None,
         before_id: int | None = None,
+        order_dir: Literal["asc", "desc"] = "desc",
     ) -> list[dict]:
+        direction = "ASC" if str(order_dir).lower() == "asc" else "DESC"
         where: list[str] = []
         join_params: list[Any] = []
         where_params: list[Any] = []
@@ -208,13 +210,6 @@ class SQLiteEventLogSync:
             if value is not None:
                 where.append(f"events.{column} = ?")
                 where_params.append(value)
-        order_col, order_dir = (
-            ("id", "DESC")
-            if before_id is not None
-            else ("id", "ASC")
-            if after_id is not None
-            else ("ts", "ASC")
-        )
         sql = "SELECT DISTINCT events.id, events.payload FROM events"
         if tags:
             for idx, tag in enumerate(tags):
@@ -223,7 +218,10 @@ class SQLiteEventLogSync:
                 join_params.append(tag)
         if where:
             sql += " WHERE " + " AND ".join(where)
-        sql += f" ORDER BY events.{order_col} {order_dir}"
+        if after_id is not None or before_id is not None:
+            sql += f" ORDER BY events.id {direction}"
+        else:
+            sql += f" ORDER BY events.ts {direction}, events.id {direction}"
         if offset:
             sql += f" LIMIT {limit if limit is not None else -1} OFFSET {offset}"
         elif limit is not None:
@@ -236,6 +234,4 @@ class SQLiteEventLogSync:
             evt = json.loads(payload_str)
             evt["_row_id"] = row_id
             out.append(evt)
-        if before_id is not None:
-            out.reverse()
         return out

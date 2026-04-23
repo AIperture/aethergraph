@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
+from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
@@ -139,13 +140,17 @@ class FSPersistence(Persistence):
         tool: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        order_dir: str = "desc",
     ) -> list[Event]:
+        order_dir = "asc" if str(order_dir).lower() == "asc" else "desc"
         events_dir = self.base_dir / "mem" / timeline_id / "events"
         if not events_dir.exists():
             return []
 
         def _read() -> list[Event]:
-            out: list[Event] = []
+            out: list[tuple[datetime, int, Event]] = []
+            seq = 0
+            min_dt = datetime.min.replace(tzinfo=UTC)
             for path in sorted(events_dir.glob("*.jsonl")):
                 with self._lock, path.open("r", encoding="utf-8") as f:
                     for line in f:
@@ -167,13 +172,16 @@ class FSPersistence(Persistence):
                             tool=tool,
                         ):
                             continue
-                        out.append(self._event_from_row(data))
-            out.sort(key=lambda e: (event_time(e), e.event_id))
+                        event = self._event_from_row(data)
+                        out.append((event_time(event) or min_dt, seq, event))
+                        seq += 1
+            out.sort(key=lambda item: (item[0], item[1]), reverse=order_dir == "desc")
+            events = [event for _, _, event in out]
             if offset:
-                out = out[offset:]
+                events = events[offset:]
             if limit is not None:
-                out = out[:limit]
-            return out
+                events = events[:limit]
+            return events
 
         return await asyncio.to_thread(_read)
 
