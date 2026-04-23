@@ -128,6 +128,41 @@ async def test_agent_state_hybrid_does_not_write_until_commit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_state_force_load_refreshes_cached_hybrid_state() -> None:
+    memory = FakeMemory()
+    store = AgentStateFacade(memory=memory).bind(
+        key="demo",
+        model=DemoState,
+        default_factory=DemoState,
+        backend="hybrid",
+    )
+
+    memory.latest = {"count": 1}
+    first = await store.load()
+    assert first == DemoState(count=1)
+
+    memory.latest = {"count": 2}
+    cached = await store.load()
+    assert cached == DemoState(count=1)
+
+    refreshed = await store.load(force=True)
+    assert refreshed == DemoState(count=2)
+
+
+@pytest.mark.asyncio
+async def test_agent_state_bind_distinguishes_scope_configuration() -> None:
+    memory = FakeMemory()
+    facade = AgentStateFacade(memory=memory)
+
+    session_store = facade.bind(key="demo", model=DemoState, level="session")
+    run_store = facade.bind(key="demo", model=DemoState, level="run")
+
+    assert session_store is not run_store
+    assert session_store.level == "session"
+    assert run_store.level == "run"
+
+
+@pytest.mark.asyncio
 async def test_agent_state_emit_change_records_lightweight_event() -> None:
     memory = FakeMemory()
     store = AgentStateFacade(memory=memory).bind(key="demo", model=DemoState)
