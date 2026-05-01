@@ -65,7 +65,9 @@ class ReadMixin:
         node_id: str | None = None,
         topic: str | None = None,
         tool: str | None = None,
+        order_dir: str = "desc",
     ) -> list[Any]:
+        order_dir = "asc" if str(order_dir).lower() == "asc" else "desc"
         scope = getattr(self, "scope", None)
         eff_session = (
             session_id
@@ -92,6 +94,7 @@ class ReadMixin:
                 tool=tool,
                 limit=None,
                 offset=0,
+                order_dir=order_dir,
             )
         else:
             rows = await self._call_query_backend(
@@ -112,13 +115,14 @@ class ReadMixin:
                 tool=tool,
                 limit=self.hot_limit,
                 offset=0,
+                order_dir=order_dir,
             )
         if level and level != "scope":
             rows = [event for event in rows if event_matches_level(event, scope, level=level)]
         if offset:
             rows = rows[offset:]
         if limit is not None:
-            rows = rows[-limit:] if not use_persistence else rows[:limit]
+            rows = rows[:limit]
         return self.normalize_recent_output(rows, return_event=return_event)
 
     async def search_events(
@@ -218,7 +222,7 @@ class ReadMixin:
         )
         if not events:
             return None
-        return (events[-1].data or {}).get("value")
+        return (events[0].data or {}).get("value")
 
     async def list_state_history(
         self: MemoryFacadeProtocol,

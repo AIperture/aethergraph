@@ -248,7 +248,30 @@ class AgentStateHandle(Generic[T]):
 class AgentStateFacade:
     def __init__(self, *, memory: MemoryFacade) -> None:
         self.memory = memory
-        self._handles: dict[tuple[str, AgentStateBackend], AgentStateHandle[Any]] = {}
+        self._handles: dict[tuple[Any, ...], AgentStateHandle[Any]] = {}
+
+    @staticmethod
+    def _cache_key(
+        *,
+        key: str,
+        model: type[Any] | None,
+        default_factory: Callable[[], Any] | None,
+        level: ScopeLevel | None,
+        backend: AgentStateBackend,
+        tags: Sequence[str] | None,
+        meta: dict[str, Any] | None,
+        kind: str,
+    ) -> tuple[Any, ...]:
+        return (
+            key,
+            backend,
+            level,
+            kind,
+            model,
+            default_factory,
+            tuple(tags or ()),
+            tuple(sorted((meta or {}).items())),
+        )
 
     def bind(
         self,
@@ -262,7 +285,16 @@ class AgentStateFacade:
         meta: dict[str, Any] | None = None,
         kind: str = "state.snapshot",
     ) -> AgentStateHandle[T]:
-        cache_key = (key, backend)
+        cache_key = self._cache_key(
+            key=key,
+            model=model,
+            default_factory=default_factory,
+            level=level,
+            backend=backend,
+            tags=tags,
+            meta=meta,
+            kind=kind,
+        )
         if cache_key not in self._handles:
             self._handles[cache_key] = AgentStateHandle(
                 memory=self.memory,

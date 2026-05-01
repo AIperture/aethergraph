@@ -17,8 +17,8 @@ class PromptMixin:
         level: str | None = None,
         use_persistence: bool = False,
         return_event: bool = False,
-        include_tags: bool = True,
-        include_ts: bool = True,
+        include_tags: bool = False,
+        include_ts: bool = False,
     ) -> list[Any]:
         events = await self.query_events(
             kinds=["chat.turn"],
@@ -128,8 +128,8 @@ class PromptMixin:
         tool_limit: int = 10,
         recent_chat_tags: list[str] | None = None,
         recent_tool_tags: list[str] | None = None,
-        recent_chat_include_tags: bool = True,
-        recent_chat_include_ts: bool = True,
+        recent_chat_include_tags: bool = False,
+        recent_chat_include_ts: bool = False,
         level=None,
         use_persistence: bool = False,
     ) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Literal
 
 from aethergraph.contracts.storage.event_log import EventLog
 
@@ -42,6 +43,7 @@ class SqliteEventLog(EventLog):
         tool: str | None = None,
         after_id: int | None = None,
         before_id: int | None = None,
+        order_dir: Literal["asc", "desc"] = "desc",
     ) -> list[dict]:
         return await asyncio.to_thread(
             self._sync.query,
@@ -64,4 +66,5 @@ class SqliteEventLog(EventLog):
             tool=tool,
             after_id=after_id,
             before_id=before_id,
+            order_dir=order_dir,
         )

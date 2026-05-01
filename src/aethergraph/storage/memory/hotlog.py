@@ -1,6 +1,8 @@
+from datetime import UTC, datetime
+
 from aethergraph.contracts.services.kv import AsyncKV
 from aethergraph.contracts.services.memory import Event, HotLog, MemoryTenantFilter
-from aethergraph.services.memory.storage_filters import event_matches_filters
+from aethergraph.services.memory.storage_filters import event_matches_filters, event_time
 
 # No specific backend is required; we use AsyncKV for storage.
 
@@ -52,15 +54,16 @@ class KVHotLog(HotLog):
         tool: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        order_dir: str = "desc",
     ) -> list[Event]:
+        order_dir = "asc" if str(order_dir).lower() == "asc" else "desc"
         buf = (await self.kv.get(kv_hot_key(timeline_id), default=[])) or []
 
         # TODO: optimize filtering by pushing down to storage layer if supported (e.g. Redis streams with consumer groups could handle this efficiently)
         # For we do filtering in-memory here; this is fine for memory-level hotlog with about 100 events, but would not scale for larger datasets or more complex queries
-        filtered = [
-            Event(**row)
-            for row in buf
-            if event_matches_filters(
+        filtered: list[tuple[int, Event]] = []
+        for seq, row in enumerate(buf):
+            if not event_matches_filters(
                 row,
                 tenant=tenant,
                 kinds=kinds,
@@ -75,10 +78,17 @@ class KVHotLog(HotLog):
                 node_id=node_id,
                 topic=topic,
                 tool=tool,
-            )
-        ]
+            ):
+                continue
+            filtered.append((seq, Event(**row)))
+
+        min_dt = datetime.min.replace(tzinfo=UTC)
+        filtered.sort(
+            key=lambda item: (event_time(item[1]) or min_dt, item[0]),
+            reverse=order_dir == "desc",
+        )
         if offset:
             filtered = filtered[offset:]
         if limit is not None:
-            filtered = filtered[-limit:] if not offset else filtered[:limit]
-        return filtered
+            filtered = filtered[:limit]
+        return [event for _, event in filtered]

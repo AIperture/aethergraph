@@ -8,7 +8,6 @@ from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.services.memory.facade.utils import event_matches_level
 from aethergraph.services.memory.storage_filters import (
     event_matches_filters,
-    event_time,
     summary_matches_filters,
 )
 from aethergraph.services.scope.scope import Scope, ScopeLevel
@@ -124,7 +123,9 @@ class EventLogPersistence(Persistence):
         tool: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        order_dir: str = "desc",
     ) -> list[Event]:
+        order_dir = "asc" if str(order_dir).lower() == "asc" else "desc"
         rows = await self._log.query(
             scope_id=timeline_id,
             since=since,
@@ -143,6 +144,7 @@ class EventLogPersistence(Persistence):
             node_id=node_id,
             topic=topic,
             tool=tool,
+            order_dir=order_dir,
         )
         events = [
             self._event_from_row(row)
@@ -164,7 +166,6 @@ class EventLogPersistence(Persistence):
                 tool=tool,
             )
         ]
-        events.sort(key=lambda e: (event_time(e), e.event_id))
         return events
 
     async def query_events_view(
@@ -196,6 +197,7 @@ class EventLogPersistence(Persistence):
             agent_id=agent_id,
             limit=None,
             offset=0,
+            order_dir="desc",
         )
         if level and level != "scope":
             events = [e for e in events if event_matches_level(e, scope, level=level)]

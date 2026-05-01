@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Protocol
+from typing import Literal, Protocol
 
 """
 Event log interface for appending and querying events.
@@ -40,6 +40,7 @@ class EventLog(Protocol):
         tool: str | None = None,
         after_id: int | None = None,  # keyset cursor: return events with id > after_id
         before_id: int | None = None,  # keyset cursor: return events with id < before_id (backward)
+        order_dir: Literal["asc", "desc"] = "desc",
     ) -> list[dict]: ...
 
     async def get_many(
