@@ -826,17 +826,27 @@ class GenericLLMClient(
         candidate = (
             _strip_schema_enforced_json_fence(text) if output_format == "json_schema" else text
         )
-        json_text, was_truncated = _extract_json_text(candidate)
+        json_text, was_truncated, remainder = _extract_json_text(candidate)
         try:
             obj = json.loads(json_text)
         except Exception as e:
             raise RuntimeError(f"Model did not return valid JSON. Raw output:\n{text}") from e
 
-        if was_truncated:
-            raise RuntimeError(
-                f"Model returned multiple JSON objects in a single response. "
-                f"Only one JSON object is allowed. Raw output:\n{text}"
-            )
+        if was_truncated and remainder:
+            try:
+                remainder_obj = json.loads(remainder)
+            except Exception:
+                remainder_obj = None
+            if remainder_obj == obj:
+                logging.getLogger(__name__).warning(
+                    "Model stuttered: returned identical JSON object twice. "
+                    "Deduplicating silently."
+                )
+            else:
+                raise RuntimeError(
+                    f"Model returned multiple JSON objects in a single response. "
+                    f"Only one JSON object is allowed. Raw output:\n{text}"
+                )
 
         if json_schema is not None and strict_schema:
             _validate_json_schema(obj, json_schema)
