@@ -117,14 +117,24 @@ def _strip_schema_enforced_json_fence(text: str) -> str:
     return m.group(1).strip() if m else t
 
 
-def _extract_json_text(text: str) -> str:
+def _extract_json_text(text: str) -> tuple[str, bool]:
+    """Extract JSON text, returning (json_text, was_truncated)."""
     t = text.strip()
     if not t:
-        return t
+        return t, False
     if t[0] in "{[":
-        return t
+        try:
+            json.loads(t)
+            return t, False
+        except json.JSONDecodeError:
+            decoder = json.JSONDecoder()
+            try:
+                _obj, end = decoder.raw_decode(t, 0)
+                return t[:end], end < len(t)
+            except json.JSONDecodeError:
+                return t, False
     m = re.search(r"(\{.*\}|\[.*\])", t, flags=re.DOTALL)
-    return m.group(1).strip() if m else t
+    return (m.group(1).strip(), False) if m else (t, False)
 
 
 def _validate_json_schema(obj: Any, schema: dict[str, Any]) -> None:

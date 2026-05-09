@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import contextlib
 import json
 import logging
 import os
@@ -493,6 +494,13 @@ class GenericLLMClient(
                 metrics={"latency_ms": observation_record.latency_ms or 0},
             )
             raise
+        finally:
+            if not getattr(span, "finished", True):
+                with contextlib.suppress(Exception):
+                    await span.fail(
+                        RuntimeError("LLM call interrupted before completion"),
+                        metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+                    )
 
     # ================================================================
     # chat_stream() — streaming with thinking/reasoning support
@@ -705,6 +713,13 @@ class GenericLLMClient(
                 metrics={"latency_ms": observation_record.latency_ms or 0},
             )
             raise
+        finally:
+            if not getattr(span, "finished", True):
+                with contextlib.suppress(Exception):
+                    await span.fail(
+                        RuntimeError("LLM stream interrupted before completion"),
+                        metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+                    )
 
     # ================================================================
     # Dispatch + postprocessing
@@ -811,11 +826,17 @@ class GenericLLMClient(
         candidate = (
             _strip_schema_enforced_json_fence(text) if output_format == "json_schema" else text
         )
-        json_text = _extract_json_text(candidate)
+        json_text, was_truncated = _extract_json_text(candidate)
         try:
             obj = json.loads(json_text)
         except Exception as e:
             raise RuntimeError(f"Model did not return valid JSON. Raw output:\n{text}") from e
+
+        if was_truncated:
+            raise RuntimeError(
+                f"Model returned multiple JSON objects in a single response. "
+                f"Only one JSON object is allowed. Raw output:\n{text}"
+            )
 
         if json_schema is not None and strict_schema:
             _validate_json_schema(obj, json_schema)

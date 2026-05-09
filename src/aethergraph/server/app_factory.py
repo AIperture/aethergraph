@@ -205,7 +205,11 @@ def create_app(
     # CORS
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "null"],  # dev UI + file:// admin page
+        allow_origins=[
+            "http://localhost:5173",
+            "http://localhost:5185",
+            "null",
+        ],  # dev UI + sim UI + file:// admin page
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -237,6 +241,15 @@ def create_app(
     from aethergraph.plugins.channel.routes.webui_routes import router as webui_router
 
     app.include_router(router=webui_router, prefix="/api/v1")
+
+    # Mount agent trace router if aethergraph_agent is installed
+    try:
+        from aethergraph_agent.trace import trace_router
+
+        app.include_router(trace_router)
+        logger.info("Agent trace router mounted at /api/trace")
+    except ImportError:
+        pass
 
     # Install services globally so run()/tools see the same container
     install_services(container)
