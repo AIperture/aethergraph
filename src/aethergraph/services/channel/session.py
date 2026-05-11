@@ -191,24 +191,20 @@ class ChannelSession:
         channel: str | None = None,
     ) -> list[str]:
         """
-        Derive some lightweight, structured tags from context
+        Derive chat memory tags from the context's tag provider
         and merge with caller-provided tags.
         """
         tags: list[str] = []
 
-        # Channel name is very useful when debugging
+        provider = getattr(self.ctx, "chat_tag_provider", None)
+        if callable(provider):
+            tags.extend(provider())
+
         try:
             ch = self._resolve_key(channel)
             tags.append(f"channel:{ch}")
         except Exception:
             pass
-
-        if self._run_id:
-            tags.append(f"run:{self._run_id}")
-        if self._session_id:
-            tags.append(f"session:{self._session_id}")
-        if self._node_id:
-            tags.append(f"node:{self._node_id}")
 
         if extra:
             tags.extend(extra)
