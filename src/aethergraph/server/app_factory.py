@@ -242,12 +242,12 @@ def create_app(
 
     app.include_router(router=webui_router, prefix="/api/v1")
 
-    # Mount agent trace router if aethergraph_agent is installed
+    # Mount engine trace router if the engine package is installed
     try:
-        from aethergraph_agent.trace import trace_router
+        from aethergraph_engine._internal.trace import trace_router
 
         app.include_router(trace_router)
-        logger.info("Agent trace router mounted at /api/trace")
+        logger.info("Engine trace router mounted at /api/trace")
     except ImportError:
         pass
 
