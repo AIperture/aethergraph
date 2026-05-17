@@ -32,6 +32,9 @@ from aethergraph.services.llm.types import (
     ImageFormat,
     ImageGenerationResult,
     ImageResponseFormat,
+    LLMCallBudgetExceededError,
+    LLMInputTooLargeError,
+    LLMRunBudgetExceededError,
     LLMUnsupportedFeatureError,
 )
 from aethergraph.services.llm.utils import (
@@ -212,17 +215,77 @@ class GenericLLMClient(
         self._per_run_tokens[run_id] = tokens
 
         if cfg.max_llm_calls_per_run and calls > cfg.max_llm_calls_per_run:
-            raise RuntimeError(
-                f"LLM call limit exceeded for this run "
-                f"({calls} > {cfg.max_llm_calls_per_run}). "
-                "Consider simplifying the graph or raising the limit."
+            raise LLMCallBudgetExceededError(
+                run_id=str(run_id),
+                calls=calls,
+                limit=int(cfg.max_llm_calls_per_run),
             )
 
         if cfg.max_llm_tokens_per_run and tokens > cfg.max_llm_tokens_per_run:
-            raise RuntimeError(
-                f"LLM token limit exceeded for this run "
-                f"({tokens} > {cfg.max_llm_tokens_per_run}). "
-                "Consider simplifying the graph or raising the limit."
+            raise LLMRunBudgetExceededError(
+                run_id=str(run_id),
+                total_tokens=tokens,
+                limit=int(cfg.max_llm_tokens_per_run),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        raw = str(text or "")
+        if not raw:
+            return 0
+        return max(1, (len(raw) + 3) // 4)
+
+    def _estimate_messages_tokens(self, messages: list[dict[str, Any]]) -> int:
+        total = 0
+        for message in list(messages or []):
+            total += 8  # role/message framing overhead
+            role = message.get("role")
+            if role is not None:
+                total += self._estimate_text_tokens(str(role))
+            content = message.get("content")
+            if content is None:
+                continue
+            if isinstance(content, str):
+                total += self._estimate_text_tokens(content)
+            else:
+                try:
+                    total += self._estimate_text_tokens(
+                        json.dumps(content, ensure_ascii=False, default=str)
+                    )
+                except Exception:
+                    total += self._estimate_text_tokens(str(content))
+        return total
+
+    def _preflight_llm_limits_for_run(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        max_output_tokens: int | None,
+    ) -> None:
+        cfg = self._get_rate_limit_cfg()
+        if cfg is None or not cfg.enabled or not cfg.max_llm_tokens_per_run:
+            return
+
+        ctx = current_meter_context.get()
+        run_id = ctx.get("run_id")
+        if not run_id:
+            return
+
+        spent_tokens = int(self._per_run_tokens.get(run_id, 0) or 0)
+        estimated_input_tokens = self._estimate_messages_tokens(messages)
+        reserved_output_tokens = max(0, int(max_output_tokens or 0))
+        projected_total_tokens = spent_tokens + estimated_input_tokens + reserved_output_tokens
+        limit = int(cfg.max_llm_tokens_per_run)
+        if projected_total_tokens > limit:
+            raise LLMInputTooLargeError(
+                run_id=str(run_id),
+                spent_tokens=spent_tokens,
+                estimated_input_tokens=estimated_input_tokens,
+                reserved_output_tokens=reserved_output_tokens,
+                projected_total_tokens=projected_total_tokens,
+                limit=limit,
             )
 
     def _current_dimensions(self) -> dict[str, Any]:
@@ -438,6 +501,10 @@ class GenericLLMClient(
 
         start = time.perf_counter()
         try:
+            self._preflight_llm_limits_for_run(
+                messages=messages,
+                max_output_tokens=max_output_tokens,
+            )
             # Provider-specific call (now symmetric)
             text, usage = await self._chat_dispatch(
                 messages,
@@ -632,6 +699,10 @@ class GenericLLMClient(
             _thinking_budget = None
 
         try:
+            self._preflight_llm_limits_for_run(
+                messages=messages,
+                max_output_tokens=max_output_tokens,
+            )
             if self.provider == "openai":
                 text, usage = await self._chat_openai_responses_stream(
                     messages,

@@ -59,6 +59,8 @@ def _artifact_to_chat_file(
         lower = filename.lower()
         if lower.endswith(".png"):
             mime = "image/png"
+        elif lower.endswith(".svg"):
+            mime = "image/svg+xml"
         elif lower.endswith((".jpg", ".jpeg")):
             mime = "image/jpeg"
         elif lower.endswith(".gif"):
@@ -87,6 +89,45 @@ def _image_filename(title: str | None, alt: str | None) -> str:
     if p.suffix:
         return base
     return base + ".png"
+
+
+def _normalize_image_extension(
+    image_format: str | None = None,
+    mimetype: str | None = None,
+) -> str:
+    fmt = (image_format or "").strip().lower()
+    if fmt == "svg":
+        return ".svg"
+    if fmt == "png":
+        return ".png"
+    mime = (mimetype or "").strip().lower()
+    if mime == "image/svg+xml":
+        return ".svg"
+    return ".png"
+
+
+def _image_mimetype(
+    image_format: str | None = None,
+    mimetype: str | None = None,
+) -> str:
+    mime = (mimetype or "").strip().lower()
+    if mime:
+        return mime
+    return "image/svg+xml" if (image_format or "").strip().lower() == "svg" else "image/png"
+
+
+def _image_filename_for_format(
+    title: str | None,
+    alt: str | None,
+    *,
+    image_format: str | None = None,
+    mimetype: str | None = None,
+) -> str:
+    base = title or alt or "image"
+    p = Path(base)
+    if p.suffix:
+        return base
+    return base + _normalize_image_extension(image_format=image_format, mimetype=mimetype)
 
 
 class ChannelSession:
@@ -882,6 +923,8 @@ class ChannelSession:
         file_bytes: bytes | None = None,
         alt: str = "image",
         title: str | None = None,
+        image_format: str | None = None,
+        mimetype: str | None = None,
         channel: str | None = None,
         artifact_labels: dict[str, Any] | None = None,
         # memory logging...
@@ -921,6 +964,9 @@ class ChannelSession:
             file_bytes: Optional image bytes. Preferred when both are provided.
             alt: Alternate text used for fallback titling/filename.
             title: Optional display title.
+            image_format: Optional image format hint such as ``"png"`` or ``"svg"``.
+            mimetype: Optional MIME type override such as ``"image/png"`` or
+                ``"image/svg+xml"``.
             channel: Optional target channel key.
             artifact_labels: Optional extra artifact labels.
             memory_log: Enable chat-memory logging for this call.
@@ -940,6 +986,7 @@ class ChannelSession:
         labels = {"renderer": "image"}
         if artifact_labels:
             labels.update(artifact_labels)
+        labels.setdefault("mimetype", _image_mimetype(image_format=image_format, mimetype=mimetype))
 
         # Reuse memory logging text
         memory_tags = [*(memory_tags or []), "image"]
@@ -947,7 +994,12 @@ class ChannelSession:
         await self.send_file(
             url=url,
             file_bytes=file_bytes,
-            filename=_image_filename(title, alt),
+            filename=_image_filename_for_format(
+                title,
+                alt,
+                image_format=image_format,
+                mimetype=mimetype,
+            ),
             title=title or alt,
             channel=channel,
             artifact_kind="image",

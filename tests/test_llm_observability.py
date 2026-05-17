@@ -14,6 +14,10 @@ from aethergraph.services.llm.observability import (
     JsonlLLMObservationSink,
     LLMObservationRecord,
 )
+from aethergraph.services.llm.types import (
+    LLMInputTooLargeError,
+    LLMRunBudgetExceededError,
+)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -206,3 +210,69 @@ async def test_default_container_llm_observability_writes_jsonl(tmp_path: Path) 
     rows = _read_jsonl(sink_path)
     assert len(rows) == 1
     assert rows[0]["raw_text"] == "container output"
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> None:
+    from aethergraph.config.config import RateLimitSettings
+
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        rate_limit_cfg=RateLimitSettings(enabled=True, max_llm_tokens_per_run=200),
+    )
+    client._per_run_tokens["run-preflight-tight"] = 180
+
+    dispatched = False
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return "unexpected", {"prompt_tokens": 1, "completion_tokens": 1}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    token = current_meter_context.set({"run_id": "run-preflight-tight"})
+    try:
+        with pytest.raises(LLMInputTooLargeError) as exc_info:
+            await client.chat(
+                [{"role": "user", "content": "x" * 120}],
+                max_output_tokens=40,
+            )
+    finally:
+        current_meter_context.reset(token)
+
+    assert dispatched is False
+    exc = exc_info.value
+    assert exc.run_id == "run-preflight-tight"
+    assert exc.spent_tokens == 180
+    assert exc.limit == 200
+    assert exc.projected_total_tokens > 200
+
+
+@pytest.mark.asyncio
+async def test_llm_post_call_budget_violation_raises_typed_error() -> None:
+    from aethergraph.config.config import RateLimitSettings
+
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        rate_limit_cfg=RateLimitSettings(enabled=True, max_llm_tokens_per_run=50),
+    )
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        return "hello back", {"prompt_tokens": 30, "completion_tokens": 25}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    token = current_meter_context.set({"run_id": "run-post"})
+    try:
+        with pytest.raises(LLMRunBudgetExceededError) as exc_info:
+            await client.chat([{"role": "user", "content": "hello"}])
+    finally:
+        current_meter_context.reset(token)
+
+    exc = exc_info.value
+    assert exc.run_id == "run-post"
+    assert exc.total_tokens == 55
+    assert exc.limit == 50

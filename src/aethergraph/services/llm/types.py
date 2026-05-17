@@ -33,6 +33,66 @@ class LLMUnsupportedFeatureError(RuntimeError):
         super().__init__(msg)
 
 
+class LLMError(RuntimeError):
+    """Base class for typed LLM service failures."""
+
+
+class LLMCallBudgetExceededError(LLMError):
+    def __init__(self, *, run_id: str, calls: int, limit: int):
+        super().__init__(
+            f"LLM call limit exceeded for this run ({calls} > {limit}). "
+            "Consider simplifying the graph or raising the limit."
+        )
+        self.run_id = run_id
+        self.calls = calls
+        self.limit = limit
+
+
+class LLMRunBudgetExceededError(LLMError):
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        total_tokens: int,
+        limit: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ):
+        super().__init__(
+            f"LLM token limit exceeded for this run ({total_tokens} > {limit}). "
+            "Consider simplifying the graph or raising the limit."
+        )
+        self.run_id = run_id
+        self.total_tokens = total_tokens
+        self.limit = limit
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
+class LLMInputTooLargeError(LLMError):
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        spent_tokens: int,
+        estimated_input_tokens: int,
+        reserved_output_tokens: int,
+        projected_total_tokens: int,
+        limit: int,
+    ):
+        super().__init__(
+            "LLM request exceeds the remaining token budget for this run "
+            f"({projected_total_tokens} > {limit}). "
+            "Consider simplifying the graph or raising the limit."
+        )
+        self.run_id = run_id
+        self.spent_tokens = spent_tokens
+        self.estimated_input_tokens = estimated_input_tokens
+        self.reserved_output_tokens = reserved_output_tokens
+        self.projected_total_tokens = projected_total_tokens
+        self.limit = limit
+
+
 @dataclass
 class GeneratedImage:
     # Exactly one of these is typically present.
