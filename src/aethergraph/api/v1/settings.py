@@ -99,8 +99,11 @@ def _llm_profile_view(profile) -> LLMProfileView:
         base_url=profile.base_url,
         timeout=profile.timeout,
         api_key=_mask_secret(_secret_str_value(profile.api_key)),
+        reasoning_effort=getattr(profile, "reasoning_effort", None),
+        thinking_mode=getattr(profile, "thinking_mode", None),
         thinking_budget=profile.thinking_budget,
         reasoning_summary=profile.reasoning_summary,
+        compatibility_policy=getattr(profile, "compatibility_policy", "compat"),
     )
 
 
@@ -171,7 +174,7 @@ def _collect_llm_env(
     """Convert LLM profile payloads to env var updates."""
     env: dict[str, str] = {}
     for name, payload in profiles.items():
-        prefix = ("LLM", name)
+        prefix = ("LLM", "DEFAULT") if name.lower() == "default" else ("LLM", "PROFILES", name)
         if payload.provider is not None:
             env[_env_key(*prefix, "PROVIDER")] = payload.provider
         if payload.model is not None:
@@ -182,6 +185,12 @@ def _collect_llm_env(
             env[_env_key(*prefix, "BASE_URL")] = payload.base_url
         if payload.timeout is not None:
             env[_env_key(*prefix, "TIMEOUT")] = str(payload.timeout)
+        if payload.reasoning_effort is not None:
+            env[_env_key(*prefix, "REASONING_EFFORT")] = payload.reasoning_effort
+        if payload.thinking_mode is not None:
+            env[_env_key(*prefix, "THINKING_MODE")] = payload.thinking_mode
+        if payload.compatibility_policy is not None:
+            env[_env_key(*prefix, "COMPATIBILITY_POLICY")] = payload.compatibility_policy
     return env
 
 
@@ -190,7 +199,7 @@ def _collect_embed_env(
 ) -> dict[str, str]:
     env: dict[str, str] = {}
     for name, payload in profiles.items():
-        prefix = ("EMBED", name)
+        prefix = ("EMBED", "DEFAULT") if name.lower() == "default" else ("EMBED", "PROFILES", name)
         if payload.provider is not None:
             env[_env_key(*prefix, "PROVIDER")] = payload.provider
         if payload.model is not None:
@@ -247,6 +256,12 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["base_url"] = payload.base_url
         if payload.timeout is not None:
             kwargs["timeout"] = payload.timeout
+        if payload.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = payload.reasoning_effort
+        if payload.thinking_mode is not None:
+            kwargs["thinking_mode"] = payload.thinking_mode
+        if payload.compatibility_policy is not None:
+            kwargs["compatibility_policy"] = payload.compatibility_policy
         if kwargs:
             llm_service.configure_profile(profile=name, **kwargs)
             logger.info("Hot-reloaded LLM profile %r", name)

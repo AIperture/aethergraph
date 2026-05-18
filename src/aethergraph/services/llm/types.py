@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 ChatOutputFormat = Literal[
     "text", "json_object", "json_schema", "raw", "json"
-]  # text: plain text; json_object: dict; json_schema: validate against schema; json_schema: validate against schema; raw: provider-specific raw response
+]  # "json" is a deprecated alias of "json_object"
 
 ImageFormat = Literal["png", "jpeg", "webp"]
 ImageResponseFormat = Literal["b64_json", "url"]  # url only for dall-e models typically

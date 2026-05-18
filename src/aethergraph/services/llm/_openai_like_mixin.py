@@ -29,6 +29,8 @@ class _OpenAILikeMixin:
         messages: list[dict[str, Any]],
         *,
         model: str,
+        reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
@@ -60,6 +62,12 @@ class _OpenAILikeMixin:
                 "temperature": temperature,
                 "top_p": top_p,
             }
+            if max_output_tokens is not None:
+                body["max_tokens"] = max_output_tokens
+            if reasoning_effort is not None and self.provider == "deepseek":
+                body["reasoning_effort"] = self._map_deepseek_reasoning_effort(reasoning_effort)
+            if self.provider == "deepseek":
+                body.update(self._deepseek_thinking_body(**kw))
             if response_format is not None:
                 body["response_format"] = response_format
             if tools is not None:
@@ -88,3 +96,72 @@ class _OpenAILikeMixin:
             return txt, usage
 
         return await self._retry.run(_call)
+
+    async def _chat_openai_like_chat_completions_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        on_delta: Any = None,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        await self._ensure_client()
+        assert self._client is not None
+
+        temperature = kw.get("temperature", 0.5)
+        top_p = kw.get("top_p", 1.0)
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": True,
+        }
+        if max_output_tokens is not None:
+            body["max_tokens"] = max_output_tokens
+        if reasoning_effort is not None and self.provider == "deepseek":
+            body["reasoning_effort"] = self._map_deepseek_reasoning_effort(reasoning_effort)
+        if self.provider == "deepseek":
+            body.update(self._deepseek_thinking_body(**kw))
+
+        chunks: list[str] = []
+        usage: dict[str, int] = {}
+
+        async def _call():
+            nonlocal usage
+            async with self._client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=self._headers_openai_like(),
+                json=body,
+            ) as r:
+                try:
+                    r.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    text = await r.aread()
+                    raise RuntimeError(f"OpenAI-like streaming error: {text!r}") from e
+
+                async for line in r.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[len("data:") :].strip()
+                    if not data_str or data_str == "[DONE]":
+                        break
+                    try:
+                        evt = json.loads(data_str)
+                    except Exception:
+                        continue
+                    choices = evt.get("choices") or []
+                    if choices:
+                        delta = (choices[0].get("delta") or {}).get("content") or ""
+                        if delta:
+                            chunks.append(delta)
+                            if on_delta is not None:
+                                await on_delta(delta)
+                    if evt.get("usage"):
+                        usage = evt.get("usage") or usage
+
+        await self._retry.run(_call)
+        return "".join(chunks), usage

@@ -98,6 +98,27 @@ See the docs for setup of **external channel** methods (Slack, Telegram, etc.) f
 > In your **project root** (the directory where you run your Python entry point).
 > You can override with `AETHERGRAPH_ENV_FILE=/path/to/.env` if needed.
 
+Reasoning defaults can be set per profile in `.env` and overridden per call:
+
+```ini
+AETHERGRAPH_LLM__PROFILES__MY_PROFILE__REASONING_EFFORT=high
+AETHERGRAPH_LLM__PROFILES__MY_PROFILE__THINKING_MODE=auto
+```
+
+Normalized profile knobs:
+
+- `REASONING_EFFORT`: `low | medium | high | xhigh | max`
+- `THINKING_MODE`: `auto | on | off`
+
+Provider mapping:
+
+- OpenAI: `REASONING_EFFORT` -> `reasoning.effort`; `THINKING_MODE` has no direct wire knob and is treated as advisory only.
+- Anthropic: `REASONING_EFFORT` -> adaptive thinking effort on newer models; `THINKING_MODE=on` prefers thinking enabled/adaptive, `off` omits thinking.
+- Gemini: `REASONING_EFFORT` -> `thinkingLevel` on Gemini 3 or `thinkingBudget` on Gemini 2.5; `THINKING_MODE=off` maps to minimal/zero-thinking where supported.
+- DeepSeek: `REASONING_EFFORT` -> `reasoning_effort` (`low`/`medium` map to `high`, `xhigh` maps to `max`); `THINKING_MODE` -> `thinking.type`.
+
+`compat` policy ignores unsupported knobs when safe; `strict` fails fast. `output_format="json"` remains a deprecated alias for `json_object`, and `chat_stream()` is text-only by contract.
+
 ---
 
 ## Verify install
