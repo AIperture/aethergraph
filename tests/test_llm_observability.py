@@ -44,6 +44,9 @@ async def test_console_sink_compact_view_renders_prompt_and_output(capsys) -> No
         strict_schema=True,
         validate_json=True,
         extra_params={},
+        request_args={},
+        provider_request_args={},
+        compatibility_notes=[],
         trace_payload=None,
     )
     record.raw_text = "Attention weights the most relevant inputs for the current prediction."

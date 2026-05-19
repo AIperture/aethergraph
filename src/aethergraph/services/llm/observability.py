@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -15,7 +15,7 @@ PromptViewMode = Literal["off", "compact", "truncated", "full"]
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _json_safe(value: Any) -> Any:
@@ -93,6 +93,9 @@ class LLMObservationRecord:
     strict_schema: bool | None = None
     validate_json: bool | None = None
     extra_params: dict[str, Any] = field(default_factory=dict)
+    request_args: dict[str, Any] = field(default_factory=dict)
+    provider_request_args: dict[str, Any] = field(default_factory=dict)
+    compatibility_notes: list[str] = field(default_factory=list)
     trace_payload: dict[str, Any] | None = None
     trace_payload_preview: dict[str, Any] | None = None
     raw_text: str | None = None
@@ -119,6 +122,9 @@ class LLMObservationRecord:
         strict_schema: bool | None,
         validate_json: bool | None,
         extra_params: dict[str, Any],
+        request_args: dict[str, Any] | None,
+        provider_request_args: dict[str, Any] | None,
+        compatibility_notes: list[str] | None,
         trace_payload: dict[str, Any] | None,
         profile_name: str | None = None,
         call_name: str | None = None,
@@ -151,6 +157,9 @@ class LLMObservationRecord:
             strict_schema=strict_schema,
             validate_json=validate_json,
             extra_params=sanitize_observation_value(extra_params) or {},
+            request_args=sanitize_observation_value(request_args) or {},
+            provider_request_args=sanitize_observation_value(provider_request_args) or {},
+            compatibility_notes=sanitize_observation_value(compatibility_notes) or [],
             trace_payload=sanitize_observation_value(trace_payload),
             trace_payload_preview=sanitize_observation_value(trace_payload),
         )

@@ -201,6 +201,203 @@ class GenericLLMClient(
         return reasoning_effort if reasoning_effort is not None else self.reasoning_effort
 
     @staticmethod
+    def _prune_none(value: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in value.items() if v is not None and v != {} and v != []}
+
+    def _build_request_args(
+        self,
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+        validate_json: bool,
+        extra_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        args = {
+            "provider": self.provider,
+            "model": model,
+            "profile_name": self.profile_name,
+            "compatibility_policy": self.compatibility_policy,
+            "reasoning_effort": reasoning_effort,
+            "thinking_mode": extra_params.get("thinking_mode", self.thinking_mode),
+            "thinking_budget": extra_params.get("thinking_budget", self.thinking_budget),
+            "reasoning_summary": extra_params.get("reasoning_summary", self.reasoning_summary),
+            "max_output_tokens": max_output_tokens,
+            "output_format": output_format,
+            "validate_json": validate_json
+            if output_format in ("json_object", "json_schema")
+            else None,
+            "strict_schema": strict_schema if output_format == "json_schema" else None,
+            "schema_name": schema_name
+            if output_format == "json_schema" and schema_name != "output"
+            else None,
+            "json_schema_present": bool(json_schema) if output_format == "json_schema" else None,
+            "temperature": extra_params.get("temperature"),
+            "top_p": extra_params.get("top_p"),
+            "tool_choice": extra_params.get("tool_choice"),
+            "tools_count": len(extra_params.get("tools") or [])
+            if extra_params.get("tools")
+            else None,
+        }
+        return self._prune_none(args)
+
+    def _build_provider_request_args(
+        self,
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+        extra_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.provider == "openai":
+            return self._prune_none(
+                {
+                    "reasoning": self._prune_none(
+                        {
+                            "effort": reasoning_effort,
+                            "summary": extra_params.get(
+                                "reasoning_summary", self.reasoning_summary
+                            ),
+                        }
+                    ),
+                    "text": self._prune_none(
+                        {
+                            "format": self._prune_none(
+                                {
+                                    "type": "json_object"
+                                    if output_format == "json_object"
+                                    else (
+                                        "json_schema" if output_format == "json_schema" else None
+                                    ),
+                                    "name": schema_name if output_format == "json_schema" else None,
+                                    "strict": strict_schema
+                                    if output_format == "json_schema"
+                                    else None,
+                                    "schema_present": bool(json_schema)
+                                    if output_format == "json_schema"
+                                    else None,
+                                }
+                            )
+                        }
+                    ),
+                    "max_output_tokens": max_output_tokens,
+                }
+            )
+        if self.provider == "anthropic":
+            thinking_mode = extra_params.get("thinking_mode", self.thinking_mode)
+            thinking: dict[str, Any] | None = None
+            if thinking_mode == "off":
+                thinking = None
+            elif reasoning_effort is not None:
+                thinking = {"type": "adaptive", "effort": reasoning_effort}
+            elif thinking_mode == "on":
+                thinking = {
+                    "type": "enabled",
+                    "budget_tokens": extra_params.get("thinking_budget", self.thinking_budget),
+                }
+            return self._prune_none(
+                {
+                    "thinking": thinking,
+                    "output_config": {"format": {"type": "json_schema", "name": schema_name}}
+                    if output_format == "json_schema"
+                    else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        if self.provider == "google":
+            return self._prune_none(
+                {
+                    "generationConfig": self._prune_none(
+                        {
+                            "thinkingConfig": self._gemini_thinking_config(
+                                model=model,
+                                reasoning_effort=reasoning_effort,
+                                thinking_mode=extra_params.get("thinking_mode", self.thinking_mode),
+                            ),
+                            "responseMimeType": "application/json"
+                            if output_format in ("json_object", "json_schema")
+                            else None,
+                            "responseJsonSchemaPresent": bool(json_schema)
+                            if output_format == "json_schema"
+                            else None,
+                            "maxOutputTokens": max_output_tokens,
+                        }
+                    )
+                }
+            )
+        if self.provider == "deepseek":
+            return self._prune_none(
+                {
+                    "reasoning_effort": self._map_deepseek_reasoning_effort(reasoning_effort)
+                    if reasoning_effort is not None
+                    else None,
+                    "thinking": self._deepseek_thinking_body(**extra_params).get("thinking"),
+                    "response_format": {"type": "json_object"}
+                    if output_format == "json_object"
+                    else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        if self.provider in {"openrouter", "lmstudio", "ollama"}:
+            return self._prune_none(
+                {
+                    "response_format": {"type": "json_object"}
+                    if output_format == "json_object"
+                    else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        if self.provider == "azure":
+            return self._prune_none(
+                {
+                    "response_format": {"type": "json_object"}
+                    if output_format == "json_object"
+                    else None,
+                    "schema_present": bool(json_schema) if output_format == "json_schema" else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        return {}
+
+    def _build_compatibility_notes(
+        self,
+        *,
+        output_format: ChatOutputFormat,
+        request_args: dict[str, Any],
+        provider_request_args: dict[str, Any],
+    ) -> list[str]:
+        notes: list[str] = []
+        if output_format == "json_object" and self.provider == "deepseek":
+            notes.append("DeepSeek JSON output also requires prompt-side JSON instructions.")
+        if output_format == "json_schema" and self.provider in {
+            "deepseek",
+            "openrouter",
+            "lmstudio",
+            "ollama",
+            "azure",
+        }:
+            notes.append(
+                "json_schema is validated locally; native provider enforcement may be partial or unavailable."
+            )
+        if request_args.get("thinking_mode") == "off" and self.provider == "openai":
+            notes.append(
+                "OpenAI does not expose a direct thinking-mode knob; thinking_mode is advisory only."
+            )
+        if request_args.get("thinking_budget") and self.provider not in {"anthropic", "google"}:
+            notes.append("thinking_budget is ignored by this provider.")
+        if not provider_request_args:
+            notes.append("No provider-specific request args were captured for this call.")
+        return notes
+
+    @staticmethod
     def _gemini_thinking_config(
         *, model: str, reasoning_effort: str | None, thinking_mode: str | None = None
     ) -> dict[str, Any] | None:
@@ -419,6 +616,9 @@ class GenericLLMClient(
         strict_schema: bool,
         validate_json: bool,
         extra_params: dict[str, Any],
+        request_args: dict[str, Any] | None,
+        provider_request_args: dict[str, Any] | None,
+        compatibility_notes: list[str] | None,
         trace_payload: dict[str, Any] | None,
         call_name: str | None = None,
     ) -> LLMObservationRecord:
@@ -436,6 +636,9 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             extra_params=extra_params,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+            compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             profile_name=self.profile_name,
             call_name=call_name,
@@ -545,6 +748,32 @@ class GenericLLMClient(
         model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
         call_name = kw.pop("call_name", None)
+        request_args = self._build_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            extra_params=kw,
+        )
+        provider_request_args = self._build_provider_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            extra_params=kw,
+        )
+        compatibility_notes = self._build_compatibility_notes(
+            output_format=output_format,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+        )
         observation_record = self._build_observation_record(
             call_type="chat",
             model=model,
@@ -557,6 +786,9 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             extra_params=kw,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+            compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             call_name=call_name,
         )
@@ -747,6 +979,32 @@ class GenericLLMClient(
         model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
         call_name = kw.pop("call_name", None)
+        request_args = self._build_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            extra_params=kw,
+        )
+        provider_request_args = self._build_provider_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            extra_params=kw,
+        )
+        compatibility_notes = self._build_compatibility_notes(
+            output_format=output_format,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+        )
         observation_record = self._build_observation_record(
             call_type="chat_stream",
             model=model,
@@ -759,6 +1017,9 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             extra_params=kw,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+            compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             call_name=call_name,
         )

@@ -102,6 +102,9 @@ class LLMCallRecord(BaseModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     reasoning_effort: str | None = None
     output_format: str | None = None
+    request_args: dict[str, Any] = Field(default_factory=dict)
+    provider_request_args: dict[str, Any] = Field(default_factory=dict)
+    compatibility_notes: list[str] = Field(default_factory=list)
     messages_preview: dict[str, Any] | None = None
     trace_payload_preview: dict[str, Any] | None = None
     raw_text_preview: dict[str, Any] | None = None

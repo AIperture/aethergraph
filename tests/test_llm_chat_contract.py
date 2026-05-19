@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from typing import Any
 
 import pytest
@@ -37,7 +36,7 @@ class _FakeHttpClient:
 
 
 @pytest.mark.asyncio
-async def test_chat_json_alias_warns_and_returns_canonical_json(caplog) -> None:
+async def test_chat_json_alias_warns_and_returns_canonical_json() -> None:
     client = GenericLLMClient(provider="openai", model="gpt-test")
 
     async def fake_chat_dispatch(messages, **kwargs):
@@ -45,16 +44,21 @@ async def test_chat_json_alias_warns_and_returns_canonical_json(caplog) -> None:
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
-    with caplog.at_level(logging.WARNING):
+    warnings: list[str] = []
+    original_warning = client._logger.warning
+    client._logger.warning = lambda msg: warnings.append(str(msg))  # type: ignore[assignment]
+    try:
         text, usage = await client.chat(
             [{"role": "user", "content": "hello"}],
             output_format="json",
             validate_json=True,
         )
+    finally:
+        client._logger.warning = original_warning  # type: ignore[assignment]
 
     assert json.loads(text) == {"a": 1, "b": 2}
     assert usage["completion_tokens"] == 1
-    assert "deprecated" in caplog.text
+    assert any("deprecated" in message for message in warnings)
 
 
 @pytest.mark.asyncio
