@@ -30,6 +30,8 @@ def _provider_default_base_url(provider: Provider) -> str | None:
         return "https://api.anthropic.com"
     if provider == "google":
         return "https://generativelanguage.googleapis.com"
+    if provider == "deepseek":
+        return "https://api.deepseek.com"
     if provider == "openrouter":
         return "https://openrouter.ai/api/v1"
     if provider == "lmstudio":
@@ -57,6 +59,9 @@ def _apply_env_overrides_to_profile(
         model_env = os.getenv("LLM_MODEL")
         base_env = os.getenv("LLM_BASE_URL")
         timeout_env = os.getenv("LLM_TIMEOUT")
+        reasoning_effort_env = os.getenv("LLM_REASONING_EFFORT")
+        thinking_mode_env = os.getenv("LLM_THINKING_MODE")
+        compat_env = os.getenv("LLM_COMPATIBILITY_POLICY")
 
         if provider_env:
             p.provider = provider_env.lower()  # type: ignore[assignment]
@@ -70,6 +75,12 @@ def _apply_env_overrides_to_profile(
             except ValueError:
                 logger = logging.getLogger("aethergraph.services.llm")
                 logger.warning(f"Invalid LLM_TIMEOUT value: {timeout_env}")
+        if reasoning_effort_env:
+            p.reasoning_effort = reasoning_effort_env.lower()  # type: ignore[assignment]
+        if thinking_mode_env:
+            p.thinking_mode = thinking_mode_env.lower()  # type: ignore[assignment]
+        if compat_env:
+            p.compatibility_policy = compat_env.lower()  # type: ignore[assignment]
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:
@@ -89,6 +100,8 @@ def _apply_env_overrides_to_profile(
             api_key = os.getenv("ANTHROPIC_API_KEY")
         elif p.provider == "google":
             api_key = os.getenv("GOOGLE_API_KEY")
+        elif p.provider == "deepseek":
+            api_key = os.getenv("DEEPSEEK_API_KEY")
         elif p.provider == "openrouter":
             api_key = os.getenv("OPENROUTER_API_KEY")
         elif p.provider == "azure":
@@ -102,6 +115,7 @@ def _apply_env_overrides_to_profile(
                 "openai": "OPENAI_API_KEY",
                 "anthropic": "ANTHROPIC_API_KEY",
                 "google": "GOOGLE_API_KEY",
+                "deepseek": "DEEPSEEK_API_KEY",
                 "openrouter": "OPENROUTER_API_KEY",
                 "azure": "AZURE_OPENAI_KEY",
             }.get(p.provider, None)  # type: ignore[index]
@@ -132,6 +146,9 @@ def client_from_profile(
         api_key=api_key,
         azure_deployment=p.azure_deployment,
         timeout=p.timeout,
+        reasoning_effort=p.reasoning_effort,
+        thinking_mode=p.thinking_mode,
+        compatibility_policy=p.compatibility_policy,
         thinking_budget=p.thinking_budget,
         reasoning_summary=p.reasoning_summary,
         observation_sink=observation_sink,

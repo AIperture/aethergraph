@@ -16,6 +16,7 @@ from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 from aethergraph.core.runtime.run_cancellation import (
     RunCancellationHandle,
     RunCancellationRegistry,
+    RunCancellationRequestedError,
     get_run_cancellation_registry,
 )
 from aethergraph.core.runtime.run_types import (
@@ -479,7 +480,7 @@ class RunManager:
                 source="direct",
             )
 
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, RunCancellationRequestedError):
             # Cancellation path: scheduler.terminate() or external cancel.
             import logging
 

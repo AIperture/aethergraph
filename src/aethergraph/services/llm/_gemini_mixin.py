@@ -28,6 +28,9 @@ class _GeminiMixin:
         messages: list[dict[str, Any]],
         *,
         model: str,
+        reasoning_effort: str | None = None,
+        thinking_mode: str | None = None,
+        max_output_tokens: int | None = None,
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
@@ -64,6 +67,13 @@ class _GeminiMixin:
 
         async def _call():
             gen_cfg: dict[str, Any] = {"temperature": temperature, "topP": top_p}
+            if max_output_tokens is not None:
+                gen_cfg["maxOutputTokens"] = max_output_tokens
+            thinking_cfg = self._gemini_thinking_config(
+                model=model, reasoning_effort=reasoning_effort, thinking_mode=thinking_mode
+            )
+            if thinking_cfg:
+                gen_cfg["thinkingConfig"] = thinking_cfg
 
             # Gemini native structured outputs
             if output_format == "json_object":
@@ -75,6 +85,8 @@ class _GeminiMixin:
                 gen_cfg["responseJsonSchema"] = json_schema
 
             payload = {"contents": turns, "generationConfig": gen_cfg}
+            if tools is not None and not fail_on_unsupported:
+                payload["tools"] = tools
 
             r = await self._client.post(
                 f"{self.base_url}/v1/models/{model}:generateContent?key={self.api_key}",

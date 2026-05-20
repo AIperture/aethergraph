@@ -55,8 +55,11 @@ class LLMProfileView(BaseModel):
     base_url: str | None = None
     timeout: float = 60.0
     api_key: str | None = None  # masked
+    reasoning_effort: str | None = None
+    thinking_mode: str | None = None
     thinking_budget: int | None = None
     reasoning_summary: str | None = None
+    compatibility_policy: str = "compat"
 
 
 class LLMProfilePayload(BaseModel):
@@ -67,6 +70,9 @@ class LLMProfilePayload(BaseModel):
     api_key: str | None = None
     base_url: str | None = None
     timeout: float | None = None
+    reasoning_effort: str | None = None
+    thinking_mode: str | None = None
+    compatibility_policy: str | None = None
 
 
 # ---------------------------------------------------------------------------

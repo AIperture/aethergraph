@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -51,6 +52,7 @@ class NodeContext:
     agent_id: str | None = None  # for agent-invoked runs
     app_id: str | None = None  # for app-invoked runs
     _planner_facade: NodePlanner | None = None  # lazy init
+    chat_tag_provider: Callable[[], list[str]] | None = None
 
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:

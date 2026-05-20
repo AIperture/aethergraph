@@ -26,6 +26,10 @@ class _AnthropicMixin:
         messages: list[dict[str, Any]],
         *,
         model: str,
+        reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        thinking_budget: int | None = None,
+        thinking_mode: str | None = None,
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
@@ -48,14 +52,8 @@ class _AnthropicMixin:
                 c = m.get("content")
                 sys_msgs.append(c if isinstance(c, str) else str(c))
 
-        if output_format in ("json_object", "json_schema"):
+        if output_format == "json_object":
             sys_msgs.insert(0, "Return ONLY valid JSON. No markdown, no commentary.")
-            if output_format == "json_schema" and json_schema is not None:
-                sys_msgs.insert(
-                    1,
-                    "JSON MUST conform to this schema:\n"
-                    + json.dumps(json_schema, ensure_ascii=False),
-                )
 
         # Convert messages to Anthropic format (blocks)
         conv: list[dict[str, Any]] = []
@@ -69,13 +67,29 @@ class _AnthropicMixin:
 
         payload: dict[str, Any] = {
             "model": model,
-            "max_tokens": kw.get("max_tokens", 1024),
+            "max_tokens": max_output_tokens or kw.get("max_tokens", 1024),
             "messages": conv,
             "temperature": temperature,
             "top_p": top_p,
         }
         if sys_msgs:
             payload["system"] = "\n\n".join(sys_msgs)
+        if output_format == "json_schema":
+            if json_schema is None:
+                raise ValueError("output_format='json_schema' requires json_schema")
+            payload["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": kw.get("schema_name", "output"),
+                    "schema": json_schema,
+                }
+            }
+        if thinking_mode == "off":
+            pass
+        elif reasoning_effort is not None:
+            payload["thinking"] = {"type": "adaptive", "effort": reasoning_effort}
+        elif thinking_mode == "on":
+            payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget or 4096}
 
         async def _call():
             r = await self._client.post(
@@ -151,14 +165,8 @@ class _AnthropicMixin:
                 c = m.get("content")
                 sys_msgs.append(c if isinstance(c, str) else str(c))
 
-        if output_format in ("json_object", "json_schema"):
+        if output_format == "json_object":
             sys_msgs.insert(0, "Return ONLY valid JSON. No markdown, no commentary.")
-            if output_format == "json_schema" and json_schema is not None:
-                sys_msgs.insert(
-                    1,
-                    "JSON MUST conform to this schema:\n"
-                    + json.dumps(json_schema, ensure_ascii=False),
-                )
 
         # Convert messages to Anthropic format (blocks)
         conv: list[dict[str, Any]] = []
@@ -177,9 +185,15 @@ class _AnthropicMixin:
             "stream": True,
         }
 
-        # Extended thinking — requires no temperature
+        if output_format == "json_schema":
+            raise RuntimeError(
+                "Anthropic json_schema streaming is intentionally unsupported; use chat() instead."
+            )
+
         if thinking_budget is not None:
             payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        elif kw.get("reasoning_effort") is not None:
+            payload["thinking"] = {"type": "adaptive", "effort": kw.get("reasoning_effort")}
         else:
             payload["temperature"] = temperature
             payload["top_p"] = top_p

@@ -38,6 +38,9 @@ class LLMService:
         api_key: str | None = None,
         azure_deployment: str | None = None,
         timeout: float | None = None,
+        reasoning_effort: str | None = None,
+        thinking_mode: str | None = None,
+        compatibility_policy: str | None = None,
     ) -> GenericLLMClient:
         """
         Create or update a profile in memory. Returns the client.
@@ -52,10 +55,12 @@ class LLMService:
                 api_key=api_key,
                 azure_deployment=azure_deployment,
                 timeout=timeout or 60.0,
+                reasoning_effort=reasoning_effort or getattr(template, "reasoning_effort", None),
+                thinking_mode=thinking_mode or getattr(template, "thinking_mode", None),
+                compatibility_policy=compatibility_policy
+                or getattr(template, "compatibility_policy", "compat"),
                 observation_sink=getattr(template, "observation_sink", None),
-                observation_capture_mode=getattr(
-                    template, "observation_capture_mode", "full"
-                ),
+                observation_capture_mode=getattr(template, "observation_capture_mode", "full"),
             )
             self._clients[profile] = client
             return client
@@ -80,6 +85,12 @@ class LLMService:
                 asyncio.create_task(old_client.aclose())
             except RuntimeError:
                 logger.warning("Failed to close old httpx client")
+        if compatibility_policy is not None:
+            c.compatibility_policy = compatibility_policy
+        if reasoning_effort is not None:
+            c.reasoning_effort = reasoning_effort
+        if thinking_mode is not None:
+            c.thinking_mode = thinking_mode
         return c
 
     # --- Quick start helpers ---

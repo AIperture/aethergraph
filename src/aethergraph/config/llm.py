@@ -11,6 +11,12 @@ class LLMProfile(BaseModel):
     embed_model: str | None = None  # separate embedding model
     base_url: str | None = None
     timeout: float = 60.0
+    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    thinking_mode: Literal["auto", "on", "off"] | None = None
+    compatibility_policy: Literal["compat", "strict"] = Field(
+        default="compat",
+        description="How to handle requested capabilities that are not natively supported by the provider.",
+    )
 
     # provider-specific
     azure_deployment: str | None = None

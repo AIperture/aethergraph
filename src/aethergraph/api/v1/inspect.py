@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
@@ -39,7 +39,7 @@ def _parse_window(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
+        return value.replace(tzinfo=UTC)
     return value
 
 
@@ -182,13 +182,7 @@ def _present_llm_row(row: dict[str, Any]) -> LLMCallRecord:
         producer=InspectProducer(family="llm", name=str(row.get("provider") or "unknown")),
         scope=scope,
         tags=[str(row.get("call_type") or "chat"), status],
-        payload={
-            "max_output_tokens": row.get("max_output_tokens"),
-            "schema_name": row.get("schema_name"),
-            "strict_schema": row.get("strict_schema"),
-            "validate_json": row.get("validate_json"),
-            "extra_params": row.get("extra_params") or {},
-        },
+        payload={},
         call_id=str(row.get("call_id")),
         created_at=str(row.get("created_at")),
         call_type=str(row.get("call_type") or "chat"),
@@ -200,6 +194,9 @@ def _present_llm_row(row: dict[str, Any]) -> LLMCallRecord:
         usage=dict(row.get("usage") or {}),
         reasoning_effort=row.get("reasoning_effort"),
         output_format=row.get("output_format"),
+        request_args=dict(row.get("request_args") or {}),
+        provider_request_args=dict(row.get("provider_request_args") or {}),
+        compatibility_notes=[str(item) for item in list(row.get("compatibility_notes") or [])],
         messages_preview=row.get("messages_preview"),
         trace_payload_preview=row.get("trace_payload_preview"),
         raw_text_preview=row.get("raw_text_preview"),
@@ -216,7 +213,7 @@ def _parse_llm_ts(value: str | None) -> float:
         return 0.0
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt.timestamp()
 
 

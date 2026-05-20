@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import contextlib
 import json
 import logging
 import os
@@ -31,6 +32,9 @@ from aethergraph.services.llm.types import (
     ImageFormat,
     ImageGenerationResult,
     ImageResponseFormat,
+    LLMCallBudgetExceededError,
+    LLMInputTooLargeError,
+    LLMRunBudgetExceededError,
     LLMUnsupportedFeatureError,
 )
 from aethergraph.services.llm.utils import (
@@ -96,8 +100,11 @@ class GenericLLMClient(
         # rate limit
         rate_limit_cfg: RateLimitSettings | None = None,
         # thinking / reasoning
+        reasoning_effort: str | None = None,
+        thinking_mode: str | None = None,
         thinking_budget: int | None = None,
         reasoning_summary: str | None = None,
+        compatibility_policy: str = "compat",
         # observability
         observation_sink: LLMObservationSink | None = None,
         observation_capture_mode: CaptureMode = "full",
@@ -118,6 +125,7 @@ class GenericLLMClient(
             or os.getenv("OPENAI_API_KEY")
             or os.getenv("ANTHROPIC_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
+            or os.getenv("DEEPSEEK_API_KEY")
             or os.getenv("OPENROUTER_API_KEY")
         )
 
@@ -128,6 +136,7 @@ class GenericLLMClient(
                 "azure": os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/"),
                 "anthropic": "https://api.anthropic.com",
                 "google": "https://generativelanguage.googleapis.com",
+                "deepseek": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
                 "openrouter": "https://openrouter.ai/api/v1",
                 "lmstudio": os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
                 "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
@@ -144,11 +153,278 @@ class GenericLLMClient(
         self._per_run_tokens: dict[str, int] = {}
 
         # Thinking / reasoning config
+        self.reasoning_effort = reasoning_effort
+        self.thinking_mode = thinking_mode
         self.thinking_budget = thinking_budget
         self.reasoning_summary = reasoning_summary
+        self.compatibility_policy = compatibility_policy or "compat"
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
+        self._logger = logging.getLogger("aethergraph.services.llm")
+
+    def _normalize_output_format(self, output_format: ChatOutputFormat) -> ChatOutputFormat:
+        if output_format == "json":
+            self._logger.warning("output_format='json' is deprecated; use 'json_object' instead.")
+            return "json_object"
+        return output_format
+
+    def _resolve_fail_on_unsupported(self, fail_on_unsupported: bool | None) -> bool:
+        if fail_on_unsupported is not None:
+            return fail_on_unsupported
+        return self.compatibility_policy == "strict"
+
+    @staticmethod
+    def _map_deepseek_reasoning_effort(reasoning_effort: str) -> str:
+        mapping = {
+            "low": "high",
+            "medium": "high",
+            "high": "high",
+            "xhigh": "max",
+            "max": "max",
+        }
+        return mapping.get(str(reasoning_effort).lower(), str(reasoning_effort).lower())
+
+    def _deepseek_thinking_body(self, **kw: Any) -> dict[str, Any]:
+        thinking = kw.get("thinking")
+        thinking_mode = kw.get("thinking_mode") or self.thinking_mode or "auto"
+        if thinking is None:
+            if thinking_mode == "off":
+                thinking = {"type": "disabled"}
+            elif thinking_mode in {"auto", "on"}:
+                thinking = {"type": "enabled"}
+        if isinstance(thinking, dict):
+            return {"thinking": thinking}
+        return {}
+
+    def _resolve_reasoning_effort(self, reasoning_effort: str | None) -> str | None:
+        return reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+
+    @staticmethod
+    def _prune_none(value: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in value.items() if v is not None and v != {} and v != []}
+
+    def _build_request_args(
+        self,
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+        validate_json: bool,
+        extra_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        args = {
+            "provider": self.provider,
+            "model": model,
+            "profile_name": self.profile_name,
+            "compatibility_policy": self.compatibility_policy,
+            "reasoning_effort": reasoning_effort,
+            "thinking_mode": extra_params.get("thinking_mode", self.thinking_mode),
+            "thinking_budget": extra_params.get("thinking_budget", self.thinking_budget),
+            "reasoning_summary": extra_params.get("reasoning_summary", self.reasoning_summary),
+            "max_output_tokens": max_output_tokens,
+            "output_format": output_format,
+            "validate_json": validate_json
+            if output_format in ("json_object", "json_schema")
+            else None,
+            "strict_schema": strict_schema if output_format == "json_schema" else None,
+            "schema_name": schema_name
+            if output_format == "json_schema" and schema_name != "output"
+            else None,
+            "json_schema_present": bool(json_schema) if output_format == "json_schema" else None,
+            "temperature": extra_params.get("temperature"),
+            "top_p": extra_params.get("top_p"),
+            "tool_choice": extra_params.get("tool_choice"),
+            "tools_count": len(extra_params.get("tools") or [])
+            if extra_params.get("tools")
+            else None,
+        }
+        return self._prune_none(args)
+
+    def _build_provider_request_args(
+        self,
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        max_output_tokens: int | None,
+        output_format: ChatOutputFormat,
+        json_schema: dict[str, Any] | None,
+        schema_name: str,
+        strict_schema: bool,
+        extra_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.provider == "openai":
+            return self._prune_none(
+                {
+                    "reasoning": self._prune_none(
+                        {
+                            "effort": reasoning_effort,
+                            "summary": extra_params.get(
+                                "reasoning_summary", self.reasoning_summary
+                            ),
+                        }
+                    ),
+                    "text": self._prune_none(
+                        {
+                            "format": self._prune_none(
+                                {
+                                    "type": "json_object"
+                                    if output_format == "json_object"
+                                    else (
+                                        "json_schema" if output_format == "json_schema" else None
+                                    ),
+                                    "name": schema_name if output_format == "json_schema" else None,
+                                    "strict": strict_schema
+                                    if output_format == "json_schema"
+                                    else None,
+                                    "schema_present": bool(json_schema)
+                                    if output_format == "json_schema"
+                                    else None,
+                                }
+                            )
+                        }
+                    ),
+                    "max_output_tokens": max_output_tokens,
+                }
+            )
+        if self.provider == "anthropic":
+            thinking_mode = extra_params.get("thinking_mode", self.thinking_mode)
+            thinking: dict[str, Any] | None = None
+            if thinking_mode == "off":
+                thinking = None
+            elif reasoning_effort is not None:
+                thinking = {"type": "adaptive", "effort": reasoning_effort}
+            elif thinking_mode == "on":
+                thinking = {
+                    "type": "enabled",
+                    "budget_tokens": extra_params.get("thinking_budget", self.thinking_budget),
+                }
+            return self._prune_none(
+                {
+                    "thinking": thinking,
+                    "output_config": {"format": {"type": "json_schema", "name": schema_name}}
+                    if output_format == "json_schema"
+                    else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        if self.provider == "google":
+            return self._prune_none(
+                {
+                    "generationConfig": self._prune_none(
+                        {
+                            "thinkingConfig": self._gemini_thinking_config(
+                                model=model,
+                                reasoning_effort=reasoning_effort,
+                                thinking_mode=extra_params.get("thinking_mode", self.thinking_mode),
+                            ),
+                            "responseMimeType": "application/json"
+                            if output_format in ("json_object", "json_schema")
+                            else None,
+                            "responseJsonSchemaPresent": bool(json_schema)
+                            if output_format == "json_schema"
+                            else None,
+                            "maxOutputTokens": max_output_tokens,
+                        }
+                    )
+                }
+            )
+        if self.provider == "deepseek":
+            return self._prune_none(
+                {
+                    "reasoning_effort": self._map_deepseek_reasoning_effort(reasoning_effort)
+                    if reasoning_effort is not None
+                    else None,
+                    "thinking": self._deepseek_thinking_body(**extra_params).get("thinking"),
+                    "response_format": {"type": "json_object"}
+                    if output_format == "json_object"
+                    else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        if self.provider in {"openrouter", "lmstudio", "ollama"}:
+            return self._prune_none(
+                {
+                    "response_format": {"type": "json_object"}
+                    if output_format == "json_object"
+                    else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        if self.provider == "azure":
+            return self._prune_none(
+                {
+                    "response_format": {"type": "json_object"}
+                    if output_format == "json_object"
+                    else None,
+                    "schema_present": bool(json_schema) if output_format == "json_schema" else None,
+                    "max_tokens": max_output_tokens,
+                }
+            )
+        return {}
+
+    def _build_compatibility_notes(
+        self,
+        *,
+        output_format: ChatOutputFormat,
+        request_args: dict[str, Any],
+        provider_request_args: dict[str, Any],
+    ) -> list[str]:
+        notes: list[str] = []
+        if output_format == "json_object" and self.provider == "deepseek":
+            notes.append("DeepSeek JSON output also requires prompt-side JSON instructions.")
+        if output_format == "json_schema" and self.provider in {
+            "deepseek",
+            "openrouter",
+            "lmstudio",
+            "ollama",
+            "azure",
+        }:
+            notes.append(
+                "json_schema is validated locally; native provider enforcement may be partial or unavailable."
+            )
+        if request_args.get("thinking_mode") == "off" and self.provider == "openai":
+            notes.append(
+                "OpenAI does not expose a direct thinking-mode knob; thinking_mode is advisory only."
+            )
+        if request_args.get("thinking_budget") and self.provider not in {"anthropic", "google"}:
+            notes.append("thinking_budget is ignored by this provider.")
+        if not provider_request_args:
+            notes.append("No provider-specific request args were captured for this call.")
+        return notes
+
+    @staticmethod
+    def _gemini_thinking_config(
+        *, model: str, reasoning_effort: str | None, thinking_mode: str | None = None
+    ) -> dict[str, Any] | None:
+        if thinking_mode == "off":
+            if model.startswith("gemini-3"):
+                return {"thinkingLevel": "minimal"}
+            return {"thinkingBudget": 0}
+        if reasoning_effort is None:
+            if thinking_mode == "on" and model.startswith("gemini-3"):
+                return {"thinkingLevel": "high"}
+            return None
+        effort = str(reasoning_effort).lower()
+        if model.startswith("gemini-3"):
+            level = {
+                "low": "low",
+                "medium": "low",
+                "high": "high",
+                "xhigh": "high",
+            }.get(effort)
+            return {"thinkingLevel": level} if level else None
+        budget = {
+            "low": 0,
+            "medium": 1024,
+            "high": 8192,
+            "xhigh": 16384,
+        }.get(effort)
+        return {"thinkingBudget": budget} if budget is not None else None
 
     # ---------------- internal helpers for metering ----------------
     @staticmethod
@@ -211,17 +487,77 @@ class GenericLLMClient(
         self._per_run_tokens[run_id] = tokens
 
         if cfg.max_llm_calls_per_run and calls > cfg.max_llm_calls_per_run:
-            raise RuntimeError(
-                f"LLM call limit exceeded for this run "
-                f"({calls} > {cfg.max_llm_calls_per_run}). "
-                "Consider simplifying the graph or raising the limit."
+            raise LLMCallBudgetExceededError(
+                run_id=str(run_id),
+                calls=calls,
+                limit=int(cfg.max_llm_calls_per_run),
             )
 
         if cfg.max_llm_tokens_per_run and tokens > cfg.max_llm_tokens_per_run:
-            raise RuntimeError(
-                f"LLM token limit exceeded for this run "
-                f"({tokens} > {cfg.max_llm_tokens_per_run}). "
-                "Consider simplifying the graph or raising the limit."
+            raise LLMRunBudgetExceededError(
+                run_id=str(run_id),
+                total_tokens=tokens,
+                limit=int(cfg.max_llm_tokens_per_run),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        raw = str(text or "")
+        if not raw:
+            return 0
+        return max(1, (len(raw) + 3) // 4)
+
+    def _estimate_messages_tokens(self, messages: list[dict[str, Any]]) -> int:
+        total = 0
+        for message in list(messages or []):
+            total += 8  # role/message framing overhead
+            role = message.get("role")
+            if role is not None:
+                total += self._estimate_text_tokens(str(role))
+            content = message.get("content")
+            if content is None:
+                continue
+            if isinstance(content, str):
+                total += self._estimate_text_tokens(content)
+            else:
+                try:
+                    total += self._estimate_text_tokens(
+                        json.dumps(content, ensure_ascii=False, default=str)
+                    )
+                except Exception:
+                    total += self._estimate_text_tokens(str(content))
+        return total
+
+    def _preflight_llm_limits_for_run(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        max_output_tokens: int | None,
+    ) -> None:
+        cfg = self._get_rate_limit_cfg()
+        if cfg is None or not cfg.enabled or not cfg.max_llm_tokens_per_run:
+            return
+
+        ctx = current_meter_context.get()
+        run_id = ctx.get("run_id")
+        if not run_id:
+            return
+
+        spent_tokens = int(self._per_run_tokens.get(run_id, 0) or 0)
+        estimated_input_tokens = self._estimate_messages_tokens(messages)
+        reserved_output_tokens = max(0, int(max_output_tokens or 0))
+        projected_total_tokens = spent_tokens + estimated_input_tokens + reserved_output_tokens
+        limit = int(cfg.max_llm_tokens_per_run)
+        if projected_total_tokens > limit:
+            raise LLMInputTooLargeError(
+                run_id=str(run_id),
+                spent_tokens=spent_tokens,
+                estimated_input_tokens=estimated_input_tokens,
+                reserved_output_tokens=reserved_output_tokens,
+                projected_total_tokens=projected_total_tokens,
+                limit=limit,
             )
 
     def _current_dimensions(self) -> dict[str, Any]:
@@ -280,6 +616,9 @@ class GenericLLMClient(
         strict_schema: bool,
         validate_json: bool,
         extra_params: dict[str, Any],
+        request_args: dict[str, Any] | None,
+        provider_request_args: dict[str, Any] | None,
+        compatibility_notes: list[str] | None,
         trace_payload: dict[str, Any] | None,
         call_name: str | None = None,
     ) -> LLMObservationRecord:
@@ -297,6 +636,9 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             extra_params=extra_params,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+            compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             profile_name=self.profile_name,
             call_name=call_name,
@@ -341,7 +683,7 @@ class GenericLLMClient(
         schema_name: str = "output",
         strict_schema: bool = True,
         validate_json: bool = True,
-        fail_on_unsupported: bool = True,
+        fail_on_unsupported: bool | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         """
@@ -396,9 +738,42 @@ class GenericLLMClient(
             - Rate limiting and metering help manage resource usage effectively.
         """
         await self._ensure_client()
+        output_format = self._normalize_output_format(output_format)
+        fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
+        reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
+        if "thinking_mode" not in kw and self.thinking_mode is not None:
+            kw["thinking_mode"] = self.thinking_mode
+        if "thinking_budget" not in kw and self.thinking_budget is not None:
+            kw["thinking_budget"] = self.thinking_budget
         model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
         call_name = kw.pop("call_name", None)
+        request_args = self._build_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            extra_params=kw,
+        )
+        provider_request_args = self._build_provider_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            extra_params=kw,
+        )
+        compatibility_notes = self._build_compatibility_notes(
+            output_format=output_format,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+        )
         observation_record = self._build_observation_record(
             call_type="chat",
             model=model,
@@ -411,6 +786,9 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             extra_params=kw,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+            compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             call_name=call_name,
         )
@@ -437,6 +815,10 @@ class GenericLLMClient(
 
         start = time.perf_counter()
         try:
+            self._preflight_llm_limits_for_run(
+                messages=messages,
+                max_output_tokens=max_output_tokens,
+            )
             # Provider-specific call (now symmetric)
             text, usage = await self._chat_dispatch(
                 messages,
@@ -493,6 +875,13 @@ class GenericLLMClient(
                 metrics={"latency_ms": observation_record.latency_ms or 0},
             )
             raise
+        finally:
+            if not getattr(span, "finished", True):
+                with contextlib.suppress(Exception):
+                    await span.fail(
+                        RuntimeError("LLM call interrupted before completion"),
+                        metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+                    )
 
     # ================================================================
     # chat_stream() — streaming with thinking/reasoning support
@@ -510,7 +899,7 @@ class GenericLLMClient(
         schema_name: str = "output",
         strict_schema: bool = True,
         validate_json: bool = True,
-        fail_on_unsupported: bool = True,
+        fail_on_unsupported: bool | None = None,
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
         **kw: Any,
@@ -575,9 +964,47 @@ class GenericLLMClient(
         """
 
         await self._ensure_client()
+        output_format = self._normalize_output_format(output_format)
+        fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
+        reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
+        if "thinking_mode" not in kw and self.thinking_mode is not None:
+            kw["thinking_mode"] = self.thinking_mode
+        if output_format != "text":
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                self.model,
+                "streaming structured output",
+                "chat_stream() is text-only by contract in this client",
+            )
         model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
         call_name = kw.pop("call_name", None)
+        request_args = self._build_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            extra_params=kw,
+        )
+        provider_request_args = self._build_provider_request_args(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            extra_params=kw,
+        )
+        compatibility_notes = self._build_compatibility_notes(
+            output_format=output_format,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+        )
         observation_record = self._build_observation_record(
             call_type="chat_stream",
             model=model,
@@ -590,6 +1017,9 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             extra_params=kw,
+            request_args=request_args,
+            provider_request_args=provider_request_args,
+            compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             call_name=call_name,
         )
@@ -624,6 +1054,10 @@ class GenericLLMClient(
             _thinking_budget = None
 
         try:
+            self._preflight_llm_limits_for_run(
+                messages=messages,
+                max_output_tokens=max_output_tokens,
+            )
             if self.provider == "openai":
                 text, usage = await self._chat_openai_responses_stream(
                     messages,
@@ -651,6 +1085,16 @@ class GenericLLMClient(
                     fail_on_unsupported=fail_on_unsupported,
                     on_delta=on_delta,
                     on_thinking_delta=on_thinking_delta,
+                    reasoning_effort=reasoning_effort,
+                    **kw,
+                )
+            elif self.provider == "deepseek":
+                text, usage = await self._chat_openai_like_chat_completions_stream(
+                    messages,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                    on_delta=on_delta,
                     **kw,
                 )
             else:
@@ -669,15 +1113,6 @@ class GenericLLMClient(
                 )
                 if on_delta is not None and text:
                     await on_delta(text)
-
-            # Postprocess (JSON modes etc.)
-            text = self._postprocess_structured_output(
-                text=text,
-                output_format=output_format,
-                json_schema=json_schema,
-                strict_schema=strict_schema,
-                validate_json=validate_json,
-            )
 
             latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.raw_text = text
@@ -705,6 +1140,13 @@ class GenericLLMClient(
                 metrics={"latency_ms": observation_record.latency_ms or 0},
             )
             raise
+        finally:
+            if not getattr(span, "finished", True):
+                with contextlib.suppress(Exception):
+                    await span.fail(
+                        RuntimeError("LLM stream interrupted before completion"),
+                        metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+                    )
 
     # ================================================================
     # Dispatch + postprocessing
@@ -745,10 +1187,12 @@ class GenericLLMClient(
             )
 
         # Everyone else
-        if self.provider in {"openrouter", "lmstudio", "ollama"}:
+        if self.provider in {"deepseek", "openrouter", "lmstudio", "ollama"}:
             return await self._chat_openai_like_chat_completions(
                 messages,
                 model=model,
+                reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
@@ -773,10 +1217,15 @@ class GenericLLMClient(
             return await self._chat_anthropic_messages(
                 messages,
                 model=model,
+                reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
+                thinking_budget=kw.pop("thinking_budget", None),
+                thinking_mode=kw.get("thinking_mode"),
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
+                schema_name=schema_name,
                 **kw,
             )
 
@@ -784,6 +1233,9 @@ class GenericLLMClient(
             return await self._chat_gemini_generate_content(
                 messages,
                 model=model,
+                reasoning_effort=reasoning_effort,
+                thinking_mode=kw.get("thinking_mode"),
+                max_output_tokens=max_output_tokens,
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
@@ -802,7 +1254,7 @@ class GenericLLMClient(
         strict_schema: bool,
         validate_json: bool,
     ) -> str:
-        if output_format not in ("json", "json_object", "json_schema"):
+        if output_format not in ("json_object", "json_schema"):
             return text
 
         if not validate_json:
@@ -811,11 +1263,27 @@ class GenericLLMClient(
         candidate = (
             _strip_schema_enforced_json_fence(text) if output_format == "json_schema" else text
         )
-        json_text = _extract_json_text(candidate)
+        json_text, was_truncated, remainder = _extract_json_text(candidate)
         try:
             obj = json.loads(json_text)
         except Exception as e:
             raise RuntimeError(f"Model did not return valid JSON. Raw output:\n{text}") from e
+
+        if was_truncated and remainder:
+            try:
+                remainder_obj = json.loads(remainder)
+            except Exception:
+                remainder_obj = None
+            if remainder_obj == obj:
+                logging.getLogger(__name__).warning(
+                    "Model stuttered: returned identical JSON object twice. "
+                    "Deduplicating silently."
+                )
+            else:
+                raise RuntimeError(
+                    f"Model returned multiple JSON objects in a single response. "
+                    f"Only one JSON object is allowed. Raw output:\n{text}"
+                )
 
         if json_schema is not None and strict_schema:
             _validate_json_schema(obj, json_schema)
@@ -1059,6 +1527,9 @@ class GenericLLMClient(
 
             return await self._retry.run(_call)
 
+        if self.provider == "deepseek":
+            raise NotImplementedError("Embeddings not supported for deepseek in this client")
+
         # Anthropic: no embeddings endpoint
         raise NotImplementedError(f"Embeddings not supported for {self.provider}")
 
@@ -1096,6 +1567,8 @@ class GenericLLMClient(
         # ---- capability + config checks ----
         if self.provider == "anthropic":
             raise NotImplementedError("Embeddings not supported for anthropic")
+        if self.provider == "deepseek":
+            raise NotImplementedError("Embeddings not supported for deepseek")
 
         if self.provider == "azure" and not self.azure_deployment:
             raise RuntimeError(
@@ -1241,7 +1714,7 @@ class GenericLLMClient(
     # ================================================================
     def _headers_openai_like(self):
         hdr = {"Content-Type": "application/json"}
-        if self.provider in {"openai", "openrouter"}:
+        if self.provider in {"openai", "openrouter", "deepseek"}:
             hdr["Authorization"] = f"Bearer {self.api_key}"
         return hdr
 
@@ -1251,11 +1724,13 @@ class GenericLLMClient(
     def _default_headers_for_raw(self) -> dict[str, str]:
         hdr = {"Content-Type": "application/json"}
 
-        if self.provider in {"openai", "openrouter"}:
+        if self.provider in {"openai", "openrouter", "deepseek"}:
             if self.api_key:
                 hdr["Authorization"] = f"Bearer {self.api_key}"
             else:
-                raise RuntimeError("OpenAI/OpenRouter requires an API key for raw() calls.")
+                raise RuntimeError(
+                    "OpenAI-compatible providers require an API key for raw() calls."
+                )
 
         elif self.provider == "anthropic":
             if self.api_key:

@@ -20,7 +20,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
     """
     Provider-agnostic embedding client.
 
-    provider: one of {"openai","azure","anthropic","google","openrouter","lmstudio","ollama","dummy"}
+    provider: one of {"openai","azure","anthropic","google","deepseek","openrouter","lmstudio","ollama","dummy"}
 
     Configuration (env defaults, but can be passed directly):
 
@@ -61,6 +61,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 or os.getenv("AZURE_OPENAI_KEY")
                 or os.getenv("ANTHROPIC_API_KEY")
                 or os.getenv("GOOGLE_API_KEY")
+                or os.getenv("DEEPSEEK_API_KEY")
                 or os.getenv("OPENROUTER_API_KEY")
             )
 
@@ -71,6 +72,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 "azure": os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/"),
                 "anthropic": "https://api.anthropic.com",
                 "google": "https://generativelanguage.googleapis.com",
+                "deepseek": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
                 "openrouter": "https://openrouter.ai/api/v1",
                 "lmstudio": os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
                 "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
@@ -140,6 +142,8 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             embs = await self._embed_google(texts, model=model, **kw)
         elif self.provider == "anthropic":
             raise NotImplementedError("Embeddings not supported for anthropic")
+        elif self.provider == "deepseek":
+            raise NotImplementedError("Embeddings not supported for deepseek")
         elif self.provider == "dummy":
             embs = await self._embed_dummy(texts, model=model, **kw)
         else:  # pragma: no cover
