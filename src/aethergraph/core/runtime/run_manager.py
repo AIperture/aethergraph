@@ -82,6 +82,16 @@ def _run_status_text(value: Any) -> str:
 
 _log = logging.getLogger("aethergraph.runtime.run_manager")
 
+# Root-turn admission is a session-consistency guard, not a general scheduler
+# throttle. It exists because UI/channel callers may submit the next visible
+# user turn as soon as a planner message is displayed, while the previous root
+# run is still saving final session state. Starting the next root run during
+# that finalization window lets the new planner observe stale session artifacts.
+#
+# Only statuses that still imply "the prior root turn may be mutating session
+# state" block admission. RunStatus.waiting is intentionally excluded: approval
+# and resume traffic must be able to enter a session once the previous root turn
+# has deliberately parked on a continuation.
 _SESSION_ROOT_TURN_BARRIER_STATUSES = frozenset(
     {
         RunStatus.pending,
@@ -91,6 +101,11 @@ _SESSION_ROOT_TURN_BARRIER_STATUSES = frozenset(
 )
 _SESSION_ROOT_TURN_BARRIER_TIMEOUT_S = 10.0
 _SESSION_ROOT_TURN_BARRIER_POLL_S = 0.05
+
+# These runs are orchestration/runtime work created underneath an already
+# admitted root turn. They must be allowed to overlap the parent; otherwise
+# async children, completion notifiers, and resumption helpers can deadlock
+# behind the very root run they are supposed to finish.
 _INTERNAL_RUN_TAGS = frozenset(
     {
         "aethergraph_engine._internal",
@@ -100,6 +115,10 @@ _INTERNAL_RUN_TAGS = frozenset(
     }
 )
 _INTERNAL_RUN_TAG_PREFIXES = ("plan_step:", "trigger:")
+
+# These origins represent visible/user-facing root turns. RunOrigin.agent and
+# RunOrigin.schedule are intentionally excluded so child/subagent runs and
+# scheduled work do not inherit chat-turn serialization semantics by accident.
 _ROOT_TURN_ORIGINS = frozenset(
     {
         RunOrigin.app,
@@ -178,6 +197,13 @@ class RunManager:
         visibility: RunVisibility | None,
         run_config: dict[str, Any] | None,
     ) -> asyncio.Lock | None:
+        """Acquire same-session root-turn admission when this run needs it.
+
+        This protects only the short admission window: we hold the per-session
+        lock while checking persisted blockers and creating the new run record.
+        After the record exists, later callers can rely on the run store to see
+        that this root turn is running and should block behind it.
+        """
         if not self._should_gate_session_root_turn(
             session_id=session_id,
             tags=tags,
@@ -218,6 +244,11 @@ class RunManager:
         visibility: RunVisibility | None,
         run_config: dict[str, Any] | None,
     ) -> bool:
+        # Future control-plane implementations should decide deliberately
+        # whether they are root turns. Direct APIs such as cancel_run/get_record
+        # bypass this path already. If a natural-language "cancel/check status"
+        # message must go through submit_run, give it a distinct origin/tag or
+        # run_config marker and handle that marker here.
         if self._store is None or not session_id:
             return False
         if visibility == RunVisibility.hidden:
@@ -319,6 +350,9 @@ class RunManager:
             status = _run_status(record.status)
             if status not in _SESSION_ROOT_TURN_BARRIER_STATUSES:
                 continue
+            # Non-root records may legitimately be newer than the prior root
+            # turn in the same session. Keep scanning until we find a visible
+            # root turn that can still be mutating shared session state.
             if self._is_session_root_turn_record(record):
                 return record
         return None
@@ -864,6 +898,9 @@ class RunManager:
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
+        # Gate before creating the RunRecord. Once this method persists a root
+        # run, that record itself becomes the blocker for later same-session
+        # root turns; the in-process lock only closes the check/create race.
         admission_lock = await self._acquire_session_root_turn_admission(
             session_id=session_id,
             graph_id=graph_id,
@@ -1004,6 +1041,10 @@ class RunManager:
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
+        # run_and_wait also creates persisted root records, so it participates
+        # in the same session admission semantics as submit_run. The lock is
+        # released immediately after record creation; execution can still run
+        # inline while later root turns observe this record in the store.
         admission_lock = await self._acquire_session_root_turn_admission(
             session_id=session_id,
             graph_id=graph_id,
