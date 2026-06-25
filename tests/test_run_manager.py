@@ -6,7 +6,7 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
-from aethergraph.core.runtime.run_types import RunStatus
+from aethergraph.core.runtime.run_types import RunOrigin, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.storage.runs.inmen_store import InMemoryRunStore
@@ -335,6 +335,79 @@ async def test_run_manager_submit_run_non_blocking(monkeypatch, dummy_meter):
     call = dummy_meter.calls[0]
     assert call["run_id"] == record.run_id
     assert call["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_submit_run_gates_same_session_root_turns_but_not_agent_children(
+    monkeypatch, dummy_meter
+):
+    store = InMemoryRunStore()
+    reg = UnifiedRegistry()
+    rm = RunManager(run_store=store, registry=reg, max_concurrent_runs=10)
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    root_started = asyncio.Event()
+    release_root = asyncio.Event()
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        if inputs.get("name") == "root":
+            root_started.set()
+            await release_root.wait()
+        return {"name": inputs.get("name")}
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    root = await rm.submit_run(
+        graph_id="my-graph",
+        inputs={"name": "root"},
+        identity=Identity(user_id="u1", org_id="o1"),
+        session_id="sess-1",
+        origin=RunOrigin.chat,
+    )
+    await asyncio.wait_for(root_started.wait(), timeout=1.0)
+
+    child = await asyncio.wait_for(
+        rm.submit_run(
+            graph_id="my-graph",
+            inputs={"name": "child"},
+            identity=Identity(user_id="u1", org_id="o1"),
+            session_id="sess-1",
+            origin=RunOrigin.agent,
+        ),
+        timeout=0.5,
+    )
+    child_record, _ = await rm.wait_run(child.run_id, return_outputs=True)
+    assert child_record.status == RunStatus.succeeded
+
+    next_root_task = asyncio.create_task(
+        rm.submit_run(
+            graph_id="my-graph",
+            inputs={"name": "next-root"},
+            identity=Identity(user_id="u1", org_id="o1"),
+            session_id="sess-1",
+            origin=RunOrigin.chat,
+        )
+    )
+    await asyncio.sleep(0.12)
+    assert next_root_task.done() is False
+
+    release_root.set()
+    next_root = await asyncio.wait_for(next_root_task, timeout=1.0)
+
+    root_record, _ = await rm.wait_run(root.run_id, return_outputs=True)
+    next_root_record, _ = await rm.wait_run(next_root.run_id, return_outputs=True)
+    assert root_record.status == RunStatus.succeeded
+    assert next_root_record.status == RunStatus.succeeded
 
 
 @pytest.mark.asyncio

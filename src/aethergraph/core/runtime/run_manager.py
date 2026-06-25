@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 import json
+import logging
 import traceback
 from typing import Any
 from uuid import uuid4
@@ -65,6 +66,52 @@ def _clone_jsonish_dict(value: dict[str, Any] | None) -> dict[str, Any]:
     return json.loads(json.dumps(value, default=repr))
 
 
+def _run_status(value: Any) -> RunStatus | None:
+    if isinstance(value, RunStatus):
+        return value
+    try:
+        return RunStatus(str(value))
+    except Exception:
+        return None
+
+
+def _run_status_text(value: Any) -> str:
+    status = _run_status(value)
+    return status.value if status is not None else str(value)
+
+
+_log = logging.getLogger("aethergraph.runtime.run_manager")
+
+_SESSION_ROOT_TURN_BARRIER_STATUSES = frozenset(
+    {
+        RunStatus.pending,
+        RunStatus.running,
+        RunStatus.cancellation_requested,
+    }
+)
+_SESSION_ROOT_TURN_BARRIER_TIMEOUT_S = 10.0
+_SESSION_ROOT_TURN_BARRIER_POLL_S = 0.05
+_INTERNAL_RUN_TAGS = frozenset(
+    {
+        "aethergraph_engine._internal",
+        "async_hop",
+        "notifier",
+        "runner_resumption",
+    }
+)
+_INTERNAL_RUN_TAG_PREFIXES = ("plan_step:", "trigger:")
+_ROOT_TURN_ORIGINS = frozenset(
+    {
+        RunOrigin.app,
+        RunOrigin.chat,
+        RunOrigin.playground,
+        RunOrigin.api,
+        RunOrigin.cli,
+        RunOrigin.local,
+    }
+)
+
+
 class RunManager:
     """
     TODO: for global schedulers, we may want to have a dedicated run manager -- current
@@ -97,6 +144,8 @@ class RunManager:
         self._run_waiters_lock = (
             asyncio.Lock()
         )  # no need for thread lock because run_manager is used within event loop
+        self._session_root_turn_locks: dict[str, asyncio.Lock] = {}
+        self._session_root_turn_locks_lock = asyncio.Lock()
 
     # -------- concurrency helpers --------
     async def _acquire_run_slot(self) -> None:
@@ -117,6 +166,162 @@ class RunManager:
             return
         async with self._lock:
             self._running = max(0, self._running - 1)
+
+    async def _acquire_session_root_turn_admission(
+        self,
+        *,
+        session_id: str | None,
+        graph_id: str,
+        run_id: str | None,
+        tags: list[str] | None,
+        origin: RunOrigin | None,
+        visibility: RunVisibility | None,
+        run_config: dict[str, Any] | None,
+    ) -> asyncio.Lock | None:
+        if not self._should_gate_session_root_turn(
+            session_id=session_id,
+            tags=tags,
+            origin=origin,
+            visibility=visibility,
+            run_config=run_config,
+        ):
+            return None
+        session_key = str(session_id)
+        async with self._session_root_turn_locks_lock:
+            lock = self._session_root_turn_locks.get(session_key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._session_root_turn_locks[session_key] = lock
+        await lock.acquire()
+        try:
+            await self._wait_for_session_root_turn_barrier(
+                session_id=session_key,
+                graph_id=graph_id,
+                run_id=run_id,
+            )
+        except Exception:
+            lock.release()
+            raise
+        return lock
+
+    @staticmethod
+    def _release_session_root_turn_admission(lock: asyncio.Lock | None) -> None:
+        if lock is not None and lock.locked():
+            lock.release()
+
+    def _should_gate_session_root_turn(
+        self,
+        *,
+        session_id: str | None,
+        tags: list[str] | None,
+        origin: RunOrigin | None,
+        visibility: RunVisibility | None,
+        run_config: dict[str, Any] | None,
+    ) -> bool:
+        if self._store is None or not session_id:
+            return False
+        if visibility == RunVisibility.hidden:
+            return False
+        if self._is_internal_run_metadata(tags=tags, run_config=run_config):
+            return False
+        return (origin or RunOrigin.app) in _ROOT_TURN_ORIGINS
+
+    @staticmethod
+    def _is_internal_run_metadata(
+        *,
+        tags: list[str] | None,
+        run_config: dict[str, Any] | None = None,
+    ) -> bool:
+        tag_set = {str(tag) for tag in list(tags or [])}
+        if tag_set.intersection(_INTERNAL_RUN_TAGS):
+            return True
+        if any(tag.startswith(_INTERNAL_RUN_TAG_PREFIXES) for tag in tag_set):
+            return True
+        resume_mode = str((run_config or {}).get("resume_mode") or "")
+        return resume_mode == "runner_resumption"
+
+    def _is_session_root_turn_record(self, record: RunRecord) -> bool:
+        if getattr(record, "visibility", None) == RunVisibility.hidden:
+            return False
+        if self._is_internal_run_metadata(
+            tags=list(record.tags or []), run_config=record.meta or {}
+        ):
+            return False
+        return (getattr(record, "origin", None) or RunOrigin.app) in _ROOT_TURN_ORIGINS
+
+    async def _wait_for_session_root_turn_barrier(
+        self,
+        *,
+        session_id: str,
+        graph_id: str,
+        run_id: str | None,
+    ) -> None:
+        if self._store is None:
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _SESSION_ROOT_TURN_BARRIER_TIMEOUT_S
+        first_blocker_id = ""
+        waited = False
+        while True:
+            blocker = await self._find_session_root_turn_blocker(session_id=session_id)
+            if blocker is None:
+                if waited:
+                    _log.debug(
+                        "session root-turn barrier released",
+                        extra={
+                            "session_id": session_id,
+                            "graph_id": graph_id,
+                            "run_id": run_id,
+                            "blocked_by": first_blocker_id,
+                        },
+                    )
+                return
+            waited = True
+            if not first_blocker_id:
+                first_blocker_id = blocker.run_id
+                _log.debug(
+                    "session root-turn barrier waiting",
+                    extra={
+                        "session_id": session_id,
+                        "graph_id": graph_id,
+                        "run_id": run_id,
+                        "blocked_by": blocker.run_id,
+                        "blocked_status": _run_status_text(blocker.status),
+                    },
+                )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                _log.warning(
+                    "session root-turn barrier timed out; admitting run",
+                    extra={
+                        "session_id": session_id,
+                        "graph_id": graph_id,
+                        "run_id": run_id,
+                        "blocked_by": blocker.run_id,
+                        "blocked_status": _run_status_text(blocker.status),
+                    },
+                )
+                return
+            await asyncio.sleep(min(_SESSION_ROOT_TURN_BARRIER_POLL_S, remaining))
+
+    async def _find_session_root_turn_blocker(self, *, session_id: str) -> RunRecord | None:
+        if self._store is None:
+            return None
+        try:
+            records = await self._store.list(session_id=session_id, limit=25)
+        except Exception:
+            _log.exception(
+                "session root-turn barrier failed to list runs",
+                extra={"session_id": session_id},
+            )
+            return None
+        for record in records:
+            status = _run_status(record.status)
+            if status not in _SESSION_ROOT_TURN_BARRIER_STATUSES:
+                continue
+            if self._is_session_root_turn_record(record):
+                return record
+        return None
 
     # -------- registry helpers --------
 
@@ -659,14 +864,23 @@ class RunManager:
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
+        admission_lock = await self._acquire_session_root_turn_admission(
+            session_id=session_id,
+            graph_id=graph_id,
+            run_id=run_id,
+            tags=tags,
+            origin=origin,
+            visibility=visibility,
+            run_config=run_config,
+        )
         # Acquire run slot (rate limiting)
-        await self._acquire_run_slot()
         # Tracks whether responsibility for releasing the slot has been handed
         # over to the background runner (_bg). If False, submit_run must
         # release the slot on exception; if True, _bg will do it its finally.
         slot_handed_to_bg = False
 
         try:
+            await self._acquire_run_slot()
             tags = tags or []
 
             record: RunRecord | None = None
@@ -755,6 +969,8 @@ class RunManager:
             if not slot_handed_to_bg:
                 await self._release_run_slot()
             raise
+        finally:
+            self._release_session_root_turn_admission(admission_lock)
 
     async def run_and_wait(
         self,
@@ -788,10 +1004,18 @@ class RunManager:
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
-        if count_slot:
-            await self._acquire_run_slot()
-
+        admission_lock = await self._acquire_session_root_turn_admission(
+            session_id=session_id,
+            graph_id=graph_id,
+            run_id=run_id,
+            tags=tags,
+            origin=origin,
+            visibility=visibility,
+            run_config=run_config,
+        )
         try:
+            if count_slot:
+                await self._acquire_run_slot()
             tags = tags or []
 
             record, target = await self._build_run_record(
@@ -824,6 +1048,8 @@ class RunManager:
 
             if self._store is not None:
                 await self._store.create(record)
+            self._release_session_root_turn_admission(admission_lock)
+            admission_lock = None
             await self._ensure_cancellation_handle(record.run_id)
 
             finalize_kwargs = {
@@ -837,6 +1063,7 @@ class RunManager:
                 finalize_kwargs["run_config"] = run_config
             return await self._run_and_finalize(**finalize_kwargs)
         finally:
+            self._release_session_root_turn_admission(admission_lock)
             if count_slot:
                 await self._release_run_slot()
 
