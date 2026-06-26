@@ -21,6 +21,8 @@ EventType = Literal[
 class PhaseRich(TypedDict, total=False):
     kind: Literal["phase"]
     phase: str  # "routing", "planning", "reasoning", "tools", "reply"
+    phase_key: str | None
+    phase_key_source: Literal["explicit", "event"] | None
     status: Literal["pending", "active", "done", "failed", "skipped"]
     label: str | None  # short human label
     detail: str | None  # optional extra text

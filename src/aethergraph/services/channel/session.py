@@ -538,6 +538,7 @@ class ChannelSession:
         phase: str,
         status: Literal["pending", "active", "done", "failed", "skipped"],
         *,
+        phase_key: str | None = None,
         label: str | None = None,
         detail: str | None = None,
         channel: str | None = None,
@@ -546,28 +547,38 @@ class ChannelSession:
         Emit a phase-style progress update event.
 
         Phases are decoupled from the reply lifecycle. Each call creates a
-        unique timeline entry (no upsert) so the frontend can accumulate them
-        as pending phases until a message claims them.
+        unique transport event while optionally carrying a stable logical
+        `phase_key` that UI consumers can use to merge updates for the same
+        phase run.
 
         Examples:
             Send a pending phase update:
-            ```python
-            await context.channel().send_phase("routing", "pending")
-            ```
+                ```python
+                await context.channel().send_phase("routing", "pending")
+                ```
 
-            Send an active phase update with details:
-            ```python
-            await context.channel().send_phase(
-                "planning",
-                "active",
-                label="Planning Phase",
-                detail="Calculating optimal routes",
-            )
-            ```
+            Send paired updates for one logical phase:
+                ```python
+                await context.channel().send_phase(
+                    "planning",
+                    "active",
+                    phase_key="builder:planning",
+                    label="Planning Phase",
+                    detail="Calculating optimal routes",
+                )
+                await context.channel().send_phase(
+                    "planning",
+                    "done",
+                    phase_key="builder:planning",
+                    label="Plan ready",
+                )
+                ```
 
         Args:
             phase: Logical phase identifier.
             status: Phase status value. One of `"pending"`, `"active"`, `"done"`, `"failed"`, or `"skipped"`.
+            phase_key: Optional stable logical phase identity. When omitted,
+                the unique event id is used as an event-scoped fallback.
             label: Optional display label. Defaults to `phase.title()`.
             detail: Optional detail text. Defaults to an empty string.
             channel: Optional target channel key.
@@ -576,9 +587,10 @@ class ChannelSession:
             None: Complete when the progress update is published.
 
         Notes:
-            - Payload shape is UI-oriented and adapters may render or ignore it differently.
-            - The frontend shows LivePulse while a phase is "active" and hides it on terminal status.
-            - Phases accumulate until the next terminal message claims them for InlinePhaseBlock display.
+            `phase_event_id` remains unique for every emission. `phase_key`
+            is only authoritative for merging when `phase_key_source` is
+            `"explicit"`; omitted keys are marked `"event"` for backward
+            compatibility.
         """
         ch_key = self._resolve_key(channel)
         self._phase_seq += 1
@@ -586,10 +598,15 @@ class ChannelSession:
         phase_updated_at = time.time()
         # Each emission is unique (no upsert — every call is a new timeline entry)
         phase_event_id = f"{self._run_id}:{self._node_id}:phase:{phase_seq}"
+        explicit_phase_key = bool(phase_key)
+        resolved_phase_key = str(phase_key) if explicit_phase_key else phase_event_id
+        phase_key_source = "explicit" if explicit_phase_key else "event"
 
         rich = {
             "kind": "phase",
             "phase": phase,
+            "phase_key": resolved_phase_key,
+            "phase_key_source": phase_key_source,
             "status": status,
             "label": label or phase.title(),
             "detail": detail or "",
@@ -608,6 +625,8 @@ class ChannelSession:
                     {
                         "kind": "phase",
                         "phase": phase,
+                        "phase_key": resolved_phase_key,
+                        "phase_key_source": phase_key_source,
                         "status": status,
                     }
                 ),
@@ -2263,6 +2282,11 @@ class ChannelSession:
         last_thinking_ts = 0.0
         thinking_started = False
         text_started = False
+        thinking_phase_key = (
+            f"{self._run_id}:{self._node_id}:thinking:{uuid.uuid4().hex}"
+            if emit_thinking_phase
+            else None
+        )
 
         async with self.stream(channel=channel) as s:
 
@@ -2282,6 +2306,7 @@ class ChannelSession:
                         await self.send_phase(
                             phase=thinking_phase,
                             status="active",
+                            phase_key=thinking_phase_key,
                             label=thinking_label_active,
                             channel=channel,
                         )
@@ -2302,6 +2327,7 @@ class ChannelSession:
                         await self.send_phase(
                             phase=thinking_phase,
                             status="active",
+                            phase_key=thinking_phase_key,
                             label=thinking_label_active,
                             detail=detail,
                             channel=channel,
@@ -2323,6 +2349,7 @@ class ChannelSession:
                         await self.send_phase(
                             phase=thinking_phase,
                             status="done",
+                            phase_key=thinking_phase_key,
                             label=thinking_label_done,
                             detail=full,
                             channel=channel,
@@ -2361,6 +2388,7 @@ class ChannelSession:
                     await self.send_phase(
                         phase=thinking_phase,
                         status="done",
+                        phase_key=thinking_phase_key,
                         label=thinking_label_done,
                         detail=full,
                         channel=channel,
