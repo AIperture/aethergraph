@@ -160,7 +160,7 @@ Checkpointing rules:
 
 UX rules:
 - For critical phases (`routing`, `planning`, `coding`, `validation`, `registration`, `finishing`), always use `send_phase` with both `label` and `detail`.
-- For long work, use `send_phase(..., status="active")` and close with `status="done"` or `status="failed"`.
+- For long work, use `send_phase(..., status="active", phase_key=...)` and close the same `phase_key` with `status="done"` or `status="failed"`.
 - Plan UX uses rich card and buttons.
 - After code generation, validate using registry + static import checks before offering register buttons.
 - If validation fails, show concise errors and offer `Regenerate` / `Replan` actions.
