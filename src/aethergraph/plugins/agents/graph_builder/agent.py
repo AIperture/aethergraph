@@ -71,9 +71,14 @@ async def graph_builder(
         )
         return {"reply": reply}
 
+    phase_prefix = f"graph_builder:{getattr(context, 'run_id', 'run')}"
+    routing_phase_key = f"{phase_prefix}:routing"
+    finishing_phase_key = f"{phase_prefix}:finishing"
+
     await chan.send_phase(
         phase="routing",
         status="active",
+        phase_key=routing_phase_key,
         label="Routing request",
         detail="Processing files and conversation context.",
     )
@@ -92,6 +97,7 @@ async def graph_builder(
         await chan.send_phase(
             phase="routing",
             status="failed",
+            phase_key=routing_phase_key,
             label="Routing failed",
             detail="Failed while processing input files.",
         )
@@ -109,6 +115,7 @@ async def graph_builder(
     await chan.send_phase(
         phase="routing",
         status="active",
+        phase_key=routing_phase_key,
         label="Selecting branch",
         detail="Analyzing intent and current builder state.",
     )
@@ -122,6 +129,7 @@ async def graph_builder(
     await chan.send_phase(
         phase="routing",
         status="done",
+        phase_key=routing_phase_key,
         label="Route selected",
         detail=f"Selected branch: {decision['branch'].value}",
     )
@@ -156,6 +164,7 @@ async def graph_builder(
     await chan.send_phase(
         phase="finishing",
         status="active",
+        phase_key=finishing_phase_key,
         label="Finalizing response",
         detail="Saving assistant output to memory.",
     )
@@ -166,6 +175,7 @@ async def graph_builder(
     await chan.send_phase(
         phase="finishing",
         status="done",
+        phase_key=finishing_phase_key,
         label="Response ready",
         detail="Handing response back to the session.",
     )

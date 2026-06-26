@@ -312,10 +312,12 @@ async def _handle_plan_v2(
         f"User request:\n{message}\n\n"
         f"Files summary:\n{files_summary}\n"
     )
+    planning_phase_key = f"graph_builder:{getattr(context, 'run_id', 'run')}:planning"
 
     await chan.send_phase(
         phase="planning",
         status="active",
+        phase_key=planning_phase_key,
         label="Planning workflow",
         detail="LLM is drafting a structured graph plan.",
     )
@@ -337,6 +339,7 @@ async def _handle_plan_v2(
         await chan.send_phase(
             phase="planning",
             status="failed",
+            phase_key=planning_phase_key,
             label="Planning failed",
             detail="LLM plan generation failed.",
         )
@@ -368,6 +371,7 @@ async def _handle_plan_v2(
     await chan.send_phase(
         phase="planning",
         status="done",
+        phase_key=planning_phase_key,
         label="Plan ready",
         detail="Plan card and decision buttons were sent.",
     )
@@ -397,6 +401,9 @@ async def _handle_generate_v2(
     chan = context.ui_session_channel()
     state = await _load_state(context=context, level="user")
     plan = state.pending_plan_json or state.last_plan_json
+    phase_prefix = f"graph_builder:{getattr(context, 'run_id', 'run')}"
+    coding_phase_key = f"{phase_prefix}:coding"
+    validation_phase_key = f"{phase_prefix}:validation"
     if not plan:
         await chan.send_phase(
             phase="planning",
@@ -457,6 +464,7 @@ async def _handle_generate_v2(
     await chan.send_phase(
         phase="coding",
         status="active",
+        phase_key=coding_phase_key,
         label="Generating code",
         detail="LLM is generating Python workflow code from the approved plan.",
     )
@@ -470,6 +478,7 @@ async def _handle_generate_v2(
         await chan.send_phase(
             phase="coding",
             status="failed",
+            phase_key=coding_phase_key,
             label="Code generation failed",
             detail="LLM code generation failed.",
         )
@@ -482,6 +491,7 @@ async def _handle_generate_v2(
         await chan.send_phase(
             phase="coding",
             status="failed",
+            phase_key=coding_phase_key,
             label="Code extraction failed",
             detail="No Python code block found in model output.",
         )
@@ -511,6 +521,7 @@ async def _handle_generate_v2(
     await chan.send_phase(
         phase="coding",
         status="done",
+        phase_key=coding_phase_key,
         label="Code generated",
         detail=f"Sent generated file `{filename}`.",
     )
@@ -537,6 +548,7 @@ async def _handle_generate_v2(
     await chan.send_phase(
         phase="validation",
         status="active",
+        phase_key=validation_phase_key,
         label="Validating generated code",
         detail="Running syntax/decorator checks, import checks, and registry probe.",
     )
@@ -553,6 +565,7 @@ async def _handle_generate_v2(
         await chan.send_phase(
             phase="validation",
             status="failed",
+            phase_key=validation_phase_key,
             label="Validation failed",
             detail=f"Found {issue_count} issue(s).",
         )
@@ -581,6 +594,7 @@ async def _handle_generate_v2(
     await chan.send_phase(
         phase="validation",
         status="done",
+        phase_key=validation_phase_key,
         label="Validation passed",
         detail="Generated source passed syntax/import/registry checks.",
     )
@@ -770,9 +784,11 @@ async def _handle_register_app_v2(
     state = await _load_state(context=context, level="user")
     if state.pending_action == "awaiting_register_decision":
         state.pending_action = None
+    registration_phase_key = f"graph_builder:{getattr(context, 'run_id', 'run')}:registration"
     await chan.send_phase(
         phase="registration",
         status="active",
+        phase_key=registration_phase_key,
         label="Registering app",
         detail="Validating and registering generated graph as an app.",
     )
@@ -856,6 +872,7 @@ async def _handle_register_app_v2(
                 await chan.send_phase(
                     phase="registration",
                     status="failed",
+                    phase_key=registration_phase_key,
                     label="Registration failed",
                     detail="Candidate source failed graph validation.",
                 )
@@ -870,6 +887,7 @@ async def _handle_register_app_v2(
         await chan.send_phase(
             phase="registration",
             status="failed",
+            phase_key=registration_phase_key,
             label="Registration failed",
             detail="No valid graph candidate found to register.",
         )
@@ -915,6 +933,7 @@ async def _handle_register_app_v2(
             await chan.send_phase(
                 phase="registration",
                 status="failed",
+                phase_key=registration_phase_key,
                 label="Registration failed",
                 detail="Registry rejected app registration.",
             )
@@ -964,6 +983,7 @@ async def _handle_register_app_v2(
     await chan.send_phase(
         phase="registration",
         status="done",
+        phase_key=registration_phase_key,
         label="Registration complete",
         detail=f"Registered app `{app_id}` for flow `{flow_id}`.",
     )
@@ -1007,9 +1027,11 @@ async def _handle_chat_v2(*, message: str, context: NodeContext) -> str:
     llm = context.llm()
     system_prompt = _compile_branch_prompt(context=context, branch=GraphBuilderBranch.CHAT)
     history = await _recent_chat_for_llm(context=context, limit=18)
+    thinking_phase_key = f"graph_builder:{getattr(context, 'run_id', 'run')}:chat-thinking"
     await chan.send_phase(
         phase="thinking",
         status="active",
+        phase_key=thinking_phase_key,
         label="LLM is processing",
         detail="Generating a response to your chat request.",
     )
@@ -1027,6 +1049,7 @@ async def _handle_chat_v2(*, message: str, context: NodeContext) -> str:
     await chan.send_phase(
         phase="thinking",
         status="done",
+        phase_key=thinking_phase_key,
         label="Chat response ready",
         detail="Completed response generation.",
     )
