@@ -64,15 +64,19 @@ def resolve_node_context_param(fn: Callable) -> str | None:
     return legacy_candidates[0] if legacy_candidates else None
 
 
-def pop_explicit_node_context(kwargs: dict[str, Any]) -> Any:
-    has_context = "context" in kwargs
-    has_ctx = "ctx" in kwargs
-    if has_context and has_ctx:
-        raise TypeError(
-            "Pass only one of 'context' or 'ctx' when providing an explicit NodeContext."
-        )
-    if has_context:
-        return kwargs.pop("context")
-    if has_ctx:
-        return kwargs.pop("ctx")
+def pop_explicit_node_context(
+    kwargs: dict[str, Any],
+    *,
+    context_param: str | None = None,
+) -> Any:
+    names = [name for name in LEGACY_CONTEXT_NAMES if name in kwargs]
+    if context_param is not None and "node_context" in kwargs:
+        names.append("node_context")
+
+    if len(names) > 1:
+        quoted = ", ".join(f"'{name}'" for name in names)
+        raise TypeError(f"Pass only one explicit NodeContext argument. Received: {quoted}.")
+
+    if names:
+        return kwargs.pop(names[0])
     return None

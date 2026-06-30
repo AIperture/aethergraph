@@ -506,8 +506,12 @@ async def run_async(
         inherited_identity = identity
         inherited_overrides = dict(rt_overrides)
 
+        context_param = getattr(target, "_node_context_param", None)
         inputs_for_inheritance = dict(inputs)
-        parent_ctx = pop_explicit_node_context(inputs_for_inheritance)
+        parent_ctx = pop_explicit_node_context(
+            inputs_for_inheritance,
+            context_param=context_param,
+        )
         if parent_ctx is not None:
             if inherited_identity is None:
                 inherited_identity = getattr(parent_ctx, "identity", None)
@@ -517,7 +521,7 @@ async def run_async(
                     inherited_overrides.setdefault(key, value)
 
         env_inputs = dict(inputs)
-        pop_explicit_node_context(env_inputs)
+        pop_explicit_node_context(env_inputs, context_param=context_param)
         env, _retry, _max_conc = await _build_env(
             target,
             env_inputs,

@@ -62,7 +62,10 @@ class GraphFunction:
 
             inherited_identity = None
             env_inputs = dict(inputs)
-            parent_ctx = pop_explicit_node_context(env_inputs)
+            parent_ctx = pop_explicit_node_context(
+                env_inputs,
+                context_param=self._node_context_param,
+            )
             if parent_ctx is not None:
                 inherited_identity = getattr(parent_ctx, "identity", None)
             env, _retry, _max_concurrency = await _build_env(
@@ -88,7 +91,10 @@ class GraphFunction:
         node_ctx = runtime_ctx.create_node_context(node=node_spec)
 
         call_kwargs = dict(inputs)
-        parent_ctx = pop_explicit_node_context(call_kwargs)
+        parent_ctx = pop_explicit_node_context(
+            call_kwargs,
+            context_param=self._node_context_param,
+        )
         if self._node_context_param is not None:
             call_kwargs.setdefault(self._node_context_param, parent_ctx or node_ctx)
 
