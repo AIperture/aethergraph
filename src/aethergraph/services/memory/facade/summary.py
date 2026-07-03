@@ -33,6 +33,9 @@ class SummaryMixin:
         max_events: int = 200,
         min_signal: float | None = None,
         use_llm: bool = False,
+        scope_id: str | None = None,
+        extra_data: dict[str, Any] | None = None,
+        extra_tags: list[str] | None = None,
     ) -> dict[str, Any]:
         eff_level = level or "scope"
         min_signal = min_signal if min_signal is not None else self.default_signal_threshold
@@ -79,12 +82,21 @@ class SummaryMixin:
         summary = await summarizer.distill(events=filtered)
         if not summary:
             return {}
+        if scope_id:
+            summary["scope_id"] = scope_id
+        if extra_data:
+            summary.update(dict(extra_data or {}))
         text = summary.get("summary", "") or summary.get("text", "")
         preview = text[:2000] + (" ...[truncated]" if len(text) > 2000 else "")
         evt = await self.append_event(
             kind=summary_kind,
             data=summary,
-            tags=["summary", summary_tag, *(["llm"] if use_llm else [])],
+            tags=[
+                "summary",
+                summary_tag,
+                *[str(tag) for tag in list(extra_tags or []) if str(tag)],
+                *(["llm"] if use_llm else []),
+            ],
             severity=2,
             stage="summary_llm" if use_llm else "summary",
             signal=0.7 if use_llm else None,
