@@ -8,13 +8,18 @@ from fastapi import APIRouter, HTTPException, Request
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.plugins.channel.utils.turn_dispatch import (
-    attachments_from_incoming_files,
     dispatch_channel_turn_run,
+    resources_from_file_refs,
 )
 from aethergraph.services.channel.ingress import (
     ChannelIngress,
     IncomingFile,
     IncomingMessage,
+)
+from aethergraph.services.channel.resources import (
+    ArtifactIngressScope,
+    InputResource,
+    ResourceStager,
 )
 from aethergraph.services.continuations.continuation import Correlator
 
@@ -223,8 +228,14 @@ async def _process_update(container, payload: dict, token: str):
             if file_path:
                 try:
                     data = await _tg_download_file(file_path, token)
-                    uri = await _stage_and_save(
-                        container, data=data, name=name, ch_key=ch_key, cont=None
+                    staged_resource = await _stage_telegram_file(
+                        container,
+                        data=data,
+                        file_id=file_id,
+                        name=name,
+                        mimetype="image/jpeg",
+                        ch_key=ch_key,
+                        conversation_id=f"tg:{channel_id}",
                     )
                     tg_files.append(
                         _file_ref(
@@ -232,7 +243,9 @@ async def _process_update(container, payload: dict, token: str):
                             name=name,
                             mimetype="image/jpeg",
                             size=size,
-                            uri=uri,
+                            artifact_id=staged_resource.artifact_id,
+                            uri=staged_resource.uri,
+                            url=staged_resource.url,
                             ch_key=ch_key,
                             ts=msg.get("date"),
                         )
@@ -253,8 +266,14 @@ async def _process_update(container, payload: dict, token: str):
             if file_path:
                 try:
                     data = await _tg_download_file(file_path, token)
-                    uri = await _stage_and_save(
-                        container, data=data, name=name, ch_key=ch_key, cont=None
+                    staged_resource = await _stage_telegram_file(
+                        container,
+                        data=data,
+                        file_id=file_id,
+                        name=name,
+                        mimetype=mime,
+                        ch_key=ch_key,
+                        conversation_id=f"tg:{channel_id}",
                     )
                     tg_files.append(
                         _file_ref(
@@ -262,7 +281,9 @@ async def _process_update(container, payload: dict, token: str):
                             name=name,
                             mimetype=mime,
                             size=size,
-                            uri=uri,
+                            artifact_id=staged_resource.artifact_id,
+                            uri=staged_resource.uri,
+                            url=staged_resource.url,
                             ch_key=ch_key,
                             ts=msg.get("date"),
                         )
@@ -281,6 +302,7 @@ async def _process_update(container, payload: dict, token: str):
                     name=fr["name"],
                     mimetype=fr.get("mimetype"),
                     size=fr.get("size"),
+                    artifact_id=fr.get("artifact_id"),
                     uri=fr.get("uri"),  # already staged as artifact
                     url=None,  # no re-download
                     extra={
@@ -321,7 +343,7 @@ async def _process_update(container, payload: dict, token: str):
                     identity=RequestIdentity(user_id="local", org_id="local", mode="local"),
                     agent_id=default_agent_id,
                     text=text,
-                    attachments=attachments_from_incoming_files(tg_files, source="telegram_upload"),
+                    attachments=resources_from_file_refs(tg_files, source="telegram_upload"),
                     user_meta={
                         **meta,
                         "channel_key": ch_key,
@@ -380,36 +402,52 @@ def _normalize_mime_by_name(name: str | None, hint: str | None) -> str:
     return "application/octet-stream"
 
 
-async def _stage_and_save(container, *, data: bytes, name: str, ch_key: str, cont) -> str:
-    tmp = await container.artifacts.plan_staging_path(planned_ext=f"_{name}")
-
-    with open(tmp, "wb") as f:
-        f.write(data)
-    run_id = cont.run_id if cont else "ad-hoc"
-    node_id = cont.node_id if cont else "telegram"
-    art = await container.artifacts.save_file(
-        path=tmp,
-        kind="upload",
-        run_id=run_id,
-        graph_id="channel",
-        node_id=node_id,
-        tool_name="telegram.upload",
-        tool_version="0.0.1",
-        labels={"source": "telegram", "channel": ch_key, "name": name},
+async def _stage_telegram_file(
+    container,
+    *,
+    data: bytes,
+    file_id: str,
+    name: str,
+    mimetype: str | None,
+    ch_key: str,
+    conversation_id: str,
+) -> InputResource:
+    return await ResourceStager(container=container).stage_bytes(
+        data,
+        name=name,
+        mime=mimetype,
+        file_id=file_id,
+        scope=ArtifactIngressScope(
+            source="telegram",
+            channel_key=ch_key,
+            conversation_id=conversation_id,
+            tool_name="telegram.upload",
+            tool_version="1.0.0",
+        ),
+        labels={"telegram_file_id": file_id},
     )
-    return getattr(art, "uri", None) or f"file://{tmp}"
 
 
 def _file_ref(
-    *, file_id: str, name: str, mimetype: str, size: int | None, uri: str, ch_key: str, ts: Any
+    *,
+    file_id: str,
+    name: str,
+    mimetype: str,
+    size: int | None,
+    artifact_id: str | None,
+    uri: str | None,
+    url: str | None,
+    ch_key: str,
+    ts: Any,
 ):
     return {
         "id": file_id,
         "name": name,
         "mimetype": mimetype or "",
         "size": size,
+        "artifact_id": artifact_id,
         "uri": uri,
-        "url_private": None,
+        "url": url,
         "platform": "telegram",
         "channel_key": ch_key,
         "ts": ts,

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 # Import the router that contains /runs/{run_id}/channel/incoming
+from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.plugins.channel.routes.webui_routes import router as channel_ui_router
 from aethergraph.services.channel.ingress import ChannelIngress
 from aethergraph.services.continuations.continuation import Continuation, Correlator
@@ -107,6 +108,11 @@ class FakeContainer:
 def build_app_with_container(container: FakeContainer) -> FastAPI:
     app = FastAPI()
     app.state.container = container
+    app.dependency_overrides[get_identity] = lambda: RequestIdentity(
+        user_id="local",
+        org_id="local",
+        mode="local",
+    )
     # Wire ChannelIngress
     container.channel_ingress = ChannelIngress(container=container, logger=container.logger)
 
@@ -161,7 +167,8 @@ async def test_run_channel_incoming_resumes_continuation():
         "ui:"
     )
     # meta should be preserved
-    assert payload["meta"] == {"foo": "bar"}
+    assert payload["meta"]["foo"] == "bar"
+    assert payload["meta"]["attachments"] == []
 
 
 @pytest.mark.asyncio
@@ -204,7 +211,8 @@ async def test_run_channel_incoming_approval_preserves_text_without_promoting_to
     assert payload["choice_label"] is None
     assert payload["matched"] is False
     assert payload["text"] == "change the delivery wording"
-    assert payload["meta"] == {"foo": "bar"}
+    assert payload["meta"]["foo"] == "bar"
+    assert payload["meta"]["attachments"] == []
 
 
 @pytest.mark.asyncio
@@ -288,6 +296,7 @@ async def test_run_channel_incoming_multipart_with_attachments_json():
     assert payload["text"] == "use attached context"
     assert payload["attachments"][0]["artifact_id"] == "art-1"
     assert payload["attachments"][0]["kind"] == "artifact"
+    assert payload["meta"]["attachments"][0]["artifact_id"] == "art-1"
 
 
 @pytest.mark.asyncio

@@ -8,13 +8,18 @@ from fastapi import HTTPException, Request
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.plugins.channel.utils.turn_dispatch import (
-    attachments_from_incoming_files,
     dispatch_channel_turn_run,
+    resources_from_file_refs,
 )
 from aethergraph.services.channel.ingress import (
     ChannelIngress,
     IncomingFile,
     IncomingMessage,
+)
+from aethergraph.services.channel.resources import (
+    ArtifactIngressScope,
+    InputResource,
+    ResourceStager,
 )
 
 
@@ -77,30 +82,30 @@ def _channel_key(team_id: str, channel_id: str, thread_ts: str | None) -> str:
     return key
 
 
-async def _stage_and_save(c, *, data: bytes, file_id: str, name: str, ch_key: str, cont) -> str:
-    """Write bytes to tmp path, then save via FileArtifactStore.save_file(...).
-    Returns the Artifact.uri (string)."""
-    tmp = await c.artifacts.plan_staging_path(planned_ext=f"_{file_id}")
-    with open(tmp, "wb") as f:
-        f.write(data)
-    run_id = cont.run_id if cont else "ad-hoc"
-    node_id = cont.node_id if cont else "channel"
-    # graph_id is unknown here; set a neutral tag
-    art = await c.artifacts.save_file(
-        path=tmp,
-        kind="upload",
-        run_id=run_id,
-        graph_id="channel",
-        node_id=node_id,
-        tool_name="slack.upload",
-        tool_version="0.0.1",
-        suggested_uri=None,
-        pin=False,
-        labels={"source": "slack", "slack_file_id": file_id, "channel": ch_key, "name": name},
-        metrics=None,
-        preview_uri=None,
+async def _stage_slack_file(
+    c,
+    *,
+    data: bytes,
+    file_id: str,
+    name: str,
+    mimetype: str | None,
+    ch_key: str,
+    conversation_id: str,
+) -> InputResource:
+    return await ResourceStager(container=c).stage_bytes(
+        data,
+        name=name,
+        mime=mimetype,
+        file_id=file_id,
+        scope=ArtifactIngressScope(
+            source="slack",
+            channel_key=ch_key,
+            conversation_id=conversation_id,
+            tool_name="slack.upload",
+            tool_version="1.0.0",
+        ),
+        labels={"slack_file_id": file_id},
     )
-    return getattr(art, "uri", None) or getattr(art, "path", None) or f"file://{tmp}"
 
 
 async def handle_slack_events_common(container, settings, payload: dict) -> dict:
@@ -142,18 +147,18 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                 size = f.get("size")
                 url_priv = f.get("url_private") or f.get("url_private_download")
 
-                uri = None
+                staged_resource: InputResource | None = None
                 if url_priv and token:
                     try:
                         data_bytes = await _download_slack_file(url_priv, token)
-                        # use Slack-specific labels via _stage_and_save
-                        uri = await _stage_and_save(
+                        staged_resource = await _stage_slack_file(
                             c,
                             data=data_bytes,
                             file_id=file_id,
                             name=name,
+                            mimetype=mimetype,
                             ch_key=ch_key,
-                            cont=None,  # we don't know cont yet; ChannelIngress will find it
+                            conversation_id=f"slack:{channel_id}#thread:{thread_ts or ''}",
                         )
                     except Exception as e:
                         container.logger and container.logger.warning(
@@ -166,7 +171,9 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                         "name": name,
                         "mimetype": mimetype,
                         "size": size,
-                        "uri": uri,
+                        "artifact_id": staged_resource.artifact_id if staged_resource else None,
+                        "uri": staged_resource.uri if staged_resource else None,
+                        "url": staged_resource.url if staged_resource else None,
                         "url_private": url_priv,
                         "platform": "slack",
                         "channel_key": ch_key,
@@ -183,6 +190,7 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                     name=fr["name"],
                     mimetype=fr.get("mimetype"),
                     size=fr.get("size"),
+                    artifact_id=fr.get("artifact_id"),
                     uri=fr.get("uri"),  # already artifact-backed
                     url=None,  # no re-download
                     extra={
@@ -219,7 +227,7 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                     identity=RequestIdentity(user_id="local", org_id="local", mode="local"),
                     agent_id=default_agent_id,
                     text=text,
-                    attachments=attachments_from_incoming_files(file_refs, source="slack_upload"),
+                    attachments=resources_from_file_refs(file_refs, source="slack_upload"),
                     user_meta={
                         **meta,
                         "channel_key": ch_key,
@@ -263,17 +271,18 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
         size = f.get("size")
         url_priv = f.get("url_private") or f.get("url_private_download")
 
-        uri = None
+        staged_resource: InputResource | None = None
         if url_priv and SLACK_BOT_TOKEN:
             try:
                 data_bytes = await _download_slack_file(url_priv, SLACK_BOT_TOKEN)
-                uri = await _stage_and_save(
+                staged_resource = await _stage_slack_file(
                     c,
                     data=data_bytes,
                     file_id=file_id,
                     name=name,
+                    mimetype=mimetype,
                     ch_key=ch_key,
-                    cont=None,
+                    conversation_id=f"slack:{channel_id}#thread:{thread_ts or ''}",
                 )
             except Exception as e:
                 container.logger and container.logger.for_run().warning(
@@ -286,7 +295,8 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
             name=name,
             mimetype=mimetype,
             size=size,
-            uri=uri,  # already artifact-backed, no re-download when uri used in ingress
+            artifact_id=staged_resource.artifact_id if staged_resource else None,
+            uri=staged_resource.uri if staged_resource else None,
             url=None,
             extra={
                 "platform": "slack",
@@ -317,13 +327,14 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
                     identity=RequestIdentity(user_id="local", org_id="local", mode="local"),
                     agent_id=default_agent_id,
                     text="",
-                    attachments=attachments_from_incoming_files(
+                    attachments=resources_from_file_refs(
                         [
                             {
                                 "id": incoming_file.id,
                                 "name": incoming_file.name,
                                 "mimetype": incoming_file.mimetype,
                                 "size": incoming_file.size,
+                                "artifact_id": incoming_file.artifact_id,
                                 "uri": incoming_file.uri,
                                 "url": incoming_file.url,
                                 "extra": incoming_file.extra,

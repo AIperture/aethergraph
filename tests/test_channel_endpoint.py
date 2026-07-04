@@ -134,3 +134,48 @@ async def test_channel_http_roundtrip():
     assert payload["meta"]["foo"] == "bar"
 
     # print("Test passed: channel HTTP roundtrip works as expected.")
+
+
+@pytest.mark.anyio
+async def test_channel_http_accepts_canonical_attachments():
+    container = TestContainer()
+    app = build_app(container)
+
+    cont = Continuation(
+        run_id="run-1",
+        node_id="node-1",
+        token="tok-1",
+        kind="user_input",
+        channel="ext:chan/user-123",
+        prompt="Send context",
+    )
+    await container.cont_store.save(cont)
+    await container.channel_bus.notify(cont)
+
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r = await client.post(
+            "/channel/incoming",
+            json={
+                "scheme": "ext",
+                "channel_id": "user-123",
+                "text": "use this",
+                "attachments": [
+                    {
+                        "kind": "artifact",
+                        "source": "external_api",
+                        "artifact_id": "art-1",
+                        "name": "input.txt",
+                        "mime": "text/plain",
+                    }
+                ],
+            },
+        )
+        assert r.status_code == 200
+
+    assert len(container.resume_router.calls) == 1
+    _, _, _, payload = container.resume_router.calls[0]
+    assert payload["attachments"][0]["artifact_id"] == "art-1"
+    assert payload["attachments"][0]["mime"] == "text/plain"
+    assert payload["meta"]["attachments"][0]["artifact_id"] == "art-1"

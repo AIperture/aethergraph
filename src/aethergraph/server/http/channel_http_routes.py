@@ -19,6 +19,7 @@ class HttpIncomingFile(BaseModel):
     size: int | None = None
     url: str | None = None
     uri: str | None = None
+    artifact_id: str | None = None
     extra: dict[str, Any] | None = None
 
 
@@ -33,6 +34,7 @@ class ChannelIncomingBody(BaseModel):
 
     text: str | None = None
     files: list[HttpIncomingFile] | None = None
+    attachments: list[dict[str, Any]] | None = None
     choice: str | None = None
     meta: dict[str, Any] | None = None
 
@@ -76,6 +78,7 @@ async def channel_incoming(body: ChannelIncomingBody, request: Request):
                     size=f.size,
                     url=f.url,
                     uri=f.uri,
+                    artifact_id=f.artifact_id,
                     extra=f.extra or {},
                 )
                 for f in body.files
@@ -88,6 +91,7 @@ async def channel_incoming(body: ChannelIncomingBody, request: Request):
                 thread_id=body.thread_id,
                 text=body.text,
                 files=files,
+                attachments=body.attachments or None,
                 choice=body.choice,
                 meta=body.meta or {},
             )

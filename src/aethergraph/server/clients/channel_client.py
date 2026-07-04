@@ -112,6 +112,7 @@ class ChannelClient:
         text: str | None,
         files: Iterable[dict[str, Any]],
         *,
+        attachments: Iterable[dict[str, Any]] | None = None,
         meta: dict[str, Any] | None = None,
     ):
         """
@@ -130,6 +131,7 @@ class ChannelClient:
             "thread_id": self.thread_id,
             "text": text,
             "files": list(files),
+            "attachments": list(attachments or []),
             "meta": meta or {},
         }
         r = await self.client.post(url, json=payload)

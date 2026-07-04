@@ -5,30 +5,21 @@ from typing import Any
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
-from aethergraph.services.channel.attachments import InputAttachment, attachment_to_dict
+from aethergraph.services.channel.resources import InputResource, InputResourceNormalizer
 
 
-def attachments_from_incoming_files(
+def resources_from_file_refs(
     files: list[dict[str, Any]] | None,
     *,
     source: str,
-) -> list[InputAttachment]:
-    out: list[InputAttachment] = []
+) -> list[InputResource]:
+    normalizer = InputResourceNormalizer()
+    out: list[InputResource] = []
     for file_info in files or []:
-        artifact_id = file_info.get("artifact_id") or file_info.get("id")
-        out.append(
-            InputAttachment(
-                kind="artifact",
-                source=source,
-                artifact_id=artifact_id,
-                name=file_info.get("name"),
-                mimetype=file_info.get("mimetype"),
-                size=file_info.get("size"),
-                uri=file_info.get("uri"),
-                url=file_info.get("url"),
-                meta=file_info.get("extra") or {},
-            )
-        )
+        raw = dict(file_info)
+        raw["source"] = source
+        raw["meta"] = raw.get("meta") or raw.get("extra") or {}
+        out.append(normalizer.from_dict(raw, source=source))
     return out
 
 
@@ -38,7 +29,7 @@ async def dispatch_channel_turn_run(
     identity: RequestIdentity | None,
     agent_id: str,
     text: str,
-    attachments: list[InputAttachment] | None,
+    attachments: list[InputResource] | None,
     session_id: str | None = None,
     user_meta: dict[str, Any] | None = None,
     tags: list[str] | None = None,
@@ -61,7 +52,7 @@ async def dispatch_channel_turn_run(
     run_imp = RunImportance(agent_meta.get("run_importance", RunImportance.ephemeral.value))
     inputs = {
         "message": text,
-        "attachments": [attachment_to_dict(a) for a in (attachments or [])],
+        "attachments": [resource.to_dict() for resource in (attachments or [])],
         "session_id": session_id,
         "user_meta": user_meta or {},
     }

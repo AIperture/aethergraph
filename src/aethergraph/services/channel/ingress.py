@@ -6,8 +6,14 @@ from typing import Any
 
 import aiohttp
 
-from aethergraph.services.channel.attachments import InputAttachment, attachment_to_dict
 from aethergraph.services.channel.choices import normalize_choice_reply
+from aethergraph.services.channel.resources import (
+    ArtifactIngressScope,
+    InputResource,
+    InputResourceNormalizer,
+    ResourceSet,
+    ResourceStager,
+)
 from aethergraph.services.continuations.continuation import Continuation, Correlator
 
 
@@ -27,6 +33,7 @@ class IncomingFile:
     size: int | None = None  # Optional size of the file in bytes
     url: str | None = None  # URL where the file is located
     uri: str | None = None  # URI where the file is located
+    artifact_id: str | None = None  # AetherGraph artifact id when already materialized
     extra: dict[str, Any] = None  # Any extra metadata
 
     def __getitem__(self, item):
@@ -47,7 +54,7 @@ class IncomingMessage:
     # For ask_text / ask_file continuations
     text: str | None = None  # Text content of the message
     files: Iterable[IncomingFile] | None = None  # Attached files
-    attachments: Iterable[InputAttachment] | None = None  # Canonical graph-facing attachments
+    attachments: Iterable[InputResource | dict[str, Any]] | None = None
 
     # For approval
     choice: str | None = None  # User's choice/response
@@ -76,6 +83,7 @@ class ChannelIngress:
         self.resume_router = (
             container.resume_router if hasattr(container, "resume_router") else None
         )
+        self.normalizer = InputResourceNormalizer()
 
         if logger is not None:
             self.logger = logger
@@ -130,114 +138,97 @@ class ChannelIngress:
         data: bytes,
         file_id: str | None,
         name: str,
+        mime: str | None,
         ch_key: str,
-        cont: Continuation,
-    ) -> str:
-        """
-        Write bytes to tmp path, then save via ArtifactStore.save_file(...).
-        Returns the Artifact.uri (string).
-        """
-        tmp = await self.artifacts.plan_staging_path(planned_ext=f"_{file_id or name}")
-
-        with open(tmp, "wb") as f:
-            f.write(data)
-
-        run_id = cont.run_id if cont else "ad-hoc"
-        node_id = cont.node_id if cont else "channel-ingress"
-
-        art = await self.artifacts.save_file(
-            path=tmp,
-            kind="upload",
-            run_id=run_id,
-            graph_id="channel",
-            node_id=node_id,
-            tool_name="channel.upload",
-            tool_version="0.0.1",
-            suggested_uri=None,
-            pin=False,
-            labels={
-                "source": "channel",
-                "channel": ch_key,
-                "name": name,
-                "inbound_file_id": file_id or "",
-            },
-            metrics=None,
-            preview_uri=None,
+        conversation_id: str,
+        cont: Continuation | None,
+        source: str,
+        meta: dict[str, Any] | None = None,
+    ) -> InputResource:
+        session_id = getattr(cont, "session_id", None) if cont else None
+        run_id = None if session_id else (cont.run_id if cont else None)
+        node_id = cont.node_id if cont else "resource_ingress"
+        return await ResourceStager(container=self.c).stage_bytes(
+            data,
+            name=name,
+            mime=mime,
+            file_id=file_id,
+            scope=ArtifactIngressScope(
+                source=source,
+                session_id=session_id,
+                run_id=run_id,
+                channel_key=ch_key,
+                conversation_id=conversation_id,
+                node_id=node_id,
+                tool_name=f"{source}.resource_ingress",
+            ),
+            labels={"channel_key": ch_key},
+            meta=meta,
         )
-
-        saved_uri = getattr(art, "uri", None)
-        if not saved_uri:
-            self._log(
-                "error",
-                "Failed to save uploaded file as artifact",
-                channel=ch_key,
-            )
-
-        return saved_uri
 
     async def _handle_files(
         self,
         msg: IncomingMessage,
         *,
         ch_key: str,
-        cont: Continuation,
-    ) -> list[dict[str, Any]]:
+        conversation_id: str,
+        cont: Continuation | None,
+    ) -> tuple[ResourceSet, list[dict[str, Any]]]:
         """
         Normalize and optionally persist incoming files to artifact store.
 
         Returns a list of file_refs that mirror the Slack file_refs shape:
           {id, name, mimetype, size, uri, url, platform, channel_key, ...}
         """
-        if not msg.files:
-            return []
+        resources = ResourceSet()
 
-        file_refs: list[dict[str, Any]] = []
-        for f in msg.files:
+        for attachment in msg.attachments or []:
+            if isinstance(attachment, InputResource):
+                resources.add(attachment)
+            elif isinstance(attachment, dict):
+                resources.add(self.normalizer.from_dict(attachment, source=msg.scheme))
+
+        for f in msg.files or []:
             name = f.name or f.id or "unnamed"
             file_id = f.id or name
             mimetype = f.mimetype or "application/octet-stream"
-            size = f.size or 0
             uri = f.uri
             url = f.url
 
-            # Optional: auto-download if url is provided and no uri
-            # this is not executed when we stage files with channel-specific upload handlers that already provide uri
-            if (not uri) and url:
+            resource = self.normalizer.from_incoming_file(f, source=msg.scheme)
+            if (not resource.artifact_id) and (not uri) and url:
                 try:
                     data_bytes = await self._download_url(url)
-                    uri = await self._stage_file(
+                    resource = await self._stage_file(
                         data=data_bytes,
                         file_id=file_id,
                         name=name,
+                        mime=mimetype,
                         ch_key=ch_key,
+                        conversation_id=conversation_id,
                         cont=cont,
+                        source=msg.scheme,
+                        meta=f.extra or {},
                     )
                 except Exception as e:
                     self._log("warning", f"Ingress: file download failed: {e}", channel_key=ch_key)
 
-            ref = {
-                "id": file_id,
-                "name": name,
-                "mimetype": mimetype,
-                "size": size,
-                "uri": uri,
-                "url": url,
-                "platform": msg.scheme,
-                "channel_key": ch_key,
-            }
-            if f.extra:
-                ref["extra"] = dict(f.extra)
+            resource.meta.setdefault("platform", msg.scheme)
+            resource.meta.setdefault("channel_key", ch_key)
+            resources.add(resource)
 
-            file_refs.append(ref)
+        resources.dedupe()
+        file_refs = resources.to_display_files()
 
         # Append to per-channel inbox, dedup by id
-        inbox_key = f"inbox://{ch_key}"
-        await self.kv_hot.list_append_unique(
-            inbox_key,
-            file_refs,
-            id_key="id",
-        )
-        return file_refs
+        if file_refs and self.kv_hot is not None:
+            inbox_key = f"inbox://{ch_key}"
+            await self.kv_hot.list_append_unique(
+                inbox_key,
+                file_refs,
+                id_key="id",
+            )
+        return resources, file_refs
 
     async def _find_continuation(
         self, *, scheme: str, ch_key: str, thread_id: str | None
@@ -308,14 +299,13 @@ class ChannelIngress:
                 )
             cont = None
 
-        # Normalize and persist any attached files
-        file_refs = []
-        if msg.files:
-            file_refs = await self._handle_files(
-                msg,
-                ch_key=ch_key,
-                cont=cont,
-            )
+        # Normalize and persist any attached files/resources
+        resources, file_refs = await self._handle_files(
+            msg,
+            ch_key=ch_key,
+            conversation_id=conversation_id,
+            cont=cont,
+        )
 
         if not cont:
             # No continuation found, log and return
@@ -328,8 +318,11 @@ class ChannelIngress:
 
         # Build payload for resumption
         kind = cont.kind
-        meta = msg.meta or {}
-        normalized_attachments = [attachment_to_dict(a) for a in (msg.attachments or [])]
+        normalized_attachments = resources.to_attachment_dicts()
+        meta = {
+            **(msg.meta or {}),
+            "attachments": normalized_attachments,
+        }
 
         if kind in ("approval", "choice"):
             normalized = normalize_choice_reply(
