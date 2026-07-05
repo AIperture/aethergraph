@@ -11,6 +11,7 @@ from aethergraph.services.llm.types import (
     ChatOutputFormat,
     GeneratedImage,
     ImageGenerationResult,
+    LLMUnsupportedFeatureError,
 )
 from aethergraph.services.llm.utils import (
     _data_url_to_b64_and_mime,
@@ -43,8 +44,13 @@ class _GeminiMixin:
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
 
-        if tools is not None and fail_on_unsupported:
-            raise RuntimeError("Gemini tools/function calling not wired yet in this client")
+        if tools is not None:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                model,
+                "provider-neutral tools",
+                "Gemini function declaration translation is not wired yet; refusing to pass tools through blindly.",
+            )
 
         # Merge system messages into preamble
         system_parts: list[str] = []
@@ -85,8 +91,6 @@ class _GeminiMixin:
                 gen_cfg["responseJsonSchema"] = json_schema
 
             payload = {"contents": turns, "generationConfig": gen_cfg}
-            if tools is not None and not fail_on_unsupported:
-                payload["tools"] = tools
 
             r = await self._client.post(
                 f"{self.base_url}/v1/models/{model}:generateContent?key={self.api_key}",

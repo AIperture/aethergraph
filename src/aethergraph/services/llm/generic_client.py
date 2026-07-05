@@ -347,6 +347,25 @@ class GenericLLMClient(
                 }
             )
         if self.provider in {"openrouter", "lmstudio", "ollama"}:
+            if self.provider == "lmstudio":
+                response_format: dict[str, Any] | None = None
+                if output_format == "json_object":
+                    response_format = {"type": "text"}
+                elif output_format == "json_schema" and json_schema is not None:
+                    response_format = {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": schema_name,
+                            "schema_present": True,
+                            "strict": strict_schema,
+                        },
+                    }
+                return self._prune_none(
+                    {
+                        "response_format": response_format,
+                        "max_tokens": max_output_tokens,
+                    }
+                )
             return self._prune_none(
                 {
                     "response_format": {"type": "json_object"}
@@ -377,10 +396,15 @@ class GenericLLMClient(
         notes: list[str] = []
         if output_format == "json_object" and self.provider == "deepseek":
             notes.append("DeepSeek JSON output also requires prompt-side JSON instructions.")
+        if output_format == "json_object" and self.provider == "lmstudio":
+            notes.append(
+                "LM Studio json_object uses response_format.type='text' plus prompt-side JSON instructions and local validation."
+            )
+        if output_format == "json_schema" and self.provider == "lmstudio":
+            notes.append("LM Studio json_schema is requested natively and validated locally.")
         if output_format == "json_schema" and self.provider in {
             "deepseek",
             "openrouter",
-            "lmstudio",
             "ollama",
             "azure",
         }:
@@ -1198,6 +1222,8 @@ class GenericLLMClient(
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
                 tool_choice=tool_choice,
+                schema_name=schema_name,
+                strict_schema=strict_schema,
                 **kw,
             )
 

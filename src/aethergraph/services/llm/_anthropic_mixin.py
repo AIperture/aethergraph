@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from aethergraph.services.llm.types import ChatOutputFormat
+from aethergraph.services.llm.types import ChatOutputFormat, LLMUnsupportedFeatureError
 from aethergraph.services.llm.utils import _to_anthropic_blocks
 
 DeltaCallback = Callable[[str], Awaitable[None]]
@@ -39,8 +39,13 @@ class _AnthropicMixin:
         await self._ensure_client()
         assert self._client is not None
 
-        if tools is not None and fail_on_unsupported:
-            raise RuntimeError("Anthropic tools/function calling not wired yet in this client")
+        if tools is not None:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                model,
+                "provider-neutral tools",
+                "Anthropic tool translation is not wired yet; refusing to drop tools silently.",
+            )
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
@@ -80,7 +85,6 @@ class _AnthropicMixin:
             payload["output_config"] = {
                 "format": {
                     "type": "json_schema",
-                    "name": kw.get("schema_name", "output"),
                     "schema": json_schema,
                 }
             }

@@ -137,6 +137,124 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     assert fake_http.last_json["thinking"] == {"type": "enabled"}
 
 
+@pytest.mark.asyncio
+async def test_lmstudio_json_object_uses_text_response_format_with_local_validation() -> None:
+    payload = {
+        "choices": [{"message": {"content": '{"answer":"ok"}'}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+    }
+    client = GenericLLMClient(
+        provider="lmstudio",
+        model="local-model",
+        compatibility_policy="compat",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, usage = await client.chat(
+        [{"role": "user", "content": "hello"}],
+        output_format="json_object",
+        validate_json=True,
+    )
+
+    assert json.loads(text) == {"answer": "ok"}
+    assert usage["completion_tokens"] == 4
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["response_format"] == {"type": "text"}
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_json_object_strict_mode_rejects_text_fallback() -> None:
+    client = GenericLLMClient(
+        provider="lmstudio",
+        model="local-model",
+        compatibility_policy="strict",
+    )
+
+    with pytest.raises(RuntimeError, match="json_object"):
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            output_format="json_object",
+        )
+
+
+@pytest.mark.asyncio
+async def test_lmstudio_json_schema_uses_native_response_format() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    payload = {
+        "choices": [{"message": {"content": '{"answer":"ok"}'}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+    }
+    client = GenericLLMClient(provider="lmstudio", model="local-model")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, _usage = await client.chat(
+        [{"role": "user", "content": "hello"}],
+        output_format="json_schema",
+        json_schema=schema,
+        schema_name="answer_schema",
+        strict_schema=False,
+    )
+
+    assert json.loads(text) == {"answer": "ok"}
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer_schema",
+            "schema": schema,
+            "strict": False,
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_tools_are_not_silently_dropped_in_compat_mode() -> None:
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="anthropic-key",
+        compatibility_policy="compat",
+    )
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="tools"):
+        await client._chat_anthropic_messages(  # type: ignore[misc]
+            [{"role": "user", "content": "hello"}],
+            model="claude-test",
+            output_format="text",
+            json_schema=None,
+            fail_on_unsupported=False,
+            tools=[{"name": "lookup", "input_schema": {"type": "object"}}],
+        )
+
+
+@pytest.mark.asyncio
+async def test_gemini_tools_are_not_passed_through_in_compat_mode() -> None:
+    client = GenericLLMClient(
+        provider="google",
+        model="gemini-test",
+        api_key="google-key",
+        compatibility_policy="compat",
+    )
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="tools"):
+        await client._chat_gemini_generate_content(  # type: ignore[misc]
+            [{"role": "user", "content": "hello"}],
+            model="gemini-test",
+            output_format="text",
+            json_schema=None,
+            fail_on_unsupported=False,
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+        )
+
+
 def test_collect_llm_env_includes_compatibility_policy() -> None:
     env = _collect_llm_env(
         {

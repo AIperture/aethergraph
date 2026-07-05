@@ -48,10 +48,29 @@ class _OpenAILikeMixin:
         response_format = None
 
         if output_format == "json_object":
-            response_format = {"type": "json_object"}
+            if self.provider == "lmstudio":
+                if fail_on_unsupported:
+                    raise RuntimeError(
+                        "LM Studio does not support response_format.type='json_object'; "
+                        "use compatibility mode for text-mode JSON with local validation"
+                    )
+                response_format = {"type": "text"}
+            else:
+                response_format = {"type": "json_object"}
             msg_for_provider = _ensure_system_json_directive(messages, schema=None)
         elif output_format == "json_schema":
-            if fail_on_unsupported:
+            if self.provider == "lmstudio":
+                if json_schema is None:
+                    raise ValueError("output_format='json_schema' requires json_schema")
+                response_format = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": kw.get("schema_name", "output"),
+                        "schema": json_schema,
+                        "strict": bool(kw.get("strict_schema", True)),
+                    },
+                }
+            elif fail_on_unsupported:
                 raise RuntimeError(f"provider {self.provider} does not support native json_schema")
             msg_for_provider = _ensure_system_json_directive(messages, schema=json_schema)
 
