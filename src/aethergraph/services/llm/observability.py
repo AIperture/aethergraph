@@ -6,12 +6,15 @@ from datetime import UTC, datetime
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 from textwrap import fill
 from typing import Any, Literal, Protocol
 import uuid
 
 CaptureMode = Literal["metadata", "full"]
 PromptViewMode = Literal["off", "compact", "truncated", "full"]
+
+_DATA_IMAGE_URL_RE = re.compile(r"data:(image/[a-zA-Z0-9.+-]+);base64,[a-zA-Z0-9+/=_-]+")
 
 
 def utc_now_iso() -> str:
@@ -20,7 +23,7 @@ def utc_now_iso() -> str:
 
 def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
-        return value
+        return _redact_data_urls(value) if isinstance(value, str) else value
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
@@ -42,6 +45,13 @@ def _json_safe(value: Any) -> Any:
 
 def sanitize_observation_value(value: Any) -> Any:
     return _json_safe(value)
+
+
+def _redact_data_urls(value: str) -> str:
+    return _DATA_IMAGE_URL_RE.sub(
+        lambda match: f"[redacted data URL: {match.group(1)}]",
+        value,
+    )
 
 
 def summarize_text(value: str | None, *, preview_chars: int = 240) -> dict[str, Any] | None:

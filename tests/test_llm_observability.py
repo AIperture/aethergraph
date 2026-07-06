@@ -183,6 +183,47 @@ async def test_llm_observation_metadata_mode_redacts_bodies(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_llm_observation_redacts_multimodal_data_urls(tmp_path: Path) -> None:
+    sink_path = tmp_path / "llm_calls.jsonl"
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=JsonlLLMObservationSink(sink_path),
+        observation_capture_mode="full",
+    )
+    data_url = "data:image/png;base64,YWJjZA=="
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        return "vision answer", {"prompt_tokens": 2, "completion_tokens": 4}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+    await client.chat(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What is this?"},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ],
+        trace_payload={"image": data_url},
+    )
+
+    row = _read_jsonl(sink_path)[0]
+    serialized = json.dumps(row, ensure_ascii=False)
+    assert data_url not in serialized
+    assert "YWJjZA==" not in serialized
+    assert row["messages"][0]["content"][1]["image_url"]["url"] == (
+        "[redacted data URL: image/png]"
+    )
+    assert row["trace_payload"]["image"] == "[redacted data URL: image/png]"
+    assert row["messages_preview"]["preview"][0]["content"][1]["image_url"]["url"] == (
+        "[redacted data URL: image/png]"
+    )
+
+
+@pytest.mark.asyncio
 async def test_default_container_llm_observability_writes_jsonl(tmp_path: Path) -> None:
     settings = AppSettings(
         root=str(tmp_path),
