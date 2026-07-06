@@ -284,6 +284,11 @@ def test_collect_llm_env_includes_explicit_vision_fields() -> None:
                 vision_enabled=True,
                 vision_max_images=3,
                 vision_max_image_bytes=2048,
+                vision_resize_enabled=True,
+                vision_resize_max_dimension=1024,
+                vision_resize_max_pixels=800_000,
+                vision_resize_jpeg_quality=82,
+                vision_resize_min_jpeg_quality=68,
                 vision_accepted_mime_prefixes=["image/"],
                 vision_accepted_mime_types=["image/png"],
             )
@@ -293,6 +298,11 @@ def test_collect_llm_env_includes_explicit_vision_fields() -> None:
     assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_ENABLED"] == "true"
     assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_MAX_IMAGES"] == "3"
     assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_MAX_IMAGE_BYTES"] == "2048"
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_RESIZE_ENABLED"] == "true"
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_RESIZE_MAX_DIMENSION"] == "1024"
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_RESIZE_MAX_PIXELS"] == "800000"
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_RESIZE_JPEG_QUALITY"] == "82"
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_RESIZE_MIN_JPEG_QUALITY"] == "68"
     assert (
         env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_ACCEPTED_MIME_PREFIXES"]
         == '["image/"]'
@@ -310,6 +320,10 @@ def test_llm_service_exposes_explicit_profile_metadata() -> None:
         vision_enabled=True,
         vision_max_images=2,
         vision_max_image_bytes=4096,
+        vision_resize_max_dimension=900,
+        vision_resize_max_pixels=700_000,
+        vision_resize_jpeg_quality=80,
+        vision_resize_min_jpeg_quality=65,
     )
     service = LLMService(
         clients={"default": object()},  # type: ignore[arg-type]
@@ -322,6 +336,11 @@ def test_llm_service_exposes_explicit_profile_metadata() -> None:
     assert exposed.vision_enabled is True
     assert exposed.vision_max_images == 2
     assert exposed.vision_max_image_bytes == 4096
+    assert exposed.vision_resize_enabled is True
+    assert exposed.vision_resize_max_dimension == 900
+    assert exposed.vision_resize_max_pixels == 700_000
+    assert exposed.vision_resize_jpeg_quality == 80
+    assert exposed.vision_resize_min_jpeg_quality == 65
     assert service.profile("missing") is None
 
 
@@ -337,6 +356,11 @@ def test_llm_service_configure_profile_updates_vision_metadata() -> None:
         vision_enabled=True,
         vision_max_images=1,
         vision_max_image_bytes=1024,
+        vision_resize_enabled=False,
+        vision_resize_max_dimension=768,
+        vision_resize_max_pixels=400_000,
+        vision_resize_jpeg_quality=78,
+        vision_resize_min_jpeg_quality=62,
         vision_accepted_mime_types=["image/png"],
     )
 
@@ -345,6 +369,11 @@ def test_llm_service_configure_profile_updates_vision_metadata() -> None:
     assert profile.vision_enabled is True
     assert profile.vision_max_images == 1
     assert profile.vision_max_image_bytes == 1024
+    assert profile.vision_resize_enabled is False
+    assert profile.vision_resize_max_dimension == 768
+    assert profile.vision_resize_max_pixels == 400_000
+    assert profile.vision_resize_jpeg_quality == 78
+    assert profile.vision_resize_min_jpeg_quality == 62
     assert profile.vision_accepted_mime_types == ["image/png"]
 
 

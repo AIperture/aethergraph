@@ -108,6 +108,17 @@ def _llm_profile_view(profile) -> LLMProfileView:
         vision_enabled=bool(getattr(profile, "vision_enabled", False)),
         vision_max_images=getattr(profile, "vision_max_images", None),
         vision_max_image_bytes=getattr(profile, "vision_max_image_bytes", None),
+        vision_resize_enabled=bool(getattr(profile, "vision_resize_enabled", True)),
+        vision_resize_max_dimension=int(
+            getattr(profile, "vision_resize_max_dimension", 1280) or 1280
+        ),
+        vision_resize_max_pixels=int(
+            getattr(profile, "vision_resize_max_pixels", 1_500_000) or 1_500_000
+        ),
+        vision_resize_jpeg_quality=int(getattr(profile, "vision_resize_jpeg_quality", 85) or 85),
+        vision_resize_min_jpeg_quality=int(
+            getattr(profile, "vision_resize_min_jpeg_quality", 70) or 70
+        ),
         vision_accepted_mime_prefixes=list(
             getattr(profile, "vision_accepted_mime_prefixes", ["image/"]) or []
         ),
@@ -205,6 +216,26 @@ def _collect_llm_env(
             env[_env_key(*prefix, "VISION_MAX_IMAGES")] = str(payload.vision_max_images)
         if payload.vision_max_image_bytes is not None:
             env[_env_key(*prefix, "VISION_MAX_IMAGE_BYTES")] = str(payload.vision_max_image_bytes)
+        if payload.vision_resize_enabled is not None:
+            env[_env_key(*prefix, "VISION_RESIZE_ENABLED")] = str(
+                payload.vision_resize_enabled
+            ).lower()
+        if payload.vision_resize_max_dimension is not None:
+            env[_env_key(*prefix, "VISION_RESIZE_MAX_DIMENSION")] = str(
+                payload.vision_resize_max_dimension
+            )
+        if payload.vision_resize_max_pixels is not None:
+            env[_env_key(*prefix, "VISION_RESIZE_MAX_PIXELS")] = str(
+                payload.vision_resize_max_pixels
+            )
+        if payload.vision_resize_jpeg_quality is not None:
+            env[_env_key(*prefix, "VISION_RESIZE_JPEG_QUALITY")] = str(
+                payload.vision_resize_jpeg_quality
+            )
+        if payload.vision_resize_min_jpeg_quality is not None:
+            env[_env_key(*prefix, "VISION_RESIZE_MIN_JPEG_QUALITY")] = str(
+                payload.vision_resize_min_jpeg_quality
+            )
         if payload.vision_accepted_mime_prefixes is not None:
             env[_env_key(*prefix, "VISION_ACCEPTED_MIME_PREFIXES")] = json.dumps(
                 payload.vision_accepted_mime_prefixes
@@ -290,6 +321,16 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["vision_max_images"] = payload.vision_max_images
         if payload.vision_max_image_bytes is not None:
             kwargs["vision_max_image_bytes"] = payload.vision_max_image_bytes
+        if payload.vision_resize_enabled is not None:
+            kwargs["vision_resize_enabled"] = payload.vision_resize_enabled
+        if payload.vision_resize_max_dimension is not None:
+            kwargs["vision_resize_max_dimension"] = payload.vision_resize_max_dimension
+        if payload.vision_resize_max_pixels is not None:
+            kwargs["vision_resize_max_pixels"] = payload.vision_resize_max_pixels
+        if payload.vision_resize_jpeg_quality is not None:
+            kwargs["vision_resize_jpeg_quality"] = payload.vision_resize_jpeg_quality
+        if payload.vision_resize_min_jpeg_quality is not None:
+            kwargs["vision_resize_min_jpeg_quality"] = payload.vision_resize_min_jpeg_quality
         if payload.vision_accepted_mime_prefixes is not None:
             kwargs["vision_accepted_mime_prefixes"] = payload.vision_accepted_mime_prefixes
         if payload.vision_accepted_mime_types is not None:

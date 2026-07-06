@@ -50,6 +50,26 @@ class LLMProfile(BaseModel):
         default=None,
         description="Maximum bytes per hydrated image for this profile.",
     )
+    vision_resize_enabled: bool = Field(
+        default=True,
+        description="Whether vision tools should downsample image inputs before LLM calls.",
+    )
+    vision_resize_max_dimension: int = Field(
+        default=1280,
+        description="Maximum width or height, in pixels, for resized vision images.",
+    )
+    vision_resize_max_pixels: int = Field(
+        default=1_500_000,
+        description="Maximum total pixel count for resized vision images.",
+    )
+    vision_resize_jpeg_quality: int = Field(
+        default=85,
+        description="Initial JPEG quality used when encoding resized vision images.",
+    )
+    vision_resize_min_jpeg_quality: int = Field(
+        default=70,
+        description="Lowest JPEG quality used while fitting resized vision images.",
+    )
     vision_accepted_mime_prefixes: list[str] = Field(
         default_factory=lambda: ["image/"],
         description="Accepted MIME prefixes for image inputs.",

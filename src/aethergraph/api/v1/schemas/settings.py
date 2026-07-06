@@ -63,6 +63,11 @@ class LLMProfileView(BaseModel):
     vision_enabled: bool = False
     vision_max_images: int | None = None
     vision_max_image_bytes: int | None = None
+    vision_resize_enabled: bool = True
+    vision_resize_max_dimension: int = 1280
+    vision_resize_max_pixels: int = 1_500_000
+    vision_resize_jpeg_quality: int = 85
+    vision_resize_min_jpeg_quality: int = 70
     vision_accepted_mime_prefixes: list[str] = Field(default_factory=lambda: ["image/"])
     vision_accepted_mime_types: list[str] = Field(default_factory=list)
 
@@ -81,6 +86,11 @@ class LLMProfilePayload(BaseModel):
     vision_enabled: bool | None = None
     vision_max_images: int | None = None
     vision_max_image_bytes: int | None = None
+    vision_resize_enabled: bool | None = None
+    vision_resize_max_dimension: int | None = None
+    vision_resize_max_pixels: int | None = None
+    vision_resize_jpeg_quality: int | None = None
+    vision_resize_min_jpeg_quality: int | None = None
     vision_accepted_mime_prefixes: list[str] | None = None
     vision_accepted_mime_types: list[str] | None = None
 

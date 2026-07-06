@@ -55,6 +55,11 @@ class LLMService:
         vision_enabled: bool | None = None,
         vision_max_images: int | None = None,
         vision_max_image_bytes: int | None = None,
+        vision_resize_enabled: bool | None = None,
+        vision_resize_max_dimension: int | None = None,
+        vision_resize_max_pixels: int | None = None,
+        vision_resize_jpeg_quality: int | None = None,
+        vision_resize_min_jpeg_quality: int | None = None,
         vision_accepted_mime_prefixes: list[str] | tuple[str, ...] | None = None,
         vision_accepted_mime_types: list[str] | tuple[str, ...] | None = None,
     ) -> GenericLLMClient:
@@ -92,6 +97,11 @@ class LLMService:
                 vision_enabled=vision_enabled,
                 vision_max_images=vision_max_images,
                 vision_max_image_bytes=vision_max_image_bytes,
+                vision_resize_enabled=vision_resize_enabled,
+                vision_resize_max_dimension=vision_resize_max_dimension,
+                vision_resize_max_pixels=vision_resize_max_pixels,
+                vision_resize_jpeg_quality=vision_resize_jpeg_quality,
+                vision_resize_min_jpeg_quality=vision_resize_min_jpeg_quality,
                 vision_accepted_mime_prefixes=vision_accepted_mime_prefixes,
                 vision_accepted_mime_types=vision_accepted_mime_types,
             )
@@ -136,6 +146,11 @@ class LLMService:
             vision_enabled=vision_enabled,
             vision_max_images=vision_max_images,
             vision_max_image_bytes=vision_max_image_bytes,
+            vision_resize_enabled=vision_resize_enabled,
+            vision_resize_max_dimension=vision_resize_max_dimension,
+            vision_resize_max_pixels=vision_resize_max_pixels,
+            vision_resize_jpeg_quality=vision_resize_jpeg_quality,
+            vision_resize_min_jpeg_quality=vision_resize_min_jpeg_quality,
             vision_accepted_mime_prefixes=vision_accepted_mime_prefixes,
             vision_accepted_mime_types=vision_accepted_mime_types,
         )
@@ -156,6 +171,11 @@ class LLMService:
         vision_enabled: bool | None,
         vision_max_images: int | None,
         vision_max_image_bytes: int | None,
+        vision_resize_enabled: bool | None,
+        vision_resize_max_dimension: int | None,
+        vision_resize_max_pixels: int | None,
+        vision_resize_jpeg_quality: int | None,
+        vision_resize_min_jpeg_quality: int | None,
         vision_accepted_mime_prefixes: list[str] | tuple[str, ...] | None,
         vision_accepted_mime_types: list[str] | tuple[str, ...] | None,
     ) -> LLMProfile:
@@ -183,6 +203,16 @@ class LLMService:
             updated.vision_max_images = vision_max_images
         if vision_max_image_bytes is not None:
             updated.vision_max_image_bytes = vision_max_image_bytes
+        if vision_resize_enabled is not None:
+            updated.vision_resize_enabled = vision_resize_enabled
+        if vision_resize_max_dimension is not None:
+            updated.vision_resize_max_dimension = vision_resize_max_dimension
+        if vision_resize_max_pixels is not None:
+            updated.vision_resize_max_pixels = vision_resize_max_pixels
+        if vision_resize_jpeg_quality is not None:
+            updated.vision_resize_jpeg_quality = vision_resize_jpeg_quality
+        if vision_resize_min_jpeg_quality is not None:
+            updated.vision_resize_min_jpeg_quality = vision_resize_min_jpeg_quality
         if vision_accepted_mime_prefixes is not None:
             updated.vision_accepted_mime_prefixes = [
                 str(item) for item in vision_accepted_mime_prefixes
