@@ -357,5 +357,9 @@ async def session_chat_incoming(
             "resumed": resumed,
             "run_id": run_id,
             "files_processed": len(files),
+            # Return the persisted display files (carrying artifact_id) so the
+            # client can swap its optimistic blob previews for durable artifact
+            # URLs immediately, without waiting for the websocket echo/refresh.
+            "files": display_files,
         }
     )
