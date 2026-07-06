@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import logging
 import re
 from typing import Any
+from urllib.parse import unquote
 
 from fastapi import (  # type: ignore
     APIRouter,
@@ -223,8 +224,63 @@ async def get_session_runs(
     return SessionRunsResponse(items=summaries, next_cursor=next_cursor)
 
 
+_ARTIFACT_CONTENT_URL_RE = re.compile(r"/api/v1/artifacts/([^/]+)/content/?$")
+
+
+def _artifact_id_from_ref(ref: Any) -> str | None:
+    """Best-effort artifact id for a display-file / attachment dict.
+
+    Prefers an explicit ``artifact_id``, then falls back to parsing the id out of
+    an ``/api/v1/artifacts/{id}/content`` URL/URI.
+    """
+    if not isinstance(ref, dict):
+        return None
+    explicit = ref.get("artifact_id")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    for key in ("url", "uri"):
+        value = ref.get(key)
+        if isinstance(value, str):
+            match = _ARTIFACT_CONTENT_URL_RE.search(value)
+            if match:
+                return unquote(match.group(1))
+    return None
+
+
+def _dedupe_attachments_against_files(
+    attachments: list[Any] | None,
+    files: list[Any] | None,
+) -> list[Any] | None:
+    """Drop context attachments already shown as inline display files.
+
+    The channel ingress persists each uploaded / context-attached resource twice
+    -- once as a display ``file`` and once as an ``attachment`` -- so the UI would
+    otherwise render the same image both inline and as a duplicate "context" pill.
+    This is display-only: the agent receives its context from the run inputs, not
+    from this presented event, so filtering here never starves the agent.
+    """
+    if not attachments:
+        return None
+    file_ids = {fid for f in (files or []) if (fid := _artifact_id_from_ref(f)) is not None}
+    if not file_ids:
+        return attachments
+    deduped = [att for att in attachments if _artifact_id_from_ref(att) not in file_ids]
+    return deduped or None
+
+
 def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
     payload = row.get("payload", {}) or {}
+    files = payload.get("files") or None
+    attachments = _dedupe_attachments_against_files(payload.get("attachments"), files)
+
+    # Mirror the dedupe into meta.attachments, which the frontend reads first.
+    meta = payload.get("meta", {}) or {}
+    if isinstance(meta.get("attachments"), list):
+        meta = {
+            **meta,
+            "attachments": _dedupe_attachments_against_files(meta["attachments"], files) or [],
+        }
+
     return SessionChatEvent(
         id=row.get("id"),
         session_id=session_id,
@@ -233,10 +289,10 @@ def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
         text=payload.get("text"),
         buttons=payload.get("buttons", []),
         file=payload.get("file"),
-        files=payload.get("files") or None,
-        attachments=payload.get("attachments") or None,
+        files=files,
+        attachments=attachments,
         rich=payload.get("rich") or None,
-        meta=payload.get("meta", {}) or {},
+        meta=meta,
         agent_id=payload.get("agent_id"),
         upsert_key=payload.get("upsert_key"),
     )
@@ -699,26 +755,8 @@ async def get_session_chat_events(
                 # Fallback to offset cursor
                 next_cursor = encode_cursor(query_offset + limit)
 
-    out: list[SessionChatEvent] = []
-    for ev in events:
-        payload = ev.get("payload", {}) or {}
-        out.append(
-            SessionChatEvent(
-                id=ev.get("id"),
-                session_id=session_id,
-                ts=ev.get("ts"),
-                type=payload.get("type") or "agent.message",
-                text=payload.get("text"),
-                buttons=payload.get("buttons", []),
-                file=payload.get("file"),  # may be None
-                files=payload.get("files") or None,  # forward list
-                attachments=payload.get("attachments") or None,  # forward list
-                meta=payload.get("meta", {}) or {},
-                agent_id=payload.get("agent_id"),
-                upsert_key=payload.get("upsert_key"),  # forward idempotent key
-                rich=payload.get("rich") or None,  # forward rich content
-            )
-        )
+    # Shared presenter also dedupes context attachments already shown as files.
+    out: list[SessionChatEvent] = [_row_to_session_chat_event(ev, session_id) for ev in events]
     out.sort(key=lambda e: e.ts)
 
     return SessionChatEventListResponse(events=out, next_cursor=next_cursor)
