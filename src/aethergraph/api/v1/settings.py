@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -104,6 +105,13 @@ def _llm_profile_view(profile) -> LLMProfileView:
         thinking_budget=profile.thinking_budget,
         reasoning_summary=profile.reasoning_summary,
         compatibility_policy=getattr(profile, "compatibility_policy", "compat"),
+        vision_enabled=bool(getattr(profile, "vision_enabled", False)),
+        vision_max_images=getattr(profile, "vision_max_images", None),
+        vision_max_image_bytes=getattr(profile, "vision_max_image_bytes", None),
+        vision_accepted_mime_prefixes=list(
+            getattr(profile, "vision_accepted_mime_prefixes", ["image/"]) or []
+        ),
+        vision_accepted_mime_types=list(getattr(profile, "vision_accepted_mime_types", []) or []),
     )
 
 
@@ -191,6 +199,20 @@ def _collect_llm_env(
             env[_env_key(*prefix, "THINKING_MODE")] = payload.thinking_mode
         if payload.compatibility_policy is not None:
             env[_env_key(*prefix, "COMPATIBILITY_POLICY")] = payload.compatibility_policy
+        if payload.vision_enabled is not None:
+            env[_env_key(*prefix, "VISION_ENABLED")] = str(payload.vision_enabled).lower()
+        if payload.vision_max_images is not None:
+            env[_env_key(*prefix, "VISION_MAX_IMAGES")] = str(payload.vision_max_images)
+        if payload.vision_max_image_bytes is not None:
+            env[_env_key(*prefix, "VISION_MAX_IMAGE_BYTES")] = str(payload.vision_max_image_bytes)
+        if payload.vision_accepted_mime_prefixes is not None:
+            env[_env_key(*prefix, "VISION_ACCEPTED_MIME_PREFIXES")] = json.dumps(
+                payload.vision_accepted_mime_prefixes
+            )
+        if payload.vision_accepted_mime_types is not None:
+            env[_env_key(*prefix, "VISION_ACCEPTED_MIME_TYPES")] = json.dumps(
+                payload.vision_accepted_mime_types
+            )
     return env
 
 
@@ -262,6 +284,16 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["thinking_mode"] = payload.thinking_mode
         if payload.compatibility_policy is not None:
             kwargs["compatibility_policy"] = payload.compatibility_policy
+        if payload.vision_enabled is not None:
+            kwargs["vision_enabled"] = payload.vision_enabled
+        if payload.vision_max_images is not None:
+            kwargs["vision_max_images"] = payload.vision_max_images
+        if payload.vision_max_image_bytes is not None:
+            kwargs["vision_max_image_bytes"] = payload.vision_max_image_bytes
+        if payload.vision_accepted_mime_prefixes is not None:
+            kwargs["vision_accepted_mime_prefixes"] = payload.vision_accepted_mime_prefixes
+        if payload.vision_accepted_mime_types is not None:
+            kwargs["vision_accepted_mime_types"] = payload.vision_accepted_mime_types
         if kwargs:
             llm_service.configure_profile(profile=name, **kwargs)
             logger.info("Hot-reloaded LLM profile %r", name)

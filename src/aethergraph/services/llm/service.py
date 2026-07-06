@@ -3,6 +3,8 @@ import logging
 
 import httpx
 
+from aethergraph.config.llm import LLMProfile
+
 from ..secrets.base import Secrets
 from .generic_client import GenericLLMClient
 from .providers import Provider
@@ -13,15 +15,24 @@ logger = logging.getLogger("aethergraph.services.llm")
 class LLMService:
     """Holds multiple LLM clients (default + named profiles)."""
 
-    def __init__(self, clients: dict[str, GenericLLMClient], secrets: Secrets | None = None):
+    def __init__(
+        self,
+        clients: dict[str, GenericLLMClient],
+        secrets: Secrets | None = None,
+        profiles: dict[str, LLMProfile] | None = None,
+    ):
         self._clients = clients
         self._secrets = secrets
+        self._profiles = dict(profiles or {})
 
     def get(self, name: str = "default") -> GenericLLMClient:
         return self._clients[name]
 
     def has(self, name: str) -> bool:
         return name in self._clients
+
+    def profile(self, name: str = "default") -> LLMProfile | None:
+        return self._profiles.get(name)
 
     async def aclose(self):
         for c in self._clients.values():
@@ -41,6 +52,11 @@ class LLMService:
         reasoning_effort: str | None = None,
         thinking_mode: str | None = None,
         compatibility_policy: str | None = None,
+        vision_enabled: bool | None = None,
+        vision_max_images: int | None = None,
+        vision_max_image_bytes: int | None = None,
+        vision_accepted_mime_prefixes: list[str] | tuple[str, ...] | None = None,
+        vision_accepted_mime_types: list[str] | tuple[str, ...] | None = None,
     ) -> GenericLLMClient:
         """
         Create or update a profile in memory. Returns the client.
@@ -63,6 +79,22 @@ class LLMService:
                 observation_capture_mode=getattr(template, "observation_capture_mode", "full"),
             )
             self._clients[profile] = client
+            self._profiles[profile] = self._updated_profile(
+                profile,
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                azure_deployment=azure_deployment,
+                timeout=timeout,
+                reasoning_effort=reasoning_effort,
+                thinking_mode=thinking_mode,
+                compatibility_policy=compatibility_policy,
+                vision_enabled=vision_enabled,
+                vision_max_images=vision_max_images,
+                vision_max_image_bytes=vision_max_image_bytes,
+                vision_accepted_mime_prefixes=vision_accepted_mime_prefixes,
+                vision_accepted_mime_types=vision_accepted_mime_types,
+            )
             return client
 
         c = self._clients[profile]
@@ -91,7 +123,73 @@ class LLMService:
             c.reasoning_effort = reasoning_effort
         if thinking_mode is not None:
             c.thinking_mode = thinking_mode
+        self._profiles[profile] = self._updated_profile(
+            profile,
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            azure_deployment=azure_deployment,
+            timeout=timeout,
+            reasoning_effort=reasoning_effort,
+            thinking_mode=thinking_mode,
+            compatibility_policy=compatibility_policy,
+            vision_enabled=vision_enabled,
+            vision_max_images=vision_max_images,
+            vision_max_image_bytes=vision_max_image_bytes,
+            vision_accepted_mime_prefixes=vision_accepted_mime_prefixes,
+            vision_accepted_mime_types=vision_accepted_mime_types,
+        )
         return c
+
+    def _updated_profile(
+        self,
+        name: str,
+        *,
+        provider: Provider | None,
+        model: str | None,
+        base_url: str | None,
+        azure_deployment: str | None,
+        timeout: float | None,
+        reasoning_effort: str | None,
+        thinking_mode: str | None,
+        compatibility_policy: str | None,
+        vision_enabled: bool | None,
+        vision_max_images: int | None,
+        vision_max_image_bytes: int | None,
+        vision_accepted_mime_prefixes: list[str] | tuple[str, ...] | None,
+        vision_accepted_mime_types: list[str] | tuple[str, ...] | None,
+    ) -> LLMProfile:
+        current = self._profiles.get(name) or self._profiles.get("default") or LLMProfile()
+        updated = current.model_copy(deep=True)
+        if provider is not None:
+            updated.provider = provider
+        if model is not None:
+            updated.model = model
+        if base_url is not None:
+            updated.base_url = base_url
+        if azure_deployment is not None:
+            updated.azure_deployment = azure_deployment
+        if timeout is not None:
+            updated.timeout = timeout
+        if reasoning_effort is not None:
+            updated.reasoning_effort = reasoning_effort  # type: ignore[assignment]
+        if thinking_mode is not None:
+            updated.thinking_mode = thinking_mode  # type: ignore[assignment]
+        if compatibility_policy is not None:
+            updated.compatibility_policy = compatibility_policy  # type: ignore[assignment]
+        if vision_enabled is not None:
+            updated.vision_enabled = vision_enabled
+        if vision_max_images is not None:
+            updated.vision_max_images = vision_max_images
+        if vision_max_image_bytes is not None:
+            updated.vision_max_image_bytes = vision_max_image_bytes
+        if vision_accepted_mime_prefixes is not None:
+            updated.vision_accepted_mime_prefixes = [
+                str(item) for item in vision_accepted_mime_prefixes
+            ]
+        if vision_accepted_mime_types is not None:
+            updated.vision_accepted_mime_types = [str(item) for item in vision_accepted_mime_types]
+        return updated
 
     # --- Quick start helpers ---
     def set_key(

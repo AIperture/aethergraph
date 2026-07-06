@@ -37,6 +37,28 @@ class LLMProfile(BaseModel):
         description="OpenAI reasoning summary mode: 'auto' or 'concise'. Enables reasoning summaries when set.",
     )
 
+    # explicit multimodal capability metadata
+    vision_enabled: bool = Field(
+        default=False,
+        description="Whether this profile's loaded model is allowed to receive image inputs.",
+    )
+    vision_max_images: int | None = Field(
+        default=None,
+        description="Maximum image attachments a vision tool may send for this profile.",
+    )
+    vision_max_image_bytes: int | None = Field(
+        default=None,
+        description="Maximum bytes per hydrated image for this profile.",
+    )
+    vision_accepted_mime_prefixes: list[str] = Field(
+        default_factory=lambda: ["image/"],
+        description="Accepted MIME prefixes for image inputs.",
+    )
+    vision_accepted_mime_types: list[str] = Field(
+        default_factory=list,
+        description="Accepted exact MIME types for image inputs.",
+    )
+
 
 class LLMObservabilitySettings(BaseModel):
     enabled: bool = True

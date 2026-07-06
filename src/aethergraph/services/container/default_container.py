@@ -373,7 +373,8 @@ def build_default_container(
         observation_sink=llm_observation_sink,
         observation_capture_mode=obs_cfg.capture_mode,
     )  # return {profile: GenericLLMClient}
-    llm_service = LLMService(clients=llm_clients) if llm_clients else None
+    llm_profiles = {"default": cfg.llm.default, **dict(cfg.llm.profiles or {})}
+    llm_service = LLMService(clients=llm_clients, profiles=llm_profiles) if llm_clients else None
 
     embed_clients = build_embedding_clients(
         cfg.embed, secrets, metering=metering

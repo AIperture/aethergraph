@@ -8,7 +8,9 @@ import pytest
 
 from aethergraph.api.v1.schemas.settings import LLMProfilePayload
 from aethergraph.api.v1.settings import _collect_llm_env
+from aethergraph.config.llm import LLMProfile
 from aethergraph.services.llm.generic_client import GenericLLMClient
+from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.types import LLMUnsupportedFeatureError
 
 
@@ -271,6 +273,79 @@ def test_collect_llm_env_includes_compatibility_policy() -> None:
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__REASONING_EFFORT"] == "high"
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__THINKING_MODE"] == "auto"
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__COMPATIBILITY_POLICY"] == "compat"
+
+
+def test_collect_llm_env_includes_explicit_vision_fields() -> None:
+    env = _collect_llm_env(
+        {
+            "local_vision": LLMProfilePayload(
+                provider="lmstudio",
+                model="local-vlm",
+                vision_enabled=True,
+                vision_max_images=3,
+                vision_max_image_bytes=2048,
+                vision_accepted_mime_prefixes=["image/"],
+                vision_accepted_mime_types=["image/png"],
+            )
+        }
+    )
+
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_ENABLED"] == "true"
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_MAX_IMAGES"] == "3"
+    assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_MAX_IMAGE_BYTES"] == "2048"
+    assert (
+        env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_ACCEPTED_MIME_PREFIXES"]
+        == '["image/"]'
+    )
+    assert (
+        env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_ACCEPTED_MIME_TYPES"]
+        == '["image/png"]'
+    )
+
+
+def test_llm_service_exposes_explicit_profile_metadata() -> None:
+    profile = LLMProfile(
+        provider="lmstudio",
+        model="local-vlm",
+        vision_enabled=True,
+        vision_max_images=2,
+        vision_max_image_bytes=4096,
+    )
+    service = LLMService(
+        clients={"default": object()},  # type: ignore[arg-type]
+        profiles={"default": profile},
+    )
+
+    exposed = service.profile("default")
+
+    assert exposed is profile
+    assert exposed.vision_enabled is True
+    assert exposed.vision_max_images == 2
+    assert exposed.vision_max_image_bytes == 4096
+    assert service.profile("missing") is None
+
+
+def test_llm_service_configure_profile_updates_vision_metadata() -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test")
+    service = LLMService(
+        clients={"default": client},
+        profiles={"default": LLMProfile(provider="openai", model="gpt-test")},
+    )
+
+    service.configure_profile(
+        profile="default",
+        vision_enabled=True,
+        vision_max_images=1,
+        vision_max_image_bytes=1024,
+        vision_accepted_mime_types=["image/png"],
+    )
+
+    profile = service.profile("default")
+    assert profile is not None
+    assert profile.vision_enabled is True
+    assert profile.vision_max_images == 1
+    assert profile.vision_max_image_bytes == 1024
+    assert profile.vision_accepted_mime_types == ["image/png"]
 
 
 @pytest.mark.asyncio

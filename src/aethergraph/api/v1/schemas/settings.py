@@ -60,6 +60,11 @@ class LLMProfileView(BaseModel):
     thinking_budget: int | None = None
     reasoning_summary: str | None = None
     compatibility_policy: str = "compat"
+    vision_enabled: bool = False
+    vision_max_images: int | None = None
+    vision_max_image_bytes: int | None = None
+    vision_accepted_mime_prefixes: list[str] = Field(default_factory=lambda: ["image/"])
+    vision_accepted_mime_types: list[str] = Field(default_factory=list)
 
 
 class LLMProfilePayload(BaseModel):
@@ -73,6 +78,11 @@ class LLMProfilePayload(BaseModel):
     reasoning_effort: str | None = None
     thinking_mode: str | None = None
     compatibility_policy: str | None = None
+    vision_enabled: bool | None = None
+    vision_max_images: int | None = None
+    vision_max_image_bytes: int | None = None
+    vision_accepted_mime_prefixes: list[str] | None = None
+    vision_accepted_mime_types: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
