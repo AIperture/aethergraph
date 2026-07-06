@@ -234,6 +234,7 @@ def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
         buttons=payload.get("buttons", []),
         file=payload.get("file"),
         files=payload.get("files") or None,
+        attachments=payload.get("attachments") or None,
         rich=payload.get("rich") or None,
         meta=payload.get("meta", {}) or {},
         agent_id=payload.get("agent_id"),
@@ -711,6 +712,7 @@ async def get_session_chat_events(
                 buttons=payload.get("buttons", []),
                 file=payload.get("file"),  # may be None
                 files=payload.get("files") or None,  # forward list
+                attachments=payload.get("attachments") or None,  # forward list
                 meta=payload.get("meta", {}) or {},
                 agent_id=payload.get("agent_id"),
                 upsert_key=payload.get("upsert_key"),  # forward idempotent key
