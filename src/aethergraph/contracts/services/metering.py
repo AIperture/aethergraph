@@ -13,6 +13,9 @@ class MeteringService(Protocol):
         provider: str,
         prompt_tokens: int,
         completion_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        uncached_input_tokens: int = 0,
         latency_ms: int | None = None,
     ) -> None:
         """Record an LLM usage event."""

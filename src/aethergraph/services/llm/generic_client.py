@@ -612,6 +612,7 @@ class GenericLLMClient(
     ) -> None:
         self.metering = self.metering or current_metering()
         prompt_tokens, completion_tokens = self._normalize_usage(usage)
+        normalized_metrics = normalized_usage_metrics(normalize_llm_usage(usage))
         dims = self._current_dimensions()
 
         try:
@@ -623,6 +624,9 @@ class GenericLLMClient(
                 provider=self.provider,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                cache_read_tokens=normalized_metrics["cache_read_tokens"],
+                cache_write_tokens=normalized_metrics["cache_write_tokens"],
+                uncached_input_tokens=normalized_metrics["uncached_input_tokens"],
                 latency_ms=latency_ms,
             )
         except Exception as e:

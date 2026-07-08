@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aethergraph.contracts.services.metering import MeteringService, MeteringStore
@@ -24,18 +24,18 @@ class EventLogMeteringService(MeteringService):
 
     @staticmethod
     def _now() -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
     @staticmethod
     def _parse_window(window: str) -> datetime:
         if not window:
-            return datetime.min.replace(tzinfo=timezone.utc)
+            return datetime.min.replace(tzinfo=UTC)
 
         unit = window[-1]
         try:
             value = int(window[:-1])
         except ValueError:
-            return datetime.min.replace(tzinfo=timezone.utc)
+            return datetime.min.replace(tzinfo=UTC)
 
         if unit == "h":
             delta = timedelta(hours=value)
@@ -44,7 +44,7 @@ class EventLogMeteringService(MeteringService):
         else:
             delta = timedelta(0)
 
-        return datetime.now(timezone.utc) - delta
+        return datetime.now(UTC) - delta
 
     @staticmethod
     def _dims_from_scope(
@@ -150,6 +150,9 @@ class EventLogMeteringService(MeteringService):
         provider: str,
         prompt_tokens: int,
         completion_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        uncached_input_tokens: int = 0,
         latency_ms: int | None = None,
     ) -> None:
         dims = self._dims_from_scope(
@@ -176,6 +179,9 @@ class EventLogMeteringService(MeteringService):
                 "provider": provider,
                 "prompt_tokens": int(prompt_tokens),
                 "completion_tokens": int(completion_tokens),
+                "cache_read_tokens": int(cache_read_tokens or 0),
+                "cache_write_tokens": int(cache_write_tokens or 0),
+                "uncached_input_tokens": int(uncached_input_tokens or 0),
                 "latency_ms": int(latency_ms) if latency_ms is not None else None,
                 "tags": ["meter.llm"],
             }
@@ -398,6 +404,9 @@ class EventLogMeteringService(MeteringService):
             "llm_calls": len(llm),
             "llm_prompt_tokens": sum(e.get("prompt_tokens", 0) for e in llm),
             "llm_completion_tokens": sum(e.get("completion_tokens", 0) for e in llm),
+            "llm_cache_read_tokens": sum(e.get("cache_read_tokens", 0) for e in llm),
+            "llm_cache_write_tokens": sum(e.get("cache_write_tokens", 0) for e in llm),
+            "llm_uncached_input_tokens": sum(e.get("uncached_input_tokens", 0) for e in llm),
             "embedding_calls": len(embeddings),
             "embedding_texts": sum(e.get("num_texts", 0) for e in embeddings),
             "embedding_tokens": sum(e.get("tokens", 0) or 0 for e in embeddings),
@@ -427,10 +436,23 @@ class EventLogMeteringService(MeteringService):
         stats: dict[str, dict[str, int]] = {}
         for e in rows:
             model = e.get("model", "unknown")
-            s = stats.setdefault(model, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
+            s = stats.setdefault(
+                model,
+                {
+                    "calls": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "uncached_input_tokens": 0,
+                },
+            )
             s["calls"] += 1
             s["prompt_tokens"] += int(e.get("prompt_tokens", 0))
             s["completion_tokens"] += int(e.get("completion_tokens", 0))
+            s["cache_read_tokens"] += int(e.get("cache_read_tokens", 0))
+            s["cache_write_tokens"] += int(e.get("cache_write_tokens", 0))
+            s["uncached_input_tokens"] += int(e.get("uncached_input_tokens", 0))
         return stats
 
     async def get_embedding_stats(
