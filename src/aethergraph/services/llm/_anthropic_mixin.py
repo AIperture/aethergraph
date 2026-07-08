@@ -15,6 +15,96 @@ DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 
 
+def _anthropic_system_payload(
+    messages: list[dict[str, Any]],
+    *,
+    output_format: ChatOutputFormat,
+) -> str | list[dict[str, Any]] | None:
+    directive = (
+        "Return ONLY valid JSON. No markdown, no commentary."
+        if output_format == "json_object"
+        else ""
+    )
+    system_messages = [m for m in list(messages or []) if m.get("role") == "system"]
+    if not directive and not system_messages:
+        return None
+    if not any(_message_has_cache_control(m) for m in system_messages):
+        sys_msgs = [directive] if directive else []
+        for message in system_messages:
+            content = message.get("content")
+            sys_msgs.append(content if isinstance(content, str) else str(content))
+        return "\n\n".join(sys_msgs) if sys_msgs else None
+
+    blocks: list[dict[str, Any]] = []
+    if directive:
+        blocks.append({"type": "text", "text": directive})
+    for message in system_messages:
+        blocks.extend(_anthropic_content_blocks(message))
+    return blocks or None
+
+
+def _anthropic_content_blocks(message: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks = _to_anthropic_blocks(message.get("content"))
+    cache_control = _anthropic_cache_control(message.get("cache_control"))
+    if cache_control:
+        if not blocks:
+            blocks = [{"type": "text", "text": ""}]
+        last = dict(blocks[-1])
+        existing = _anthropic_cache_control(last.get("cache_control"))
+        if existing is not None and existing != cache_control:
+            raise ValueError(
+                "conflicting Anthropic cache_control on message and final content block"
+            )
+        last["cache_control"] = cache_control
+        blocks[-1] = last
+    return blocks
+
+
+def _anthropic_cache_control(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise TypeError("Anthropic cache_control must be a dict")
+    if not value:
+        return None
+    return dict(value)
+
+
+def _message_has_cache_control(message: dict[str, Any]) -> bool:
+    if _anthropic_cache_control(message.get("cache_control")):
+        return True
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(item, dict) and _anthropic_cache_control(item.get("cache_control"))
+        for item in content
+    )
+
+
+def _validate_anthropic_cache_breakpoints(payload: dict[str, Any]) -> None:
+    count = 1 if _anthropic_cache_control(payload.get("cache_control")) else 0
+    system = payload.get("system")
+    if isinstance(system, list):
+        count += _count_cache_control_blocks(system)
+    for message in list(payload.get("messages") or []):
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            count += _count_cache_control_blocks(content)
+    if count > 4:
+        raise ValueError(
+            f"Anthropic prompt caching supports at most 4 cache breakpoints; got {count}"
+        )
+
+
+def _count_cache_control_blocks(blocks: list[Any]) -> int:
+    return sum(
+        1
+        for block in blocks
+        if isinstance(block, dict) and _anthropic_cache_control(block.get("cache_control"))
+    )
+
+
 class _AnthropicMixin:
     """Provider methods for Anthropic Messages API."""
 
@@ -50,15 +140,7 @@ class _AnthropicMixin:
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
 
-        # System text aggregation
-        sys_msgs: list[str] = []
-        for m in messages:
-            if m.get("role") == "system":
-                c = m.get("content")
-                sys_msgs.append(c if isinstance(c, str) else str(c))
-
-        if output_format == "json_object":
-            sys_msgs.insert(0, "Return ONLY valid JSON. No markdown, no commentary.")
+        system_payload = _anthropic_system_payload(messages, output_format=output_format)
 
         # Convert messages to Anthropic format (blocks)
         conv: list[dict[str, Any]] = []
@@ -67,7 +149,7 @@ class _AnthropicMixin:
             if role == "system":
                 continue
             anthro_role = "assistant" if role == "assistant" else "user"
-            content_blocks = _to_anthropic_blocks(m.get("content"))
+            content_blocks = _anthropic_content_blocks(m)
             conv.append({"role": anthro_role, "content": content_blocks})
 
         payload: dict[str, Any] = {
@@ -77,8 +159,11 @@ class _AnthropicMixin:
             "temperature": temperature,
             "top_p": top_p,
         }
-        if sys_msgs:
-            payload["system"] = "\n\n".join(sys_msgs)
+        request_cache_control = _anthropic_cache_control(kw.get("cache_control"))
+        if request_cache_control:
+            payload["cache_control"] = request_cache_control
+        if system_payload:
+            payload["system"] = system_payload
         if output_format == "json_schema":
             if json_schema is None:
                 raise ValueError("output_format='json_schema' requires json_schema")
@@ -94,6 +179,7 @@ class _AnthropicMixin:
             payload["thinking"] = {"type": "adaptive", "effort": reasoning_effort}
         elif thinking_mode == "on":
             payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget or 4096}
+        _validate_anthropic_cache_breakpoints(payload)
 
         async def _call():
             r = await self._client.post(
@@ -162,15 +248,7 @@ class _AnthropicMixin:
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
 
-        # System text aggregation
-        sys_msgs: list[str] = []
-        for m in messages:
-            if m.get("role") == "system":
-                c = m.get("content")
-                sys_msgs.append(c if isinstance(c, str) else str(c))
-
-        if output_format == "json_object":
-            sys_msgs.insert(0, "Return ONLY valid JSON. No markdown, no commentary.")
+        system_payload = _anthropic_system_payload(messages, output_format=output_format)
 
         # Convert messages to Anthropic format (blocks)
         conv: list[dict[str, Any]] = []
@@ -179,7 +257,7 @@ class _AnthropicMixin:
             if role == "system":
                 continue
             anthro_role = "assistant" if role == "assistant" else "user"
-            content_blocks = _to_anthropic_blocks(m.get("content"))
+            content_blocks = _anthropic_content_blocks(m)
             conv.append({"role": anthro_role, "content": content_blocks})
 
         payload: dict[str, Any] = {
@@ -202,8 +280,12 @@ class _AnthropicMixin:
             payload["temperature"] = temperature
             payload["top_p"] = top_p
 
-        if sys_msgs:
-            payload["system"] = "\n\n".join(sys_msgs)
+        request_cache_control = _anthropic_cache_control(kw.get("cache_control"))
+        if request_cache_control:
+            payload["cache_control"] = request_cache_control
+        if system_payload:
+            payload["system"] = system_payload
+        _validate_anthropic_cache_breakpoints(payload)
 
         headers: dict[str, str] = {
             "x-api-key": self.api_key,

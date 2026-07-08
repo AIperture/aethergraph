@@ -289,7 +289,11 @@ def _to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
                 continue
             t = p.get("type")
             if t in ("text", "input_text", "output_text"):
-                blocks.append({"type": "text", "text": p.get("text", "")})
+                block = {"type": "text", "text": p.get("text", "")}
+                cache_control = p.get("cache_control")
+                if isinstance(cache_control, dict):
+                    block["cache_control"] = dict(cache_control)
+                blocks.append(block)
             elif t == "image" and "source" in p:
                 blocks.append(p)
             elif t in ("image_url", "input_image"):

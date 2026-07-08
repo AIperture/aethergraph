@@ -238,6 +238,134 @@ async def test_anthropic_tools_are_not_silently_dropped_in_compat_mode() -> None
 
 
 @pytest.mark.asyncio
+async def test_anthropic_without_cache_control_keeps_classic_system_string() -> None:
+    payload = {
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 3, "output_tokens": 4},
+    }
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="anthropic-key",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, usage = await client._chat_anthropic_messages(  # type: ignore[misc]
+        [
+            {"role": "system", "content": "Stable rules."},
+            {"role": "user", "content": "hello"},
+        ],
+        model="claude-test",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+    )
+
+    assert text == "ok"
+    assert usage["input_tokens"] == 3
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["system"] == "Stable rules."
+    assert "cache_control" not in fake_http.last_json
+    assert "cache_control" not in fake_http.last_json["messages"][0]["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_cache_control_passes_through_system_and_messages() -> None:
+    payload = {
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {
+            "input_tokens": 3,
+            "output_tokens": 4,
+            "cache_creation_input_tokens": 100,
+            "cache_read_input_tokens": 50,
+        },
+    }
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="anthropic-key",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, usage = await client._chat_anthropic_messages(  # type: ignore[misc]
+        [
+            {
+                "role": "system",
+                "content": "Frozen header.",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Frozen ledger.",
+                        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": "Volatile tail.",
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        model="claude-test",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+        cache_control={"type": "ephemeral"},
+    )
+
+    assert text == "ok"
+    assert usage["cache_read_input_tokens"] == 50
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["cache_control"] == {"type": "ephemeral"}
+    assert fake_http.last_json["system"] == [
+        {
+            "type": "text",
+            "text": "Frozen header.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    messages = fake_http.last_json["messages"]
+    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert messages[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_cache_control_rejects_more_than_four_breakpoints() -> None:
+    payload = {"content": [{"type": "text", "text": "ok"}], "usage": {}}
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="anthropic-key",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    messages = [
+        {"role": "user", "content": f"block {index}", "cache_control": {"type": "ephemeral"}}
+        for index in range(5)
+    ]
+
+    with pytest.raises(ValueError, match="at most 4"):
+        await client._chat_anthropic_messages(  # type: ignore[misc]
+            messages,
+            model="claude-test",
+            output_format="text",
+            json_schema=None,
+            fail_on_unsupported=False,
+        )
+
+    assert fake_http.last_json is None
+
+
+@pytest.mark.asyncio
 async def test_gemini_tools_are_not_passed_through_in_compat_mode() -> None:
     client = GenericLLMClient(
         provider="google",
