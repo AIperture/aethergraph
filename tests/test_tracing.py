@@ -133,7 +133,11 @@ async def test_llm_chat_emits_trace_with_usage_metrics() -> None:
     client = GenericLLMClient(provider="openai", model="gpt-test")
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return "hello back", {"prompt_tokens": 11, "completion_tokens": 7}
+        return "hello back", {
+            "prompt_tokens": 11,
+            "completion_tokens": 7,
+            "prompt_tokens_details": {"cached_tokens": 5},
+        }
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     services = SimpleNamespace(tracer=tracer)
@@ -164,3 +168,7 @@ async def test_llm_chat_emits_trace_with_usage_metrics() -> None:
     payload = end_rows[-1]["payload"]
     assert payload["metrics"]["prompt_tokens"] == 11
     assert payload["metrics"]["completion_tokens"] == 7
+    assert payload["metrics"]["input_tokens"] == 11
+    assert payload["metrics"]["output_tokens"] == 7
+    assert payload["metrics"]["cache_read_tokens"] == 5
+    assert payload["metrics"]["uncached_input_tokens"] == 6

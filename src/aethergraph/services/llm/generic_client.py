@@ -37,6 +37,10 @@ from aethergraph.services.llm.types import (
     LLMRunBudgetExceededError,
     LLMUnsupportedFeatureError,
 )
+from aethergraph.services.llm.usage import (
+    normalize_llm_usage,
+    normalized_usage_metrics,
+)
 from aethergraph.services.llm.utils import (
     _extract_json_text,
     _strip_schema_enforced_json_fence,
@@ -868,6 +872,7 @@ class GenericLLMClient(
             )
 
             latency_ms = int((time.perf_counter() - start) * 1000)
+            normalized_usage = normalize_llm_usage(usage)
             observation_record.raw_text = text
             observation_record.usage = usage or {}
             observation_record.latency_ms = latency_ms
@@ -883,9 +888,17 @@ class GenericLLMClient(
             )
             await self._emit_observation(observation_record)
             await span.finish(
-                response={"text": text, "usage": usage},
+                response={
+                    "text": text,
+                    "usage": usage,
+                    "normalized_usage": normalized_usage,
+                },
                 metadata=self._current_dimensions(),
-                metrics={**(usage or {}), "latency_ms": latency_ms},
+                metrics={
+                    **(usage or {}),
+                    **normalized_usage_metrics(normalized_usage),
+                    "latency_ms": latency_ms,
+                },
             )
             return text, usage
         except Exception as exc:
@@ -1139,6 +1152,7 @@ class GenericLLMClient(
                     await on_delta(text)
 
             latency_ms = int((time.perf_counter() - start) * 1000)
+            normalized_usage = normalize_llm_usage(usage)
             observation_record.raw_text = text
             observation_record.usage = usage or {}
             observation_record.latency_ms = latency_ms
@@ -1148,9 +1162,17 @@ class GenericLLMClient(
             await self._record_llm_usage(model=model, usage=usage, latency_ms=latency_ms)
             await self._emit_observation(observation_record)
             await span.finish(
-                response={"text": text, "usage": usage},
+                response={
+                    "text": text,
+                    "usage": usage,
+                    "normalized_usage": normalized_usage,
+                },
                 metadata=self._current_dimensions(),
-                metrics={**(usage or {}), "latency_ms": latency_ms},
+                metrics={
+                    **(usage or {}),
+                    **normalized_usage_metrics(normalized_usage),
+                    "latency_ms": latency_ms,
+                },
             )
             return text, usage
         except Exception as exc:

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import Token
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -16,7 +16,7 @@ from aethergraph.core.runtime.runtime_metering import current_meter_context
 
 
 def utc_now_ts() -> float:
-    return datetime.now(timezone.utc).timestamp()
+    return datetime.now(UTC).timestamp()
 
 
 def _json_safe(value: Any) -> Any:
@@ -107,6 +107,9 @@ def extract_metrics(value: Any) -> dict[str, int | float]:
         "input_tokens",
         "output_tokens",
         "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "uncached_input_tokens",
     ):
         raw = safe.get(key)
         if isinstance(raw, (int, float)):
