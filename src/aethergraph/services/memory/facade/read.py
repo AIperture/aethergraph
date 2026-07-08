@@ -28,6 +28,16 @@ class ReadMixin:
             return await method(*args, **filtered_kwargs)
 
     async def get_event(self: MemoryFacadeProtocol, event_id: str) -> Event | None:
+        """Fetch a single event by id.
+
+        Looks in durable persistence first, then falls back to the hot log.
+
+        Args:
+            event_id: Identifier of the event to fetch.
+
+        Returns:
+            Event | None: The matching event, or ``None`` if not found.
+        """
         events = await self.persistence.get_events_by_ids(
             self.timeline_id,
             [event_id],
@@ -67,6 +77,37 @@ class ReadMixin:
         tool: str | None = None,
         order_dir: str = "desc",
     ) -> list[Any]:
+        """Query events by structured filters (kinds, tags, scope, time, source).
+
+        Reads from the hot log by default, or from durable persistence when
+        ``use_persistence=True``. Results are scope-filtered by ``level``, then
+        offset/limited and returned newest-first (``order_dir="desc"``) unless
+        overridden.
+
+        Args:
+            kinds: Restrict to these event kinds.
+            tags: Restrict to events carrying all of these tags.
+            limit: Maximum number of events to return.
+            level: Scope level to filter by (``"scope"``, ``"session"``, ``"run"``,
+                ``"user"``, ``"org"``).
+            use_persistence: Query durable storage instead of the hot log.
+            since: Lower time bound (ISO timestamp).
+            until: Upper time bound (ISO timestamp).
+            offset: Number of leading results to skip.
+            return_event: Return ``Event`` objects when ``True``, else plain dicts.
+            session_id: Filter by session id (inferred from scope when ``level="session"``).
+            run_id: Filter by run id (inferred from scope when ``level="run"``).
+            agent_id: Filter by agent id.
+            client_id: Filter by client id.
+            graph_id: Filter by graph id.
+            node_id: Filter by node id.
+            topic: Filter by event topic.
+            tool: Filter by tool topic.
+            order_dir: ``"desc"`` (newest first, default) or ``"asc"``.
+
+        Returns:
+            list: Events (or dicts) matching the query.
+        """
         order_dir = "asc" if str(order_dir).lower() == "asc" else "desc"
         scope = getattr(self, "scope", None)
         eff_session = (
@@ -137,6 +178,26 @@ class ReadMixin:
         time_window: str | None = None,
         mode: SearchMode | None = None,
     ) -> list[Event]:
+        """Search events semantically/lexically, falling back to structured query.
+
+        When an index backend is available and ``use_embedding=True``, runs a
+        semantic (or ``mode``-selected) search over indexed events and hydrates the
+        matching ``Event`` objects. Otherwise falls back to a persistence-backed
+        :meth:`query_events` plus a lexical substring filter on ``query``.
+
+        Args:
+            query: Free-text query. When empty, returns the most recent matches.
+            kinds: Restrict to these event kinds.
+            tags: Restrict to events carrying these tags.
+            limit: Maximum number of results.
+            use_embedding: Use the semantic index when available.
+            level: Scope level to filter by.
+            time_window: Optional relative window (e.g. ``"7d"``, ``"24h"``).
+            mode: Optional explicit search mode (e.g. ``"semantic"``, ``"lexical"``).
+
+        Returns:
+            list[Event]: Matching events.
+        """
         if use_embedding and getattr(self, "scoped_indices", None) is not None:
             idx: ScopedIndices = self.scoped_indices
             if idx is not None and idx.backend is not None:
@@ -180,6 +241,19 @@ class ReadMixin:
         scored_items: list[ScoredItem],
         corpus: str = "event",
     ) -> list[EventSearchResult]:
+        """Hydrate full ``Event`` objects for a list of scored search hits.
+
+        Given ``ScoredItem`` results from the search backend, resolves the
+        corresponding events from the hot log and durable persistence.
+
+        Args:
+            scored_items: Scored items returned by the search backend.
+            corpus: Corpus to hydrate from (defaults to ``"event"``).
+
+        Returns:
+            list[EventSearchResult]: Pairs of scored item and resolved event
+            (``event`` is ``None`` when it could not be found).
+        """
         event_items = [item for item in scored_items if item.corpus == corpus]
         if not event_items:
             return []
@@ -212,6 +286,20 @@ class ReadMixin:
         use_persistence: bool = False,
         kind: str = "state.snapshot",
     ) -> Any | None:
+        """Return the most recent value stored for a state ``key``.
+
+        Convenience wrapper over :meth:`query_events` for ``state.snapshot`` events.
+
+        Args:
+            key: State key to look up.
+            tags: Extra tags to require in addition to the state tags.
+            level: Scope level to filter by.
+            use_persistence: Read durable storage instead of the hot log.
+            kind: State event kind (defaults to ``"state.snapshot"``).
+
+        Returns:
+            Any | None: The stored value, or ``None`` if no snapshot exists.
+        """
         events = await self.query_events(
             kinds=[kind],
             tags=["state", f"state:{key}", *(list(tags or []))],
@@ -234,6 +322,19 @@ class ReadMixin:
         kind: str = "state.snapshot",
         use_persistence: bool = False,
     ) -> list[Event]:
+        """Return the history of snapshots recorded for a state ``key``.
+
+        Args:
+            key: State key to look up.
+            tags: Extra tags to require in addition to the state tags.
+            limit: Maximum number of snapshots to return.
+            level: Scope level to filter by.
+            kind: State event kind (defaults to ``"state.snapshot"``).
+            use_persistence: Read durable storage instead of the hot log.
+
+        Returns:
+            list[Event]: Snapshot events, newest last.
+        """
         return await self.query_events(
             kinds=[kind],
             tags=["state", f"state:{key}", *(list(tags or []))],
@@ -254,6 +355,22 @@ class ReadMixin:
         created_at_min: float | None = None,
         created_at_max: float | None = None,
     ) -> list[EventSearchResult]:
+        """Semantically search recorded state snapshots.
+
+        Requires a configured index backend; returns an empty list otherwise.
+
+        Args:
+            query: Free-text query.
+            key: Optional state key to restrict the search to.
+            tags: Extra tags to require.
+            top_k: Maximum number of results.
+            time_window: Optional relative window (e.g. ``"7d"``).
+            created_at_min: Optional lower bound as a UNIX timestamp.
+            created_at_max: Optional upper bound as a UNIX timestamp.
+
+        Returns:
+            list[EventSearchResult]: Scored snapshot hits with resolved events.
+        """
         scoped = getattr(self, "scoped_indices", None)
         if scoped is None or scoped.backend is None:
             return []

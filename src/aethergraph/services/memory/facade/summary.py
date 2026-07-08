@@ -37,6 +37,29 @@ class SummaryMixin:
         extra_data: dict[str, Any] | None = None,
         extra_tags: list[str] | None = None,
     ) -> dict[str, Any]:
+        """Distill recent events into a stored summary event.
+
+        Selects events by kind/tag/scope and importance ``signal``, summarizes them
+        (heuristically, or with the configured LLM when ``use_llm=True``), and
+        persists the result as a summary event that later calls can load.
+
+        Args:
+            level: Scope level to gather events from (defaults to ``"scope"``).
+            summary_tag: Tag applied to the produced summary.
+            summary_kind: Event kind for the produced summary.
+            include_kinds: Restrict source events to these kinds.
+            include_tags: Restrict source events to these tags.
+            max_events: Maximum number of source events to consider.
+            min_signal: Minimum importance signal for an event to be included.
+            use_llm: Use the configured LLM summarizer instead of the heuristic one.
+            scope_id: Optional scope id recorded on the summary.
+            extra_data: Extra fields merged into the summary payload.
+            extra_tags: Extra tags applied to the summary event.
+
+        Returns:
+            dict: The summary payload (empty dict when there is nothing to
+            summarize), including ``event_id``, ``summary_kind`` and ``summary_tag``.
+        """
         eff_level = level or "scope"
         min_signal = min_signal if min_signal is not None else self.default_signal_threshold
         events = await self.query_events(
@@ -117,6 +140,18 @@ class SummaryMixin:
         scope_id: str | None = None,
         level=None,
     ) -> list[dict[str, Any]]:
+        """List recent stored summaries for a tag/kind, oldest to newest.
+
+        Args:
+            summary_tag: Summary tag to load.
+            limit: Maximum number of summaries to return.
+            summary_kind: Summary event kind to load.
+            scope_id: Optional scope id to restrict summaries to.
+            level: Scope level to filter by (defaults to ``"scope"``).
+
+        Returns:
+            list[dict]: Summary payloads, most recent last.
+        """
         fetch_limit = max(limit * 5, 20) if scope_id is not None else limit
         events: list[Event] = await self.query_events(
             kinds=[summary_kind],
@@ -157,6 +192,17 @@ class SummaryMixin:
         summary_kind: str = "long_term_summary",
         level=None,
     ) -> dict[str, Any] | None:
+        """Return the most recent stored summary, or ``None``.
+
+        Args:
+            scope_id: Optional scope id to restrict summaries to.
+            summary_tag: Summary tag to load.
+            summary_kind: Summary event kind to load.
+            level: Scope level to filter by (defaults to ``"scope"``).
+
+        Returns:
+            dict | None: The latest summary payload, or ``None`` if none exist.
+        """
         summaries = await self.list_summaries(
             summary_tag=summary_tag,
             summary_kind=summary_kind,
@@ -174,6 +220,21 @@ class SummaryMixin:
         scope_id: str | None = None,
         level=None,
     ) -> dict[str, Any] | None:
+        """Re-surface the latest summary by appending a lightweight hydrate event.
+
+        Loads the most recent summary and records a low-severity
+        ``<summary_kind>_hydrate`` event so the summary re-enters recent memory
+        without recomputing it. Returns the summary that was hydrated.
+
+        Args:
+            summary_tag: Summary tag to load.
+            summary_kind: Summary event kind to load.
+            scope_id: Optional scope id to restrict summaries to.
+            level: Scope level to filter by (defaults to ``"scope"``).
+
+        Returns:
+            dict | None: The hydrated summary payload, or ``None`` if none exist.
+        """
         summary = await self.get_latest_summary(
             scope_id=scope_id,
             summary_tag=summary_tag,

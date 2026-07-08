@@ -22,6 +22,25 @@ class WriteMixin:
         text: str | None = None,
         metrics: dict[str, float] | None = None,
     ) -> Event:
+        """Record a low-level event from an explicit ``base`` payload.
+
+        This is the primitive that the higher-level ``append_*`` helpers build on.
+        It fills in scope/tenant identity, timestamps, a stable event id, and an
+        importance ``signal``, then appends the event to the hot log and durable
+        persistence and (when an index backend is configured) indexes it for search.
+
+        Prefer :meth:`append_event` and the typed ``append_*`` helpers for most use;
+        reach for ``record_raw`` only when you need full control over the raw fields.
+
+        Args:
+            base: Raw event fields (``kind``, ``stage``, ``tags``, ``data``,
+                ``severity``, ``signal``, ``tool``, ``topic``, identity overrides, ...).
+            text: Human-readable content used for previews and search indexing.
+            metrics: Optional numeric metrics attached to the event.
+
+        Returns:
+            Event: The persisted event, including its generated ``event_id``.
+        """
         span = await self._start_trace(
             operation="record_raw",
             request={"base": base, "text": text, "metrics": metrics},
@@ -163,6 +182,30 @@ class WriteMixin:
         topic: str | None = None,
         tool: str | None = None,
     ) -> Event:
+        """Record a structured event with automatic text/data normalization.
+
+        Serializes ``data`` into an indexable ``text`` preview when ``text`` is not
+        given, truncates overly long text, and wraps non-dict payloads so they are
+        always JSON-safe. Delegates persistence to :meth:`record_raw`. This is the
+        general-purpose recording entry point most callers should use.
+
+        Args:
+            kind: Logical event type (e.g. ``"chat.turn"``, ``"tool_result"``).
+            data: Arbitrary JSON-serializable payload for the event.
+            tags: Low-cardinality labels used for filtering and search.
+            severity: Importance level (1=low, 2=medium, 3=high).
+            stage: Optional phase indicator (e.g. role for chat turns).
+            inputs: Optional structured input values.
+            outputs: Optional structured output values.
+            metrics: Optional numeric metrics.
+            signal: Optional relevance signal; estimated automatically when omitted.
+            text: Optional human-readable content; derived from ``data`` when omitted.
+            topic: Optional topic classification.
+            tool: Optional tool topic associated with the event.
+
+        Returns:
+            Event: The persisted event.
+        """
         if text is None and data is not None:
             if isinstance(data, str):
                 text = data
@@ -207,6 +250,23 @@ class WriteMixin:
         severity: int = 2,
         signal: float | None = None,
     ) -> Event:
+        """Record a single chat turn as a ``chat.turn`` event.
+
+        Stores the message ``role`` as the event ``stage`` and tags the event with
+        ``"chat"`` so it can be retrieved by :meth:`recent_chat` and
+        :meth:`chat_history_for_llm`.
+
+        Args:
+            role: Message role (``"user"``, ``"assistant"``, ``"system"``, ``"tool"``).
+            text: The message content.
+            tags: Extra tags to attach (``"chat"`` is always added).
+            data: Optional extra fields merged into the event payload.
+            severity: Importance level (1=low, 2=medium, 3=high).
+            signal: Optional relevance signal.
+
+        Returns:
+            Event: The persisted chat event.
+        """
         payload = {"role": role, "text": text}
         if data:
             payload.update(data)
@@ -231,6 +291,24 @@ class WriteMixin:
         message: str | None = None,
         severity: int = 3,
     ) -> Event:
+        """Record the result of a tool invocation as a ``tool_result`` event.
+
+        The ``tool`` name is stored as both the event ``tool`` and ``topic`` so tool
+        history can be filtered by tool (e.g.
+        ``query_events(kinds=["tool_result"], tool=...)``).
+
+        Args:
+            tool: Tool name/identifier.
+            inputs: Structured inputs passed to the tool.
+            outputs: Structured outputs returned by the tool.
+            tags: Extra tags to attach.
+            metrics: Optional numeric metrics (e.g. latency, cost).
+            message: Optional human-readable summary used for search/preview.
+            severity: Importance level (defaults to 3).
+
+        Returns:
+            Event: The persisted tool-result event.
+        """
         return await self.append_event(
             kind="tool_result",
             data={"tool": tool},
@@ -256,6 +334,26 @@ class WriteMixin:
         kind: str = "state.snapshot",
         stage: str | None = None,
     ) -> Event:
+        """Persist a JSON-serializable state value as a ``state.snapshot`` event.
+
+        Dataclasses and pydantic-style objects are converted to plain data before
+        storage. Snapshots are tagged ``state`` and ``state:<key>`` so they can be
+        retrieved with :meth:`get_latest_state` / :meth:`list_state_history` or
+        searched with :meth:`search_state`.
+
+        Args:
+            key: Logical state key this snapshot belongs to.
+            value: The state value (any JSON-serializable / dataclass / model object).
+            tags: Extra tags to attach.
+            meta: Optional metadata stored alongside the value.
+            severity: Importance level (1=low, 2=medium, 3=high).
+            signal: Optional relevance signal.
+            kind: Event kind to use (defaults to ``"state.snapshot"``).
+            stage: Optional phase indicator.
+
+        Returns:
+            Event: The persisted state event.
+        """
         import dataclasses
 
         def _to_serializable(obj: Any) -> Any:

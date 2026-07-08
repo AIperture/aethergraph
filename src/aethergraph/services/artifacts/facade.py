@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -247,9 +247,9 @@ class ArtifactFacade:
         created_dt: datetime
         if isinstance(a.created_at, datetime):
             if a.created_at.tzinfo is None:
-                created_dt = a.created_at.replace(tzinfo=timezone.utc)
+                created_dt = a.created_at.replace(tzinfo=UTC)
             else:
-                created_dt = a.created_at.astimezone(timezone.utc)
+                created_dt = a.created_at.astimezone(UTC)
         elif isinstance(a.created_at, str):
             # Best-effort parse; if it fails, fall back to "now"
             try:
@@ -259,14 +259,14 @@ class ArtifactFacade:
                 else:
                     created_dt = datetime.fromisoformat(a.created_at)
                 if created_dt.tzinfo is None:
-                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                    created_dt = created_dt.replace(tzinfo=UTC)
                 else:
-                    created_dt = created_dt.astimezone(timezone.utc)
+                    created_dt = created_dt.astimezone(UTC)
             except Exception:
-                created_dt = datetime.now(timezone.utc)
+                created_dt = datetime.now(UTC)
         else:
             # No timestamp provided → use now
-            created_dt = datetime.now(timezone.utc)
+            created_dt = datetime.now(UTC)
 
         # Persist normalized timestamp back onto the artifact
         a.created_at = created_dt
@@ -783,7 +783,8 @@ class ArtifactFacade:
         metrics: dict | None = None,
         pin: bool = False,
     ) -> Artifact:
-        """
+        """Save text as an artifact and index it.
+
         This method stages the text as a temporary `.txt` file, writes the payload,
         and persists it as an artifact with associated metadata. It is accessed via
         `context.artifacts().save_text(...)`.

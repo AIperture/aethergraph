@@ -20,6 +20,25 @@ class PromptMixin:
         include_tags: bool = False,
         include_ts: bool = False,
     ) -> list[Any]:
+        """Return recent chat turns, as plain dicts or ``Event`` objects.
+
+        Reads ``chat.turn`` events (via :meth:`query_events`) and optionally filters
+        by ``roles``. By default returns ``{"role", "text"}`` dicts trimmed to the
+        last ``limit`` turns.
+
+        Args:
+            limit: Maximum number of turns to return.
+            roles: Restrict to these roles (e.g. ``["user", "assistant"]``).
+            tags: Restrict to turns carrying these tags.
+            level: Scope level to filter by.
+            use_persistence: Read durable storage instead of the hot log.
+            return_event: Return ``Event`` objects instead of dicts.
+            include_tags: Include a ``tags`` field on each dict.
+            include_ts: Include a ``ts`` field on each dict.
+
+        Returns:
+            list: Recent chat turns (dicts or events).
+        """
         events = await self.query_events(
             kinds=["chat.turn"],
             tags=list(tags) if tags else None,
@@ -73,6 +92,26 @@ class PromptMixin:
         level=None,
         use_persistence: bool = False,
     ) -> dict[str, Any]:
+        """Build an LLM-ready message list from chat history and summaries.
+
+        Optionally prepends a system message containing recent long-term summaries,
+        then appends recent chat turns mapped to ``user``/``assistant``/``system``
+        roles.
+
+        Args:
+            limit: Maximum number of recent chat turns to include.
+            include_system_summary: Prepend a summary system message when available.
+            summary_tag: Summary tag to load.
+            summary_scope_id: Optional scope id to restrict summaries to.
+            summary_kind: Summary event kind to load.
+            max_summaries: Maximum number of summaries to include.
+            level: Scope level to filter by.
+            use_persistence: Read durable storage instead of the hot log.
+
+        Returns:
+            dict: ``{"summary": str, "messages": list[dict]}`` ready to pass to an
+            LLM ``chat`` call.
+        """
         messages: list[dict[str, str]] = []
         summary_text = ""
         if include_system_summary:
@@ -133,6 +172,31 @@ class PromptMixin:
         level=None,
         use_persistence: bool = False,
     ) -> dict[str, Any]:
+        """Assemble reusable prompt segments (long-term, recent chat, recent tools).
+
+        A superset of :meth:`chat_history_for_llm` that returns the raw building
+        blocks rather than a message list, so callers can compose their own prompt.
+
+        Args:
+            recent_chat_limit: Maximum recent chat turns to include.
+            include_long_term: Include long-term summary text.
+            summary_tag: Summary tag to load.
+            summary_scope_id: Optional scope id to restrict summaries to.
+            summary_kind: Summary event kind to load.
+            max_summaries: Maximum number of summaries to include.
+            include_recent_tools: Include recent tool-result events.
+            tool: Restrict recent tools to this tool name.
+            tool_limit: Maximum number of tool results to include.
+            recent_chat_tags: Restrict recent chat to these tags.
+            recent_tool_tags: Restrict recent tools to these tags.
+            recent_chat_include_tags: Include tags on chat items.
+            recent_chat_include_ts: Include timestamps on chat items.
+            level: Scope level to filter by.
+            use_persistence: Read durable storage instead of the hot log.
+
+        Returns:
+            dict: ``{"long_term": str, "recent_chat": list, "recent_tools": list}``.
+        """
         span = await self._start_trace(
             operation="build_prompt_segments",
             request={
