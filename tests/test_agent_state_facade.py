@@ -24,11 +24,14 @@ class DemoState:
 
 class FakeMemory:
     def __init__(self) -> None:
+        self.memory_scope_id = "session-1"
+        self.session_id = "session-1"
         self.latest = None
         self.record_state_calls = []
         self.record_calls = []
         self.history_calls = []
         self.search_calls = []
+        self.external_resource_changes = []
 
     async def latest_state(self, key, **kwargs):
         return self.latest
@@ -41,6 +44,10 @@ class FakeMemory:
     async def record(self, **kwargs):
         self.record_calls.append(kwargs)
         return SimpleNamespace(event_id=f"event-{len(self.record_calls)}")
+
+    async def append_external_resource_change(self, change):
+        self.external_resource_changes.append(change)
+        return SimpleNamespace(event_id=change.event_id, data=change.to_dict())
 
     async def state_history(self, key, **kwargs):
         self.history_calls.append((key, kwargs))
@@ -103,10 +110,17 @@ async def test_agent_state_local_backend_does_not_write_memory() -> None:
     state = await store.load()
     state.count = 3
     await store.commit(state, reason="local")
-    await store.emit_change(reason="local-change")
+    await store.emit_change(
+        event_id="local-1",
+        source_sequence=1,
+        revision="1",
+        recorded_at="2026-07-10T20:00:01Z",
+        reason="local-change",
+    )
 
     assert memory.record_state_calls == []
     assert memory.record_calls == []
+    assert memory.external_resource_changes == []
 
 
 @pytest.mark.asyncio
@@ -163,29 +177,38 @@ async def test_agent_state_bind_distinguishes_scope_configuration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_state_emit_change_records_lightweight_event() -> None:
+async def test_agent_state_emit_change_uses_external_resource_contract() -> None:
     memory = FakeMemory()
     store = AgentStateFacade(memory=memory).bind(key="demo", model=DemoState)
 
     await store.emit_change(
+        event_id="state-outbox-1",
+        source_sequence=1,
+        revision="1",
+        recorded_at="2026-07-10T20:00:01Z",
         reason="stage_started",
-        stage_id="stage-a",
         patch={"pipeline.active_stage_id": "stage-a"},
         summary="Stage started.",
     )
 
-    assert len(memory.record_calls) == 1
-    call = memory.record_calls[0]
-    assert call["kind"] == "agent.state.change"
-    assert call["data"] == {
-        "key": "demo",
-        "revision": 0,
-        "reason": "stage_started",
-        "stage_id": "stage-a",
+    assert memory.record_calls == []
+    assert len(memory.external_resource_changes) == 1
+    change = memory.external_resource_changes[0]
+    assert change.to_dict() == {
+        "kind": "external.resource.changed",
+        "event_id": "state-outbox-1",
+        "scope_id": "session-1",
+        "session_id": "session-1",
+        "source_sequence": 1,
+        "resource_key": "agent_state:demo",
+        "resource_kind": "agent_state",
+        "revision": "1",
+        "source": "agent_state",
+        "recorded_at": "2026-07-10T20:00:01Z",
+        "changed_fields": ["pipeline.active_stage_id"],
         "summary": "Stage started.",
-        "patch": {"pipeline.active_stage_id": "stage-a"},
     }
-    assert "count" not in str(call["data"])
+    assert "stage-a" not in str(change.to_dict())
 
 
 @pytest.mark.asyncio

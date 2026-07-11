@@ -4,7 +4,11 @@ import json
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from aethergraph.contracts.services.memory import Event
+from aethergraph.contracts.services.memory import (
+    EXTERNAL_RESOURCE_CHANGED_KIND,
+    Event,
+    ExternalResourceChangedEvent,
+)
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
@@ -69,7 +73,7 @@ class WriteMixin:
             if signal is None:
                 signal = self._estimate_signal(text=text, metrics=metrics, severity=severity)
             kind = base.get("kind") or "misc"
-            eid = stable_event_id(
+            eid = str(base.get("event_id") or "").strip() or stable_event_id(
                 {
                     "ts": ts_iso,
                     "run_id": run_id,
@@ -239,6 +243,99 @@ class WriteMixin:
         if signal is not None:
             base["signal"] = signal
         return await self.record_raw(base=base, text=text, metrics=metrics)
+
+    async def append_external_resource_change(
+        self: MemoryFacadeProtocol,
+        change: ExternalResourceChangedEvent | dict[str, Any],
+    ) -> Event:
+        """Ingest one committed authoritative-store outbox event.
+
+        The method validates scope identity and persists the compact change on
+        the existing memory timeline. It does not mutate the resource and has no
+        run submission, continuation, notification, or scheduling behavior.
+
+        Examples:
+            Ingest a typed event:
+            ```python
+                change = ExternalResourceChangedEvent(
+                    event_id="evt-1",
+                    scope_id=memory.memory_scope_id,
+                    session_id=memory.session_id,
+                    source_sequence=1,
+                    resource_key="design_config:project-42",
+                    resource_kind="design_config",
+                    revision="19",
+                    source="design_ui",
+                    recorded_at="2026-07-10T20:00:01Z",
+                )
+                persisted = await memory.append_external_resource_change(change)
+                assert persisted.event_id == "evt-1"
+            ```
+
+            Ingest a JSON outbox row:
+            ```python
+                persisted = await memory.append_external_resource_change(
+                    {
+                        "event_id": "evt-2",
+                        "scope_id": memory.memory_scope_id,
+                        "session_id": memory.session_id,
+                        "source_sequence": 2,
+                        "resource_key": "clock:world",
+                        "resource_kind": "clock",
+                        "revision": "day-2",
+                        "source": "world_service",
+                        "recorded_at": "2026-07-10T20:00:02Z",
+                    }
+                )
+                assert persisted.kind == "external.resource.changed"
+            ```
+
+        Args:
+            change: Typed contract or strict JSON row read from a committed
+                producer outbox.
+
+        Returns:
+            Event: Persisted memory event retaining the producer event identity.
+
+        Notes:
+            Producers must deliver rows in `source_sequence` order within one
+            source and scope. Consumers use that sequence rather than ingestion
+            timestamps as the durable cursor.
+        """
+
+        normalized = (
+            change
+            if isinstance(change, ExternalResourceChangedEvent)
+            else ExternalResourceChangedEvent.from_dict(change)
+        )
+        if normalized.scope_id != str(self.memory_scope_id or ""):
+            raise ValueError("external resource event scope_id does not match memory scope")
+        if normalized.session_id != str(self.session_id or ""):
+            raise ValueError("external resource event session_id does not match memory session")
+        payload = normalized.to_dict()
+        text = normalized.summary or (
+            f"external resource changed: {normalized.resource_key} "
+            f"revision {normalized.revision}"
+        )
+        return await self.record_raw(
+            base={
+                "event_id": normalized.event_id,
+                "kind": EXTERNAL_RESOURCE_CHANGED_KIND,
+                "session_id": normalized.session_id,
+                "scope_id": normalized.scope_id,
+                "stage": "committed_outbox",
+                "severity": 2,
+                "tags": [
+                    "external_resource",
+                    EXTERNAL_RESOURCE_CHANGED_KIND,
+                    f"external_source:{normalized.source}",
+                    f"resource_kind:{normalized.resource_kind}",
+                ],
+                "data": payload,
+                "topic": normalized.resource_key,
+            },
+            text=text,
+        )
 
     async def append_chat_turn(
         self: MemoryFacadeProtocol,

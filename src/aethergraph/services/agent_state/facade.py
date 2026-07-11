@@ -4,6 +4,7 @@ from collections.abc import Callable, Sequence
 import dataclasses
 from typing import Any, Generic, Literal, TypeVar, cast
 
+from aethergraph.contracts.services.memory import ExternalResourceChangedEvent
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.scope.scope import ScopeLevel
 
@@ -165,42 +166,95 @@ class AgentStateHandle(Generic[T]):
     async def emit_change(
         self,
         *,
+        event_id: str,
+        source_sequence: int,
+        revision: str,
+        recorded_at: str,
         reason: str,
-        stage_id: str | None = None,
         patch: dict[str, Any] | None = None,
         summary: str = "",
-        tags: Sequence[str] | None = None,
-        severity: int = 1,
-        signal: float | None = None,
+        previous_revision: str = "",
+        previous_content_hash: str = "",
+        content_hash: str = "",
+        effective_at: str = "",
     ) -> Any | None:
+        """Publish a direct state mutation through the common external contract.
+
+        Callers provide the committed mutation's outbox identity, monotonic
+        sequence, and revision. The state value itself is not copied into the
+        change event; only changed field paths and a compact summary are stored.
+
+        Examples:
+            Publish a committed state change:
+            ```python
+                await handle.emit_change(
+                    event_id="state-outbox-7",
+                    source_sequence=7,
+                    revision="7",
+                    recorded_at="2026-07-10T20:00:01Z",
+                    reason="stage_started",
+                    patch={"pipeline.active_stage_id": "stage-a"},
+                )
+            ```
+
+            Include revision hashes without state content:
+            ```python
+                await handle.emit_change(
+                    event_id="state-outbox-8",
+                    source_sequence=8,
+                    revision="8",
+                    recorded_at="2026-07-10T20:00:02Z",
+                    reason="settings_changed",
+                    content_hash="sha256:new",
+                )
+            ```
+
+        Args:
+            event_id: Unique authoritative outbox event identifier.
+            source_sequence: Monotonic sequence within this state source/scope.
+            revision: Opaque equality-comparable state revision.
+            recorded_at: Timezone-aware ISO timestamp of outbox insertion.
+            reason: Compact producer reason used when no summary is supplied.
+            patch: Changed field mapping; values are not persisted in the event.
+            summary: Optional human-readable change summary.
+            previous_revision: Previously committed opaque revision.
+            previous_content_hash: Hash of the previous authoritative state.
+            content_hash: Hash of the new authoritative state.
+            effective_at: Optional timezone-aware mutation-effective timestamp.
+
+        Returns:
+            Any | None: Persisted external-resource memory event, or `None` for
+            a deliberately local-only state backend.
+
+        Notes:
+            Mutation plus outbox insertion belongs to the authoritative state
+            transaction. This method ingests its committed row and never starts
+            an agent run.
+        """
+
         if self.backend == "local":
             return None
-        data = {
-            "key": self.key,
-            "revision": self._revision,
-            "reason": reason,
-            "stage_id": stage_id,
-            "summary": summary,
-            "patch": dict(patch or {}),
-        }
-        text = summary or f"agent state changed: {self.key} {reason}".strip()
-        return await _call_memory_method(
-            self.memory,
-            "append_event",
-            "record",
-            kind="agent.state.change",
-            text=text,
-            data=data,
-            tags=[
-                "state",
-                f"state:{self.key}",
-                "agent.state.change",
-                *self.tags,
-                *list(tags or []),
-            ],
-            severity=severity,
-            stage=stage_id,
-            signal=signal,
+        append = getattr(self.memory, "append_external_resource_change", None)
+        if not callable(append):
+            raise AttributeError("Memory object does not expose append_external_resource_change()")
+        return await append(
+            ExternalResourceChangedEvent(
+                event_id=event_id,
+                scope_id=str(getattr(self.memory, "memory_scope_id", "") or ""),
+                session_id=str(getattr(self.memory, "session_id", "") or ""),
+                source_sequence=source_sequence,
+                resource_key=f"agent_state:{self.key}",
+                resource_kind="agent_state",
+                previous_revision=previous_revision,
+                revision=revision,
+                previous_content_hash=previous_content_hash,
+                content_hash=content_hash,
+                changed_fields=tuple(str(key) for key in dict(patch or {})),
+                summary=summary or f"agent state changed: {self.key} {reason}".strip(),
+                source="agent_state",
+                effective_at=effective_at,
+                recorded_at=recorded_at,
+            )
         )
 
     async def history(

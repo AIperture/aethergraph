@@ -13,7 +13,257 @@ EventKind = Literal[
     "checkpoint",
     "run_summary",
     "rolling_summary",
+    "external.resource.changed",
 ]
+
+EXTERNAL_RESOURCE_CHANGED_KIND = "external.resource.changed"
+_EXTERNAL_RESOURCE_CHANGE_FIELDS = frozenset(
+    {
+        "kind",
+        "event_id",
+        "scope_id",
+        "session_id",
+        "source_sequence",
+        "resource_key",
+        "resource_kind",
+        "previous_revision",
+        "revision",
+        "previous_content_hash",
+        "content_hash",
+        "changed_fields",
+        "summary",
+        "source",
+        "effective_at",
+        "recorded_at",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ExternalResourceChangedEvent:
+    event_id: str
+    scope_id: str
+    session_id: str
+    source_sequence: int
+    resource_key: str
+    resource_kind: str
+    revision: str
+    source: str
+    recorded_at: str
+    previous_revision: str = ""
+    previous_content_hash: str = ""
+    content_hash: str = ""
+    changed_fields: tuple[str, ...] = ()
+    summary: str = ""
+    effective_at: str = ""
+
+    def __post_init__(self) -> None:
+        required = {
+            "event_id": self.event_id,
+            "scope_id": self.scope_id,
+            "session_id": self.session_id,
+            "resource_key": self.resource_key,
+            "resource_kind": self.resource_kind,
+            "revision": self.revision,
+            "source": self.source,
+            "recorded_at": self.recorded_at,
+        }
+        missing = [name for name, value in required.items() if not str(value or "").strip()]
+        if missing:
+            raise ValueError(
+                "external.resource.changed missing required fields: " + ", ".join(sorted(missing))
+            )
+        if ":" not in str(self.resource_key):
+            raise ValueError("external resource_key must use a namespaced identity")
+        if isinstance(self.source_sequence, bool) or int(self.source_sequence) <= 0:
+            raise ValueError("external source_sequence must be a positive integer")
+        _require_aware_iso_timestamp(self.recorded_at, field_name="recorded_at")
+        if self.effective_at:
+            _require_aware_iso_timestamp(self.effective_at, field_name="effective_at")
+        normalized_fields = tuple(
+            dict.fromkeys(
+                str(value or "").strip()
+                for value in self.changed_fields
+                if str(value or "").strip()
+            )
+        )
+        if len(normalized_fields) > 256 or any(
+            len(field_path) > 512 for field_path in normalized_fields
+        ):
+            raise ValueError("external changed_fields exceed compact event limits")
+        if len(str(self.summary or "")) > 2000:
+            raise ValueError("external summary exceeds compact event limit")
+        object.__setattr__(self, "changed_fields", normalized_fields)
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> ExternalResourceChangedEvent:
+        """Validate a committed producer-outbox row as one external change.
+
+        Unknown fields are rejected so the compact event cannot accidentally
+        become a carrier for the authoritative configuration or other large
+        content. The producer's transaction remains responsible for mutation
+        plus outbox insertion.
+
+        Examples:
+            Parse a design change:
+            ```python
+                event = ExternalResourceChangedEvent.from_dict(
+                    {
+                        "kind": "external.resource.changed",
+                        "event_id": "evt-19",
+                        "scope_id": "session:s-1",
+                        "session_id": "s-1",
+                        "source_sequence": 19,
+                        "resource_key": "design_config:project-42",
+                        "resource_kind": "design_config",
+                        "revision": "19",
+                        "source": "design_ui",
+                        "recorded_at": "2026-07-10T20:00:01Z",
+                    }
+                )
+                assert event.source_sequence == 19
+            ```
+
+            Reject an embedded large configuration:
+            ```python
+                try:
+                    ExternalResourceChangedEvent.from_dict({"config": {"large": True}})
+                except ValueError as exc:
+                    assert "unknown fields" in str(exc)
+            ```
+
+        Args:
+            value: Mapping read from a committed authoritative-store outbox row.
+
+        Returns:
+            ExternalResourceChangedEvent: Strict, compact, scope-addressed event.
+
+        Notes:
+            `source_sequence` is monotonic within one source and scope and is the
+            durable ordering cursor supplied by the authoritative outbox.
+        """
+
+        raw = dict(value or {})
+        unknown = sorted(set(raw) - _EXTERNAL_RESOURCE_CHANGE_FIELDS)
+        if unknown:
+            raise ValueError(
+                "external.resource.changed contains unknown fields: " + ", ".join(unknown)
+            )
+        kind = str(raw.get("kind") or EXTERNAL_RESOURCE_CHANGED_KIND)
+        if kind != EXTERNAL_RESOURCE_CHANGED_KIND:
+            raise ValueError(
+                f"external resource event kind must be {EXTERNAL_RESOURCE_CHANGED_KIND!r}"
+            )
+        try:
+            source_sequence = int(raw.get("source_sequence"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("external source_sequence must be a positive integer") from exc
+        changed_fields = raw.get("changed_fields") or ()
+        if not isinstance(changed_fields, list | tuple):
+            raise ValueError("external changed_fields must be a list of field paths")
+        return cls(
+            event_id=str(raw.get("event_id") or "").strip(),
+            scope_id=str(raw.get("scope_id") or "").strip(),
+            session_id=str(raw.get("session_id") or "").strip(),
+            source_sequence=source_sequence,
+            resource_key=str(raw.get("resource_key") or "").strip(),
+            resource_kind=str(raw.get("resource_kind") or "").strip(),
+            previous_revision=str(raw.get("previous_revision") or "").strip(),
+            revision=str(raw.get("revision") or "").strip(),
+            previous_content_hash=str(raw.get("previous_content_hash") or "").strip(),
+            content_hash=str(raw.get("content_hash") or "").strip(),
+            changed_fields=tuple(changed_fields),
+            summary=str(raw.get("summary") or "").strip(),
+            source=str(raw.get("source") or "").strip(),
+            effective_at=str(raw.get("effective_at") or "").strip(),
+            recorded_at=str(raw.get("recorded_at") or "").strip(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the compact event for memory persistence and ingestion.
+
+        Empty optional metadata is omitted while required identity, scope,
+        sequence, revision, and source fields remain explicit.
+
+        Examples:
+            Serialize required fields:
+            ```python
+                event = ExternalResourceChangedEvent(
+                    event_id="evt-1",
+                    scope_id="session:s-1",
+                    session_id="s-1",
+                    source_sequence=1,
+                    resource_key="clock:world",
+                    resource_kind="clock",
+                    revision="day-2",
+                    source="world_service",
+                    recorded_at="2026-07-10T20:00:01Z",
+                )
+                assert event.to_dict()["kind"] == "external.resource.changed"
+            ```
+
+            Preserve ordered changed fields:
+            ```python
+                event = ExternalResourceChangedEvent(
+                    event_id="evt-2",
+                    scope_id="session:s-1",
+                    session_id="s-1",
+                    source_sequence=2,
+                    resource_key="design:p-1",
+                    resource_kind="design",
+                    revision="2",
+                    source="ui",
+                    recorded_at="2026-07-10T20:00:02Z",
+                    changed_fields=("lens.aperture",),
+                )
+                assert event.to_dict()["changed_fields"] == ["lens.aperture"]
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, Any]: JSON-safe committed-outbox event payload.
+
+        Notes:
+            The payload intentionally has no field for authoritative resource
+            content.
+        """
+
+        payload: dict[str, Any] = {
+            "kind": EXTERNAL_RESOURCE_CHANGED_KIND,
+            "event_id": self.event_id,
+            "scope_id": self.scope_id,
+            "session_id": self.session_id,
+            "source_sequence": self.source_sequence,
+            "resource_key": self.resource_key,
+            "resource_kind": self.resource_kind,
+            "revision": self.revision,
+            "source": self.source,
+            "recorded_at": self.recorded_at,
+        }
+        for key, value in (
+            ("previous_revision", self.previous_revision),
+            ("previous_content_hash", self.previous_content_hash),
+            ("content_hash", self.content_hash),
+            ("summary", self.summary),
+            ("effective_at", self.effective_at),
+        ):
+            if value:
+                payload[key] = value
+        if self.changed_fields:
+            payload["changed_fields"] = list(self.changed_fields)
+        return payload
+
+
+def _require_aware_iso_timestamp(value: str, *, field_name: str) -> None:
+    text = str(value or "").strip()
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"external {field_name} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"external {field_name} must include a timezone")
 
 
 @dataclass
@@ -147,6 +397,11 @@ class MemoryFacadeProtocol(Protocol):
         text: str | None = None,
         topic: str | None = None,
         tool: str | None = None,
+    ) -> Event: ...
+
+    async def append_external_resource_change(
+        self,
+        change: ExternalResourceChangedEvent | dict[str, Any],
     ) -> Event: ...
 
     async def append_chat_turn(
