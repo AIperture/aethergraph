@@ -144,6 +144,22 @@ class AppSettings(BaseSettings):
     # top-level workspace root directory
     workspace: str = "./aethergraph_workspace"
 
+    # Browser origins allowed by CORS for the HTTP API. Covers the local dev
+    # UIs, the AG Studio UI (both 127.0.0.1 and localhost forms — browsers treat
+    # them as distinct origins), and the file:// admin page ("null"). Override
+    # via env with a JSON list, e.g.:
+    #   AETHERGRAPH_CORS_ALLOW_ORIGINS='["http://127.0.0.1:4186","http://localhost:4186"]'
+    cors_allow_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",  # dev UI
+            "http://localhost:5185",  # sim UI
+            "http://127.0.0.1:4186",  # AG Studio UI (127.0.0.1 form)
+            "http://localhost:4186",  # AG Studio UI (localhost form)
+            "null",  # file:// admin page
+        ],
+        description="Browser origins allowed by CORS for the HTTP API.",
+    )
+
     # Deployment mode controls identity resolution and tenant scoping.
     #
     #   "local" (default / OSS):

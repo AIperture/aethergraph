@@ -203,13 +203,13 @@ def create_app(
             )
 
     # CORS
+    # Origins come from settings (env: AETHERGRAPH_CORS_ALLOW_ORIGINS) so the API
+    # can be opened to additional local UIs (e.g. AG Studio on :4186) without a
+    # code change. Note: allow_credentials=True forbids a "*" wildcard per the
+    # CORS spec, so this must stay an explicit origin list.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://localhost:5185",
-            "null",
-        ],  # dev UI + sim UI + file:// admin page
+        allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
