@@ -45,6 +45,7 @@ class RuntimeEnv:
     run_id: str
     graph_id: str | None = None
     session_id: str | None = None
+    default_channel_key: str | None = None
     identity: RequestIdentity | None = None
     graph_inputs: dict[str, Any] = field(default_factory=dict)
     outputs_by_node: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -236,6 +237,7 @@ class RuntimeEnv:
             agent_id=self.agent_id,
             app_id=self.app_id,
             current_run_id=self.run_id,
+            default_channel_key=self.default_channel_key,
         )
 
         services = NodeServices(
@@ -282,6 +284,7 @@ class RuntimeEnv:
         return ExecutionContext(
             run_id=self.run_id,
             session_id=self.session_id,
+            default_channel_key=self.default_channel_key,
             identity=self.identity,
             graph_id=self.graph_id,
             agent_id=self.agent_id,

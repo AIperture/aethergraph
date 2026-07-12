@@ -51,6 +51,8 @@ class RunFacade:
         session_id: Optional default session id for child runs.
         agent_id: Optional default agent id for child runs.
         app_id: Optional default app id for child runs.
+        default_channel_key: Optional run-scoped default channel propagated to
+            child runs.
 
     Returns:
         RunFacade: Bound facade for child run orchestration APIs.
@@ -66,6 +68,40 @@ class RunFacade:
     agent_id: str | None = None
     app_id: str | None = None
     current_run_id: str | None = None
+    default_channel_key: str | None = None
+
+    def _child_run_config(self) -> dict[str, Any]:
+        """Build inherited runtime configuration for a child run.
+
+        The returned mapping carries the run-scoped channel default without
+        mutating the shared container channel service.
+
+        Examples:
+            Build configuration with a scoped channel:
+            ```python
+            facade = RunFacade(manager, default_channel_key="ui:session/s-1")
+            config = facade._child_run_config()
+            ```
+
+            Build configuration without a scoped channel:
+            ```python
+            facade = RunFacade(manager)
+            config = facade._child_run_config()
+            ```
+
+        Args:
+            None: This helper takes no arguments.
+
+        Returns:
+            dict[str, Any]: A mapping containing `default_channel_key`, or an
+            empty mapping when no run-scoped default is configured.
+
+        Notes:
+            The mapping is passed through the existing `run_config` path.
+        """
+        if self.default_channel_key is None:
+            return {}
+        return {"default_channel_key": self.default_channel_key}
 
     async def spawn_run(
         self,
@@ -157,6 +193,7 @@ class RunFacade:
                 agent_id=effective_agent_id,
                 app_id=effective_app_id,
                 identity=self.identity,
+                run_config=self._child_run_config(),
             )
             await span.finish(
                 response={"run_id": record.run_id},
@@ -259,6 +296,7 @@ class RunFacade:
                 app_id=effective_app_id,
                 identity=self.identity,
                 count_slot=False,
+                run_config=self._child_run_config(),
             )
             if has_waits:
                 await span.wait(

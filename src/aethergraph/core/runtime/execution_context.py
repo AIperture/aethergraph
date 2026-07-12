@@ -27,6 +27,7 @@ class ExecutionContext:
     run_id: str
     graph_id: str | None
     session_id: str | None
+    default_channel_key: str | None
     agent_id: str | None
     app_id: str | None
     identity: RequestIdentity | None
@@ -45,6 +46,7 @@ class ExecutionContext:
             run_id=self.run_id,
             graph_id=self.graph_id or "",
             session_id=self.session_id,
+            default_channel_key=self.default_channel_key,
             node_id=node.node_id,
             services=self.services,
             identity=self.identity,

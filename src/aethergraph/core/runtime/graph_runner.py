@@ -99,6 +99,7 @@ async def _build_env(
         run_id=run_id,
         graph_id=graph_id,
         session_id=session_id,
+        default_channel_key=rt_overrides.get("default_channel_key"),
         identity=identity,
         graph_inputs=inputs,
         outputs_by_node={},
