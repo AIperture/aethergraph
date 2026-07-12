@@ -215,7 +215,15 @@ class ChannelBus:
             "node_id": continuation.node_id,
             "token": continuation.token,
             "resume_key": resume_key,
+            "interaction_kind": kind,
         }
+        continuation_payload = getattr(continuation, "payload", None)
+        if isinstance(continuation_payload, dict) and kind in (
+            "user_files",
+            "user_input_or_files",
+        ):
+            meta["accept"] = list(continuation_payload.get("accept") or [])
+            meta["multiple"] = bool(continuation_payload.get("multiple", True))
 
         # Enrich continuation meta with the same context fields we attach
         # on normal channel events (if present on the continuation object).

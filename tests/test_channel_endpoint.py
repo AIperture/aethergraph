@@ -179,3 +179,30 @@ async def test_channel_http_accepts_canonical_attachments():
     assert payload["attachments"][0]["artifact_id"] == "art-1"
     assert payload["attachments"][0]["mime"] == "text/plain"
     assert payload["meta"]["attachments"][0]["artifact_id"] == "art-1"
+
+
+@pytest.mark.anyio
+async def test_channel_prompt_preserves_interaction_rendering_hints():
+    container = TestContainer()
+    cont = Continuation(
+        run_id="run-1",
+        node_id="node-1",
+        token="tok-files",
+        kind="user_files",
+        channel="ext:chan/user-123",
+        prompt="Upload evidence",
+        payload={
+            "prompt": "Upload evidence",
+            "accept": ["image/png", ".pdf"],
+            "multiple": False,
+        },
+    )
+
+    await container.channel_bus.notify(cont)
+
+    events = await container.kv_hot.list_get("outbox://ext:chan/user-123")
+    assert len(events) == 1
+    assert events[0]["type"] == "session.need_input"
+    assert events[0]["meta"]["interaction_kind"] == "user_files"
+    assert events[0]["meta"]["accept"] == ["image/png", ".pdf"]
+    assert events[0]["meta"]["multiple"] is False
