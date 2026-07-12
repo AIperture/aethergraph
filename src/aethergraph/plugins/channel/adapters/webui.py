@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 import uuid
 
@@ -19,6 +19,7 @@ class UIChannelEvent:
     type: str  # original OutEvent.type, e.g. "agent.message"
     text: str | None
     buttons: list[dict[str, Any]]
+    image: dict[str, Any] | None
     file: dict[str, Any] | None
     meta: dict[str, Any]
     ts: float
@@ -112,6 +113,7 @@ class WebUIChannelAdapter(ChannelAdapter):
         raw_buttons = getattr(event, "buttons", None) or []
         buttons = [self._button_to_dict(b) for b in raw_buttons]
         file_info = getattr(event, "file", None) or None
+        image_info = getattr(event, "image", None) or None
 
         files = getattr(event, "files", None) or None
         rich = getattr(event, "rich", None) or None
@@ -158,13 +160,14 @@ class WebUIChannelAdapter(ChannelAdapter):
 
         row = {
             "id": str(uuid.uuid4()),
-            "ts": datetime.now(timezone.utc).timestamp(),
+            "ts": datetime.now(UTC).timestamp(),
             "scope_id": scope_id,
             "kind": kind,
             "payload": {
                 "type": payload_type,
                 "text": payload_text,
                 "buttons": buttons,
+                "image": image_info,
                 "file": file_info,
                 "files": files,
                 "rich": rich,

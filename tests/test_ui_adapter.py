@@ -122,3 +122,23 @@ async def test_web_ui_adapter_binds_correlator_via_channel_bus():
     assert corr.channel == "ui:run/run-456"
     # thread must be "" so ChannelIngress fallback matches it
     assert corr.thread == ""
+
+
+@pytest.mark.asyncio
+async def test_web_ui_adapter_preserves_image_projection_data():
+    log = FakeEventLog()
+    adapter = WebUIChannelAdapter(event_log=log)
+    event = OutEvent(
+        type="agent.message",
+        channel="ui:session/session-123",
+        image={"url": "/artifacts/image-1", "alt": "Chart", "title": "Result"},
+        meta={"session_id": "session-123"},
+    )
+
+    await adapter.send(event)
+
+    assert log.rows[0]["payload"]["image"] == {
+        "url": "/artifacts/image-1",
+        "alt": "Chart",
+        "title": "Result",
+    }
