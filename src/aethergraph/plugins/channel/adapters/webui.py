@@ -163,6 +163,11 @@ class WebUIChannelAdapter(ChannelAdapter):
             "ts": datetime.now(UTC).timestamp(),
             "scope_id": scope_id,
             "kind": kind,
+            # Top-level identity keys populate the event log's indexed columns
+            # so consumers can filter chat rows by session/run/agent directly.
+            "session_id": session_id,
+            "run_id": run_id,
+            "agent_id": meta.get("agent_id"),
             "payload": {
                 "type": payload_type,
                 "text": payload_text,
