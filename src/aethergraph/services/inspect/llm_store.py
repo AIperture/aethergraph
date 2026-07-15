@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from typing import Any, Protocol
@@ -12,7 +12,7 @@ def _parse_iso_ts(value: str | None) -> datetime | None:
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=UTC)
         return dt
     except Exception:
         return None
@@ -55,10 +55,17 @@ class JsonlLLMObservationStore:
         if not self.path.exists():
             return []
         rows: list[dict[str, Any]] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        content = self.path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        for index, line in enumerate(lines):
             if not line.strip():
                 continue
-            rows.append(json.loads(line))
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                if index == len(lines) - 1 and not content.endswith(("\n", "\r")):
+                    continue
+                raise
         return rows
 
     async def query(

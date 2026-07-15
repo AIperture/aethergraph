@@ -10,12 +10,26 @@ from typing import Any, Literal
 
 
 class SQLiteEventLogSync:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, read_only: bool = False):
         path_obj = Path(path)
-        path_obj.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(str(path_obj), check_same_thread=False, isolation_level=None)
+        self._read_only = read_only
+        if read_only:
+            if not path_obj.is_file():
+                raise FileNotFoundError(path_obj)
+            uri = f"{path_obj.resolve().as_uri()}?mode=ro"
+            self._db = sqlite3.connect(
+                uri,
+                uri=True,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+            self._db.execute("PRAGMA query_only = ON")
+        else:
+            path_obj.parent.mkdir(parents=True, exist_ok=True)
+            self._db = sqlite3.connect(str(path_obj), check_same_thread=False, isolation_level=None)
         self._lock = threading.RLock()
-        self._initialize_db()
+        if not read_only:
+            self._initialize_db()
 
     def _initialize_db(self) -> None:
         self._db.execute(
@@ -92,6 +106,8 @@ class SQLiteEventLogSync:
         )
 
     def append(self, evt: dict) -> None:
+        if self._read_only:
+            raise RuntimeError("Cannot append through a read-only event log")
         row = dict(evt)
         partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
         ts = row.get("ts")
@@ -148,6 +164,10 @@ class SQLiteEventLogSync:
                     "INSERT OR IGNORE INTO event_tags (event_row_id, tag) VALUES (?, ?)",
                     [(row_id, tag) for tag in tags],
                 )
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
 
     def query(
         self,

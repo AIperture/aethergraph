@@ -15,11 +15,14 @@ class SqliteEventLog(EventLog):
     Async EventLog wrapper around SQLiteEventLogSync via asyncio.to_thread.
     """
 
-    def __init__(self, path: str):
-        self._sync = SQLiteEventLogSync(path)
+    def __init__(self, path: str, *, read_only: bool = False):
+        self._sync = SQLiteEventLogSync(path, read_only=read_only)
 
     async def append(self, evt: dict) -> None:
         await asyncio.to_thread(self._sync.append, evt)
+
+    async def close(self) -> None:
+        await asyncio.to_thread(self._sync.close)
 
     async def query(
         self,
@@ -68,3 +71,34 @@ class SqliteEventLog(EventLog):
             before_id=before_id,
             order_dir=order_dir,
         )
+
+    async def get_many(self, scope_id: str, event_ids: list[str]) -> list[dict]:
+        """Read selected events from one exact event-log scope.
+
+        The lookup is read-only and preserves the event-log query ordering.
+
+        Examples:
+            Read two events:
+                ```python
+                rows = await event_log.get_many("run-1", ["event-1", "event-2"])
+                ```
+            Read an empty selection:
+                ```python
+                rows = await event_log.get_many("run-1", [])
+                ```
+
+        Args:
+            scope_id: Exact persisted event scope.
+            event_ids: Exact event identifiers to retain.
+
+        Returns:
+            list[dict]: Matching persisted event rows in query order.
+
+        Notes:
+            Numeric SQLite row identifiers are not accepted as event IDs.
+        """
+        if not event_ids:
+            return []
+        selected = set(event_ids)
+        rows = await self.query(scope_id=scope_id, limit=None)
+        return [row for row in rows if str(row.get("id") or "") in selected]

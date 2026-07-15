@@ -6,28 +6,34 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 
-from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.services.inspect.facade import (
+    InspectionFacade,
+    InspectionIdentity,
+    InspectionNotFoundError,
+    InspectionUnavailableError,
+    _matches_scope,
+    _paginate_rows,
+    _passes_identity_scope,
+    _present_llm_row,
+    _present_log_row,
+    _present_trace_row,
+    _scope_from_mapping,
+    _store_identity_scope,
+    _trace_error_statuses,
+)
 
 from .deps import RequestIdentity, get_identity
 from .schemas.inspect import (
-    AgentEventEnvelope,
     AgentEventListResponse,
     AgentEventTypeListResponse,
     AgentEventTypeRecord,
-    InspectLinks,
-    InspectLogError,
     InspectLogListResponse,
     InspectLogRecord,
-    InspectPayloadSchema,
-    InspectProducer,
-    InspectScope,
     LLMCallListResponse,
     LLMCallRecord,
     LLMSummary,
-    TraceErrorInfo,
-    TraceEvent,
     TraceEventListResponse,
     TraceSummary,
 )
@@ -43,10 +49,48 @@ def _parse_window(value: datetime | None) -> datetime | None:
     return value
 
 
+def _inspection_identity(identity: RequestIdentity) -> InspectionIdentity:
+    return InspectionIdentity(
+        mode=identity.mode,
+        user_id=identity.user_id,
+        org_id=identity.org_id,
+    )
+
+
 def _identity_scope(identity: RequestIdentity) -> tuple[str | None, str | None]:
-    if identity.mode in ("cloud", "demo"):
-        return identity.user_id, identity.org_id
-    return None, None
+    return _store_identity_scope(_inspection_identity(identity))
+
+
+def _inspection_facade(identity: RequestIdentity) -> InspectionFacade:
+    container = current_services()
+
+    async def resolve_run_statuses(run_ids: set[str]) -> dict[str, str]:
+        run_manager = getattr(container, "run_manager", None)
+        if run_manager is None:
+            return {}
+        statuses: dict[str, str] = {}
+        for run_id in run_ids:
+            record = await run_manager.get_record(run_id)
+            if record is not None:
+                statuses[run_id] = (
+                    record.status.value
+                    if isinstance(record.status, RunStatus)
+                    else str(record.status)
+                )
+        return statuses
+
+    return InspectionFacade(
+        event_log=getattr(container, "eventlog", None),
+        llm_observation_store=getattr(container, "llm_observation_store", None),
+        identity=_inspection_identity(identity),
+        run_status_resolver=resolve_run_statuses,
+    )
+
+
+def _inspection_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, InspectionNotFoundError):
+        return HTTPException(status_code=404, detail=str(exc))
+    return HTTPException(status_code=503, detail=str(exc))
 
 
 async def _get_run_or_404(run_id: str, identity: RequestIdentity):
@@ -67,207 +111,6 @@ async def _get_run_or_404(run_id: str, identity: RequestIdentity):
     return rec
 
 
-def _scope_from_mapping(data: dict[str, Any] | None = None) -> InspectScope:
-    data = data or {}
-    return InspectScope(
-        org_id=data.get("org_id"),
-        user_id=data.get("user_id"),
-        client_id=data.get("client_id"),
-        run_id=data.get("run_id"),
-        session_id=data.get("session_id"),
-        agent_id=data.get("agent_id"),
-        app_id=data.get("app_id"),
-        graph_id=data.get("graph_id"),
-        node_id=data.get("node_id"),
-        trace_id=data.get("trace_id"),
-        span_id=data.get("span_id"),
-    )
-
-
-def _passes_identity_scope(scope: InspectScope, identity: RequestIdentity) -> bool:
-    if identity.mode not in ("cloud", "demo"):
-        return True
-    if identity.user_id is None:
-        return False
-    if scope.user_id and scope.user_id != identity.user_id:
-        return False
-    if identity.org_id and scope.org_id and scope.org_id != identity.org_id:
-        return False
-    return True
-
-
-def _matches_scope(
-    scope: InspectScope,
-    *,
-    run_id: str | None = None,
-    session_id: str | None = None,
-    agent_id: str | None = None,
-    app_id: str | None = None,
-    graph_id: str | None = None,
-    node_id: str | None = None,
-) -> bool:
-    if run_id and scope.run_id != run_id:
-        return False
-    if session_id and scope.session_id != session_id:
-        return False
-    if agent_id and scope.agent_id != agent_id:
-        return False
-    if app_id and scope.app_id != app_id:
-        return False
-    if graph_id and scope.graph_id != graph_id:
-        return False
-    if node_id and scope.node_id != node_id:
-        return False
-    return True
-
-
-def _paginate_rows(
-    items: list[Any], *, cursor: str | None, limit: int
-) -> tuple[list[Any], str | None]:
-    offset = decode_cursor(cursor)
-    page = items[offset : offset + limit]
-    next_cursor = encode_cursor(offset + limit) if len(items) > offset + limit else None
-    return page, next_cursor
-
-
-def _present_trace_row(row: dict[str, Any]) -> TraceEvent:
-    payload = row.get("payload") or {}
-    scope = _scope_from_mapping(payload)
-    scope.trace_id = payload.get("trace_id")
-    scope.span_id = payload.get("span_id")
-    summary = (
-        f"{payload.get('service') or 'service'}/{payload.get('operation') or 'op'} "
-        f"{payload.get('phase') or 'phase'} [{payload.get('status') or 'unknown'}]"
-    )
-    status = str(payload.get("status") or "unknown")
-    severity = "error" if payload.get("error") else ("warning" if status == "pending" else "info")
-    return TraceEvent(
-        id=row.get("id") or payload.get("span_id") or payload.get("trace_id"),
-        ts=float(row.get("ts") or 0.0),
-        summary=summary,
-        severity=severity,
-        status=status,
-        producer=InspectProducer(family="trace", name=str(payload.get("service") or "runtime")),
-        scope=scope,
-        tags=list(payload.get("tags") or []),
-        links=None,
-        payload=payload,
-        trace_id=str(payload.get("trace_id") or ""),
-        span_id=str(payload.get("span_id") or ""),
-        parent_span_id=payload.get("parent_span_id"),
-        service=str(payload.get("service") or "unknown"),
-        operation=str(payload.get("operation") or "unknown"),
-        phase=str(payload.get("phase") or "unknown"),
-        duration_ms=payload.get("duration_ms"),
-        request_preview=payload.get("request"),
-        response_preview=payload.get("response"),
-        error=TraceErrorInfo(**(payload.get("error") or {})) if payload.get("error") else None,
-        metrics=dict(payload.get("metrics") or {}),
-    )
-
-
-def _present_llm_row(row: dict[str, Any]) -> LLMCallRecord:
-    scope = _scope_from_mapping(row)
-    scope.trace_id = row.get("trace_id")
-    scope.span_id = row.get("span_id")
-    status = "error" if row.get("error_type") else "ok"
-    call_name = row.get("call_name")
-    summary_prefix = f"[{call_name}] " if call_name else ""
-    return LLMCallRecord(
-        id=str(row.get("call_id")),
-        ts=_parse_llm_ts(row.get("created_at")),
-        summary=f"{summary_prefix}{row.get('provider')}/{row.get('model')} {row.get('call_type')}",
-        severity="error" if row.get("error_type") else "info",
-        status=status,
-        producer=InspectProducer(family="llm", name=str(row.get("provider") or "unknown")),
-        scope=scope,
-        tags=[str(row.get("call_type") or "chat"), status],
-        payload={},
-        call_id=str(row.get("call_id")),
-        created_at=str(row.get("created_at")),
-        call_type=str(row.get("call_type") or "chat"),
-        provider=str(row.get("provider") or "unknown"),
-        model=str(row.get("model") or "unknown"),
-        profile_name=row.get("profile_name"),
-        call_name=row.get("call_name"),
-        latency_ms=row.get("latency_ms"),
-        usage=dict(row.get("usage") or {}),
-        reasoning_effort=row.get("reasoning_effort"),
-        output_format=row.get("output_format"),
-        request_args=dict(row.get("request_args") or {}),
-        provider_request_args=dict(row.get("provider_request_args") or {}),
-        compatibility_notes=[str(item) for item in list(row.get("compatibility_notes") or [])],
-        messages_preview=row.get("messages_preview"),
-        trace_payload_preview=row.get("trace_payload_preview"),
-        raw_text_preview=row.get("raw_text_preview"),
-        messages=row.get("messages"),
-        trace_payload=row.get("trace_payload"),
-        raw_text=row.get("raw_text"),
-        error_type=row.get("error_type"),
-        error_message=row.get("error_message"),
-    )
-
-
-def _parse_llm_ts(value: str | None) -> float:
-    if not value:
-        return 0.0
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.timestamp()
-
-
-def _present_log_row(
-    row: dict[str, Any], *, run_status: str | None = None, trace_status: str | None = None
-) -> InspectLogRecord:
-    payload = row.get("payload") or {}
-    scope = _scope_from_mapping(payload.get("scope") or {})
-    inner = payload.get("payload") or {}
-    return InspectLogRecord(
-        id=str(payload.get("id") or row.get("id")),
-        ts=float(payload.get("ts") or row.get("ts") or 0.0),
-        summary=str(payload.get("summary") or inner.get("message") or ""),
-        severity=str(payload.get("severity") or inner.get("level") or "info"),
-        status=str(payload.get("status") or inner.get("level") or "info"),
-        producer=InspectProducer(
-            **(payload.get("producer") or {"family": "logger", "name": "unknown"})
-        ),
-        scope=scope,
-        tags=list(payload.get("tags") or []),
-        payload=inner,
-        logger=str(inner.get("logger") or "unknown"),
-        level=str(inner.get("level") or "info"),
-        message=str(inner.get("message") or ""),
-        error=InspectLogError(**(inner.get("error") or {})) if inner.get("error") else None,
-        extra=dict(inner.get("extra") or {}),
-        run_status=run_status,
-        trace_status=trace_status,
-    )
-
-
-def _present_agent_row(row: dict[str, Any]) -> AgentEventEnvelope:
-    payload = row.get("payload") or {}
-    return AgentEventEnvelope(
-        id=str(payload.get("event_id") or row.get("id")),
-        ts=float(payload.get("ts") or row.get("ts") or 0.0),
-        summary=str(payload.get("summary") or payload.get("event_type") or "agent event"),
-        severity="error"
-        if str(payload.get("status") or "").lower() in {"error", "failed"}
-        else "info",
-        status=str(payload.get("status") or "info"),
-        producer=InspectProducer(
-            **(payload.get("producer") or {"family": "agent", "name": "unknown"})
-        ),
-        scope=_scope_from_mapping(payload.get("scope") or {}),
-        tags=list(payload.get("tags") or []),
-        links=InspectLinks(**(payload.get("links") or {})),
-        payload=dict(payload.get("payload") or {}),
-        event_id=str(payload.get("event_id") or row.get("id")),
-        event_type=str(payload.get("event_type") or "unknown"),
-        payload_schema=InspectPayloadSchema(**(payload.get("payload_schema") or {})),
-    )
-
-
 async def _collect_trace_rows(
     *, run_id: str, since: datetime | None, until: datetime | None
 ) -> list[dict[str, Any]]:
@@ -286,92 +129,6 @@ async def _collect_trace_rows(
     return rows
 
 
-async def _get_global_trace_events(
-    *,
-    since: datetime | None,
-    until: datetime | None,
-    identity: RequestIdentity,
-) -> list[TraceEvent]:
-    container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
-        raise HTTPException(status_code=503, detail="Event log not configured")
-    rows = await event_log.query(
-        since=since,
-        until=until,
-        kinds=["trace"],
-        limit=None,
-    )
-    items: list[TraceEvent] = []
-    for row in rows:
-        event = _present_trace_row(row)
-        if _passes_identity_scope(event.scope, identity):
-            items.append(event)
-    items.sort(key=lambda item: item.ts, reverse=True)
-    return items
-
-
-async def _get_run_status_map(run_ids: set[str]) -> dict[str, str]:
-    if not run_ids:
-        return {}
-    container = current_services()
-    rm = getattr(container, "run_manager", None)
-    if rm is None:
-        return {}
-    out: dict[str, str] = {}
-    for rid in run_ids:
-        rec = await rm.get_record(rid)
-        if rec is not None:
-            out[rid] = rec.status.value if isinstance(rec.status, RunStatus) else str(rec.status)
-    return out
-
-
-async def _get_global_log_records(
-    *,
-    since: datetime | None,
-    until: datetime | None,
-    identity: RequestIdentity,
-) -> list[InspectLogRecord]:
-    container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
-        raise HTTPException(status_code=503, detail="Event log not configured")
-    user_id, org_id = _identity_scope(identity)
-    rows = await event_log.query(
-        since=since,
-        until=until,
-        kinds=["inspect_log"],
-        limit=None,
-        user_id=user_id,
-        org_id=org_id,
-    )
-    run_ids = {
-        (row.get("payload") or {}).get("scope", {}).get("run_id")
-        for row in rows
-        if (row.get("payload") or {}).get("scope", {}).get("run_id")
-    }
-    trace_ids = {
-        (row.get("payload") or {}).get("scope", {}).get("trace_id")
-        for row in rows
-        if (row.get("payload") or {}).get("scope", {}).get("trace_id")
-    }
-    run_statuses = await _get_run_status_map(run_ids)
-    trace_statuses = await _get_trace_error_statuses(trace_ids)
-    items: list[InspectLogRecord] = []
-    for row in rows:
-        record = _present_log_row(
-            row,
-            run_status=run_statuses.get((row.get("payload") or {}).get("scope", {}).get("run_id")),
-            trace_status=trace_statuses.get(
-                (row.get("payload") or {}).get("scope", {}).get("trace_id")
-            ),
-        )
-        if _passes_identity_scope(record.scope, identity):
-            items.append(record)
-    items.sort(key=lambda item: item.ts, reverse=True)
-    return items
-
-
 @router.get("/runs/{run_id}/trace", response_model=TraceEventListResponse)
 async def get_run_trace(
     run_id: str,
@@ -388,7 +145,10 @@ async def get_run_trace(
     items = [
         _present_trace_row(row)
         for row in rows
-        if _passes_identity_scope(_scope_from_mapping(row.get("payload") or {}), identity)
+        if _passes_identity_scope(
+            _scope_from_mapping(row.get("payload") or {}),
+            _inspection_identity(identity),
+        )
     ]
     page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
     return TraceEventListResponse(items=page, next_cursor=next_cursor)
@@ -411,27 +171,24 @@ async def list_traces(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceEventListResponse:
-    items = await _get_global_trace_events(
-        since=_parse_window(from_), until=_parse_window(to), identity=identity
-    )
-    filtered = [
-        item
-        for item in items
-        if _matches_scope(
-            item.scope,
+    try:
+        return await _inspection_facade(identity).list_traces(
+            since=_parse_window(from_),
+            until=_parse_window(to),
             run_id=run_id,
             session_id=session_id,
             agent_id=agent_id,
             app_id=app_id,
             graph_id=graph_id,
             node_id=node_id,
+            trace_id=trace_id,
+            service=service,
+            status=status,
+            cursor=cursor,
+            limit=limit,
         )
-        and (trace_id is None or item.trace_id == trace_id)
-        and (service is None or item.service in service)
-        and (status is None or item.status == status)
-    ]
-    page, next_cursor = _paginate_rows(filtered, cursor=cursor, limit=limit)
-    return TraceEventListResponse(items=page, next_cursor=next_cursor)
+    except InspectionUnavailableError as exc:
+        raise _inspection_http_error(exc) from exc
 
 
 @router.get("/traces/{trace_id}", response_model=TraceEventListResponse)
@@ -452,7 +209,7 @@ async def get_trace_by_id(
         if payload.get("trace_id") != trace_id:
             continue
         event = _present_trace_row(row)
-        if _passes_identity_scope(event.scope, identity):
+        if _passes_identity_scope(event.scope, _inspection_identity(identity)):
             items.append(event)
     items.sort(key=lambda item: item.ts)
     page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
@@ -531,36 +288,25 @@ async def list_llm_calls(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallListResponse:
-    container = current_services()
-    store = getattr(container, "llm_observation_store", None)
-    if store is None:
-        raise HTTPException(status_code=503, detail="LLM observation store not configured")
-    user_id, org_id = _identity_scope(identity)
-    rows = await store.query(
-        run_id=run_id,
-        session_id=session_id,
-        agent_id=agent_id,
-        app_id=app_id,
-        graph_id=graph_id,
-        node_id=node_id,
-        since=_parse_window(from_),
-        until=_parse_window(to),
-        user_id=user_id,
-        org_id=org_id,
-        limit=None,
-    )
-    items = [_present_llm_row(row) for row in rows]
-    items = [
-        item
-        for item in items
-        if (provider is None or item.provider == provider)
-        and (model is None or item.model == model)
-        and (call_type is None or item.call_type == call_type)
-        and (status is None or item.status == status)
-    ]
-    items.sort(key=lambda item: item.ts, reverse=True)
-    page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
-    return LLMCallListResponse(items=page, next_cursor=next_cursor)
+    try:
+        return await _inspection_facade(identity).list_llm_calls(
+            since=_parse_window(from_),
+            until=_parse_window(to),
+            run_id=run_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            graph_id=graph_id,
+            node_id=node_id,
+            provider=provider,
+            model=model,
+            call_type=call_type,
+            status=status,
+            cursor=cursor,
+            limit=limit,
+        )
+    except InspectionUnavailableError as exc:
+        raise _inspection_http_error(exc) from exc
 
 
 @router.get("/llm-calls/{call_id}", response_model=LLMCallRecord)
@@ -568,17 +314,10 @@ async def get_llm_call(
     call_id: str,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallRecord:
-    container = current_services()
-    store = getattr(container, "llm_observation_store", None)
-    if store is None:
-        raise HTTPException(status_code=503, detail="LLM observation store not configured")
-    row = await store.get(call_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail="LLM call not found")
-    record = _present_llm_row(row)
-    if not _passes_identity_scope(record.scope, identity):
-        raise HTTPException(status_code=404, detail="LLM call not found")
-    return record
+    try:
+        return await _inspection_facade(identity).get_llm_call(call_id)
+    except (InspectionUnavailableError, InspectionNotFoundError) as exc:
+        raise _inspection_http_error(exc) from exc
 
 
 @router.get("/runs/{run_id}/llm-summary", response_model=LLMSummary)
@@ -603,7 +342,7 @@ async def get_run_llm_summary(
         limit=None,
     )
     items = [_present_llm_row(row) for row in rows]
-    by_model = Counter()
+    by_model: Counter[str] = Counter()
     prompt_tokens = 0
     completion_tokens = 0
     total_tokens = 0
@@ -628,23 +367,6 @@ async def get_run_llm_summary(
         error_count=error_count,
         by_model=dict(by_model),
     )
-
-
-async def _get_trace_error_statuses(trace_ids: set[str]) -> dict[str, str]:
-    if not trace_ids:
-        return {}
-    container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
-        return {}
-    rows = await event_log.query(kinds=["trace"], limit=None)
-    out: dict[str, str] = {}
-    for row in rows:
-        payload = row.get("payload") or {}
-        trace_id = payload.get("trace_id")
-        if trace_id in trace_ids and payload.get("error") is not None:
-            out[trace_id] = "error"
-    return out
 
 
 @router.get("/runs/{run_id}/logs", response_model=InspectLogListResponse)
@@ -677,7 +399,7 @@ async def get_run_logs(
         for row in rows
         if (row.get("payload") or {}).get("scope", {}).get("trace_id")
     }
-    trace_statuses = await _get_trace_error_statuses(trace_ids)
+    trace_statuses = await _trace_error_statuses(event_log, trace_ids)
     items = [
         _present_log_row(
             row,
@@ -710,28 +432,25 @@ async def list_logs(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> InspectLogListResponse:
-    items = await _get_global_log_records(
-        since=_parse_window(from_), until=_parse_window(to), identity=identity
-    )
-    filtered = [
-        item
-        for item in items
-        if _matches_scope(
-            item.scope,
+    try:
+        return await _inspection_facade(identity).list_logs(
+            since=_parse_window(from_),
+            until=_parse_window(to),
             run_id=run_id,
             session_id=session_id,
             agent_id=agent_id,
             app_id=app_id,
             graph_id=graph_id,
             node_id=node_id,
+            level=level,
+            logger=logger,
+            run_status=run_status,
+            trace_status=trace_status,
+            cursor=cursor,
+            limit=limit,
         )
-        and (level is None or item.level == level)
-        and (logger is None or item.logger == logger)
-        and (run_status is None or item.run_status == run_status)
-        and (trace_status is None or item.trace_status == trace_status)
-    ]
-    page, next_cursor = _paginate_rows(filtered, cursor=cursor, limit=limit)
-    return InspectLogListResponse(items=page, next_cursor=next_cursor)
+    except InspectionUnavailableError as exc:
+        raise _inspection_http_error(exc) from exc
 
 
 @router.get("/agent-event-types", response_model=AgentEventTypeListResponse)
@@ -770,9 +489,16 @@ async def get_errors(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> InspectLogListResponse:
-    records = await _get_global_log_records(
-        since=_parse_window(from_), until=_parse_window(to), identity=identity
-    )
+    try:
+        records = (
+            await _inspection_facade(identity).list_logs(
+                since=_parse_window(from_),
+                until=_parse_window(to),
+                limit=2_147_483_647,
+            )
+        ).items
+    except InspectionUnavailableError as exc:
+        raise _inspection_http_error(exc) from exc
     items: list[InspectLogRecord] = []
     for record in records:
         if record.level not in {"warning", "error", "critical"}:
@@ -857,39 +583,19 @@ async def list_agent_events(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> AgentEventListResponse:
-    container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
-        raise HTTPException(status_code=503, detail="Event log not configured")
-    user_id, org_id = _identity_scope(identity)
-    scope_id = run_id or (f"session:{session_id}" if session_id else None)
-    rows = await event_log.query(
-        scope_id=scope_id,
-        since=_parse_window(from_),
-        until=_parse_window(to),
-        kinds=["agent_event"],
-        limit=None,
-        user_id=user_id,
-        org_id=org_id,
-    )
-    rows.sort(key=lambda row: row.get("ts") or 0.0, reverse=True)
-    items: list[AgentEventEnvelope] = []
-    for row in rows:
-        event = _present_agent_row(row)
-        if not _passes_identity_scope(event.scope, identity):
-            continue
-        if not _matches_scope(
-            event.scope,
+    try:
+        return await _inspection_facade(identity).list_agent_events(
+            since=_parse_window(from_),
+            until=_parse_window(to),
             run_id=run_id,
             session_id=session_id,
             agent_id=agent_id,
             app_id=app_id,
             graph_id=graph_id,
             node_id=node_id,
-        ):
-            continue
-        if event_type and event.event_type != event_type:
-            continue
-        items.append(event)
-    page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
-    return AgentEventListResponse(items=page, next_cursor=next_cursor)
+            event_type=event_type,
+            cursor=cursor,
+            limit=limit,
+        )
+    except InspectionUnavailableError as exc:
+        raise _inspection_http_error(exc) from exc
