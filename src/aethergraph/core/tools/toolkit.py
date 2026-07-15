@@ -10,6 +10,7 @@ from ..graph.graph_builder import current_builder
 from ..graph.node_handle import NodeHandle
 from ..runtime.injection import resolve_node_context_param
 from ..runtime.runtime_registry import current_registry
+from .declaration import build_tool_definition
 from .waitable import DualStageTool, waitable_tool
 
 
@@ -125,11 +126,15 @@ def _execute_immediate_tool(fn_or_path, kwargs: dict[str, Any]):
 
 
 def tool(
-    outputs: list[str],
+    outputs: list[str] | None = None,
     inputs: list[str] | None = None,
     *,
     name: str | None = None,
-    version: str = "0.1.0",
+    version: str = "1",
+    description: str | None = None,
+    args_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
+    approval: str = "none",
 ):
     """
     Dual-mode decorator for plain functions and DualStageTool classes.
@@ -142,15 +147,18 @@ def tool(
         waitable = inspect.isclass(obj) and issubclass(obj, DualStageTool)
         impl = waitable_tool(obj) if waitable else obj
         sig = inspect.signature(impl)
-        declared_inputs = (
-            inputs
-            or getattr(impl, "__aether_inputs__", None)
-            or [
-                p.name
-                for p in sig.parameters.values()
-                if p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)
-            ]
+        definition = build_tool_definition(
+            impl,
+            name=name,
+            description=description,
+            version=version,
+            inputs=inputs or getattr(impl, "__aether_inputs__", None),
+            outputs=outputs,
+            args_schema=args_schema,
+            result_schema=result_schema,
+            approval=approval,
         )
+        declared_inputs = list(definition.inputs)
 
         @wraps(impl)
         def proxy(*args, **kwargs):
@@ -173,8 +181,11 @@ def tool(
             return _execute_immediate_tool(proxy, call_kwargs)
 
         proxy.__aether_inputs__ = list(declared_inputs)
-        proxy.__aether_outputs__ = list(outputs)
+        proxy.__aether_outputs__ = list(definition.outputs)
         proxy.__aether_impl__ = impl
+        proxy.__aether_tool_definition__ = definition
+        proxy.__aether_definition__ = definition
+        proxy.__version__ = definition.version
 
         if waitable:
             proxy.__aether_waitable__ = True
@@ -185,11 +196,12 @@ def tool(
             meta = {
                 "kind": "tool",
                 "tags": [],
+                "definition": definition.to_dict(),
             }
             registry.register(
                 nspace="tool",
-                name=name or getattr(impl, "__name__", "tool"),
-                version=version,
+                name=definition.name,
+                version=definition.version,
                 obj=impl,
                 meta=meta,
             )
