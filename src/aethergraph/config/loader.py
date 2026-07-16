@@ -1,5 +1,7 @@
-# aethergraph/config_loader.py
-from collections.abc import Iterable
+"""Resolve canonical AetherGraph application settings."""
+
+from __future__ import annotations
+
 import logging
 import os
 from pathlib import Path
@@ -7,57 +9,73 @@ from pathlib import Path
 from .config import AppSettings
 
 
-def _existing(paths: Iterable[Path]) -> list[Path]:
-    return [p for p in paths if p and p.exists()]
+def _existing(paths: list[Path]) -> list[Path]:
+    return [path for path in paths if path.is_file()]
 
 
-def load_settings() -> AppSettings:
+def load_settings(*, env_file: str | Path | None = None) -> AppSettings:
+    """
+    Load validated AetherGraph settings from explicit or discovered dotenv data.
+
+    An explicit `env_file` is authoritative and disables discovery. Without an
+    argument, `AETHERGRAPH_ENV_FILE` is authoritative when set; otherwise the
+    canonical execution, workspace, and user configuration candidates are
+    loaded in order.
+
+    Examples:
+        Load the canonical discovered configuration:
+        ```python
+        settings = load_settings()
+        assert settings.workspace
+        ```
+
+        Load one exact Studio-managed file:
+        ```python
+        settings = load_settings(env_file=".data/settings/.env")
+        assert settings.llm.default.model
+        ```
+
+    Args:
+        env_file: Optional exact dotenv path. No discovery candidates are read
+            when it is supplied.
+
+    Returns:
+        AppSettings: The validated settings snapshot.
+
+    Notes:
+        A missing explicit file raises `FileNotFoundError`. Later discovered
+        files override earlier discovered files according to Pydantic settings
+        semantics.
+    """
+
     log = logging.getLogger("aethergraph.config.loader")
-
-    # 1) explicit override
-    explicit = os.getenv("AETHERGRAPH_ENV_FILE")
+    explicit = str(env_file) if env_file is not None else os.getenv("AETHERGRAPH_ENV_FILE")
     explicit_path = Path(explicit).expanduser().resolve() if explicit else None
+    if explicit_path is not None:
+        if not explicit_path.is_file():
+            raise FileNotFoundError(f"AETHERGRAPH_ENV_FILE not found: {explicit_path}")
+        log.info("Loading AetherGraph settings from explicit file %s", explicit_path)
+        return AppSettings(_env_file=str(explicit_path))
 
-    # 2) execution context (project) – where user runs `python ...`
     cwd = Path.cwd()
-
-    # 3) workspace-level (if user sets it)
     workspace = (
         Path(os.getenv("AETHERGRAPH_WORKSPACE", "./aethergraph_workspace")).expanduser().resolve()
     )
-
-    # 4) user config dir (~/.config/aethergraph/.env or XDG)
     xdg = Path(os.getenv("XDG_CONFIG_HOME", Path.home() / ".config")).expanduser().resolve()
-    user_cfg_env = xdg / "aethergraph" / ".env"
-
-    # Optional: keep a *repo dev* fallback if running from source
-    # (safe; only used if that path actually exists)
-    try:
-        repo_root = Path(__file__).resolve().parents[3]
-    except Exception:
-        repo_root = None
-    repo_env = (
-        (repo_root / ".env").resolve() if (repo_root and (repo_root / ".env").exists()) else None
-    )
-    print("Repo root for .env fallback:", repo_env)
     candidates = _existing(
         [
-            explicit_path or Path(),  # explicit if set
             cwd / ".env",
             cwd / ".env.local",
             workspace / ".env",
-            user_cfg_env,
-            # repo_env if repo_env else Path(),  # dev fallback only if exists
+            xdg / "aethergraph" / ".env",
         ]
     )
-    print("Loading .env files from:", candidates)
-
-    if explicit and not explicit_path.exists():
-        raise FileNotFoundError(f"AETHERGRAPH_ENV_FILE not found: {explicit_path}")
-
     if not candidates:
         log.warning("No .env files found; using OS environment variables only.")
         return AppSettings()
 
-    # Later files override earlier ones
-    return AppSettings(_env_file=[str(p) for p in candidates])
+    log.info("Loading AetherGraph settings from discovered files: %s", candidates)
+    return AppSettings(_env_file=[str(path) for path in candidates])
+
+
+__all__ = ["load_settings"]

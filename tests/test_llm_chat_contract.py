@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 
 from aethergraph.api.v1.schemas.settings import LLMProfilePayload
-from aethergraph.api.v1.settings import _collect_llm_env
 from aethergraph.config.llm import LLMProfile
+from aethergraph.config.llm_env import encode_llm_profile_env
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.types import LLMUnsupportedFeatureError
@@ -385,17 +385,16 @@ async def test_gemini_tools_are_not_passed_through_in_compat_mode() -> None:
         )
 
 
-def test_collect_llm_env_includes_compatibility_policy() -> None:
-    env = _collect_llm_env(
-        {
-            "DEEPSEEK": LLMProfilePayload(
-                provider="deepseek",
-                model="deepseek-v4-pro",
-                reasoning_effort="high",
-                thinking_mode="auto",
-                compatibility_policy="compat",
-            )
-        }
+def test_encode_llm_profile_env_includes_compatibility_policy() -> None:
+    env = encode_llm_profile_env(
+        "DEEPSEEK",
+        LLMProfilePayload(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            reasoning_effort="high",
+            thinking_mode="auto",
+            compatibility_policy="compat",
+        ),
     )
 
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__REASONING_EFFORT"] == "high"
@@ -403,24 +402,23 @@ def test_collect_llm_env_includes_compatibility_policy() -> None:
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__COMPATIBILITY_POLICY"] == "compat"
 
 
-def test_collect_llm_env_includes_explicit_vision_fields() -> None:
-    env = _collect_llm_env(
-        {
-            "local_vision": LLMProfilePayload(
-                provider="lmstudio",
-                model="local-vlm",
-                vision_enabled=True,
-                vision_max_images=3,
-                vision_max_image_bytes=2048,
-                vision_resize_enabled=True,
-                vision_resize_max_dimension=1024,
-                vision_resize_max_pixels=800_000,
-                vision_resize_jpeg_quality=82,
-                vision_resize_min_jpeg_quality=68,
-                vision_accepted_mime_prefixes=["image/"],
-                vision_accepted_mime_types=["image/png"],
-            )
-        }
+def test_encode_llm_profile_env_includes_explicit_vision_fields() -> None:
+    env = encode_llm_profile_env(
+        "local_vision",
+        LLMProfilePayload(
+            provider="lmstudio",
+            model="local-vlm",
+            vision_enabled=True,
+            vision_max_images=3,
+            vision_max_image_bytes=2048,
+            vision_resize_enabled=True,
+            vision_resize_max_dimension=1024,
+            vision_resize_max_pixels=800_000,
+            vision_resize_jpeg_quality=82,
+            vision_resize_min_jpeg_quality=68,
+            vision_accepted_mime_prefixes=["image/"],
+            vision_accepted_mime_types=["image/png"],
+        ),
     )
 
     assert env["AETHERGRAPH_LLM__PROFILES__LOCAL_VISION__VISION_ENABLED"] == "true"

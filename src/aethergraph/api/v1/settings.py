@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 
 from aethergraph.config.dotenv_writer import write_dotenv
+from aethergraph.config.llm_env import aethergraph_env_key, encode_llm_profile_env
 from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, get_identity
@@ -179,74 +179,6 @@ async def get_settings(
 # ---------------------------------------------------------------------------
 
 
-def _env_key(*parts: str) -> str:
-    """Build an AETHERGRAPH env var name from dot-path parts.
-
-    Example: _env_key("LLM", "DEFAULT", "API_KEY") -> "AETHERGRAPH_LLM__DEFAULT__API_KEY"
-    """
-    return "AETHERGRAPH_" + "__".join(p.upper() for p in parts)
-
-
-def _collect_llm_env(
-    profiles: dict[str, LLMProfilePayload],
-) -> dict[str, str]:
-    """Convert LLM profile payloads to env var updates."""
-    env: dict[str, str] = {}
-    for name, payload in profiles.items():
-        prefix = ("LLM", "DEFAULT") if name.lower() == "default" else ("LLM", "PROFILES", name)
-        if payload.provider is not None:
-            env[_env_key(*prefix, "PROVIDER")] = payload.provider
-        if payload.model is not None:
-            env[_env_key(*prefix, "MODEL")] = payload.model
-        if payload.api_key is not None and not _is_masked(payload.api_key):
-            env[_env_key(*prefix, "API_KEY")] = payload.api_key
-        if payload.base_url is not None:
-            env[_env_key(*prefix, "BASE_URL")] = payload.base_url
-        if payload.timeout is not None:
-            env[_env_key(*prefix, "TIMEOUT")] = str(payload.timeout)
-        if payload.reasoning_effort is not None:
-            env[_env_key(*prefix, "REASONING_EFFORT")] = payload.reasoning_effort
-        if payload.thinking_mode is not None:
-            env[_env_key(*prefix, "THINKING_MODE")] = payload.thinking_mode
-        if payload.compatibility_policy is not None:
-            env[_env_key(*prefix, "COMPATIBILITY_POLICY")] = payload.compatibility_policy
-        if payload.vision_enabled is not None:
-            env[_env_key(*prefix, "VISION_ENABLED")] = str(payload.vision_enabled).lower()
-        if payload.vision_max_images is not None:
-            env[_env_key(*prefix, "VISION_MAX_IMAGES")] = str(payload.vision_max_images)
-        if payload.vision_max_image_bytes is not None:
-            env[_env_key(*prefix, "VISION_MAX_IMAGE_BYTES")] = str(payload.vision_max_image_bytes)
-        if payload.vision_resize_enabled is not None:
-            env[_env_key(*prefix, "VISION_RESIZE_ENABLED")] = str(
-                payload.vision_resize_enabled
-            ).lower()
-        if payload.vision_resize_max_dimension is not None:
-            env[_env_key(*prefix, "VISION_RESIZE_MAX_DIMENSION")] = str(
-                payload.vision_resize_max_dimension
-            )
-        if payload.vision_resize_max_pixels is not None:
-            env[_env_key(*prefix, "VISION_RESIZE_MAX_PIXELS")] = str(
-                payload.vision_resize_max_pixels
-            )
-        if payload.vision_resize_jpeg_quality is not None:
-            env[_env_key(*prefix, "VISION_RESIZE_JPEG_QUALITY")] = str(
-                payload.vision_resize_jpeg_quality
-            )
-        if payload.vision_resize_min_jpeg_quality is not None:
-            env[_env_key(*prefix, "VISION_RESIZE_MIN_JPEG_QUALITY")] = str(
-                payload.vision_resize_min_jpeg_quality
-            )
-        if payload.vision_accepted_mime_prefixes is not None:
-            env[_env_key(*prefix, "VISION_ACCEPTED_MIME_PREFIXES")] = json.dumps(
-                payload.vision_accepted_mime_prefixes
-            )
-        if payload.vision_accepted_mime_types is not None:
-            env[_env_key(*prefix, "VISION_ACCEPTED_MIME_TYPES")] = json.dumps(
-                payload.vision_accepted_mime_types
-            )
-    return env
-
-
 def _collect_embed_env(
     profiles: dict[str, EmbeddingProfilePayload],
 ) -> dict[str, str]:
@@ -254,39 +186,39 @@ def _collect_embed_env(
     for name, payload in profiles.items():
         prefix = ("EMBED", "DEFAULT") if name.lower() == "default" else ("EMBED", "PROFILES", name)
         if payload.provider is not None:
-            env[_env_key(*prefix, "PROVIDER")] = payload.provider
+            env[aethergraph_env_key(*prefix, "PROVIDER")] = payload.provider
         if payload.model is not None:
-            env[_env_key(*prefix, "MODEL")] = payload.model
+            env[aethergraph_env_key(*prefix, "MODEL")] = payload.model
         if payload.api_key is not None and not _is_masked(payload.api_key):
-            env[_env_key(*prefix, "API_KEY")] = payload.api_key
+            env[aethergraph_env_key(*prefix, "API_KEY")] = payload.api_key
         if payload.base_url is not None:
-            env[_env_key(*prefix, "BASE_URL")] = payload.base_url
+            env[aethergraph_env_key(*prefix, "BASE_URL")] = payload.base_url
         if payload.timeout is not None:
-            env[_env_key(*prefix, "TIMEOUT")] = str(payload.timeout)
+            env[aethergraph_env_key(*prefix, "TIMEOUT")] = str(payload.timeout)
     return env
 
 
 def _collect_slack_env(payload: SlackPayload) -> dict[str, str]:
     env: dict[str, str] = {}
     if payload.enabled is not None:
-        env[_env_key("SLACK", "ENABLED")] = str(payload.enabled).lower()
+        env[aethergraph_env_key("SLACK", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
-        env[_env_key("SLACK", "BOT_TOKEN")] = payload.bot_token
+        env[aethergraph_env_key("SLACK", "BOT_TOKEN")] = payload.bot_token
     if payload.signing_secret is not None and not _is_masked(payload.signing_secret):
-        env[_env_key("SLACK", "SIGNING_SECRET")] = payload.signing_secret
+        env[aethergraph_env_key("SLACK", "SIGNING_SECRET")] = payload.signing_secret
     if payload.default_agent_id is not None:
-        env[_env_key("SLACK", "DEFAULT_AGENT_ID")] = payload.default_agent_id
+        env[aethergraph_env_key("SLACK", "DEFAULT_AGENT_ID")] = payload.default_agent_id
     return env
 
 
 def _collect_telegram_env(payload: TelegramPayload) -> dict[str, str]:
     env: dict[str, str] = {}
     if payload.enabled is not None:
-        env[_env_key("TELEGRAM", "ENABLED")] = str(payload.enabled).lower()
+        env[aethergraph_env_key("TELEGRAM", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
-        env[_env_key("TELEGRAM", "BOT_TOKEN")] = payload.bot_token
+        env[aethergraph_env_key("TELEGRAM", "BOT_TOKEN")] = payload.bot_token
     if payload.default_agent_id is not None:
-        env[_env_key("TELEGRAM", "DEFAULT_AGENT_ID")] = payload.default_agent_id
+        env[aethergraph_env_key("TELEGRAM", "DEFAULT_AGENT_ID")] = payload.default_agent_id
     return env
 
 
@@ -405,7 +337,11 @@ async def update_settings(
     # 1) Collect env var updates
     env_updates: dict[str, str] = {}
     if body.llm:
-        env_updates.update(_collect_llm_env(body.llm))
+        for name, payload in body.llm.items():
+            values = payload.model_dump(exclude_none=True)
+            if _is_masked(values.get("api_key")):
+                values.pop("api_key", None)
+            env_updates.update(encode_llm_profile_env(name, values))
     if body.embedding:
         env_updates.update(_collect_embed_env(body.embedding))
     if body.slack:
