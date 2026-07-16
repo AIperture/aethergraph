@@ -21,7 +21,7 @@ def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
 
     definition = search.__aether_tool_definition__
 
-    assert definition.api_version == "aethergraph.tool/v1"
+    assert definition.api_version == "aethergraph.tool/v2"
     assert definition.name == "search"
     assert definition.approval == "expensive"
     assert definition.inputs == ("query", "limit")
@@ -42,7 +42,12 @@ def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
 
 
 def test_tool_supports_literal_schema_and_explicit_public_name() -> None:
-    @tool(name="choose", version="2")
+    @tool(
+        name="choose",
+        version="2",
+        examples=[{"args": {"value": "first"}, "result": "first"}],
+        availability="plan_proposal",
+    )
     def choose_value(value: Literal["first", "second"]) -> str:
         return value
 
@@ -50,6 +55,8 @@ def test_tool_supports_literal_schema_and_explicit_public_name() -> None:
 
     assert definition.name == "choose"
     assert definition.version == "2"
+    assert definition.examples == ({"args": {"value": "first"}, "result": "first"},)
+    assert definition.availability == "plan_proposal"
     assert definition.args_schema["properties"]["value"] == {
         "enum": ["first", "second"],
         "type": "string",

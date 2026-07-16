@@ -6,8 +6,9 @@ import inspect
 from types import NoneType, UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v1"
+TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v2"
 TOOL_APPROVAL_TIERS = frozenset({"none", "expensive", "always"})
+TOOL_AVAILABILITY = frozenset({"normal", "plan_proposal", "plan_lifecycle"})
 
 
 def schema_from_annotation(annotation: Any) -> dict[str, Any]:
@@ -94,11 +95,14 @@ class ToolDefinition:
     outputs: tuple[str, ...]
     args_schema: dict[str, Any]
     result_schema: dict[str, Any]
+    examples: tuple[dict[str, Any], ...] = ()
+    artifact_outputs: tuple[dict[str, Any], ...] = ()
+    availability: Literal["normal", "plan_proposal", "plan_lifecycle"] = "normal"
     approval: Literal["none", "expensive", "always"] = "none"
     injections: tuple[tuple[str, str], ...] = ()
     implementation_module: str = ""
     implementation_symbol: str = ""
-    api_version: Literal["aethergraph.tool/v1"] = TOOL_DEFINITION_API_VERSION
+    api_version: Literal["aethergraph.tool/v2"] = TOOL_DEFINITION_API_VERSION
     kind: Literal["tool"] = "tool"
 
     def to_dict(self) -> dict[str, Any]:
@@ -112,6 +116,9 @@ class ToolDefinition:
             "outputs": list(self.outputs),
             "args_schema": deepcopy(self.args_schema),
             "result_schema": deepcopy(self.result_schema),
+            "examples": deepcopy(list(self.examples)),
+            "artifact_outputs": deepcopy(list(self.artifact_outputs)),
+            "availability": self.availability,
             "approval": self.approval,
             "injections": [
                 {"parameter": parameter, "kind": kind} for parameter, kind in self.injections
@@ -131,10 +138,21 @@ def build_tool_definition(
     outputs: list[str] | None,
     args_schema: dict[str, Any] | None,
     result_schema: dict[str, Any] | None,
+    examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    artifact_outputs: list[Any] | tuple[Any, ...] | None,
+    availability: str,
     approval: str,
 ) -> ToolDefinition:
     if approval not in TOOL_APPROVAL_TIERS:
         raise ValueError("tool approval must be none, expensive, or always")
+    if availability not in TOOL_AVAILABILITY:
+        raise ValueError("tool availability must be normal, plan_proposal, or plan_lifecycle")
+    normalized_examples = _normalize_mapping_items(examples, field_name="examples")
+    normalized_artifact_outputs = _normalize_mapping_items(
+        artifact_outputs,
+        field_name="artifact_outputs",
+        allow_to_dict=True,
+    )
     signature = inspect.signature(impl)
     try:
         type_hints = get_type_hints(impl)
@@ -190,6 +208,9 @@ def build_tool_definition(
             if result_schema is not None
             else schema_from_annotation(type_hints.get("return", signature.return_annotation))
         ),
+        examples=normalized_examples,
+        artifact_outputs=normalized_artifact_outputs,
+        availability=availability,  # type: ignore[arg-type]
         approval=approval,  # type: ignore[arg-type]
         injections=tuple(injections),
         implementation_module=str(getattr(impl, "__module__", "") or ""),
@@ -197,8 +218,26 @@ def build_tool_definition(
     )
 
 
+def _normalize_mapping_items(
+    values: list[Any] | tuple[Any, ...] | None,
+    *,
+    field_name: str,
+    allow_to_dict: bool = False,
+) -> tuple[dict[str, Any], ...]:
+    normalized: list[dict[str, Any]] = []
+    for value in values or ():
+        item = value
+        if allow_to_dict and callable(getattr(item, "to_dict", None)):
+            item = item.to_dict()
+        if not isinstance(item, dict):
+            raise TypeError(f"tool {field_name} entries must be dictionaries")
+        normalized.append(deepcopy(item))
+    return tuple(normalized)
+
+
 __all__ = [
     "TOOL_APPROVAL_TIERS",
+    "TOOL_AVAILABILITY",
     "TOOL_DEFINITION_API_VERSION",
     "ToolDefinition",
     "build_tool_definition",

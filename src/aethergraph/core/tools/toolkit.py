@@ -134,6 +134,9 @@ def tool(
     description: str | None = None,
     args_schema: dict[str, Any] | None = None,
     result_schema: dict[str, Any] | None = None,
+    examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    artifact_outputs: list[Any] | tuple[Any, ...] | None = None,
+    availability: str = "normal",
     approval: str = "none",
 ):
     """
@@ -156,6 +159,9 @@ def tool(
             outputs=outputs,
             args_schema=args_schema,
             result_schema=result_schema,
+            examples=examples,
+            artifact_outputs=artifact_outputs,
+            availability=availability,
             approval=approval,
         )
         declared_inputs = list(definition.inputs)
