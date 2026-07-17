@@ -69,3 +69,22 @@ def test_tool_rejects_unknown_approval_policy() -> None:
         @tool(approval="sometimes")
         def invalid() -> None:
             return None
+
+
+def test_tool_rejects_non_object_explicit_result_schema() -> None:
+    with pytest.raises(ValueError, match="structured result data payload"):
+
+        @tool(result_schema={"type": "string"})
+        def invalid_result_schema() -> str:
+            return "invalid"
+
+
+def test_tool_accepts_arbitrary_object_explicit_result_schema() -> None:
+    @tool(result_schema={"type": "object", "additionalProperties": True})
+    def arbitrary_result_schema() -> dict[str, object]:
+        return {"arbitrary": "value"}
+
+    assert arbitrary_result_schema.__aether_tool_definition__.result_schema == {
+        "type": "object",
+        "additionalProperties": True,
+    }

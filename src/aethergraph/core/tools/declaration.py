@@ -147,6 +147,10 @@ def build_tool_definition(
         raise ValueError("tool approval must be none, expensive, or always")
     if availability not in TOOL_AVAILABILITY:
         raise ValueError("tool availability must be normal, plan_proposal, or plan_lifecycle")
+    if result_schema is not None and result_schema.get("type") != "object":
+        raise ValueError(
+            "tool result_schema must be an object schema for the structured " "result data payload"
+        )
     normalized_examples = _normalize_mapping_items(examples, field_name="examples")
     normalized_artifact_outputs = _normalize_mapping_items(
         artifact_outputs,
