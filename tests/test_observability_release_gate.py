@@ -197,6 +197,44 @@ async def test_retention_enforces_logical_byte_ceiling_and_purge_rolls_back_on_f
 
 
 @pytest.mark.asyncio
+async def test_retention_evicts_only_the_trace_above_its_logical_byte_ceiling(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteObservationStore(tmp_path / "observability.db")
+    for trace_id, payload_size in (("trace-small", 32), ("trace-large", 4_096)):
+        await store.append_observation(
+            ObservationRecord(
+                category="log",
+                name="sized",
+                summary=trace_id,
+                scope=ObservationScope(run_id=trace_id, trace_id=trace_id),
+                attributes={"payload": "x" * payload_size},
+            )
+        )
+    scopes = {
+        row["scope_id"]: row["logical_bytes"] for row in await store.list_scope_storage("trace_id")
+    }
+    ceiling = (scopes["trace-small"] + scopes["trace-large"]) // 2
+
+    janitor = RetentionJanitor(
+        store,
+        RetentionPolicy(
+            max_age_days=30,
+            error_max_age_days=90,
+            max_full_prompt_age_days=3,
+            max_bytes_per_trace=ceiling,
+            max_total_bytes=10**9,
+        ),
+    )
+    await janitor.run_once()
+
+    retained = await store.list_observations()
+    suppressed = await store.list_suppressed_scopes()
+    assert [row["trace_id"] for row in retained] == ["trace-small"]
+    assert suppressed["trace_id"] == {"trace-large"}
+
+
+@pytest.mark.asyncio
 async def test_active_session_deletion_is_atomic_and_completed_session_is_hidden(
     tmp_path: Path,
 ) -> None:

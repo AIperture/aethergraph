@@ -224,6 +224,29 @@ async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_observation_sink_failure_cannot_change_a_successful_llm_result() -> None:
+    class FailingSink:
+        async def emit(self, record, *, capture_mode: str) -> None:
+            raise RuntimeError("observation store unavailable")
+
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=FailingSink(),
+        observation_capture_mode="metadata",
+    )
+
+    async def successful_dispatch(messages, **kwargs):
+        return "provider result", {"prompt_tokens": 3, "completion_tokens": 2}
+
+    client._chat_dispatch = successful_dispatch  # type: ignore[method-assign]
+    text, usage = await client.chat([{"role": "user", "content": "hello"}])
+
+    assert text == "provider result"
+    assert usage == {"prompt_tokens": 3, "completion_tokens": 2}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["off", "metadata", "manifest", "full"])
 async def test_metering_is_independent_of_capture_mode(tmp_path: Path, mode: str) -> None:
     class FakeMetering:
