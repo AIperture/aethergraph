@@ -13,15 +13,16 @@ from aethergraph.plugins.channel.utils.turn_dispatch import (
 )
 from aethergraph.services.channel.ingress import (
     ChannelIngress,
+    ExpectedContinuation,
     IncomingFile,
     IncomingMessage,
+    IngressPersistenceScope,
 )
 from aethergraph.services.channel.resources import (
     ArtifactIngressScope,
     InputResource,
     ResourceStager,
 )
-from aethergraph.services.continuations.continuation import Correlator
 
 router = APIRouter()
 
@@ -76,6 +77,33 @@ def _tg_scheme_and_channel_id(chat_id: int, topic_id: int | None) -> tuple[str, 
     return "tg", base
 
 
+async def _resolve_resume_token(store: Any, resume_key: str | None) -> str | None:
+    """Resolve Telegram's compact token prefix to one exact open token."""
+    if not resume_key:
+        return None
+
+    resolver = getattr(store, "token_from_alias", None)
+    if resolver is not None:
+        resolved = resolver(resume_key)
+        resolved = await resolved if inspect.isawaitable(resolved) else resolved
+        if resolved:
+            return str(resolved)
+
+    list_waits = getattr(store, "list_waits", None)
+    if list_waits is None:
+        return None
+    waits = list_waits()
+    waits = await waits if inspect.isawaitable(waits) else waits
+    matches = {
+        str(wait.get("token"))
+        for wait in waits or []
+        if isinstance(wait, dict)
+        and not wait.get("closed")
+        and str(wait.get("token") or "").startswith(resume_key)
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 # ---- helpers ----
 async def _tg_get_file_path(file_id: str, token: str) -> str | None:
     if not token:
@@ -127,68 +155,42 @@ async def _process_update(container, payload: dict, token: str):
                 except Exception:
                     choice = str(data_raw)
 
-            tok = None
-            run_id = None
-            node_id = None
+            tok = await _resolve_resume_token(container.cont_store, resume_key)
 
             # Preferred: resolve alias → token
-            if resume_key and hasattr(container.cont_store, "token_from_alias"):
-                maybe_tok = container.cont_store.token_from_alias(resume_key)
-                tok = await maybe_tok if inspect.isawaitable(maybe_tok) else maybe_tok
-
-            if tok and hasattr(container.cont_store, "get_by_token"):
-                maybe_cont = container.cont_store.get_by_token(tok)
-                cont = await maybe_cont if inspect.isawaitable(maybe_cont) else maybe_cont
-                if cont:
-                    run_id, node_id = cont.run_id, cont.node_id
-
-            # Fallback: thread-scoped correlator
-            if not tok:
-                corr = Correlator(
-                    scheme="tg",
-                    channel=ch_key,
-                    thread=str(topic_id or ""),
-                    message="",
+            if tok:
+                conversation_id = f"tg:chat/{int(chat_id)}" + (
+                    f":topic/{int(topic_id)}" if topic_id is not None else ""
                 )
-                cont = await container.cont_store.find_by_correlator(corr=corr)
-                if cont:
-                    run_id, node_id, tok = cont.run_id, cont.node_id, cont.token
-
-            resumed = await ingress.handle(
-                IncomingMessage(
-                    scheme="tg",
-                    channel_id=f"chat/{int(chat_id)}"
-                    + (f":topic/{int(topic_id)}" if topic_id is not None else ""),
-                    thread_id=str(topic_id or ""),
-                    text="",
-                    choice=choice,
-                    conversation_id=f"tg:chat/{int(chat_id)}"
-                    + (f":topic/{int(topic_id)}" if topic_id is not None else ""),
-                    meta={
-                        "telegram": {
-                            "callback_id": cq.get("id"),
-                            "message_id": msg.get("message_id"),
-                            "chat_id": chat_id,
+                callback_user_id = (cq.get("from") or {}).get("id")
+                await ingress.accept(
+                    IncomingMessage(
+                        scheme="tg",
+                        channel_id=f"chat/{int(chat_id)}"
+                        + (f":topic/{int(topic_id)}" if topic_id is not None else ""),
+                        thread_id=str(topic_id or ""),
+                        text="",
+                        choice=choice,
+                        conversation_id=conversation_id,
+                        meta={
+                            "telegram": {
+                                "update_id": payload.get("update_id"),
+                                "callback_id": cq.get("id"),
+                                "message_id": msg.get("message_id"),
+                                "chat_id": chat_id,
+                            },
                         },
-                    },
+                    ),
+                    persistence_scope=IngressPersistenceScope(
+                        scope_id=conversation_id,
+                        kind="channel_inbound",
+                        user_id=(str(callback_user_id) if callback_user_id is not None else None),
+                    ),
+                    expected_continuation=ExpectedContinuation(token=tok, kind="choice"),
                 )
-            )
-
-            if (not resumed) and tok and run_id and node_id:
-                await container.resume_router.resume(
-                    run_id=run_id,
-                    node_id=node_id,
-                    token=tok,
-                    payload={
-                        "choice": choice,
-                        "matched": True,
-                        "text": "",
-                        "telegram": {
-                            "callback_id": cq.get("id"),
-                            "message_id": msg.get("message_id"),
-                            "chat_id": chat_id,
-                        },
-                    },
+            elif container.logger:
+                container.logger.for_run().warning(
+                    "Telegram interaction ignored because its continuation token could not be resolved"
                 )
 
             # Ack the button press to stop the spinner
@@ -317,22 +319,31 @@ async def _process_update(container, payload: dict, token: str):
             "raw": payload,
             "channel_key": ch_key,
             "telegram": {
+                "update_id": payload.get("update_id"),
                 "message_id": msg.get("message_id"),
                 "chat_id": chat_id,
             },
         }
+        conversation_id = f"tg:{channel_id}"
+        sender_id = (msg.get("from") or {}).get("id")
 
-        resumed = await ingress.handle(
+        result = await ingress.accept(
             IncomingMessage(
                 scheme=scheme,
                 channel_id=channel_id,
                 thread_id=str(topic_id or ""),
                 text=text,
                 files=incoming_files or None,
-                conversation_id=f"tg:{channel_id}",
+                conversation_id=conversation_id,
                 meta=meta,
-            )
+            ),
+            persistence_scope=IngressPersistenceScope(
+                scope_id=conversation_id,
+                kind="channel_inbound",
+                user_id=str(sender_id) if sender_id is not None else None,
+            ),
         )
+        resumed = result.resumed
 
         if (not resumed) and (text or incoming_files):
             default_agent_id = getattr(getattr(container, "settings", None), "telegram", None)

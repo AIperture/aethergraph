@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import json
 from typing import Any
-from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
@@ -14,7 +12,11 @@ from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.plugins.channel.utils.turn_dispatch import dispatch_channel_turn_run
-from aethergraph.services.channel.ingress import ChannelIngress, IncomingMessage
+from aethergraph.services.channel.ingress import (
+    ChannelIngress,
+    IncomingMessage,
+    IngressPersistenceScope,
+)
 from aethergraph.services.channel.resources import (
     ArtifactIngressScope,
     InputResource,
@@ -169,7 +171,6 @@ async def run_channel_incoming(
     try:
         container = request.app.state.container  # type: ignore
         ingress: ChannelIngress = container.channel_ingress
-        event_log = container.eventlog
 
         text, choice, meta, resources_raw, upload_files = await _parse_run_incoming(request=request)
 
@@ -189,35 +190,8 @@ async def run_channel_incoming(
                 )
             )
         resources.dedupe()
-        display_files = resources.to_display_files()
-        attachment_payloads = resources.to_attachment_dicts()
 
-        if text or display_files:
-            now_ts = datetime.now(UTC).timestamp()
-            await event_log.append(
-                {
-                    "id": str(uuid4()),
-                    "ts": now_ts,
-                    "scope_id": run_id,
-                    "kind": "run_channel",
-                    "payload": {
-                        "type": "user.message",
-                        "text": text,
-                        "buttons": [],
-                        "file": None,
-                        "files": display_files,
-                        "attachments": attachment_payloads,
-                        "meta": {
-                            **meta,
-                            "direction": "inbound",
-                            "role": "user",
-                            "attachments": attachment_payloads,
-                        },
-                    },
-                }
-            )
-
-        resumed = await ingress.handle(
+        result = await ingress.accept(
             IncomingMessage(
                 scheme="ui",
                 channel_id=f"run/{run_id}",
@@ -227,10 +201,23 @@ async def run_channel_incoming(
                 choice=choice,
                 conversation_id=f"ui:run/{run_id}",
                 meta=meta,
-            )
+            ),
+            persistence_scope=IngressPersistenceScope(
+                scope_id=run_id,
+                kind="run_channel",
+                user_id=identity.user_id,
+                org_id=identity.org_id,
+            ),
+            source_meta={"identity_mode": identity.mode},
         )
 
-        return JSONResponse({"ok": True, "resumed": resumed, "files_processed": len(upload_files)})
+        return JSONResponse(
+            {
+                "ok": True,
+                "resumed": result.resumed,
+                "files_processed": len(upload_files),
+            }
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -251,7 +238,6 @@ async def session_chat_incoming(
     container = current_services()
     ingress = container.channel_ingress
     registry = scoped_registry(identity)
-    event_log = container.eventlog
 
     meta: dict[str, Any] = {}
     if meta_json:
@@ -289,30 +275,7 @@ async def session_chat_incoming(
     display_files = resources.to_display_files()
     attachment_payloads = resources.to_attachment_dicts()
 
-    if text or display_files:
-        now_ts = datetime.now(UTC).timestamp()
-        await event_log.append(
-            {
-                "id": str(uuid4()),
-                "ts": now_ts,
-                "scope_id": session_id,
-                "kind": "session_chat",
-                "payload": {
-                    "type": "user.message",
-                    "text": text,
-                    "files": display_files,
-                    "attachments": attachment_payloads,
-                    "meta": {
-                        **meta,
-                        "direction": "inbound",
-                        "role": "user",
-                        "attachments": attachment_payloads,
-                    },
-                },
-            }
-        )
-
-    resumed = await ingress.handle(
+    result = await ingress.accept(
         IncomingMessage(
             scheme="ui",
             channel_id=f"session/{session_id}",
@@ -324,8 +287,16 @@ async def session_chat_incoming(
                 **meta,
                 "_drop_stale_continuation": True,
             },
-        )
+        ),
+        persistence_scope=IngressPersistenceScope(
+            scope_id=session_id,
+            kind="session_chat",
+            user_id=identity.user_id,
+            org_id=identity.org_id,
+        ),
+        source_meta={"identity_mode": identity.mode},
     )
+    resumed = result.resumed
 
     run_id: str | None = None
     if not resumed:

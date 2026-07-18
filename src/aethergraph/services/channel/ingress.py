@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
+import hmac
 from typing import Any
+from uuid import uuid4
 
 import aiohttp
 
@@ -62,6 +65,32 @@ class IncomingMessage:
 
     # Optional structured metadata
     meta: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class IngressPersistenceScope:
+    """Event-log scope used for one canonical inbound message."""
+
+    scope_id: str
+    kind: str
+    user_id: str | None = None
+    org_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ExpectedContinuation:
+    """Exact continuation identity required by an interaction response."""
+
+    token: str
+    kind: str | None = None
+
+
+@dataclass(frozen=True)
+class InboundResult:
+    """Result of accepting and optionally resuming one inbound message."""
+
+    event_id: str | None
+    resumed: bool
 
 
 class ChannelIngress:
@@ -259,21 +288,37 @@ class ChannelIngress:
 
         return False
 
-    # ---- Public method ----
-    async def handle(self, msg: IncomingMessage) -> bool:
-        """
-        Handle an inbound message and resume a waiting continuation if any.
+    @staticmethod
+    def _interaction_kind(cont: Continuation | None) -> str | None:
+        if cont is None:
+            return None
+        if cont.kind in ("approval", "choice"):
+            return "choice"
+        return "text"
 
-        Returns:
-          True  -> a continuation was found and resumed
-          False -> nothing was listening on this channel (fire-and-forget)
-        """
-        scheme = msg.scheme
-        ch_key = self._channel_key(scheme, msg.channel_id)
-        conversation_id = self._conversation_id(msg=msg, ch_key=ch_key)
+    @staticmethod
+    def _expected_matches(
+        cont: Continuation | None,
+        expected: ExpectedContinuation | None,
+    ) -> bool:
+        if expected is None:
+            return True
+        if cont is None or not expected.token:
+            return False
+        if not hmac.compare_digest(cont.token, expected.token):
+            return False
+        if expected.kind is None:
+            return True
+        return ChannelIngress._interaction_kind(cont) == expected.kind
 
+    async def _resolve_continuation(
+        self,
+        *,
+        msg: IncomingMessage,
+        ch_key: str,
+    ) -> Continuation | None:
         cont = await self._find_continuation(
-            scheme=scheme,
+            scheme=msg.scheme,
             ch_key=ch_key,
             thread_id=msg.thread_id,
         )
@@ -297,73 +342,180 @@ class ChannelIngress:
                     run_id=cont.run_id,
                     node_id=cont.node_id,
                 )
-            cont = None
+            return None
 
-        # Normalize and persist any attached files/resources
+        return cont
+
+    async def _process(
+        self,
+        msg: IncomingMessage,
+        *,
+        persistence_scope: IngressPersistenceScope | None,
+        expected_continuation: ExpectedContinuation | None,
+        source_meta: dict[str, Any] | None,
+    ) -> InboundResult:
+        scheme = msg.scheme
+        ch_key = self._channel_key(scheme, msg.channel_id)
+        conversation_id = self._conversation_id(msg=msg, ch_key=ch_key)
+        cont = await self._resolve_continuation(msg=msg, ch_key=ch_key)
+
+        if not self._expected_matches(cont, expected_continuation):
+            self._log(
+                "info",
+                "Ingress: expected continuation did not match",
+                channel_key=ch_key,
+            )
+            return InboundResult(event_id=None, resumed=False)
+
         resources, file_refs = await self._handle_files(
             msg,
             ch_key=ch_key,
             conversation_id=conversation_id,
             cont=cont,
         )
-
-        if not cont:
-            # No continuation found, log and return
-            self._log(
-                "info",
-                "Ingress: no continuation found for inbound message",
-                channel_key=ch_key,
-            )
-            return False
-
-        # Build payload for resumption
-        kind = cont.kind
         normalized_attachments = resources.to_attachment_dicts()
-        meta = {
-            **(msg.meta or {}),
-            "attachments": normalized_attachments,
+        normalized_choice: dict[str, Any] = {
+            "choice": msg.choice,
+            "choice_label": (msg.meta or {}).get("choice_label"),
+            "text": msg.text or "",
+            "matched": False,
         }
-
-        if kind in ("approval", "choice"):
-            normalized = normalize_choice_reply(
+        if cont and cont.kind in ("approval", "choice"):
+            normalized_choice = normalize_choice_reply(
                 prompt=getattr(cont, "prompt", None),
                 raw_choice=msg.choice,
                 raw_text=msg.text or "",
             )
-            payload: dict[str, Any] = {
-                "choice": normalized.get("choice"),
-                "choice_label": normalized.get("choice_label"),
-                "text": normalized.get("text", ""),
-                "matched": bool(normalized.get("matched")),
-                "channel_key": ch_key,
-                "conversation_id": conversation_id,
-                "thread_id": msg.thread_id,
-                "meta": meta,
-            }
-        elif kind in ("user_files", "user_input_or_files"):
-            payload = {
-                "text": msg.text or "",
-                "files": file_refs,
-                "attachments": normalized_attachments,
-                "channel_key": ch_key,
-                "conversation_id": conversation_id,
-                "thread_id": msg.thread_id,
-                "meta": meta,
-            }
-        else:
-            payload = {
-                "text": msg.text or "",
-                "attachments": normalized_attachments,
-                "channel_key": ch_key,
-                "conversation_id": conversation_id,
-                "thread_id": msg.thread_id,
-                "meta": meta,
-            }
 
-        await self.resume_router.resume(
-            run_id=cont.run_id,
-            node_id=cont.node_id,
-            token=cont.token,
-            payload=payload,
+        payload: dict[str, Any] | None = None
+        if cont:
+            meta = {
+                **(msg.meta or {}),
+                "attachments": normalized_attachments,
+            }
+            if cont.kind in ("approval", "choice"):
+                payload = {
+                    **normalized_choice,
+                    "channel_key": ch_key,
+                    "conversation_id": conversation_id,
+                    "thread_id": msg.thread_id,
+                    "meta": meta,
+                }
+            elif cont.kind in ("user_files", "user_input_or_files"):
+                payload = {
+                    "text": msg.text or "",
+                    "files": file_refs,
+                    "attachments": normalized_attachments,
+                    "channel_key": ch_key,
+                    "conversation_id": conversation_id,
+                    "thread_id": msg.thread_id,
+                    "meta": meta,
+                }
+            else:
+                payload = {
+                    "text": msg.text or "",
+                    "attachments": normalized_attachments,
+                    "channel_key": ch_key,
+                    "conversation_id": conversation_id,
+                    "thread_id": msg.thread_id,
+                    "meta": meta,
+                }
+
+        event_id: str | None = None
+        if persistence_scope is not None and (
+            msg.text or msg.choice or file_refs or normalized_attachments
+        ):
+            event_id = str(uuid4())
+            choice = normalized_choice.get("choice")
+            choice_label = normalized_choice.get("choice_label")
+            display_text = msg.text or choice_label or choice or ""
+            continuation_token = cont.token if cont else None
+            interaction_kind = self._interaction_kind(cont)
+            event_meta = {
+                **(msg.meta or {}),
+                **(source_meta or {}),
+                "direction": "inbound",
+                "role": "user",
+                "source": scheme,
+                "channel_key": ch_key,
+                "conversation_id": conversation_id,
+                "attachments": normalized_attachments,
+                "choice": choice,
+                "choice_label": choice_label,
+                "continuation_token": continuation_token,
+                "interaction_kind": interaction_kind,
+            }
+            row: dict[str, Any] = {
+                "id": event_id,
+                "ts": datetime.now(UTC).timestamp(),
+                "scope_id": persistence_scope.scope_id,
+                "kind": persistence_scope.kind,
+                "payload": {
+                    "type": "user.message",
+                    "text": display_text,
+                    "buttons": [],
+                    "file": None,
+                    "files": file_refs,
+                    "attachments": normalized_attachments,
+                    "choice": choice,
+                    "choice_label": choice_label,
+                    "continuation_token": continuation_token,
+                    "interaction_kind": interaction_kind,
+                    "meta": event_meta,
+                },
+            }
+            if persistence_scope.user_id is not None:
+                row["user_id"] = persistence_scope.user_id
+            if persistence_scope.org_id is not None:
+                row["org_id"] = persistence_scope.org_id
+            await self.c.eventlog.append(row)
+
+        if cont and payload is not None:
+            await self.resume_router.resume(
+                run_id=cont.run_id,
+                node_id=cont.node_id,
+                token=cont.token,
+                payload=payload,
+            )
+            return InboundResult(event_id=event_id, resumed=True)
+
+        self._log(
+            "info",
+            "Ingress: no continuation found for inbound message",
+            channel_key=ch_key,
         )
-        return True
+        return InboundResult(event_id=event_id, resumed=False)
+
+    # ---- Public method ----
+    async def handle(self, msg: IncomingMessage) -> bool:
+        """
+        Handle an inbound message and resume a waiting continuation if any.
+
+        Returns:
+          True  -> a continuation was found and resumed
+          False -> nothing was listening on this channel (fire-and-forget)
+        """
+        result = await self._process(
+            msg,
+            persistence_scope=None,
+            expected_continuation=None,
+            source_meta=None,
+        )
+        return result.resumed
+
+    async def accept(
+        self,
+        msg: IncomingMessage,
+        *,
+        persistence_scope: IngressPersistenceScope,
+        expected_continuation: ExpectedContinuation | None = None,
+        source_meta: dict[str, Any] | None = None,
+    ) -> InboundResult:
+        """Persist one canonical inbound row and resume its exact continuation."""
+
+        return await self._process(
+            msg,
+            persistence_scope=persistence_scope,
+            expected_continuation=expected_continuation,
+            source_meta=source_meta,
+        )

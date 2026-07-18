@@ -13,8 +13,10 @@ from aethergraph.plugins.channel.utils.turn_dispatch import (
 )
 from aethergraph.services.channel.ingress import (
     ChannelIngress,
+    ExpectedContinuation,
     IncomingFile,
     IncomingMessage,
+    IngressPersistenceScope,
 )
 from aethergraph.services.channel.resources import (
     ArtifactIngressScope,
@@ -204,20 +206,31 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
         meta = {
             "raw": payload,
             "channel_key": ch_key,
+            "slack": {
+                "event_id": payload.get("event_id"),
+                "event_ts": ev.get("event_ts") or ev.get("ts"),
+            },
         }
+        conversation_id = f"slack:{channel_id}#thread:{thread_ts or ''}"
 
-        # Let ChannelIngress find the continuation, update inbox, and resume
-        resumed = await ingress.handle(
+        result = await ingress.accept(
             IncomingMessage(
                 scheme=scheme,
                 channel_id=channel_id,
                 thread_id=str(thread_ts or ""),
                 text=text,
                 files=incoming_files or None,
-                conversation_id=f"slack:{channel_id}#thread:{thread_ts or ''}",
+                conversation_id=conversation_id,
                 meta=meta,
-            )
+            ),
+            persistence_scope=IngressPersistenceScope(
+                scope_id=conversation_id,
+                kind="channel_inbound",
+                user_id=ev.get("user"),
+                org_id=team,
+            ),
         )
+        resumed = result.resumed
 
         if (not resumed) and (text or incoming_files):
             default_agent_id = getattr(settings.slack, "default_agent_id", None)
@@ -305,19 +318,34 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
             },
         )
 
-        meta = {"raw": payload, "channel_key": ch_key}
+        meta = {
+            "raw": payload,
+            "channel_key": ch_key,
+            "slack": {
+                "event_id": payload.get("event_id"),
+                "event_ts": ev.get("event_ts"),
+            },
+        }
+        conversation_id = f"slack:{channel_id}#thread:{thread_ts or ''}"
 
-        resumed = await ingress.handle(
+        result = await ingress.accept(
             IncomingMessage(
                 scheme=scheme,
                 channel_id=channel_id,
                 thread_id=str(thread_ts or ""),
                 text="",  # no text; just a file drop
                 files=[incoming_file],
-                conversation_id=f"slack:{channel_id}#thread:{thread_ts or ''}",
+                conversation_id=conversation_id,
                 meta=meta,
-            )
+            ),
+            persistence_scope=IngressPersistenceScope(
+                scope_id=conversation_id,
+                kind="channel_inbound",
+                user_id=f.get("user"),
+                org_id=team,
+            ),
         )
+        resumed = result.resumed
 
         if not resumed:
             default_agent_id = getattr(settings.slack, "default_agent_id", None)
@@ -393,39 +421,41 @@ async def handle_slack_interactive_common(container, payload: dict) -> dict:
         or (payload.get("container") or {}).get("message_ts")
     )
     ingress: ChannelIngress = c.channel_ingress
-    resumed = await ingress.handle(
+    token = meta.get("token")
+    if not token:
+        if container.logger:
+            container.logger.for_run().warning(
+                "Slack interaction ignored because its continuation token is missing"
+            )
+        return {}
+
+    conversation_id = f"slack:team/{team}:chan/{chan}#thread:{thread_ts or ''}"
+    await ingress.accept(
         IncomingMessage(
             scheme="slack",
             channel_id=f"team/{team}:chan/{chan}",
             thread_id=str(thread_ts or ""),
             text="",
             choice=meta.get("choice"),
-            conversation_id=f"slack:team/{team}:chan/{chan}#thread:{thread_ts or ''}",
+            conversation_id=conversation_id,
             meta={
                 "raw": payload,
                 "channel_key": ch_key,
                 "choice_label": meta.get("choice_label"),
+                "slack": {
+                    "action_id": action.get("action_id"),
+                    "action_ts": action.get("action_ts"),
+                    "trigger_id": payload.get("trigger_id"),
+                },
             },
-        )
+        ),
+        persistence_scope=IngressPersistenceScope(
+            scope_id=conversation_id,
+            kind="channel_inbound",
+            user_id=(payload.get("user") or {}).get("id"),
+            org_id=team,
+        ),
+        expected_continuation=ExpectedContinuation(token=str(token), kind="choice"),
     )
-
-    # Fallback for older button payloads or message-specific interactions
-    token = meta.get("token")
-    run_id = meta.get("run_id")
-    node_id = meta.get("node_id")
-    if (not resumed) and token and run_id and node_id:
-        await c.resume_router.resume(
-            run_id=run_id,
-            node_id=node_id,
-            token=token,
-            payload={
-                "choice": meta.get("choice"),
-                "choice_label": meta.get("choice_label"),
-                "matched": True,
-                "text": "",
-                "slack_ts": (payload.get("message") or {}).get("ts"),
-                "channel_key": ch_key,
-            },
-        )
 
     return {}
