@@ -12,6 +12,7 @@ import pytest
 from aethergraph.contracts.services.runtime_output import RuntimeOutputFrame
 from aethergraph.core.execution.retry_policy import RetryPolicy
 from aethergraph.core.execution.step_forward import step_forward
+from aethergraph.core.graph.graph_fn import GRAPH_FN_ROOT_NODE_ID, GraphFunction
 from aethergraph.services.runtime_output import (
     EventLogRuntimeOutputSink,
     capture_runtime_output,
@@ -330,4 +331,43 @@ async def test_step_forward_captures_sync_and_async_tool_prints(
         "async tool output" if is_async else "sync tool output"
     )
     assert event_log.rows[0]["tool"] == "demo"
+    await sink.close()
+
+
+@pytest.mark.asyncio
+async def test_graph_function_captures_nested_async_tool_prints():
+    event_log = _EventLog()
+    sink = EventLogRuntimeOutputSink(event_log=event_log)
+
+    async def _printing_tool() -> str:
+        print("graph function tool output")
+        return "ok"
+
+    async def _graph_body() -> dict[str, str]:
+        return {"result": await _printing_tool()}
+
+    graph = GraphFunction(
+        name="graph_fn.runtime.output",
+        fn=_graph_body,
+        outputs=["result"],
+    )
+    runtime_ctx = SimpleNamespace(
+        run_id="run-graph-fn",
+        session_id="session-graph-fn",
+        graph_id=graph.name,
+        runtime_output_sink=sink,
+        create_node_context=lambda node: SimpleNamespace(),
+    )
+    env = SimpleNamespace(
+        resume_payload=None,
+        make_ctx=lambda **kwargs: runtime_ctx,
+    )
+
+    with _installed_stream_capture():
+        result = await graph.run(env=env)
+
+    assert result == {"result": "ok"}
+    assert event_log.rows[0]["payload"]["text"] == "graph function tool output"
+    assert event_log.rows[0]["node_id"] == GRAPH_FN_ROOT_NODE_ID
+    assert event_log.rows[0]["tool"] == graph.name
     await sink.close()

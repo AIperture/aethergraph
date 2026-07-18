@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import inspect
 from typing import Any, get_type_hints
+from uuid import uuid4
 
 from aethergraph.contracts.errors.errors import GraphValidationError, build_error_hints
 from aethergraph.core.graph.action_spec import IOSlot, _map_py_type_to_json_type
@@ -19,6 +20,7 @@ from aethergraph.services.registry.agent_app_meta import (
     build_agent_meta,
     build_app_meta,
 )
+from aethergraph.services.runtime_output import capture_runtime_output
 
 from ..runtime.injection import pop_explicit_node_context, resolve_node_context_param
 from ..runtime.runtime_env import RuntimeEnv
@@ -98,9 +100,18 @@ class GraphFunction:
         if self._node_context_param is not None:
             call_kwargs.setdefault(self._node_context_param, parent_ctx or node_ctx)
 
-        res = self.fn(**call_kwargs)
-        if inspect.isawaitable(res):
-            res = await res
+        async with capture_runtime_output(
+            sink=getattr(runtime_ctx, "runtime_output_sink", None),
+            execution_id=f"exec-{uuid4().hex}",
+            run_id=runtime_ctx.run_id,
+            session_id=runtime_ctx.session_id,
+            graph_id=runtime_ctx.graph_id,
+            node_id=node_spec.node_id,
+            tool_name=node_spec.tool_name,
+        ):
+            res = self.fn(**call_kwargs)
+            if inspect.isawaitable(res):
+                res = await res
 
         return _normalize_graph_fn_outputs(res, self.outputs)
 
