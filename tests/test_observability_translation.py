@@ -20,6 +20,7 @@ async def test_v2_presenter_projects_semantic_events_and_metadata_context(
     tmp_path,
 ) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events" / "events.db"))
+    engine_event_log = SqliteEventLog(str(tmp_path / "memory_events" / "events.db"))
     run_store = SQLiteRunStore(str(tmp_path / "runs" / "runs.db"))
     store = SQLiteObservationStore(
         tmp_path / "events" / "observability.db",
@@ -74,7 +75,7 @@ async def test_v2_presenter_projects_semantic_events_and_metadata_context(
                 f"resource_relation:{link['relation']}",
             )
         ]
-        await event_log.append(
+        await engine_event_log.append(
             {
                 "event_id": event_id,
                 "ts": ts,
@@ -182,7 +183,12 @@ async def test_v2_presenter_projects_semantic_events_and_metadata_context(
         }
     )
 
-    facade = ObservabilityFacade(store, event_log=event_log, run_store=run_store)
+    facade = ObservabilityFacade(
+        store,
+        event_log=event_log,
+        engine_event_log=engine_event_log,
+        run_store=run_store,
+    )
     sessions = await facade.list_trace_sessions()
     assert sessions["items"][0]["latest_trace_id"] == "run-1"
     spans = (await facade.get_trace_spans("run-1"))["items"]
@@ -209,11 +215,13 @@ async def test_v2_presenter_projects_semantic_events_and_metadata_context(
     assert snapshot["body"]["sections"] == []
     await facade.close()
     await event_log.close()
+    await engine_event_log.close()
 
 
 @pytest.mark.asyncio
 async def test_v2_presenter_omits_context_span_when_capture_is_off(tmp_path) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events" / "events.db"))
+    engine_event_log = SqliteEventLog(str(tmp_path / "memory_events" / "events.db"))
     run_store = SQLiteRunStore(str(tmp_path / "runs" / "runs.db"))
     store = SQLiteObservationStore(
         tmp_path / "events" / "observability.db",
@@ -228,7 +236,7 @@ async def test_v2_presenter_omits_context_span_when_capture_is_off(tmp_path) -> 
             started_at=datetime(2026, 7, 17, tzinfo=UTC),
         )
     )
-    await event_log.append(
+    await engine_event_log.append(
         {
             "event_id": "decision-off",
             "ts": "2026-07-17T00:00:00+00:00",
@@ -243,8 +251,14 @@ async def test_v2_presenter_omits_context_span_when_capture_is_off(tmp_path) -> 
             },
         }
     )
-    facade = ObservabilityFacade(store, event_log=event_log, run_store=run_store)
+    facade = ObservabilityFacade(
+        store,
+        event_log=event_log,
+        engine_event_log=engine_event_log,
+        run_store=run_store,
+    )
     spans = (await facade.get_trace_spans("run-off"))["items"]
     assert [span["kind"] for span in spans] == ["react_cycle"]
     await facade.close()
     await event_log.close()
+    await engine_event_log.close()

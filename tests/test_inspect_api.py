@@ -441,6 +441,7 @@ def client(monkeypatch) -> TestClient:
     FakeContainer.observability = ObservabilityFacade(
         FakeObservationStore(llm_rows, observation_rows),
         event_log=eventlog,
+        engine_event_log=eventlog,
         run_store=FakeContainer.run_manager,
         owns_store=False,
     )

@@ -118,6 +118,7 @@ from aethergraph.storage.factory import (
 )
 from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
 from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
+from aethergraph.storage.memory.event_persist import EventLogPersistence
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
 from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
@@ -286,12 +287,19 @@ def build_default_container(
         full_prompt_ttl_days=cfg.observability.retention.max_full_prompt_age_days,
     )
     eventlog = build_event_log(cfg)
+    memory_persistence = build_memory_persistence(cfg)
+    engine_event_log = (
+        memory_persistence.event_log
+        if isinstance(memory_persistence, EventLogPersistence)
+        else None
+    )
     observation_store = SQLiteObservationStore(observation_path, policy=observation_policy)
     run_store = build_run_store(cfg)
     session_store = build_session_store(cfg)
     observability = open_active_observability_facade(
         observation_store,
         event_log=eventlog,
+        engine_event_log=engine_event_log,
         run_store=run_store,
     )
     retention_cfg = cfg.observability.retention
@@ -410,11 +418,10 @@ def build_default_container(
     )
 
     # memory factory
-    persistence = build_memory_persistence(cfg)
     hotlog = build_memory_hotlog(cfg)
     memory_factory = MemoryFactory(
         hotlog=hotlog,
-        persistence=persistence,
+        persistence=memory_persistence,
         artifacts=artifacts,
         hot_limit=int(cfg.memory.hot_limit),
         hot_ttl_s=int(cfg.memory.hot_ttl_s),

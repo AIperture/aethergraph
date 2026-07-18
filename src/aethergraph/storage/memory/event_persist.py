@@ -32,6 +32,36 @@ class EventLogPersistence(Persistence):
         self._docs = docs
         self._prefix = uri_prefix
 
+    @property
+    def event_log(self) -> EventLog:
+        """Expose the canonical memory-event log used by this persistence service.
+
+        Intro:
+            Returns the exact event-log instance that receives durable memory
+            events, allowing read-only projections to share the canonical source.
+
+        Examples:
+            Query one canonical run:
+            ```python
+            rows = await persistence.event_log.query(run_id="run-1")
+            ```
+
+            Confirm the reader is stable:
+            ```python
+            assert persistence.event_log is persistence.event_log
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            EventLog: Shared canonical memory-event log instance.
+
+        Notes:
+            The caller does not acquire ownership and must not close the log.
+        """
+        return self._log
+
     def _doc_id_from_uri(self, uri: str) -> str:
         if uri.startswith(self._prefix):
             return uri[len(self._prefix) :]

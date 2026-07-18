@@ -22,6 +22,7 @@ def test_workspace_facade_reads_active_and_historical_records(tmp_path) -> None:
     async def exercise() -> None:
         event_path = tmp_path / "events" / "events.db"
         writer = SqliteEventLog(str(event_path))
+        engine_writer = SqliteEventLog(str(tmp_path / "memory_events" / "events.db"))
         run_store = SQLiteRunStore(str(tmp_path / "runs" / "runs.db"))
         await run_store.create(
             RunRecord(
@@ -103,5 +104,6 @@ def test_workspace_facade_reads_active_and_historical_records(tmp_path) -> None:
         await facade.close()
         await observation_store.close()
         await writer.close()
+        await engine_writer.close()
 
     asyncio.run(exercise())

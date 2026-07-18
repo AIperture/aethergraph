@@ -283,6 +283,7 @@ def _present_engine_event_row(row: dict[str, Any]) -> AgentEventEnvelope:
 @dataclass
 class StudioTranslationPresenter:
     event_log: Any | None
+    engine_event_log: Any | None
     store: Any | None
     run_store: Any | None = None
     identity: ObservabilityIdentity = ObservabilityIdentity()
@@ -654,9 +655,10 @@ class StudioTranslationPresenter:
         Notes:
             Raises `InspectionUnavailableError` when no event log is configured.
         """
+        engine_event_log = self._require_engine_event_log()
         event_log = self._require_event_log()
         user_id, org_id = _store_identity_scope(self.identity)
-        engine_rows = await event_log.query(
+        engine_rows = await engine_event_log.query(
             since=since,
             until=until,
             tags=["agent_engine"],
@@ -870,7 +872,7 @@ class StudioTranslationPresenter:
         return {"items": []}
 
     async def _engine_rows(self, *, run_id: str | None = None) -> list[dict[str, Any]]:
-        rows = await self._require_event_log().query(
+        rows = await self._require_engine_event_log().query(
             tags=["agent_engine"],
             run_id=run_id,
             limit=None,
@@ -1102,6 +1104,11 @@ class StudioTranslationPresenter:
         if self.event_log is None:
             raise ObservabilityUnavailableError("Event log not configured")
         return self.event_log
+
+    def _require_engine_event_log(self) -> Any:
+        if self.engine_event_log is None:
+            raise ObservabilityUnavailableError("Canonical engine event log not configured")
+        return self.engine_event_log
 
     def _require_llm_store(self) -> Any:
         if self.store is None:

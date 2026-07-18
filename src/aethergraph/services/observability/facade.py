@@ -67,11 +67,13 @@ class ObservabilityFacade:
 
     Args:
         store: Concrete SQLite observation store owned by this facade.
-        event_log: Canonical AG event log for engine events and metering.
+        event_log: Global AG event log for metering and custom agent events.
+        engine_event_log: Canonical memory-event log for `agent_engine.*` events.
         run_store: Authoritative AG run store used for grouping and status.
         identity: Optional read identity applied by the translation presenter.
         run_statuses: Optional retained status overrides for historical reads.
         owns_event_log: Whether `close` releases the injected event log.
+        owns_engine_event_log: Whether `close` releases the engine event log.
         owns_store: Whether `close` releases the observation store.
 
     Returns:
@@ -86,18 +88,22 @@ class ObservabilityFacade:
         store: SQLiteObservationStore,
         *,
         event_log: Any | None = None,
+        engine_event_log: Any | None = None,
         run_store: Any | None = None,
         identity: ObservabilityIdentity | None = None,
         run_statuses: dict[str, str] | None = None,
         owns_event_log: bool = False,
+        owns_engine_event_log: bool = False,
         owns_store: bool = True,
     ) -> None:
         self.store = store
         self.event_log = event_log
+        self.engine_event_log = engine_event_log
         self.run_store = run_store
         self.identity = identity or ObservabilityIdentity()
         self._run_statuses = dict(run_statuses or {})
         self._owns_event_log = owns_event_log
+        self._owns_engine_event_log = owns_engine_event_log
         self._owns_store = owns_store
 
     async def close(self) -> None:
@@ -122,6 +128,9 @@ class ObservabilityFacade:
         if self._owns_event_log and self.event_log is not None:
             await self.event_log.close()
             self._owns_event_log = False
+        if self._owns_engine_event_log and self.engine_event_log is not None:
+            await self.engine_event_log.close()
+            self._owns_engine_event_log = False
         if self._owns_store:
             await self.store.close()
             self._owns_store = False
@@ -148,6 +157,7 @@ class ObservabilityFacade:
         return ObservabilityFacade(
             self.store,
             event_log=self.event_log,
+            engine_event_log=self.engine_event_log,
             run_store=self.run_store,
             identity=identity,
             run_statuses=self._run_statuses,
@@ -477,7 +487,9 @@ class ObservabilityFacade:
         if self.event_log is None:
             raise RuntimeError("AG event log is required for usage reads")
         rows = await self.event_log.query(kinds=["meter.llm"], run_id=run_id, limit=None)
-        tool_rows = await self.event_log.query(
+        if self.engine_event_log is None:
+            raise RuntimeError("Canonical engine event log is required for usage reads")
+        tool_rows = await self.engine_event_log.query(
             kinds=["agent_engine.tool_call"],
             tags=["agent_engine"],
             run_id=run_id,
@@ -527,12 +539,12 @@ class ObservabilityFacade:
         Notes:
             Tool result bodies are never parsed to discover resource references.
         """
-        if self.event_log is None:
-            raise RuntimeError("AG event log is required for resource-event reads")
+        if self.engine_event_log is None:
+            raise RuntimeError("Canonical engine event log is required for resource-event reads")
         tags = ["agent_engine", f"resource:{resource_key}"]
         if relation is not None:
             tags.append(f"resource_relation:{relation}")
-        engine_events = await self.event_log.query(
+        engine_events = await self.engine_event_log.query(
             tags=tags,
             limit=None,
             order_dir="desc",
@@ -787,6 +799,7 @@ class ObservabilityFacade:
 
         return StudioTranslationPresenter(
             event_log=self.event_log,
+            engine_event_log=self.engine_event_log,
             store=self.store,
             run_store=self.run_store,
             identity=self.identity,
@@ -827,29 +840,54 @@ def open_active_observability_facade(
     store: SQLiteObservationStore,
     *,
     event_log: Any,
+    engine_event_log: Any | None,
     run_store: Any,
 ) -> ObservabilityFacade:
     """Compose the active-container observability query boundary.
 
     Intro:
-        Binds the live observation, event, and run stores without extra readers.
+        Binds the live observation, global event, canonical memory-event, and
+        run stores without copying semantic events.
 
     Examples:
-        `facade = open_active_observability_facade(store, event_log=log, run_store=runs)`
-        `container.observability = open_active_observability_facade(store, event_log=log, run_store=runs)`
+        Compose a fully observable runtime:
+        ```python
+        facade = open_active_observability_facade(
+            store,
+            event_log=global_log,
+            engine_event_log=memory_log,
+            run_store=runs,
+        )
+        ```
+
+        Compose a runtime whose canonical engine stream is unavailable:
+        ```python
+        facade = open_active_observability_facade(
+            store,
+            event_log=global_log,
+            engine_event_log=None,
+            run_store=runs,
+        )
+        ```
 
     Args:
         store: Active canonical observation store.
-        event_log: Active AG event log.
+        event_log: Active global AG event log.
+        engine_event_log: Active canonical memory-event log, when configured.
         run_store: Active authoritative run store.
 
     Returns:
         ObservabilityFacade: One active read/write boundary.
 
     Notes:
-        The returned facade owns the observation store, not the shared event log.
+        The returned facade owns the observation store, not either shared event log.
     """
-    return ObservabilityFacade(store, event_log=event_log, run_store=run_store)
+    return ObservabilityFacade(
+        store,
+        event_log=event_log,
+        engine_event_log=engine_event_log,
+        run_store=run_store,
+    )
 
 
 def open_observability_facade(
@@ -863,7 +901,8 @@ def open_observability_facade(
     """Open the canonical observation store for one workspace.
 
     Intro:
-        Resolves the single v2 database without creating a legacy read path.
+        Resolves the four required v2 workspace stores without creating a
+        legacy read path or copying canonical engine events.
 
     Examples:
         Open historical data read-only:
@@ -887,19 +926,22 @@ def open_observability_facade(
         ObservabilityFacade: Facade over observations, canonical events, and runs.
 
     Notes:
-        Missing workspaces or databases fail directly; there is no legacy fallback.
+        Missing global-event, memory-event, observation, or run databases fail
+        directly; there is no legacy fallback.
     """
     root = Path(workspace_root).expanduser().resolve()
     event_path = root / "events" / "events.db"
+    engine_event_path = root / "memory_events" / "events.db"
     observation_path = root / "events" / "observability.db"
     run_path = root / "runs" / "runs.db"
     if not root.is_dir() or not all(
-        path.is_file() for path in (event_path, observation_path, run_path)
+        path.is_file() for path in (event_path, engine_event_path, observation_path, run_path)
     ):
         raise ObservabilityWorkspaceError("AetherGraph v2 observability workspace was not found")
     from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 
     event_log = SqliteEventLog(str(event_path), read_only=read_only)
+    engine_event_log = SqliteEventLog(str(engine_event_path), read_only=read_only)
     return ObservabilityFacade(
         SQLiteObservationStore(
             observation_path,
@@ -907,8 +949,10 @@ def open_observability_facade(
             policy=policy,
         ),
         event_log=event_log,
+        engine_event_log=engine_event_log,
         run_store=_ReadOnlySQLiteRunStore(run_path),
         identity=identity,
         run_statuses=run_statuses,
         owns_event_log=True,
+        owns_engine_event_log=True,
     )

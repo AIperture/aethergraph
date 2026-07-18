@@ -251,6 +251,7 @@ async def test_active_session_deletion_is_atomic_and_completed_session_is_hidden
     facade = ObservabilityFacade(
         store,
         event_log=_EventLog(),
+        engine_event_log=_EventLog(),
         run_store=_RunStore(runs),
     )
     await store.append_observation(
@@ -309,6 +310,7 @@ async def test_trace_session_listing_and_deletion_enforce_request_identity(
     facade = ObservabilityFacade(
         store,
         event_log=_EventLog(),
+        engine_event_log=_EventLog(),
         run_store=_RunStore(runs),
         identity=ObservabilityIdentity(
             mode="cloud",
