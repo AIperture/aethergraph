@@ -249,6 +249,9 @@ class DefaultContainer:
     # channel ingress (set after init to avoid circular dependency)
     channel_ingress: ChannelIngress | None = None  # set after init to avoid circular dependency
 
+    # opt-in host runtime output capture; disabled for normal CLI/server hosts
+    runtime_output_sink: Any | None = None
+
 
 def build_default_container(
     *,

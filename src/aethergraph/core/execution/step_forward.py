@@ -3,10 +3,12 @@ import functools
 import inspect
 import traceback
 from typing import Any
+from uuid import uuid4
 
 from aethergraph.contracts.services.channel import OutEvent
 from aethergraph.core.runtime.run_cancellation import RunCancellationRequestedError
 from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.runtime_output import capture_runtime_output
 
 from ..graph.task_node import NodeStatus, TaskNodeRuntime
 from ..runtime.execution_context import ExecutionContext
@@ -228,14 +230,24 @@ async def step_forward(
         node_ctx=node_ctx,  # <-- pass node_ctx explicitly for convenience
         runtime_ctx=ctx,  # <-- pass runtime explicitly to resolve resume payload
     )
+    execution_id = f"exec-{uuid4().hex}"
     try:
-        with enter_tool_execution():
-            result = (
-                await logic_fn(**kwargs)
-                if inspect.iscoroutinefunction(logic_fn)
-                or (callable(logic_fn) and inspect.iscoroutinefunction(logic_fn.__call__))
-                else logic_fn(**kwargs)
-            )
+        async with capture_runtime_output(
+            sink=getattr(ctx, "runtime_output_sink", None),
+            execution_id=execution_id,
+            run_id=ctx.run_id,
+            session_id=getattr(ctx, "session_id", None),
+            graph_id=getattr(ctx, "graph_id", None),
+            node_id=node.node_id,
+            tool_name=node.tool_name or getattr(logic_fn, "__name__", None),
+        ):
+            with enter_tool_execution():
+                result = (
+                    await logic_fn(**kwargs)
+                    if inspect.iscoroutinefunction(logic_fn)
+                    or (callable(logic_fn) and inspect.iscoroutinefunction(logic_fn.__call__))
+                    else logic_fn(**kwargs)
+                )
 
         if inspect.isawaitable(result):
             raise TypeError(

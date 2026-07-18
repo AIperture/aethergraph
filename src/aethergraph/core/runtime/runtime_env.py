@@ -298,6 +298,7 @@ class RuntimeEnv:
             should_run_fn=self.should_run_fn,
             scope=node_scope,
             resume_router=self.resume_router,
+            runtime_output_sink=getattr(self.container, "runtime_output_sink", None),
         )
 
     def _resolve_memory_config(self) -> tuple[str, str | None]:

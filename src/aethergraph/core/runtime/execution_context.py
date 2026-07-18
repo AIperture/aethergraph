@@ -40,6 +40,7 @@ class ExecutionContext:
     should_run_fn: Callable[[], bool] | None = None
     resume_router: ResumeRouter | None = None  # ResumeRouter
     scope: Scope | None = None  # Node Scope
+    runtime_output_sink: Any | None = None
 
     def create_node_context(self, node: TaskNodeRuntime) -> NodeContext:
         return NodeContext(
