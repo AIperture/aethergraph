@@ -4,6 +4,12 @@ from .facade import (
     open_active_observability_facade,
     open_observability_facade,
 )
+from .legacy_cleanup import (
+    LegacyObservabilityCleanupResult,
+    LegacyObservabilityReport,
+    cleanup_legacy_observability,
+    scan_legacy_observability,
+)
 from .models import (
     CaptureMode,
     LLMObservationRecord,
@@ -27,6 +33,8 @@ __all__ = [
     "ActiveObservabilityScopeError",
     "CaptureMode",
     "LLMObservationRecord",
+    "LegacyObservabilityCleanupResult",
+    "LegacyObservabilityReport",
     "ObservationFilter",
     "ObservationPolicy",
     "ObservationRecord",
@@ -41,6 +49,8 @@ __all__ = [
     "RetentionPolicy",
     "SQLiteObservationStore",
     "StorageStats",
+    "cleanup_legacy_observability",
     "open_active_observability_facade",
     "open_observability_facade",
+    "scan_legacy_observability",
 ]

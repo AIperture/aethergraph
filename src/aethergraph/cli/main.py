@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from aethergraph.cli.commands import register, run, serve
+from aethergraph.cli.commands import observability, register, run, serve
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -12,6 +12,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.register_parser(subparsers)
     run.register_parser(subparsers)
     register.register_parser(subparsers)
+    observability.register_parser(subparsers)
     return parser
 
 
