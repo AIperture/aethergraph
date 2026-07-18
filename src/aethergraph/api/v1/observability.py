@@ -3,10 +3,11 @@ from __future__ import annotations
 from collections import Counter
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, Query, Response  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.observability import (
+    ActiveObservabilityScopeError,
     ObservabilityFacade,
     ObservabilityIdentity,
     ObservabilityNotFoundError,
@@ -62,6 +63,8 @@ def _observability_facade(identity: RequestIdentity) -> ObservabilityFacade:
 def _observability_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ObservabilityNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
+    if isinstance(exc, ActiveObservabilityScopeError):
+        return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=503, detail=str(exc))
 
 
@@ -515,6 +518,72 @@ async def list_trace_sessions(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> dict:
     return await _observability_facade(identity).list_trace_sessions(limit=limit, cursor=cursor)
+
+
+@trace_router.delete("/sessions/{session_id}", status_code=204)
+async def delete_trace_session(
+    session_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> Response:
+    """Delete observations for one completed Trace Explorer session.
+
+    Intro:
+        Purges AG-owned capture while retaining canonical runtime history.
+
+    Examples:
+        `DELETE /api/trace/sessions/session-1`
+        `DELETE /api/trace/sessions/session-complete`
+
+    Args:
+        session_id: Exact authoritative session identity.
+        identity: Authenticated request identity used for containment.
+
+    Returns:
+        Response: Empty HTTP 204 response after completed deletion.
+
+    Notes:
+        Active or resumable sessions return HTTP 409.
+    """
+    try:
+        await _observability_facade(identity).delete_session_observations(session_id)
+    except ActiveObservabilityScopeError as exc:
+        raise _observability_http_error(exc) from exc
+    return Response(status_code=204)
+
+
+@trace_router.post("/sessions/delete")
+async def delete_trace_sessions(
+    payload: dict,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict[str, int]:
+    """Delete observations for multiple completed sessions.
+
+    Intro:
+        Validates every session before performing the first destructive action.
+
+    Examples:
+        `POST /api/trace/sessions/delete {"session_ids": ["s-1"]}`
+        `POST /api/trace/sessions/delete {"session_ids": []}`
+
+    Args:
+        payload: JSON object containing a `session_ids` list.
+        identity: Authenticated request identity used for containment.
+
+    Returns:
+        dict[str, int]: Count of unique session scopes deleted.
+
+    Notes:
+        One active, resumable, or unauthorized session prevents the whole batch.
+    """
+    session_ids = payload.get("session_ids")
+    if not isinstance(session_ids, list):
+        raise HTTPException(status_code=400, detail="session_ids must be a list")
+    normalized = [str(session_id).strip() for session_id in session_ids if str(session_id).strip()]
+    try:
+        results = await _observability_facade(identity).delete_sessions_observations(normalized)
+    except ActiveObservabilityScopeError as exc:
+        raise _observability_http_error(exc) from exc
+    return {"deleted": len(results)}
 
 
 @trace_router.get("/traces/{trace_id}")

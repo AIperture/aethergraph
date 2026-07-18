@@ -16,7 +16,7 @@ from aethergraph.services.inspect import (
     emit_agent_event,
     register_default_agent_event_types,
 )
-from aethergraph.services.observability import ObservabilityFacade
+from aethergraph.services.observability import ObservabilityFacade, PurgeResult
 from aethergraph.services.observability.logging import ObservationLogHandler
 
 
@@ -94,6 +94,9 @@ class FakeEventLog:
 
 
 class FakeRunManager:
+    def __init__(self) -> None:
+        self.status = RunStatus.failed
+
     async def get_record(self, run_id: str) -> RunRecord | None:
         if run_id != "run-1":
             return None
@@ -101,7 +104,7 @@ class FakeRunManager:
             run_id="run-1",
             graph_id="graph-1",
             kind="graphfn",
-            status=RunStatus.failed,
+            status=self.status,
             started_at=datetime(2026, 3, 11, tzinfo=UTC),
             user_id="u1",
             org_id="o1",
@@ -186,6 +189,13 @@ class FakeObservationStore:
     async def append_observation(self, record):
         self.appended.append(record)
         return record.observation_id
+
+    async def list_suppressed_scopes(self):
+        return {"session_id": set(), "run_id": set(), "trace_id": set()}
+
+    async def delete_session_observations(self, session_id: str, *, dry_run: bool = False):
+        del session_id
+        return PurgeResult(dry_run, 0, 0, 0, 0, 0, 0)
 
 
 @pytest.fixture()
@@ -425,7 +435,8 @@ def client(monkeypatch) -> TestClient:
     class FakeContainer:
         pass
 
-    FakeContainer.run_manager = FakeRunManager()
+    run_manager = FakeRunManager()
+    FakeContainer.run_manager = run_manager
     FakeContainer.eventlog = eventlog
     FakeContainer.observability = ObservabilityFacade(
         FakeObservationStore(llm_rows, observation_rows),
@@ -479,6 +490,7 @@ def client(monkeypatch) -> TestClient:
 
     tc = TestClient(app)
     tc.fake_eventlog = eventlog
+    tc.fake_run_manager = run_manager
     return tc
 
 
@@ -494,6 +506,31 @@ def test_connected_trace_router_uses_observability_facade(client: TestClient) ->
     resp = client.get("/api/trace/sessions")
     assert resp.status_code == 200
     assert resp.json()["items"][0]["latest_trace_id"] == "run-1"
+
+
+def test_connected_trace_router_deletes_completed_session_observations(
+    client: TestClient,
+) -> None:
+    deleted = client.delete("/api/trace/sessions/sess-1")
+    batch = client.post(
+        "/api/trace/sessions/delete",
+        json={"session_ids": ["sess-1", "sess-1"]},
+    )
+
+    assert deleted.status_code == 204
+    assert batch.status_code == 200
+    assert batch.json() == {"deleted": 1}
+
+
+def test_connected_trace_router_refuses_active_session_deletion(
+    client: TestClient,
+) -> None:
+    client.fake_run_manager.status = RunStatus.waiting
+
+    response = client.delete("/api/trace/sessions/sess-1")
+
+    assert response.status_code == 409
+    assert "active runs: run-1" in response.json()["detail"]
 
 
 def test_get_run_trace_summary(client: TestClient) -> None:

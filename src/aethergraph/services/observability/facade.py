@@ -9,11 +9,19 @@ from typing import TYPE_CHECKING, Any
 
 from aethergraph.services.llm.correlation import complete_llm_call_correlation
 
-from .models import LLMObservationRecord, ObservationFilter, ObservationRecord, PurgeResult
+from .models import (
+    LLMObservationRecord,
+    ObservationFilter,
+    ObservationRecord,
+    PurgeResult,
+    StorageStats,
+)
 from .policy import ObservationPolicy
 from .sqlite_store import SQLiteObservationStore
 from .studio_translation import (
     ObservabilityIdentity,
+    ObservabilityNotFoundError,
+    ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
     StudioTranslationPresenter,
 )
@@ -26,6 +34,16 @@ if TYPE_CHECKING:
         LLMCallRecord,
         TraceEventListResponse,
     )
+
+
+class ActiveObservabilityScopeError(RuntimeError):
+    """Reject destructive observation cleanup for active or resumable runs."""
+
+    def __init__(self, scope_key: str, run_ids: Iterable[str]) -> None:
+        self.scope_key = scope_key
+        self.run_ids = tuple(sorted({str(run_id) for run_id in run_ids if run_id}))
+        joined = ", ".join(self.run_ids)
+        super().__init__(f"Observability scope {scope_key} has active runs: {joined}")
 
 
 class ObservabilityFacade:
@@ -540,15 +558,123 @@ class ObservabilityFacade:
         return await self.store.delete_observation(observation_id)
 
     async def delete_trace(self, trace_id: str, *, dry_run: bool = False) -> PurgeResult:
+        """Delete AG-owned observations for one semantic trace/run.
+
+        Intro:
+            Purges observation payloads while retaining canonical runtime history.
+
+        Examples:
+            `preview = await facade.delete_trace("run-1", dry_run=True)`
+            `result = await facade.delete_trace("run-1")`
+
+        Args:
+            trace_id: Semantic trace identity, equal to the AG run ID in v2.
+            dry_run: Whether to report impact without deleting data.
+
+        Returns:
+            PurgeResult: Estimated or completed deletion accounting.
+
+        Notes:
+            Active or resumable runs are refused for non-dry-run deletion.
+        """
+        if not dry_run:
+            await self._ensure_runs_inactive(
+                f"trace:{trace_id}",
+                await self._runs_for_run_id(trace_id),
+            )
         return await self.store.delete_trace(trace_id, dry_run=dry_run)
 
     async def delete_run_observations(self, run_id: str, *, dry_run: bool = False) -> PurgeResult:
+        """Delete AG-owned observations for one run.
+
+        Intro:
+            Removes capture data without deleting the authoritative run record.
+
+        Examples:
+            `preview = await facade.delete_run_observations("run-1", dry_run=True)`
+            `result = await facade.delete_run_observations("run-1")`
+
+        Args:
+            run_id: Exact authoritative AG run identity.
+            dry_run: Whether to report impact without deleting data.
+
+        Returns:
+            PurgeResult: Estimated or completed deletion accounting.
+
+        Notes:
+            Active or resumable runs are refused for non-dry-run deletion.
+        """
+        if not dry_run:
+            await self._ensure_runs_inactive(
+                f"run:{run_id}",
+                await self._runs_for_run_id(run_id),
+            )
         return await self.store.delete_run_observations(run_id, dry_run=dry_run)
 
     async def delete_session_observations(
         self, session_id: str, *, dry_run: bool = False
     ) -> PurgeResult:
+        """Delete AG-owned observations for one completed session.
+
+        Intro:
+            Purges observation payloads and hides the session from observability views.
+
+        Examples:
+            `preview = await facade.delete_session_observations("session-1", dry_run=True)`
+            `result = await facade.delete_session_observations("session-1")`
+
+        Args:
+            session_id: Exact authoritative AG session identity.
+            dry_run: Whether to report impact without deleting data.
+
+        Returns:
+            PurgeResult: Estimated or completed deletion accounting.
+
+        Notes:
+            Any active or resumable run causes non-dry-run deletion to fail atomically.
+        """
+        if not dry_run:
+            await self._ensure_runs_inactive(
+                f"session:{session_id}",
+                await self._runs_for_session(session_id),
+            )
         return await self.store.delete_session_observations(session_id, dry_run=dry_run)
+
+    async def delete_sessions_observations(
+        self,
+        session_ids: Iterable[str],
+    ) -> list[PurgeResult]:
+        """Delete AG-owned observations for completed sessions atomically by eligibility.
+
+        Intro:
+            Validates every requested session before performing the first deletion.
+
+        Examples:
+            `results = await facade.delete_sessions_observations(["s-1", "s-2"])`
+            `results = await facade.delete_sessions_observations([])`
+
+        Args:
+            session_ids: Session identities to validate and purge.
+
+        Returns:
+            list[PurgeResult]: One completed deletion result per unique session.
+
+        Notes:
+            Canonical run, session, event, and artifact history is not deleted.
+        """
+        normalized = tuple(
+            dict.fromkeys(
+                str(session_id).strip() for session_id in session_ids if str(session_id).strip()
+            )
+        )
+        runs_by_session = {
+            session_id: await self._runs_for_session(session_id) for session_id in normalized
+        }
+        for session_id, runs in runs_by_session.items():
+            await self._ensure_runs_inactive(f"session:{session_id}", runs)
+        return [
+            await self.store.delete_session_observations(session_id) for session_id in normalized
+        ]
 
     async def purge_observations(
         self, filters: ObservationFilter, *, dry_run: bool = True
@@ -560,6 +686,87 @@ class ObservabilityFacade:
 
     async def garbage_collect_fragments(self) -> int:
         return await self.store.garbage_collect_fragments()
+
+    async def compact_storage(self) -> StorageStats:
+        """Compact the observation database after destructive maintenance.
+
+        Intro:
+            Returns unused main/WAL capacity to the filesystem on demand.
+
+        Examples:
+            `stats = await facade.compact_storage()`
+            `physical_bytes = stats.physical_bytes`
+
+        Args:
+            None.
+
+        Returns:
+            StorageStats: Storage accounting after SQLite compaction.
+
+        Notes:
+            Call from an administrative maintenance window, not an active loop.
+        """
+        return await self.store.compact_storage()
+
+    async def _runs_for_run_id(self, run_id: str) -> list[Any]:
+        if self.run_store is None:
+            raise ObservabilityUnavailableError(
+                "Run store is required for destructive observability operations"
+            )
+        run = await self.run_store.get(run_id)
+        if run is None:
+            return []
+        if not self._run_is_visible(run):
+            raise ObservabilityNotFoundError("Observability run was not found")
+        return [run]
+
+    async def _runs_for_session(self, session_id: str) -> list[Any]:
+        if self.run_store is None:
+            raise ObservabilityUnavailableError(
+                "Run store is required for destructive observability operations"
+            )
+        runs = list(
+            await self.run_store.list(
+                session_id=session_id,
+                limit=10_000,
+                offset=0,
+            )
+        )
+        visible = [run for run in runs if self._run_is_visible(run)]
+        if runs and len(visible) != len(runs):
+            raise ObservabilityNotFoundError("Observability session was not found")
+        return visible
+
+    async def _ensure_runs_inactive(
+        self,
+        scope_key: str,
+        runs: Iterable[Any],
+    ) -> None:
+        active = [
+            self._run_value(run, "run_id")
+            for run in runs
+            if self._run_status(run) not in {"succeeded", "failed", "canceled"}
+        ]
+        if active:
+            raise ActiveObservabilityScopeError(scope_key, active)
+
+    def _run_is_visible(self, run: Any) -> bool:
+        if self.identity.mode not in {"cloud", "demo"}:
+            return True
+        if not self.identity.user_id:
+            return False
+        if self._run_value(run, "user_id") != self.identity.user_id:
+            return False
+        return not self.identity.org_id or (self._run_value(run, "org_id") == self.identity.org_id)
+
+    @classmethod
+    def _run_status(cls, run: Any) -> str:
+        value = cls._run_value(run, "status")
+        return str(getattr(value, "value", value) or "")
+
+    @staticmethod
+    def _run_value(run: Any, key: str) -> Any:
+        return run.get(key) if isinstance(run, dict) else getattr(run, key, None)
 
     def _presenter(self) -> StudioTranslationPresenter:
         async def resolve_run_statuses(run_ids: set[str]) -> dict[str, str]:

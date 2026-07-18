@@ -163,7 +163,11 @@ class StorageStats:
     manifests: int
     fragments: int
     fragment_bytes: int
+    logical_bytes: int
     database_bytes: int
+    wal_bytes: int
+    shm_bytes: int
+    physical_bytes: int
 
 
 @dataclass(frozen=True)

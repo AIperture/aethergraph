@@ -667,13 +667,23 @@ class SQLiteObservationStore:
             ObservationFilter(trace_id=trace_id), dry_run=dry_run
         )
         if not dry_run:
-            await asyncio.to_thread(self._delete_management, "trace_id", trace_id)
+            await self.update_trace_management(
+                f"trace:{trace_id}",
+                hidden=True,
+                deleted=True,
+                scope={"trace_id": trace_id},
+            )
         return result
 
     async def delete_run_observations(self, run_id: str, *, dry_run: bool = False) -> PurgeResult:
         result = await self.purge_observations(ObservationFilter(run_id=run_id), dry_run=dry_run)
         if not dry_run:
-            await asyncio.to_thread(self._delete_management, "run_id", run_id)
+            await self.update_trace_management(
+                f"run:{run_id}",
+                hidden=True,
+                deleted=True,
+                scope={"run_id": run_id},
+            )
         return result
 
     async def delete_session_observations(
@@ -683,7 +693,12 @@ class SQLiteObservationStore:
             ObservationFilter(session_id=session_id), dry_run=dry_run
         )
         if not dry_run:
-            await asyncio.to_thread(self._delete_management, "session_id", session_id)
+            await self.update_trace_management(
+                f"session:{session_id}",
+                hidden=True,
+                deleted=True,
+                scope={"session_id": session_id},
+            )
         return result
 
     async def purge_observations(
@@ -739,8 +754,8 @@ class SQLiteObservationStore:
             ).fetchall()
             fragment_rows = conn.execute(
                 f"""
-                SELECT DISTINCT fragment_id, byte_count FROM content_fragments
-                WHERE fragment_id IN (
+                SELECT DISTINCT f.* FROM content_fragments f
+                WHERE f.fragment_id IN (
                     SELECT p.fragment_id FROM prompt_manifest_parts p
                     JOIN prompt_manifests m ON m.manifest_id = p.manifest_id
                     JOIN llm_calls c ON c.llm_call_id = m.llm_call_id
@@ -756,22 +771,16 @@ class SQLiteObservationStore:
                 [*ids, *ids, *ids],
             ).fetchall()
             candidate_ids = [row["fragment_id"] for row in fragment_rows]
-            row_bytes = int(
-                conn.execute(
-                    f"""
-                    SELECT COALESCE(SUM(LENGTH(summary) + LENGTH(attributes_json)), 0)
-                    FROM observations WHERE observation_id IN ({placeholders})
-                    """,
-                    ids,
-                ).fetchone()[0]
-            )
+            row_bytes = self._observation_nonfragment_bytes(conn, ids)
             exclusive = 0
+            exclusive_storage = 0
             shared = 0
             for row in fragment_rows:
                 if self._fragment_has_external_reference(conn, row["fragment_id"], set(ids)):
                     shared += int(row["byte_count"])
                 else:
                     exclusive += int(row["byte_count"])
+                    exclusive_storage += self._row_logical_bytes(row)
             preview = PurgeResult(
                 dry_run=dry_run,
                 matching_traces=len({row["trace_id"] for row in selected if row["trace_id"]}),
@@ -779,7 +788,7 @@ class SQLiteObservationStore:
                 matching_manifests=len(manifests),
                 exclusive_fragment_bytes=exclusive,
                 shared_fragment_bytes_retained=shared,
-                estimated_reclaimed_bytes=exclusive + row_bytes,
+                estimated_reclaimed_bytes=exclusive_storage + row_bytes,
             )
             if dry_run:
                 return preview
@@ -808,11 +817,74 @@ class SQLiteObservationStore:
             conn.commit()
             return deleted
 
+    async def compact_storage(self) -> StorageStats:
+        """Return deleted SQLite capacity to the filesystem.
+
+        Intro:
+            Checkpoints the WAL and vacuums the observation database explicitly.
+
+        Examples:
+            `stats = await store.compact_storage()`
+            `reclaimed = before.physical_bytes - stats.physical_bytes`
+
+        Args:
+            None.
+
+        Returns:
+            StorageStats: Storage accounting after compaction.
+
+        Notes:
+            This maintenance operation may require an exclusive SQLite lock and
+            is never run automatically on the agent execution path.
+        """
+        await asyncio.to_thread(self._compact_storage)
+        return await self.get_storage_stats()
+
+    def _compact_storage(self) -> None:
+        self._ensure_writable()
+        with self._connect() as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.execute("VACUUM")
+
     async def get_storage_stats(self) -> StorageStats:
         return await asyncio.to_thread(self._get_storage_stats)
 
     async def list_scope_storage(self, scope_column: str) -> list[dict[str, Any]]:
         return await asyncio.to_thread(self._list_scope_storage, scope_column)
+
+    async def list_suppressed_scopes(self) -> dict[str, set[str]]:
+        """List tombstoned observability scope identities.
+
+        Intro:
+            Reads session, run, and trace scopes hidden by explicit deletion.
+
+        Examples:
+            `scopes = await store.list_suppressed_scopes()`
+            `hidden_sessions = scopes["session_id"]`
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, set[str]]: Suppressed IDs grouped by scope column.
+
+        Notes:
+            Canonical runtime records remain untouched by these tombstones.
+        """
+        return await asyncio.to_thread(self._list_suppressed_scopes)
+
+    def _list_suppressed_scopes(self) -> dict[str, set[str]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, run_id, trace_id FROM trace_management
+                WHERE hidden = 1 OR deleted = 1
+                """
+            ).fetchall()
+        return {
+            column: {str(row[column]) for row in rows if row[column]}
+            for column in ("session_id", "run_id", "trace_id")
+        }
 
     def _list_scope_storage(self, scope_column: str) -> list[dict[str, Any]]:
         if scope_column not in {"trace_id", "run_id"}:
@@ -820,8 +892,7 @@ class SQLiteObservationStore:
         with self._connect() as conn:
             scopes = conn.execute(
                 f"""
-                SELECT {scope_column} AS scope_id, MAX(occurred_at) AS latest_at,
-                       SUM(LENGTH(summary) + LENGTH(attributes_json)) AS row_bytes
+                SELECT {scope_column} AS scope_id, MAX(occurred_at) AS latest_at
                 FROM observations
                 WHERE {scope_column} IS NOT NULL
                 GROUP BY {scope_column}
@@ -838,6 +909,7 @@ class SQLiteObservationStore:
                     )
                 ]
                 fragment_bytes = self._observation_fragment_bytes(conn, observation_ids)
+                row_bytes = self._observation_nonfragment_bytes(conn, observation_ids)
                 pinned = bool(
                     conn.execute(
                         f"SELECT 1 FROM trace_management WHERE {scope_column} = ? AND pinned = 1 LIMIT 1",
@@ -848,7 +920,7 @@ class SQLiteObservationStore:
                     {
                         "scope_id": scope["scope_id"],
                         "latest_at": scope["latest_at"],
-                        "logical_bytes": int(scope["row_bytes"] or 0) + fragment_bytes,
+                        "logical_bytes": row_bytes + fragment_bytes,
                         "pinned": pinned,
                     }
                 )
@@ -865,13 +937,34 @@ class SQLiteObservationStore:
             ).fetchone()
             page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
             page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+            logical_bytes = sum(
+                self._table_logical_bytes(conn, table)
+                for table in (
+                    "content_fragments",
+                    "observations",
+                    "observation_resource_links",
+                    "llm_calls",
+                    "prompt_manifests",
+                    "prompt_manifest_parts",
+                    "trace_management",
+                )
+            )
+            database_bytes = page_count * page_size
+            wal_path = Path(f"{self.path}-wal")
+            wal_bytes = wal_path.stat().st_size if wal_path.is_file() else 0
+            shm_path = Path(f"{self.path}-shm")
+            shm_bytes = shm_path.stat().st_size if shm_path.is_file() else 0
             return StorageStats(
                 observations=count("observations"),
                 llm_calls=count("llm_calls"),
                 manifests=count("prompt_manifests"),
                 fragments=int(fragment_row[0]),
                 fragment_bytes=int(fragment_row[1]),
-                database_bytes=page_count * page_size,
+                logical_bytes=logical_bytes,
+                database_bytes=database_bytes,
+                wal_bytes=wal_bytes,
+                shm_bytes=shm_bytes,
+                physical_bytes=database_bytes + wal_bytes + shm_bytes,
             )
 
     async def update_trace_management(
@@ -968,14 +1061,6 @@ class SQLiteObservationStore:
             payload["hidden"] = bool(payload["hidden"])
             payload["deleted"] = bool(payload["deleted"])
             return payload
-
-    def _delete_management(self, column: str, value: str) -> None:
-        self._ensure_writable()
-        if column not in {"trace_id", "run_id", "session_id"}:
-            raise ValueError(f"Unsupported management scope: {column}")
-        with self._connect() as conn:
-            conn.execute(f"DELETE FROM trace_management WHERE {column} = ?", (value,))
-            conn.commit()
 
     def _insert_observation(
         self,
@@ -1207,15 +1292,70 @@ class SQLiteObservationStore:
         for row in selected:
             retained.append(row)
             observation_id = row["observation_id"]
-            observation = conn.execute(
-                "SELECT LENGTH(summary) + LENGTH(attributes_json) FROM observations WHERE observation_id = ?",
-                (observation_id,),
-            ).fetchone()
-            logical_bytes += int(observation[0] or 0)
+            logical_bytes += self._observation_nonfragment_bytes(conn, [observation_id])
             logical_bytes += self._observation_fragment_bytes(conn, [observation_id])
             if logical_bytes >= target_bytes:
                 break
         return retained
+
+    @classmethod
+    def _observation_nonfragment_bytes(
+        cls,
+        conn: sqlite3.Connection,
+        observation_ids: list[str],
+    ) -> int:
+        if not observation_ids:
+            return 0
+        placeholders = ",".join("?" for _ in observation_ids)
+        rows = [
+            *conn.execute(
+                f"SELECT * FROM observations WHERE observation_id IN ({placeholders})",
+                observation_ids,
+            ).fetchall(),
+            *conn.execute(
+                f"""
+                SELECT r.* FROM observation_resource_links r
+                WHERE r.observation_id IN ({placeholders})
+                """,
+                observation_ids,
+            ).fetchall(),
+            *conn.execute(
+                f"SELECT c.* FROM llm_calls c WHERE c.observation_id IN ({placeholders})",
+                observation_ids,
+            ).fetchall(),
+            *conn.execute(
+                f"""
+                SELECT m.* FROM prompt_manifests m
+                JOIN llm_calls c ON c.llm_call_id = m.llm_call_id
+                WHERE c.observation_id IN ({placeholders})
+                """,
+                observation_ids,
+            ).fetchall(),
+            *conn.execute(
+                f"""
+                SELECT p.* FROM prompt_manifest_parts p
+                JOIN prompt_manifests m ON m.manifest_id = p.manifest_id
+                JOIN llm_calls c ON c.llm_call_id = m.llm_call_id
+                WHERE c.observation_id IN ({placeholders})
+                """,
+                observation_ids,
+            ).fetchall(),
+        ]
+        return sum(cls._row_logical_bytes(row) for row in rows)
+
+    @classmethod
+    def _table_logical_bytes(
+        cls,
+        conn: sqlite3.Connection,
+        table: str,
+    ) -> int:
+        return sum(
+            cls._row_logical_bytes(row) for row in conn.execute(f"SELECT * FROM {table}").fetchall()
+        )
+
+    @staticmethod
+    def _row_logical_bytes(row: sqlite3.Row) -> int:
+        return sum(len(str(value).encode("utf-8")) for value in row if value is not None)
 
     @staticmethod
     def _observation_fragment_bytes(

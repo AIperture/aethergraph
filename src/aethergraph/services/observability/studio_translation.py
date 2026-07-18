@@ -883,7 +883,13 @@ class StudioTranslationPresenter:
     async def _list_runs(self) -> list[Any]:
         if self.run_store is None:
             raise ObservabilityUnavailableError("Run store not configured")
-        return list(await self.run_store.list(limit=10_000, offset=0))
+        suppressed = await self.store.list_suppressed_scopes()
+        return [
+            run
+            for run in await self.run_store.list(limit=10_000, offset=0)
+            if _passes_identity_scope(_scope_from_mapping(_run_mapping(run)), self.identity)
+            and not self._run_is_suppressed(run, suppressed)
+        ]
 
     async def _get_run(self, run_id: str) -> Any | None:
         if self.run_store is None:
@@ -892,7 +898,23 @@ class StudioTranslationPresenter:
         if run is None:
             return None
         scope = _scope_from_mapping(_run_mapping(run))
-        return run if _passes_identity_scope(scope, self.identity) else None
+        if not _passes_identity_scope(scope, self.identity):
+            return None
+        suppressed = await self.store.list_suppressed_scopes()
+        return None if self._run_is_suppressed(run, suppressed) else run
+
+    @staticmethod
+    def _run_is_suppressed(
+        run: Any,
+        suppressed: dict[str, set[str]],
+    ) -> bool:
+        run_id = _run_text(run, "run_id")
+        session_id = _run_text(run, "session_id") or run_id
+        return (
+            run_id in suppressed["run_id"]
+            or run_id in suppressed["trace_id"]
+            or session_id in suppressed["session_id"]
+        )
 
     def _run_summary(self, run: Any, events: list[dict[str, Any]]) -> dict[str, Any]:
         kinds = [str(row.get("kind") or "") for row in events]

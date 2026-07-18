@@ -71,7 +71,9 @@ async def test_unknown_resource_relation_fails_without_partial_observation(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_purge_is_bounded_supports_dry_run_and_removes_management(tmp_path: Path) -> None:
+async def test_purge_is_bounded_supports_dry_run_and_tombstones_deleted_trace(
+    tmp_path: Path,
+) -> None:
     store = SQLiteObservationStore(tmp_path / "observability.db")
     for index in range(3):
         await store.append_observation(
@@ -112,8 +114,8 @@ async def test_purge_is_bounded_supports_dry_run_and_removes_management(tmp_path
     assert target_preview.estimated_reclaimed_bytes > 0
 
     await store.delete_trace("trace-1")
-    with store._connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM trace_management").fetchone()[0] == 0
+    suppressed = await store.list_suppressed_scopes()
+    assert suppressed["trace_id"] == {"trace-1"}
 
 
 @pytest.mark.asyncio

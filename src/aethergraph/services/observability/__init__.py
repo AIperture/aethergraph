@@ -1,4 +1,5 @@
 from .facade import (
+    ActiveObservabilityScopeError,
     ObservabilityFacade,
     open_active_observability_facade,
     open_observability_facade,
@@ -23,6 +24,7 @@ from .studio_translation import (
 )
 
 __all__ = [
+    "ActiveObservabilityScopeError",
     "CaptureMode",
     "LLMObservationRecord",
     "ObservationFilter",

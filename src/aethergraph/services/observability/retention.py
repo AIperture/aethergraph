@@ -116,11 +116,12 @@ class RetentionJanitor:
             if not scope["pinned"]:
                 results.append(await self.store.delete_run_observations(scope["scope_id"]))
         stats = await self.store.get_storage_stats()
-        if stats.database_bytes > self.policy.max_total_bytes:
+        if stats.logical_bytes > self.policy.max_total_bytes:
             results.append(
                 await self.store.purge_observations(
                     ObservationFilter(
                         pinned=False,
+                        target_reclaimed_bytes=(stats.logical_bytes - self.policy.max_total_bytes),
                         limit=self.policy.max_observations_per_purge,
                     ),
                     dry_run=False,
