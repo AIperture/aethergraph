@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-from datetime import datetime, timezone
-import json
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -62,7 +60,7 @@ class HarnessRunner:
     async def run_scenario(
         self, scenario: HarnessScenario, *, benchmark_id: str | None = None
     ) -> HarnessRunResult:
-        started = datetime.now(timezone.utc)
+        started = datetime.now(UTC)
         session_id = scenario.shared_session_id or f"harness-session-{uuid4().hex[:12]}"
         run_id = f"harness-run-{uuid4().hex[:12]}"
         tags = [
@@ -112,7 +110,7 @@ class HarnessRunner:
                     result.outputs = outputs
                     result.waits = waits
                     result.status = "succeeded"
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if result.run_id:
                 await self.container.run_manager.cancel_run(result.run_id)
             result.status = "timeout"
@@ -121,7 +119,7 @@ class HarnessRunner:
             result.status = "failed"
             result.error = str(exc)
 
-        finished = datetime.now(timezone.utc)
+        finished = datetime.now(UTC)
         result.finished_at = finished.isoformat()
         result.duration_s = max(0.0, (finished - started).total_seconds())
         result.trace = await self._collect_trace(
@@ -330,7 +328,7 @@ class HarnessRunner:
                 await self.container.eventlog.append(
                     {
                         "id": str(uuid4()),
-                        "ts": datetime.now(timezone.utc).timestamp(),
+                        "ts": datetime.now(UTC).timestamp(),
                         "scope_id": session_id,
                         "kind": "session_chat",
                         "payload": {
@@ -413,20 +411,10 @@ class HarnessRunner:
         return bundle
 
     async def _read_llm_rows(self, *, run_id: str | None, session_id: str) -> list[dict]:
-        obs_path = getattr(self.container, "llm_observation_path", None)
-        if not obs_path:
+        observability = getattr(self.container, "observability", None)
+        if observability is None:
             return []
-        path = Path(obs_path)
-        if not path.exists():
-            return []
-        rows: list[dict] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            if run_id and row.get("run_id") == run_id or row.get("session_id") == session_id:
-                rows.append(row)
-        return rows
+        return await observability.list_llm_calls(run_id=run_id, session_id=session_id)
 
     async def _read_memory_rows(
         self, *, scenario: HarnessScenario, run_id: str, session_id: str

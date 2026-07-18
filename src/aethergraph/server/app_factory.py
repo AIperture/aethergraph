@@ -70,6 +70,12 @@ def create_app(
         app.state.container = container
 
         trigger_engine_task = None
+        retention_stop = asyncio.Event()
+        retention_task = None
+        if container.retention_janitor is not None:
+            retention_task = asyncio.create_task(
+                container.retention_janitor.run_forever(retention_stop)
+            )
 
         # Start trigger engine if trigger_service is present
         if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
@@ -153,6 +159,11 @@ def create_app(
                     task.cancel()
                     with suppress(asyncio.CancelledError):
                         await task
+
+            if retention_task is not None:
+                retention_stop.set()
+                with suppress(asyncio.CancelledError):
+                    await retention_task
 
     # Create app with lifespan
     app = FastAPI(

@@ -81,11 +81,7 @@ class LLMProfile(BaseModel):
 
 
 class LLMObservabilitySettings(BaseModel):
-    enabled: bool = True
-    sink: Literal["console", "file"] = "file"
-    path: str = "events/llm/llm_calls.jsonl"
-    capture_mode: Literal["metadata", "full"] = "full"
-    prompt_view: Literal["off", "compact", "truncated", "full"] = "compact"
+    capture_mode: Literal["off", "metadata", "manifest", "full"] = "metadata"
 
 
 class LLMSettings(BaseModel):

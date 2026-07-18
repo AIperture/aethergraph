@@ -50,7 +50,6 @@ from aethergraph.services.execution.local_python import LocalPythonExecutionServ
 from aethergraph.services.indices.global_indices import GlobalIndices
 from aethergraph.services.inspect import (
     AgentEventTypeRegistry,
-    JsonlLLMObservationStore,
     register_default_agent_event_types,
 )
 from aethergraph.services.knowledge.chunker import TextSplitter
@@ -60,10 +59,6 @@ from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBack
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
-from aethergraph.services.llm.observability import (
-    ConsoleLLMObservationSink,
-    JsonlLLMObservationSink,
-)
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -71,6 +66,13 @@ from aethergraph.services.mcp.service import MCPService
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
 from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
+from aethergraph.services.observability import (
+    ObservabilityFacade,
+    ObservationPolicy,
+    RetentionJanitor,
+    RetentionPolicy,
+    SQLiteObservationStore,
+)
 
 # ---- Planning components ----
 from aethergraph.services.planning.action_catalog import ActionCatalog
@@ -88,7 +90,7 @@ from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.skills.skill_registry import SkillRegistry
-from aethergraph.services.tracing import EventLogTracer, NoopTracer
+from aethergraph.services.tracing import NoopTracer
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
@@ -147,6 +149,7 @@ SERVICE_KEYS = [
     "authz",
     "redactor",
     "metering",
+    "observability",
     "tracer",
     "secrets",
 ]
@@ -203,9 +206,8 @@ class DefaultContainer:
 
     # optional llm service
     llm: LLMService | None = None
-    llm_observation_sink: Any | None = None
-    llm_observation_path: str | None = None
-    llm_observation_store: Any | None = None
+    observability: ObservabilityFacade | None = None
+    retention_janitor: RetentionJanitor | None = None
     mcp: MCPService | None = None
     embed_service: EmbeddingService | None = None
     web_search: WebSearchService | None = None
@@ -232,7 +234,7 @@ class DefaultContainer:
 
     metering: MeteringService | None = None
     rate_limiter: SimpleRateLimiter | None = None
-    tracer: NoopTracer | EventLogTracer | None = None
+    tracer: NoopTracer | None = None
     agent_event_registry: AgentEventTypeRegistry | None = None
     secrets: EnvSecrets | None = None
 
@@ -275,6 +277,31 @@ def build_default_container(
     # Scope factory
     scope_factory = ScopeFactory()
 
+    observation_path = Path(cfg.observability.path)
+    if not observation_path.is_absolute():
+        observation_path = root_p / observation_path
+    observation_policy = ObservationPolicy(
+        capture_mode=cfg.llm.observability.capture_mode,
+        full_prompt_ttl_days=cfg.observability.retention.max_full_prompt_age_days,
+    )
+    observation_store = SQLiteObservationStore(observation_path, policy=observation_policy)
+    observability = ObservabilityFacade(observation_store)
+    retention_cfg = cfg.observability.retention
+    retention_janitor = RetentionJanitor(
+        observation_store,
+        RetentionPolicy(
+            max_age_days=retention_cfg.max_age_days,
+            error_max_age_days=retention_cfg.error_max_age_days,
+            max_full_prompt_age_days=retention_cfg.max_full_prompt_age_days,
+            max_bytes_per_trace=retention_cfg.max_bytes_per_trace,
+            max_total_bytes=retention_cfg.max_total_bytes,
+            max_retained_traces=retention_cfg.max_retained_traces,
+            max_retained_runs=retention_cfg.max_retained_runs,
+            max_observations_per_purge=retention_cfg.max_observations_per_purge,
+        ),
+        interval_seconds=retention_cfg.janitor_interval_seconds,
+    )
+
     # event log for metering and channel events --
     # TODO: make configurable from cfg
     eventlog = build_event_log(cfg)
@@ -282,7 +309,7 @@ def build_default_container(
     # core services
     logger_factory = StdLoggerService.build(
         LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs")),
-        event_log=eventlog,
+        observation_store=observation_store if cfg.observability.persist_logs else None,
     )
 
     clock = SystemClock()
@@ -352,25 +379,10 @@ def build_default_container(
         EnvSecrets()
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     obs_cfg = cfg.llm.observability
-    llm_observation_sink = None
-    llm_observation_path: str | None = None
-    llm_observation_store = None
-    if obs_cfg.enabled:
-        if obs_cfg.sink == "console":
-            llm_observation_sink = ConsoleLLMObservationSink(prompt_view=obs_cfg.prompt_view)
-        elif obs_cfg.sink == "file":
-            obs_path = Path(obs_cfg.path)
-            if not obs_path.is_absolute():
-                obs_path = root_p / obs_path
-            llm_observation_sink = JsonlLLMObservationSink(obs_path)
-            llm_observation_path = str(obs_path)
-            llm_observation_store = JsonlLLMObservationStore(obs_path)
-        else:
-            raise ValueError(f"Unsupported LLM observability sink: {obs_cfg.sink!r}")
     llm_clients = build_llm_clients(
         cfg.llm,
         secrets,
-        observation_sink=llm_observation_sink,
+        observation_sink=observability,
         observation_capture_mode=obs_cfg.capture_mode,
     )  # return {profile: GenericLLMClient}
     llm_profiles = {"default": cfg.llm.default, **dict(cfg.llm.profiles or {})}
@@ -552,9 +564,8 @@ def build_default_container(
         eventlog=eventlog,
         memory_factory=memory_factory,
         llm=llm_service,
-        llm_observation_sink=llm_observation_sink,
-        llm_observation_path=llm_observation_path,
-        llm_observation_store=llm_observation_store,
+        observability=observability,
+        retention_janitor=retention_janitor,
         embed_service=embed_service,
         web_search=web_search,
         mcp=mcp,
@@ -570,9 +581,7 @@ def build_default_container(
         redactor=None,
         metering=metering,
         rate_limiter=rate_limiter,
-        tracer=EventLogTracer(event_log=eventlog, event_hub=event_hub)
-        if eventlog is not None
-        else NoopTracer(),
+        tracer=NoopTracer(),
         agent_event_registry=agent_event_registry,
         settings=cfg,
     )

@@ -23,7 +23,11 @@ from aethergraph.api.v1.schemas.inspect import (
     TraceEvent,
     TraceEventListResponse,
 )
-from aethergraph.services.inspect.llm_store import JsonlLLMObservationStore
+from aethergraph.services.observability import (
+    ObservabilityFacade,
+    ObservationFilter,
+    open_observability_facade,
+)
 from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 
 RunStatusResolver = Callable[[set[str]], Awaitable[Mapping[str, str]]]
@@ -201,19 +205,17 @@ def _present_llm_row(row: dict[str, Any]) -> LLMCallRecord:
 def _present_log_row(
     row: dict[str, Any], *, run_status: str | None = None, trace_status: str | None = None
 ) -> InspectLogRecord:
-    payload = row.get("payload") or {}
-    inner = payload.get("payload") or {}
+    inner = row.get("attributes") or {}
+    scope = _scope_from_mapping(row)
     return InspectLogRecord(
-        id=str(payload.get("id") or row.get("id")),
-        ts=float(payload.get("ts") or row.get("ts") or 0.0),
-        summary=str(payload.get("summary") or inner.get("message") or ""),
-        severity=str(payload.get("severity") or inner.get("level") or "info"),
-        status=str(payload.get("status") or inner.get("level") or "info"),
-        producer=InspectProducer(
-            **(payload.get("producer") or {"family": "logger", "name": "unknown"})
-        ),
-        scope=_scope_from_mapping(payload.get("scope") or {}),
-        tags=list(payload.get("tags") or []),
+        id=str(row.get("observation_id")),
+        ts=_parse_llm_ts(row.get("occurred_at")),
+        summary=str(row.get("summary") or inner.get("message") or ""),
+        severity=str(row.get("severity") or inner.get("level") or "info"),
+        status=str(row.get("status") or "ok"),
+        producer=InspectProducer(family="logger", name=str(inner.get("logger") or "unknown")),
+        scope=scope,
+        tags=[str(inner.get("level") or "info")],
         payload=inner,
         logger=str(inner.get("logger") or "unknown"),
         level=str(inner.get("level") or "info"),
@@ -264,7 +266,7 @@ async def _trace_error_statuses(event_log: Any, trace_ids: set[str]) -> dict[str
 @dataclass
 class InspectionFacade:
     event_log: Any | None
-    llm_observation_store: Any | None
+    observability: ObservabilityFacade | None
     identity: InspectionIdentity = InspectionIdentity()
     run_status_resolver: RunStatusResolver | None = None
     close_callback: Callable[[], Awaitable[None]] | None = None
@@ -282,7 +284,7 @@ class InspectionFacade:
                 ```
             Close an injected facade:
                 ```python
-                facade = InspectionFacade(event_log=event_log, llm_observation_store=None)
+                facade = InspectionFacade(event_log=event_log, observability=None)
                 await facade.close()
                 ```
 
@@ -440,7 +442,7 @@ class InspectionFacade:
         """
         store = self._require_llm_store()
         user_id, org_id = _store_identity_scope(self.identity)
-        rows = await store.query(
+        rows = await store.query_llm_calls(
             run_id=run_id,
             session_id=session_id,
             agent_id=agent_id,
@@ -494,7 +496,7 @@ class InspectionFacade:
         Notes:
             Raises `InspectionNotFoundError` for missing or out-of-scope records.
         """
-        row = await self._require_llm_store().get(call_id)
+        row = await self._require_llm_store().get_llm_call(call_id)
         if row is None or (required_run_id and row.get("run_id") != required_run_id):
             raise InspectionNotFoundError("LLM call not found")
         record = _present_llm_row(row)
@@ -556,39 +558,35 @@ class InspectionFacade:
         Notes:
             Run status is omitted when no resolver is configured.
         """
-        event_log = self._require_event_log()
         user_id, org_id = _store_identity_scope(self.identity)
-        rows = await event_log.query(
-            since=since,
-            until=until,
-            kinds=["inspect_log"],
-            limit=None,
-            user_id=user_id,
-            org_id=org_id,
+        rows = await self._require_llm_store().list_observations(
+            ObservationFilter(
+                category="log",
+                run_id=run_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                app_id=app_id,
+                graph_id=graph_id,
+                node_id=node_id,
+                user_id=user_id,
+                org_id=org_id,
+            )
         )
-        raw_run_ids = {
-            (row.get("payload") or {}).get("scope", {}).get("run_id")
-            for row in rows
-            if (row.get("payload") or {}).get("scope", {}).get("run_id")
-        }
+        raw_run_ids = {row.get("run_id") for row in rows if row.get("run_id")}
         run_statuses = await self._resolve_run_statuses(raw_run_ids)
-        trace_ids = {
-            (row.get("payload") or {}).get("scope", {}).get("trace_id")
-            for row in rows
-            if (row.get("payload") or {}).get("scope", {}).get("trace_id")
-        }
-        trace_statuses = await _trace_error_statuses(event_log, trace_ids)
+        trace_ids = {row.get("trace_id") for row in rows if row.get("trace_id")}
+        trace_statuses = (
+            await _trace_error_statuses(self.event_log, trace_ids) if self.event_log else {}
+        )
         items = [
             _present_log_row(
                 row,
-                run_status=run_statuses.get(
-                    (row.get("payload") or {}).get("scope", {}).get("run_id")
-                ),
-                trace_status=trace_statuses.get(
-                    (row.get("payload") or {}).get("scope", {}).get("trace_id")
-                ),
+                run_status=run_statuses.get(row.get("run_id")),
+                trace_status=trace_statuses.get(row.get("trace_id")),
             )
             for row in rows
+            if (since is None or _parse_llm_ts(row.get("occurred_at")) >= since.timestamp())
+            and (until is None or _parse_llm_ts(row.get("occurred_at")) <= until.timestamp())
         ]
         items = [
             item
@@ -698,9 +696,9 @@ class InspectionFacade:
         return self.event_log
 
     def _require_llm_store(self) -> Any:
-        if self.llm_observation_store is None:
+        if self.observability is None:
             raise InspectionUnavailableError("LLM observation store not configured")
-        return self.llm_observation_store
+        return self.observability.store
 
     async def _resolve_run_statuses(self, run_ids: set[str]) -> Mapping[str, str]:
         if not run_ids or self.run_status_resolver is None:
@@ -743,7 +741,8 @@ def open_inspection_facade(
     """
     root = Path(workspace_root).expanduser().resolve()
     event_path = root / "events" / "events.db"
-    if not root.is_dir() or not event_path.is_file():
+    observation_path = root / "events" / "observability.db"
+    if not root.is_dir() or not event_path.is_file() or not observation_path.is_file():
         raise InspectionWorkspaceError("AetherGraph inspection workspace was not found")
 
     statuses = dict(run_statuses or {})
@@ -752,12 +751,18 @@ def open_inspection_facade(
         return {run_id: statuses[run_id] for run_id in run_ids if run_id in statuses}
 
     event_log = SqliteEventLog(str(event_path), read_only=True)
+    observability = open_observability_facade(root, read_only=True)
+
+    async def close_stores() -> None:
+        await event_log.close()
+        await observability.close()
+
     return InspectionFacade(
         event_log=event_log,
-        llm_observation_store=JsonlLLMObservationStore(root / "events" / "llm" / "llm_calls.jsonl"),
+        observability=observability,
         identity=identity or InspectionIdentity(),
         run_status_resolver=resolve_run_statuses,
-        close_callback=event_log.close,
+        close_callback=close_stores,
     )
 
 

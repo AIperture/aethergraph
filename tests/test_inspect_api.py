@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import logging
 
 from fastapi import FastAPI
@@ -16,7 +16,7 @@ from aethergraph.services.inspect import (
     emit_agent_event,
     register_default_agent_event_types,
 )
-from aethergraph.services.inspect.logging import EventLogInspectionHandler
+from aethergraph.services.observability.logging import ObservationLogHandler
 
 
 class FakeEventLog:
@@ -82,7 +82,7 @@ class FakeRunManager:
             graph_id="graph-1",
             kind="graphfn",
             status=RunStatus.failed,
-            started_at=datetime(2026, 3, 11, tzinfo=timezone.utc),
+            started_at=datetime(2026, 3, 11, tzinfo=UTC),
             user_id="u1",
             org_id="o1",
             session_id="sess-1",
@@ -91,11 +91,13 @@ class FakeRunManager:
         )
 
 
-class FakeLLMObservationStore:
-    def __init__(self, rows: list[dict]) -> None:
-        self.rows = rows
+class FakeObservationStore:
+    def __init__(self, llm_rows: list[dict], log_rows: list[dict]) -> None:
+        self.llm_rows = llm_rows
+        self.log_rows = log_rows
+        self.appended = []
 
-    async def query(self, **kwargs):
+    async def query_llm_calls(self, **kwargs):
         run_id = kwargs.get("run_id")
         session_id = kwargs.get("session_id")
         agent_id = kwargs.get("agent_id")
@@ -107,7 +109,7 @@ class FakeLLMObservationStore:
         since = kwargs.get("since")
         until = kwargs.get("until")
         out = []
-        for row in self.rows:
+        for row in self.llm_rows:
             created_at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
             if run_id and row["run_id"] != run_id:
                 continue
@@ -136,11 +138,26 @@ class FakeLLMObservationStore:
             out.append(sanitized)
         return out
 
-    async def get(self, call_id: str):
-        for row in self.rows:
+    async def get_llm_call(self, call_id: str):
+        for row in self.llm_rows:
             if call_id == row["call_id"]:
                 return row
         return None
+
+    async def list_observations(self, filters):
+        return [
+            row
+            for row in self.log_rows
+            if (filters.category is None or row["category"] == filters.category)
+            and (filters.run_id is None or row["run_id"] == filters.run_id)
+            and (filters.session_id is None or row["session_id"] == filters.session_id)
+            and (filters.user_id is None or row["user_id"] == filters.user_id)
+            and (filters.org_id is None or row["org_id"] == filters.org_id)
+        ]
+
+    async def append_observation(self, record):
+        self.appended.append(record)
+        return record.observation_id
 
 
 @pytest.fixture()
@@ -330,13 +347,35 @@ def client(monkeypatch) -> TestClient:
             "error_message": "too many requests",
         },
     ]
+    log_rows = []
+    for event_row in eventlog.rows:
+        if event_row.get("kind") != "inspect_log":
+            continue
+        payload = event_row["payload"]
+        log_rows.append(
+            {
+                "observation_id": payload["id"],
+                "category": "log",
+                "name": payload["producer"]["name"],
+                "occurred_at": datetime.fromtimestamp(payload["ts"], tz=UTC).isoformat(),
+                "summary": payload["summary"],
+                "severity": payload["severity"],
+                "status": "error" if payload["severity"] == "error" else "ok",
+                **payload["scope"],
+                "attributes": payload["payload"],
+            }
+        )
 
     class FakeContainer:
         pass
 
     FakeContainer.run_manager = FakeRunManager()
     FakeContainer.eventlog = eventlog
-    FakeContainer.llm_observation_store = FakeLLMObservationStore(llm_rows)
+    FakeContainer.observability = type(
+        "FakeObservability",
+        (),
+        {"store": FakeObservationStore(llm_rows, log_rows)},
+    )()
     FakeContainer.agent_event_registry = register_default_agent_event_types(
         AgentEventTypeRegistry()
     )
@@ -423,7 +462,7 @@ def test_get_llm_call_detail_includes_full_payload(client: TestClient) -> None:
 def test_get_run_logs_and_errors(client: TestClient) -> None:
     run_logs = client.get("/api/v1/inspect/runs/run-1/logs")
     assert run_logs.status_code == 200
-    log_item = run_logs.json()["items"][0]
+    log_item = next(item for item in run_logs.json()["items"] if item["level"] == "error")
     assert log_item["message"] == "run failed"
     assert log_item["trace_status"] == "error"
 
@@ -488,9 +527,9 @@ def test_list_agent_events_supports_time_window(client: TestClient) -> None:
     assert len(items) == 0
 
 
-def test_eventlog_inspection_handler_emits_scoped_log_record() -> None:
-    eventlog = FakeEventLog()
-    handler = EventLogInspectionHandler(eventlog, level=logging.INFO)
+def test_observation_log_handler_emits_one_scoped_record() -> None:
+    store = FakeObservationStore([], [])
+    handler = ObservationLogHandler(store, level=logging.INFO)
     logger = logging.getLogger("aethergraph.test.inspect")
     logger.handlers = []
     logger.addHandler(handler)
@@ -515,8 +554,8 @@ def test_eventlog_inspection_handler_emits_scoped_log_record() -> None:
     finally:
         current_meter_context.reset(token)
 
-    assert len(eventlog.rows) == 1
-    row = eventlog.rows[0]
-    assert row["kind"] == "inspect_log"
-    assert row["scope_id"] == "run-1"
-    assert row["payload"]["payload"]["message"] == "structured failure"
+    assert len(store.appended) == 1
+    row = store.appended[0]
+    assert row.category == "log"
+    assert row.scope.run_id == "run-1"
+    assert row.attributes["message"] == "structured failure"

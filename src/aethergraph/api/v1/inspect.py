@@ -17,11 +17,9 @@ from aethergraph.services.inspect.facade import (
     _paginate_rows,
     _passes_identity_scope,
     _present_llm_row,
-    _present_log_row,
     _present_trace_row,
     _scope_from_mapping,
     _store_identity_scope,
-    _trace_error_statuses,
 )
 
 from .deps import RequestIdentity, get_identity
@@ -81,7 +79,7 @@ def _inspection_facade(identity: RequestIdentity) -> InspectionFacade:
 
     return InspectionFacade(
         event_log=getattr(container, "eventlog", None),
-        llm_observation_store=getattr(container, "llm_observation_store", None),
+        observability=getattr(container, "observability", None),
         identity=_inspection_identity(identity),
         run_status_resolver=resolve_run_statuses,
     )
@@ -253,11 +251,12 @@ async def get_run_llm_calls(
 ) -> LLMCallListResponse:
     await _get_run_or_404(run_id, identity)
     container = current_services()
-    store = getattr(container, "llm_observation_store", None)
+    observability = getattr(container, "observability", None)
+    store = observability.store if observability is not None else None
     if store is None:
         raise HTTPException(status_code=503, detail="LLM observation store not configured")
     user_id, org_id = _identity_scope(identity)
-    rows = await store.query(
+    rows = await store.query_llm_calls(
         run_id=run_id,
         since=_parse_window(from_),
         until=_parse_window(to),
@@ -329,11 +328,12 @@ async def get_run_llm_summary(
 ) -> LLMSummary:
     await _get_run_or_404(run_id, identity)
     container = current_services()
-    store = getattr(container, "llm_observation_store", None)
+    observability = getattr(container, "observability", None)
+    store = observability.store if observability is not None else None
     if store is None:
         raise HTTPException(status_code=503, detail="LLM observation store not configured")
     user_id, org_id = _identity_scope(identity)
-    rows = await store.query(
+    rows = await store.query_llm_calls(
         run_id=run_id,
         since=_parse_window(from_),
         until=_parse_window(to),
@@ -378,40 +378,17 @@ async def get_run_logs(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> InspectLogListResponse:
-    rec = await _get_run_or_404(run_id, identity)
-    container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
-        raise HTTPException(status_code=503, detail="Event log not configured")
-    user_id, org_id = _identity_scope(identity)
-    rows = await event_log.query(
-        scope_id=run_id,
-        since=_parse_window(from_),
-        until=_parse_window(to),
-        kinds=["inspect_log"],
-        limit=None,
-        user_id=user_id,
-        org_id=org_id,
-    )
-    rows.sort(key=lambda row: row.get("ts") or 0.0)
-    trace_ids = {
-        (row.get("payload") or {}).get("scope", {}).get("trace_id")
-        for row in rows
-        if (row.get("payload") or {}).get("scope", {}).get("trace_id")
-    }
-    trace_statuses = await _trace_error_statuses(event_log, trace_ids)
-    items = [
-        _present_log_row(
-            row,
-            run_status=rec.status.value if isinstance(rec.status, RunStatus) else str(rec.status),
-            trace_status=trace_statuses.get(
-                (row.get("payload") or {}).get("scope", {}).get("trace_id")
-            ),
+    await _get_run_or_404(run_id, identity)
+    try:
+        return await _inspection_facade(identity).list_logs(
+            since=_parse_window(from_),
+            until=_parse_window(to),
+            run_id=run_id,
+            cursor=cursor,
+            limit=limit,
         )
-        for row in rows
-    ]
-    page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
-    return InspectLogListResponse(items=page, next_cursor=next_cursor)
+    except InspectionUnavailableError as exc:
+        raise _inspection_http_error(exc) from exc
 
 
 @router.get("/logs", response_model=InspectLogListResponse)

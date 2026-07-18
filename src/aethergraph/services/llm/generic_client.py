@@ -22,6 +22,7 @@ from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
+from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.observability import (
     CaptureMode,
     LLMObservationRecord,
@@ -111,7 +112,7 @@ class GenericLLMClient(
         compatibility_policy: str = "compat",
         # observability
         observation_sink: LLMObservationSink | None = None,
-        observation_capture_mode: CaptureMode = "full",
+        observation_capture_mode: CaptureMode = "metadata",
         # identity
         profile_name: str | None = None,
     ):
@@ -654,7 +655,7 @@ class GenericLLMClient(
         trace_payload: dict[str, Any] | None,
         call_name: str | None = None,
     ) -> LLMObservationRecord:
-        return LLMObservationRecord.new(
+        record = LLMObservationRecord.new(
             call_type=call_type,
             provider=self.provider,
             model=model,
@@ -675,6 +676,8 @@ class GenericLLMClient(
             profile_name=self.profile_name,
             call_name=call_name,
         )
+        begin_llm_call_correlation(record.llm_call_id)
+        return record
 
     async def _emit_observation(self, record: LLMObservationRecord) -> None:
         if self.observation_sink is None:

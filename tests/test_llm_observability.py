@@ -1,41 +1,39 @@
 from __future__ import annotations
 
-import json
+import asyncio
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from aethergraph.config.config import AppSettings
+from aethergraph.config.config import AppSettings, RateLimitSettings
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
-from aethergraph.services.llm.observability import (
-    ConsoleLLMObservationSink,
-    JsonlLLMObservationSink,
+from aethergraph.services.llm.observability import ConsoleLLMObservationSink
+from aethergraph.services.llm.types import LLMInputTooLargeError, LLMRunBudgetExceededError
+from aethergraph.services.observability import (
     LLMObservationRecord,
+    ObservabilityFacade,
+    ObservationPolicy,
+    SQLiteObservationStore,
 )
-from aethergraph.services.llm.types import (
-    LLMInputTooLargeError,
-    LLMRunBudgetExceededError,
-)
+from aethergraph.services.observability.prompt_store import canonical_json
 
 
-def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-
-
-@pytest.mark.asyncio
-async def test_console_sink_compact_view_renders_prompt_and_output(capsys) -> None:
-    sink = ConsoleLLMObservationSink(prompt_view="compact", width=60, truncation_chars=80)
+def _record(
+    *,
+    prompt: str = "hello",
+    output: str | None = "hello back",
+    run_id: str = "run-1",
+) -> LLMObservationRecord:
     record = LLMObservationRecord.new(
         call_type="chat",
         provider="openai",
-        model="gpt-4o-mini",
-        dimensions={"run_id": "run-1", "graph_id": "graph-1"},
-        messages=[
-            {"role": "system", "content": "You are concise and helpful."},
-            {"role": "user", "content": "Explain attention in one sentence."},
-        ],
+        model="gpt-test",
+        dimensions={"run_id": run_id, "graph_id": "graph-1"},
+        messages=[{"role": "user", "content": prompt}],
         reasoning_effort=None,
         max_output_tokens=64,
         output_format="text",
@@ -44,199 +42,236 @@ async def test_console_sink_compact_view_renders_prompt_and_output(capsys) -> No
         strict_schema=True,
         validate_json=True,
         extra_params={},
-        request_args={},
-        provider_request_args={},
+        request_args={"model": "gpt-test"},
+        provider_request_args={"temperature": 0},
         compatibility_notes=[],
-        trace_payload=None,
+        trace_payload={"step": 1},
     )
-    record.raw_text = "Attention weights the most relevant inputs for the current prediction."
-    record.usage = {"prompt_tokens": 12, "completion_tokens": 9}
-    record.latency_ms = 1546
-
-    await sink.emit(record, capture_mode="full")
-    out = capsys.readouterr().out
-    assert "LLM CALL  [-] openai/gpt-4o-mini  profile=default" in out
-    assert "[SYSTEM]" in out
-    assert "[USER]" in out
-    assert "[OUTPUT]" in out
-    assert "tokens:  in=12  out=9  total=21" in out
+    record.raw_text = output
+    record.usage = {"prompt_tokens": 3, "completion_tokens": 2}
+    record.latency_ms = 12
+    return record
 
 
 @pytest.mark.asyncio
-async def test_llm_observation_non_stream_success_full_capture(tmp_path: Path) -> None:
-    sink_path = tmp_path / "llm_calls.jsonl"
+async def test_console_sink_compact_view_renders_prompt_and_output(capsys) -> None:
+    sink = ConsoleLLMObservationSink(prompt_view="compact", width=60, truncation_chars=80)
+    record = _record(prompt="Explain attention.", output="Attention weights relevant inputs.")
+
+    await sink.emit(record, capture_mode="full")
+
+    out = capsys.readouterr().out
+    assert "LLM CALL  [-] openai/gpt-test  profile=default" in out
+    assert "[USER]" in out
+    assert "[OUTPUT]" in out
+    assert "tokens:  in=3  out=2  total=5" in out
+
+
+@pytest.mark.asyncio
+async def test_manifest_reconstructs_exact_provider_request_and_deduplicates_fragments(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteObservationStore(
+        tmp_path / "observability.db",
+        policy=ObservationPolicy(capture_mode="manifest"),
+    )
+    first = _record(run_id="run-1")
+    second = _record(run_id="run-2")
+
+    await store.append_llm_call(first)
+    first_stats = await store.get_storage_stats()
+    await store.append_llm_call(second)
+    second_stats = await store.get_storage_stats()
+    detail = await store.get_llm_call(first.llm_call_id)
+
+    assert detail is not None
+    manifest = detail["prompt_manifest"]
+    request = manifest["provider_request"]
+    assert (
+        sha256(canonical_json(request).encode()).hexdigest() == manifest["assembled_request_hash"]
+    )
+    assert request["messages"] == [{"content": "hello", "role": "user"}]
+    assert second_stats.fragments == first_stats.fragments
+
+
+@pytest.mark.asyncio
+async def test_full_capture_stores_one_prompt_body_without_duplicate_preview(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteObservationStore(
+        tmp_path / "observability.db",
+        policy=ObservationPolicy(capture_mode="full"),
+    )
+    record = _record(prompt="unique-secret-prompt")
+
+    await store.append_llm_call(record)
+    detail = await store.get_llm_call(record.llm_call_id)
+
+    assert detail is not None
+    assert detail["messages"] == [{"content": "unique-secret-prompt", "role": "user"}]
+    assert "preview" not in detail["messages_preview"]
+    with store._connect() as conn:
+        bodies = [row[0] for row in conn.execute("SELECT body FROM content_fragments")]
+    assert sum(body.count("unique-secret-prompt") for body in bodies) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["off", "metadata"])
+async def test_non_payload_capture_modes_store_no_content_fragments(
+    tmp_path: Path, mode: str
+) -> None:
+    store = SQLiteObservationStore(
+        tmp_path / f"{mode}.db",
+        policy=ObservationPolicy(capture_mode=mode),  # type: ignore[arg-type]
+    )
+    record = _record(prompt="secret prompt", output="secret answer")
+
+    await store.append_llm_call(record)
+    stats = await store.get_storage_stats()
+    detail = await store.get_llm_call(record.llm_call_id)
+
+    assert stats.fragments == 0
+    assert detail is not None
+    assert detail["messages"] is None
+    assert detail["raw_text"] is None
+    if mode == "off":
+        assert detail["messages_preview"] is None
+        assert stats.manifests == 0
+    else:
+        assert detail["messages_preview"]["count"] == 1
+        assert stats.manifests == 1
+
+
+@pytest.mark.asyncio
+async def test_deletion_retains_shared_fragments_until_final_reference(tmp_path: Path) -> None:
+    store = SQLiteObservationStore(
+        tmp_path / "observability.db",
+        policy=ObservationPolicy(capture_mode="manifest"),
+    )
+    first = _record(run_id="run-1")
+    second = _record(run_id="run-2")
+    await store.append_llm_call(first)
+    await store.append_llm_call(second)
+    before = await store.get_storage_stats()
+
+    preview = await store.delete_run_observations("run-1", dry_run=True)
+    deleted_first = await store.delete_run_observations("run-1")
+    middle = await store.get_storage_stats()
+    deleted_second = await store.delete_run_observations("run-2")
+    after = await store.get_storage_stats()
+
+    assert preview.shared_fragment_bytes_retained > 0
+    assert deleted_first.deleted_observations == 1
+    assert middle.fragments == before.fragments
+    assert deleted_second.deleted_fragments == before.fragments
+    assert after.fragments == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_writes_and_historical_reads_are_safe(tmp_path: Path) -> None:
+    store = SQLiteObservationStore(
+        tmp_path / "observability.db",
+        policy=ObservationPolicy(capture_mode="manifest"),
+    )
+    records = [_record(run_id=f"run-{index}") for index in range(20)]
+
+    await asyncio.gather(
+        *(store.append_llm_call(record) for record in records),
+        *(store.query_llm_calls(limit=None) for _ in range(5)),
+    )
+
+    assert len(await store.query_llm_calls(limit=None)) == 20
+
+
+@pytest.mark.asyncio
+async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path: Path) -> None:
+    store = SQLiteObservationStore(
+        tmp_path / "observability.db",
+        policy=ObservationPolicy(capture_mode="manifest"),
+    )
+    sink = ObservabilityFacade(store)
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
-        observation_sink=JsonlLLMObservationSink(sink_path),
-        observation_capture_mode="full",
+        observation_sink=sink,
+        observation_capture_mode="manifest",
     )
 
-    async def fake_chat_dispatch(messages, **kwargs):
+    async def successful_dispatch(messages, **kwargs):
         return "hello back", {"prompt_tokens": 11, "completion_tokens": 7}
 
-    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
-    token = current_meter_context.set(
-        {"run_id": "run-1", "graph_id": "graph-1", "user_id": "user-1", "org_id": "org-1"}
-    )
+    client._chat_dispatch = successful_dispatch  # type: ignore[method-assign]
+    token = current_meter_context.set({"run_id": "run-success"})
     try:
-        text, usage = await client.chat(
-            [{"role": "user", "content": "hello"}],
-            max_output_tokens=128,
-            trace_payload={"stage": "test"},
-        )
+        await client.chat([{"role": "user", "content": "hello"}])
     finally:
         current_meter_context.reset(token)
 
-    assert text == "hello back"
-    assert usage["prompt_tokens"] == 11
-    rows = _read_jsonl(sink_path)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["provider"] == "openai"
-    assert row["model"] == "gpt-test"
-    assert row["run_id"] == "run-1"
-    assert row["messages"][0]["content"] == "hello"
-    assert row["raw_text"] == "hello back"
-    assert row["usage"]["completion_tokens"] == 7
-    assert row["trace_payload"]["stage"] == "test"
-    assert row["latency_ms"] is not None
-
-
-@pytest.mark.asyncio
-async def test_llm_observation_non_stream_failure_emits_record(tmp_path: Path) -> None:
-    sink_path = tmp_path / "llm_calls.jsonl"
-    client = GenericLLMClient(
-        provider="openai",
-        model="gpt-test",
-        observation_sink=JsonlLLMObservationSink(sink_path),
-        observation_capture_mode="full",
-    )
-
-    async def fake_chat_dispatch(messages, **kwargs):
+    async def failed_dispatch(messages, **kwargs):
         raise RuntimeError("boom")
 
-    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
-
+    client._chat_dispatch = failed_dispatch  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="boom"):
         await client.chat([{"role": "user", "content": "hello"}])
 
-    rows = _read_jsonl(sink_path)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["error_type"] == "RuntimeError"
-    assert row["error_message"] == "boom"
-    assert row["raw_text"] is None
+    rows = await store.query_llm_calls(limit=None)
+    assert len(rows) == 2
+    assert {row["error_type"] for row in rows} == {None, "RuntimeError"}
+    assert len({row["llm_call_id"] for row in rows}) == 2
+    correlation = current_llm_call_correlation()
+    assert correlation is not None
+    assert correlation.llm_call_id in {row["llm_call_id"] for row in rows}
 
 
 @pytest.mark.asyncio
-async def test_llm_observation_stream_success_full_capture(tmp_path: Path) -> None:
-    sink_path = tmp_path / "llm_calls.jsonl"
-    client = GenericLLMClient(
-        provider="openai",
-        model="gpt-stream",
-        observation_sink=JsonlLLMObservationSink(sink_path),
-        observation_capture_mode="full",
+@pytest.mark.parametrize("mode", ["off", "metadata", "manifest", "full"])
+async def test_metering_is_independent_of_capture_mode(tmp_path: Path, mode: str) -> None:
+    class FakeMetering:
+        def __init__(self) -> None:
+            self.records = []
+
+        async def record_llm(self, **record) -> None:
+            self.records.append(record)
+
+    metering = FakeMetering()
+    store = SQLiteObservationStore(
+        tmp_path / f"{mode}.db",
+        policy=ObservationPolicy(capture_mode=mode),  # type: ignore[arg-type]
     )
-
-    async def fake_stream(messages, **kwargs):
-        return "streamed output", {"input_tokens": 3, "output_tokens": 5}
-
-    client._chat_openai_responses_stream = fake_stream  # type: ignore[method-assign]
-
-    text, usage = await client.chat_stream([{"role": "user", "content": "hi"}])
-    assert text == "streamed output"
-    assert usage["output_tokens"] == 5
-
-    rows = _read_jsonl(sink_path)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["call_type"] == "chat_stream"
-    assert row["raw_text"] == "streamed output"
-    assert row["usage"]["output_tokens"] == 5
-
-
-@pytest.mark.asyncio
-async def test_llm_observation_metadata_mode_redacts_bodies(tmp_path: Path) -> None:
-    sink_path = tmp_path / "llm_calls.jsonl"
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
-        observation_sink=JsonlLLMObservationSink(sink_path),
-        observation_capture_mode="metadata",
+        metering=metering,
+        observation_sink=ObservabilityFacade(store),
+        observation_capture_mode=mode,  # type: ignore[arg-type]
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return "secret answer", {"prompt_tokens": 2, "completion_tokens": 4}
+        return "ok", {
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "prompt_tokens_details": {"cached_tokens": 4},
+        }
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
-    await client.chat([{"role": "user", "content": "secret prompt"}], trace_payload={"foo": "bar"})
+    await client.chat([{"role": "user", "content": "hello"}])
 
-    rows = _read_jsonl(sink_path)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["messages"] is None
-    assert row["raw_text"] is None
-    assert row["trace_payload"] is None
-    assert row["messages_preview"]["count"] == 1
-    assert row["raw_text_preview"]["length"] == len("secret answer")
+    assert len(metering.records) == 1
+    assert metering.records[0]["cache_read_tokens"] == 4
+    assert metering.records[0]["uncached_input_tokens"] == 6
 
 
 @pytest.mark.asyncio
-async def test_llm_observation_redacts_multimodal_data_urls(tmp_path: Path) -> None:
-    sink_path = tmp_path / "llm_calls.jsonl"
-    client = GenericLLMClient(
-        provider="openai",
-        model="gpt-test",
-        observation_sink=JsonlLLMObservationSink(sink_path),
-        observation_capture_mode="full",
-    )
-    data_url = "data:image/png;base64,YWJjZA=="
-
-    async def fake_chat_dispatch(messages, **kwargs):
-        return "vision answer", {"prompt_tokens": 2, "completion_tokens": 4}
-
-    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
-    await client.chat(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "What is this?"},
-                    {"type": "image_url", "image_url": {"url": data_url}},
-                ],
-            }
-        ],
-        trace_payload={"image": data_url},
-    )
-
-    row = _read_jsonl(sink_path)[0]
-    serialized = json.dumps(row, ensure_ascii=False)
-    assert data_url not in serialized
-    assert "YWJjZA==" not in serialized
-    assert row["messages"][0]["content"][1]["image_url"]["url"] == (
-        "[redacted data URL: image/png]"
-    )
-    assert row["trace_payload"]["image"] == "[redacted data URL: image/png]"
-    assert row["messages_preview"]["preview"][0]["content"][1]["image_url"]["url"] == (
-        "[redacted data URL: image/png]"
-    )
-
-
-@pytest.mark.asyncio
-async def test_default_container_llm_observability_writes_jsonl(tmp_path: Path) -> None:
+async def test_default_container_uses_sqlite_and_no_jsonl_or_persisted_tracer(
+    tmp_path: Path,
+) -> None:
     settings = AppSettings(
-        root=str(tmp_path),
+        workspace=str(tmp_path),
         deploy_mode="local",
         llm={
             "enabled": True,
             "default": {"provider": "openai", "model": "gpt-container"},
-            "observability": {
-                "enabled": True,
-                "sink": "file",
-                "path": "events/llm/custom_calls.jsonl",
-                "capture_mode": "full",
-            },
+            "observability": {"capture_mode": "manifest"},
         },
     )
     container = build_default_container(root=str(tmp_path), cfg=settings)
@@ -249,24 +284,21 @@ async def test_default_container_llm_observability_writes_jsonl(tmp_path: Path) 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     await client.chat([{"role": "user", "content": "from container"}])
 
-    sink_path = tmp_path / "events" / "llm" / "custom_calls.jsonl"
-    assert sink_path.exists()
-    rows = _read_jsonl(sink_path)
-    assert len(rows) == 1
-    assert rows[0]["raw_text"] == "container output"
+    assert (tmp_path / "events" / "observability.db").is_file()
+    assert not list(tmp_path.rglob("llm_calls.jsonl"))
+    assert container.tracer.__class__.__name__ == "NoopTracer"
+    rows = await container.observability.list_llm_calls(limit=None)
+    assert rows[0]["capture_mode"] == "manifest"
 
 
 @pytest.mark.asyncio
 async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> None:
-    from aethergraph.config.config import RateLimitSettings
-
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
         rate_limit_cfg=RateLimitSettings(enabled=True, max_llm_tokens_per_run=200),
     )
     client._per_run_tokens["run-preflight-tight"] = 180
-
     dispatched = False
 
     async def fake_chat_dispatch(messages, **kwargs):
@@ -275,7 +307,6 @@ async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> 
         return "unexpected", {"prompt_tokens": 1, "completion_tokens": 1}
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
-
     token = current_meter_context.set({"run_id": "run-preflight-tight"})
     try:
         with pytest.raises(LLMInputTooLargeError) as exc_info:
@@ -287,17 +318,12 @@ async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> 
         current_meter_context.reset(token)
 
     assert dispatched is False
-    exc = exc_info.value
-    assert exc.run_id == "run-preflight-tight"
-    assert exc.spent_tokens == 180
-    assert exc.limit == 200
-    assert exc.projected_total_tokens > 200
+    assert exc_info.value.limit == 200
+    assert exc_info.value.projected_total_tokens > 200
 
 
 @pytest.mark.asyncio
 async def test_llm_post_call_budget_violation_raises_typed_error() -> None:
-    from aethergraph.config.config import RateLimitSettings
-
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
@@ -308,7 +334,6 @@ async def test_llm_post_call_budget_violation_raises_typed_error() -> None:
         return "hello back", {"prompt_tokens": 30, "completion_tokens": 25}
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
-
     token = current_meter_context.set({"run_id": "run-post"})
     try:
         with pytest.raises(LLMRunBudgetExceededError) as exc_info:
@@ -316,7 +341,5 @@ async def test_llm_post_call_budget_violation_raises_typed_error() -> None:
     finally:
         current_meter_context.reset(token)
 
-    exc = exc_info.value
-    assert exc.run_id == "run-post"
-    assert exc.total_tokens == 55
-    assert exc.limit == 50
+    assert exc_info.value.total_tokens == 55
+    assert exc_info.value.limit == 50

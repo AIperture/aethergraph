@@ -133,7 +133,7 @@ def client_from_profile(
     *,
     profile_name: str | None = None,
     observation_sink: LLMObservationSink | None = None,
-    observation_capture_mode: CaptureMode = "full",
+    observation_capture_mode: CaptureMode = "metadata",
 ) -> GenericLLMClient:
     # At this point, _apply_env_overrides_to_profile has already filled
     # p.base_url, p.api_key, etc. as much as possible.
@@ -162,7 +162,7 @@ def build_llm_clients(
     secrets: Secrets,
     *,
     observation_sink: LLMObservationSink | None = None,
-    observation_capture_mode: CaptureMode = "full",
+    observation_capture_mode: CaptureMode = "metadata",
 ) -> dict[str, GenericLLMClient]:
     """Returns dict of {profile_name: client}, always includes 'default' if enabled."""
     if not cfg.enabled:
