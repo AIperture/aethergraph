@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
-from aethergraph.api.v1 import inspect as inspect_api
+from aethergraph.api.v1 import observability as observability_api
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
 from aethergraph.core.runtime.runtime_metering import current_meter_context
@@ -16,6 +16,7 @@ from aethergraph.services.inspect import (
     emit_agent_event,
     register_default_agent_event_types,
 )
+from aethergraph.services.observability import ObservabilityFacade
 from aethergraph.services.observability.logging import ObservationLogHandler
 
 
@@ -38,6 +39,12 @@ class FakeEventLog:
         offset: int = 0,
         user_id: str | None = None,
         org_id: str | None = None,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        order_dir: str = "desc",
     ) -> list[dict]:
         out: list[dict] = []
         min_ts = since.timestamp() if since else None
@@ -56,10 +63,23 @@ class FakeEventLog:
                 continue
             if org_id is not None and row.get("org_id") != org_id:
                 continue
-            row_tags = set(row.get("tags") or [])
-            if tags is not None and not row_tags.issuperset(tags):
+            for key, value in (
+                ("run_id", run_id),
+                ("session_id", session_id),
+                ("agent_id", agent_id),
+                ("graph_id", graph_id),
+                ("node_id", node_id),
+            ):
+                if value is not None and row.get(key) != value:
+                    break
+            else:
+                row_tags = set(row.get("tags") or [])
+                if tags is not None and not row_tags.issuperset(tags):
+                    continue
+                out.append(row)
                 continue
-            out.append(row)
+            continue
+        out.sort(key=lambda row: float(row.get("ts") or 0), reverse=order_dir != "asc")
         out = out[offset:]
         if limit is not None:
             out = out[:limit]
@@ -90,11 +110,19 @@ class FakeRunManager:
             app_id="app-1",
         )
 
+    async def get(self, run_id: str) -> RunRecord | None:
+        return await self.get_record(run_id)
+
+    async def list(self, **kwargs) -> list[RunRecord]:
+        del kwargs
+        record = await self.get_record("run-1")
+        return [record] if record is not None else []
+
 
 class FakeObservationStore:
-    def __init__(self, llm_rows: list[dict], log_rows: list[dict]) -> None:
+    def __init__(self, llm_rows: list[dict], observation_rows: list[dict]) -> None:
         self.llm_rows = llm_rows
-        self.log_rows = log_rows
+        self.observation_rows = observation_rows
         self.appended = []
 
     async def query_llm_calls(self, **kwargs):
@@ -147,7 +175,7 @@ class FakeObservationStore:
     async def list_observations(self, filters):
         return [
             row
-            for row in self.log_rows
+            for row in self.observation_rows
             if (filters.category is None or row["category"] == filters.category)
             and (filters.run_id is None or row["run_id"] == filters.run_id)
             and (filters.session_id is None or row["session_id"] == filters.session_id)
@@ -347,12 +375,40 @@ def client(monkeypatch) -> TestClient:
             "error_message": "too many requests",
         },
     ]
-    log_rows = []
+    observation_rows = []
     for event_row in eventlog.rows:
+        if event_row.get("kind") == "trace":
+            payload = event_row["payload"]
+            observation_rows.append(
+                {
+                    "observation_id": event_row["id"],
+                    "category": "service_operation",
+                    "name": payload["operation"],
+                    "occurred_at": datetime.fromtimestamp(event_row["ts"], tz=UTC).isoformat(),
+                    "summary": f"{payload['service']}/{payload['operation']}",
+                    "severity": "error" if payload.get("error") else "info",
+                    "status": payload["status"],
+                    **{
+                        key: payload.get(key)
+                        for key in (
+                            "run_id",
+                            "session_id",
+                            "graph_id",
+                            "agent_id",
+                            "app_id",
+                            "trace_id",
+                            "user_id",
+                            "org_id",
+                        )
+                    },
+                    "attributes": payload,
+                }
+            )
+            continue
         if event_row.get("kind") != "inspect_log":
             continue
         payload = event_row["payload"]
-        log_rows.append(
+        observation_rows.append(
             {
                 "observation_id": payload["id"],
                 "category": "log",
@@ -371,23 +427,27 @@ def client(monkeypatch) -> TestClient:
 
     FakeContainer.run_manager = FakeRunManager()
     FakeContainer.eventlog = eventlog
-    FakeContainer.observability = type(
-        "FakeObservability",
-        (),
-        {"store": FakeObservationStore(llm_rows, log_rows)},
-    )()
+    FakeContainer.observability = ObservabilityFacade(
+        FakeObservationStore(llm_rows, observation_rows),
+        event_log=eventlog,
+        run_store=FakeContainer.run_manager,
+        owns_store=False,
+    )
     FakeContainer.agent_event_registry = register_default_agent_event_types(
         AgentEventTypeRegistry()
     )
 
-    monkeypatch.setattr("aethergraph.api.v1.inspect.current_services", lambda: FakeContainer())
+    monkeypatch.setattr(
+        "aethergraph.api.v1.observability.current_services", lambda: FakeContainer()
+    )
     app = FastAPI()
-    app.include_router(inspect_api.router, prefix="/api/v1")
+    app.include_router(observability_api.router, prefix="/api/v1")
+    app.include_router(observability_api.trace_router)
 
     async def fake_get_identity():
         return RequestIdentity(user_id="u1", org_id="o1", mode="cloud")
 
-    app.dependency_overrides[inspect_api.get_identity] = fake_get_identity
+    app.dependency_overrides[observability_api.get_identity] = fake_get_identity
 
     token = current_meter_context.set(
         {
@@ -430,6 +490,12 @@ def test_get_run_trace(client: TestClient) -> None:
     assert data["items"][0]["trace_id"] == "tr_1"
 
 
+def test_connected_trace_router_uses_observability_facade(client: TestClient) -> None:
+    resp = client.get("/api/trace/sessions")
+    assert resp.status_code == 200
+    assert resp.json()["items"][0]["latest_trace_id"] == "run-1"
+
+
 def test_get_run_trace_summary(client: TestClient) -> None:
     resp = client.get("/api/v1/inspect/runs/run-1/trace/summary")
     assert resp.status_code == 200
@@ -443,8 +509,8 @@ def test_get_run_llm_calls(client: TestClient) -> None:
     resp = client.get("/api/v1/inspect/runs/run-1/llm-calls")
     assert resp.status_code == 200
     item = resp.json()["items"][0]
-    assert item["provider"] == "openai"
-    assert item["messages_preview"]["count"] == 1
+    assert item["provider"] == "anthropic"
+    assert item["messages_preview"]["count"] == 2
     assert item["messages"] is None
     assert item["raw_text"] is None
     assert item["trace_payload"] is None
@@ -493,7 +559,7 @@ def test_list_global_traces_filters_and_ordering(client: TestClient) -> None:
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 1
-    assert items[0]["span_id"] == "sp_2"
+    assert items[0]["span_id"] == "trace-evt-err"
 
 
 def test_list_global_llm_calls_filters_and_ordering(client: TestClient) -> None:

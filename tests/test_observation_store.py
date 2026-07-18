@@ -38,7 +38,11 @@ async def test_observation_crud_resource_links_and_storage_stats(tmp_path: Path)
         ],
     )
 
-    assert (await facade.get_observation(observation_id))["summary"] == "read report"
+    detail = await facade.get_observation(observation_id)
+    assert detail["summary"] == "read report"
+    assert detail["resource_links"][0]["resource_key"] == "artifact:report"
+    linked = await store.list_resource_observations("artifact:report", relation="read")
+    assert [item["observation_id"] for item in linked] == [observation_id]
     assert await facade.list_traces() == ["trace-1"]
     assert len(await facade.get_trace("trace-1")) == 1
     stats = await facade.get_storage_stats()

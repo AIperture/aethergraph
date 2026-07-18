@@ -443,7 +443,7 @@ class SQLiteObservationStore:
             row = conn.execute(
                 "SELECT * FROM observations WHERE observation_id = ?", (observation_id,)
             ).fetchone()
-            return self._observation_row(row) if row else None
+            return self._observation_row(row, conn=conn) if row else None
 
     async def list_observations(
         self,
@@ -466,7 +466,55 @@ class SQLiteObservationStore:
             sql += " LIMIT ? OFFSET ?"
             params.extend((filters.limit, offset))
         with self._connect() as conn:
-            return [self._observation_row(row) for row in conn.execute(sql, params).fetchall()]
+            return [
+                self._observation_row(row, conn=conn)
+                for row in conn.execute(sql, params).fetchall()
+            ]
+
+    async def list_resource_observations(
+        self, resource_key: str, *, relation: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List AG observations linked to one canonical resource identity.
+
+        Intro:
+            Queries the dedicated resource-link index without parsing payload text.
+
+        Examples:
+            `rows = await store.list_resource_observations("artifact:a-1")`
+            `outputs = await store.list_resource_observations("artifact:a-1", relation="output")`
+
+        Args:
+            resource_key: Exact namespaced resource identity.
+            relation: Optional exact canonical relationship.
+
+        Returns:
+            list[dict[str, Any]]: Linked observations in reverse chronological order.
+
+        Notes:
+            The authoritative resource content remains outside observability.
+        """
+        return await asyncio.to_thread(self._list_resource_observations, resource_key, relation)
+
+    def _list_resource_observations(
+        self, resource_key: str, relation: str | None
+    ) -> list[dict[str, Any]]:
+        where = ["l.resource_key = ?"]
+        params: list[Any] = [resource_key]
+        if relation is not None:
+            where.append("l.relation = ?")
+            params.append(relation)
+        sql = f"""
+            SELECT DISTINCT o.* FROM observations o
+            JOIN observation_resource_links l
+              ON l.observation_id = o.observation_id
+            WHERE {" AND ".join(where)}
+            ORDER BY o.occurred_at DESC
+        """
+        with self._connect() as conn:
+            return [
+                self._observation_row(row, conn=conn)
+                for row in conn.execute(sql, params).fetchall()
+            ]
 
     async def query_llm_calls(
         self,
@@ -1027,9 +1075,28 @@ class SQLiteObservationStore:
         }
 
     @staticmethod
-    def _observation_row(row: sqlite3.Row) -> dict[str, Any]:
+    def _observation_row(
+        row: sqlite3.Row, *, conn: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
         result = dict(row)
         result["attributes"] = json.loads(result.pop("attributes_json"))
+        result["resource_links"] = (
+            [
+                dict(link)
+                for link in conn.execute(
+                    """
+                    SELECT resource_key, relation, revision, content_hash,
+                           slot_key, artifact_id
+                    FROM observation_resource_links
+                    WHERE observation_id = ?
+                    ORDER BY resource_key, relation
+                    """,
+                    (result["observation_id"],),
+                ).fetchall()
+            ]
+            if conn is not None
+            else []
+        )
         return result
 
     def _bounded_json(self, value: Any) -> str:

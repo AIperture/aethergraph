@@ -1,14 +1,31 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
+import json
 from pathlib import Path
-from typing import Any
+import sqlite3
+from typing import TYPE_CHECKING, Any
 
 from aethergraph.services.llm.correlation import complete_llm_call_correlation
 
 from .models import LLMObservationRecord, ObservationFilter, ObservationRecord, PurgeResult
 from .policy import ObservationPolicy
 from .sqlite_store import SQLiteObservationStore
+from .studio_translation import (
+    ObservabilityIdentity,
+    ObservabilityWorkspaceError,
+    StudioTranslationPresenter,
+)
+
+if TYPE_CHECKING:
+    from aethergraph.api.v1.schemas.inspect import (
+        AgentEventListResponse,
+        InspectLogListResponse,
+        LLMCallListResponse,
+        LLMCallRecord,
+        TraceEventListResponse,
+    )
 
 
 class ObservabilityFacade:
@@ -32,6 +49,12 @@ class ObservabilityFacade:
 
     Args:
         store: Concrete SQLite observation store owned by this facade.
+        event_log: Canonical AG event log for engine events and metering.
+        run_store: Authoritative AG run store used for grouping and status.
+        identity: Optional read identity applied by the translation presenter.
+        run_statuses: Optional retained status overrides for historical reads.
+        owns_event_log: Whether `close` releases the injected event log.
+        owns_store: Whether `close` releases the observation store.
 
     Returns:
         ObservabilityFacade: A facade over canonical observations and prompts.
@@ -40,11 +63,78 @@ class ObservabilityFacade:
         This facade does not read legacy JSONL or engine trace stores.
     """
 
-    def __init__(self, store: SQLiteObservationStore) -> None:
+    def __init__(
+        self,
+        store: SQLiteObservationStore,
+        *,
+        event_log: Any | None = None,
+        run_store: Any | None = None,
+        identity: ObservabilityIdentity | None = None,
+        run_statuses: dict[str, str] | None = None,
+        owns_event_log: bool = False,
+        owns_store: bool = True,
+    ) -> None:
         self.store = store
+        self.event_log = event_log
+        self.run_store = run_store
+        self.identity = identity or ObservabilityIdentity()
+        self._run_statuses = dict(run_statuses or {})
+        self._owns_event_log = owns_event_log
+        self._owns_store = owns_store
 
     async def close(self) -> None:
-        await self.store.close()
+        """Release stores owned by this facade.
+
+        Intro:
+            Closes only resources whose ownership was explicitly assigned.
+
+        Examples:
+            `await facade.close()`
+            `await facade.close()`
+
+        Args:
+            None.
+
+        Returns:
+            None: Owned stores are closed before completion.
+
+        Notes:
+            Repeated calls are safe.
+        """
+        if self._owns_event_log and self.event_log is not None:
+            await self.event_log.close()
+            self._owns_event_log = False
+        if self._owns_store:
+            await self.store.close()
+            self._owns_store = False
+
+    def for_identity(self, identity: ObservabilityIdentity) -> ObservabilityFacade:
+        """Create a non-owning identity-scoped query facade.
+
+        Intro:
+            Reuses the active stores while applying one request identity.
+
+        Examples:
+            `scoped = facade.for_identity(ObservabilityIdentity(mode="local"))`
+            `cloud = facade.for_identity(identity)`
+
+        Args:
+            identity: Exact identity constraints for subsequent reads.
+
+        Returns:
+            ObservabilityFacade: Non-owning scoped facade.
+
+        Notes:
+            Closing the returned facade does not close shared stores.
+        """
+        return ObservabilityFacade(
+            self.store,
+            event_log=self.event_log,
+            run_store=self.run_store,
+            identity=identity,
+            run_statuses=self._run_statuses,
+            owns_store=False,
+        )
 
     async def emit(self, record: LLMObservationRecord, *, capture_mode: str) -> None:
         if capture_mode != self.store.policy.capture_mode:
@@ -76,6 +166,365 @@ class ObservabilityFacade:
 
     async def list_llm_calls(self, **filters: Any) -> list[dict[str, Any]]:
         return await self.store.query_llm_calls(**filters)
+
+    async def list_inspect_traces(self, **filters: Any) -> TraceEventListResponse:
+        """Project explicit service observations into the current Inspect DTO.
+
+        Intro:
+            Preserves the temporary browser contract without legacy storage.
+
+        Examples:
+            `page = await facade.list_inspect_traces(run_id="run-1")`
+            `page = await facade.list_inspect_traces(status="error")`
+
+        Args:
+            **filters: Current Inspect trace filters and pagination values.
+
+        Returns:
+            TraceEventListResponse: Translated service-operation page.
+
+        Notes:
+            Generic tracing is off by default, so an empty page is valid.
+        """
+        return await self._presenter().list_traces(**filters)
+
+    async def list_inspect_llm_calls(self, **filters: Any) -> LLMCallListResponse:
+        """Project LLM observations into the current Inspect list DTO.
+
+        Intro:
+            Returns metadata-safe call rows through the one v2 presenter.
+
+        Examples:
+            `page = await facade.list_inspect_llm_calls(run_id="run-1")`
+            `page = await facade.list_inspect_llm_calls(provider="openai")`
+
+        Args:
+            **filters: Current LLM list filters and pagination values.
+
+        Returns:
+            LLMCallListResponse: Translated LLM call page.
+
+        Notes:
+            Prompt bodies are omitted from list results.
+        """
+        return await self._presenter().list_llm_calls(**filters)
+
+    async def get_inspect_llm_call(
+        self, call_id: str, *, required_run_id: str | None = None
+    ) -> LLMCallRecord:
+        """Project one full LLM observation into the current Inspect DTO.
+
+        Intro:
+            Applies identity and optional run ownership before hydration.
+
+        Examples:
+            `item = await facade.get_inspect_llm_call("call-1")`
+            `item = await facade.get_inspect_llm_call("call-1", required_run_id="run-1")`
+
+        Args:
+            call_id: Exact LLM call identity.
+            required_run_id: Optional required owner run.
+
+        Returns:
+            LLMCallRecord: Capture-policy-aware call detail.
+
+        Notes:
+            Missing content is represented by capture metadata, not fabrication.
+        """
+        return await self._presenter().get_llm_call(call_id, required_run_id=required_run_id)
+
+    async def list_inspect_logs(self, **filters: Any) -> InspectLogListResponse:
+        """Project structured log observations into the current Logs DTO.
+
+        Intro:
+            Keeps chronological log inspection on the v2 observation store.
+
+        Examples:
+            `page = await facade.list_inspect_logs(run_id="run-1")`
+            `page = await facade.list_inspect_logs(level="error")`
+
+        Args:
+            **filters: Current log filters and pagination values.
+
+        Returns:
+            InspectLogListResponse: Translated structured-log page.
+
+        Notes:
+            Ordinary logs are never converted into semantic trace spans.
+        """
+        return await self._presenter().list_logs(**filters)
+
+    async def list_inspect_agent_events(self, **filters: Any) -> AgentEventListResponse:
+        """Project canonical and explicit custom agent events for Inspect.
+
+        Intro:
+            Reads canonical engine events and explicit AG agent events together.
+
+        Examples:
+            `page = await facade.list_inspect_agent_events(run_id="run-1")`
+            `page = await facade.list_inspect_agent_events(event_type="agent_engine.decision")`
+
+        Args:
+            **filters: Current agent-event filters and pagination values.
+
+        Returns:
+            AgentEventListResponse: Normalized event page.
+
+        Notes:
+            Resource links stay in the canonical event payload.
+        """
+        return await self._presenter().list_agent_events(**filters)
+
+    async def list_trace_sessions(
+        self, *, limit: int = 50, cursor: str | None = None
+    ) -> dict[str, Any]:
+        """List current Trace Explorer session groups from v2 data.
+
+        Intro:
+            Groups authoritative runs by session without an engine trace store.
+
+        Examples:
+            `page = await facade.list_trace_sessions()`
+            `page = await facade.list_trace_sessions(limit=25, cursor="25")`
+
+        Args:
+            limit: Maximum session groups returned.
+            cursor: Optional decimal offset cursor.
+
+        Returns:
+            dict[str, Any]: Current session-group page shape.
+
+        Notes:
+            Run IDs are the semantic trace IDs during the UI transition.
+        """
+        return await self._presenter()._list_trace_sessions(limit=limit, cursor=cursor)
+
+    async def inspect_trace(self, trace_id: str) -> dict[str, Any] | None:
+        """Build one current Trace Explorer tree from v2 records.
+
+        Intro:
+            Composes run, event, plan, graph, and context availability at read time.
+
+        Examples:
+            `tree = await facade.inspect_trace("run-1")`
+            `missing = await facade.inspect_trace("unknown")`
+
+        Args:
+            trace_id: Exact AG run identity.
+
+        Returns:
+            dict[str, Any] | None: Current trace tree or `None`.
+
+        Notes:
+            No translated tree is persisted or cached.
+        """
+        return await self._presenter()._inspect_trace(trace_id)
+
+    async def get_trace_graph(self, trace_id: str) -> dict[str, Any] | None:
+        """Build the observed agent/dispatch graph for one run.
+
+        Intro:
+            Includes only nodes and edges supported by canonical events.
+
+        Examples:
+            `graph = await facade.get_trace_graph("run-1")`
+            `missing = await facade.get_trace_graph("unknown")`
+
+        Args:
+            trace_id: Exact AG run identity.
+
+        Returns:
+            dict[str, Any] | None: Current graph DTO or `None`.
+
+        Notes:
+            Unknown topology is omitted rather than inferred.
+        """
+        return await self._presenter()._get_trace_graph(trace_id)
+
+    async def get_trace_spans(
+        self,
+        trace_id: str,
+        *,
+        kind: str | None = None,
+        agent_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Project canonical events into current Trace Explorer spans.
+
+        Intro:
+            Pairs tools and dispatches by explicit causal identities.
+
+        Examples:
+            `page = await facade.get_trace_spans("run-1")`
+            `tools = await facade.get_trace_spans("run-1", kind="tool_call")`
+
+        Args:
+            trace_id: Exact AG run identity.
+            kind: Optional translated span-kind filter.
+            agent_id: Optional exact agent-instance filter.
+
+        Returns:
+            dict[str, Any] | None: Mapping with translated `items`, or `None`.
+
+        Notes:
+            Unrepresented legacy span kinds are honestly absent.
+        """
+        return await self._presenter()._get_trace_spans(trace_id, kind=kind, agent_id=agent_id)
+
+    async def get_trace_plans(self, trace_id: str) -> dict[str, Any] | None:
+        """Reconstruct retained plan versions for one run.
+
+        Intro:
+            Reads canonical plan lifecycle events in persisted order.
+
+        Examples:
+            `plans = await facade.get_trace_plans("run-1")`
+            `missing = await facade.get_trace_plans("unknown")`
+
+        Args:
+            trace_id: Exact AG run identity.
+
+        Returns:
+            dict[str, Any] | None: Mapping with plan snapshots, or `None`.
+
+        Notes:
+            Only explicitly retained plan payloads are returned.
+        """
+        return await self._presenter()._get_trace_plans(trace_id)
+
+    async def get_trace_context_snapshot(
+        self, trace_id: str, snapshot_id: str
+    ) -> dict[str, Any] | None:
+        """Hydrate one prompt-manifest context snapshot for the current UI.
+
+        Intro:
+            Converts captured manifest metadata/fragments without inventing content.
+
+        Examples:
+            `snapshot = await facade.get_trace_context_snapshot("run-1", "manifest-1")`
+            `missing = await facade.get_trace_context_snapshot("run-1", "unknown")`
+
+        Args:
+            trace_id: Exact AG run identity.
+            snapshot_id: Exact prompt manifest identity.
+
+        Returns:
+            dict[str, Any] | None: Current context DTO or `None`.
+
+        Notes:
+            Metadata capture returns a valid empty body with capture information.
+        """
+        return await self._presenter()._get_context_snapshot(trace_id, snapshot_id)
+
+    async def get_trace_agent_states(self, trace_id: str, agent_id: str) -> dict[str, Any] | None:
+        """Return explicitly retained agent state history for one run.
+
+        Intro:
+            Preserves the current collection contract without synthetic snapshots.
+
+        Examples:
+            `states = await facade.get_trace_agent_states("run-1", "planner")`
+            `missing = await facade.get_trace_agent_states("unknown", "planner")`
+
+        Args:
+            trace_id: Exact AG run identity.
+            agent_id: Exact agent-instance identity.
+
+        Returns:
+            dict[str, Any] | None: State-history page or `None`.
+
+        Notes:
+            The result is empty when no canonical state event was retained.
+        """
+        return await self._presenter()._get_agent_states(trace_id, agent_id)
+
+    async def get_usage(self, *, run_id: str | None = None) -> dict[str, int]:
+        """Aggregate product-agent LLM and cache usage.
+
+        Intro:
+            Sums usage stored on canonical LLM observations.
+
+        Examples:
+            `usage = await facade.get_usage(run_id="run-1")`
+            `workspace_usage = await facade.get_usage()`
+
+        Args:
+            run_id: Optional exact run scope.
+
+        Returns:
+            dict[str, int]: LLM call and token/cache totals.
+
+        Notes:
+            This is agent-scoped product usage, not engine trace metering.
+        """
+        if self.event_log is None:
+            raise RuntimeError("AG event log is required for usage reads")
+        rows = await self.event_log.query(kinds=["meter.llm"], run_id=run_id, limit=None)
+        tool_rows = await self.event_log.query(
+            kinds=["agent_engine.tool_call"],
+            tags=["agent_engine"],
+            run_id=run_id,
+            limit=None,
+        )
+        totals = {
+            "llm_calls": len(rows),
+            "tool_calls": len(tool_rows),
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "uncached_input_tokens": 0,
+        }
+        for row in rows:
+            totals["input_tokens"] += int(row.get("input_tokens") or row.get("prompt_tokens") or 0)
+            totals["output_tokens"] += int(
+                row.get("output_tokens") or row.get("completion_tokens") or 0
+            )
+            for name in (
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "uncached_input_tokens",
+            ):
+                totals[name] += int(row.get(name) or 0)
+        return totals
+
+    async def list_resource_events(
+        self, resource_key: str, *, relation: str | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Query all v2 evidence linked to one resource identity.
+
+        Intro:
+            Composes indexed AG observation links and canonical engine-event tags.
+
+        Examples:
+            `events = await facade.list_resource_events("artifact:a-1")`
+            `outputs = await facade.list_resource_events("artifact:a-1", relation="output")`
+
+        Args:
+            resource_key: Exact namespaced resource identity.
+            relation: Optional canonical relation filter.
+
+        Returns:
+            dict[str, list[dict[str, Any]]]: Observation and engine-event evidence.
+
+        Notes:
+            Tool result bodies are never parsed to discover resource references.
+        """
+        if self.event_log is None:
+            raise RuntimeError("AG event log is required for resource-event reads")
+        tags = ["agent_engine", f"resource:{resource_key}"]
+        if relation is not None:
+            tags.append(f"resource_relation:{relation}")
+        engine_events = await self.event_log.query(
+            tags=tags,
+            limit=None,
+            order_dir="desc",
+        )
+        return {
+            "observations": await self.store.list_resource_observations(
+                resource_key, relation=relation
+            ),
+            "engine_events": engine_events,
+        }
 
     async def get_trace(self, trace_id: str) -> list[dict[str, Any]]:
         return await self.store.list_observations(ObservationFilter(trace_id=trace_id))
@@ -112,12 +561,97 @@ class ObservabilityFacade:
     async def garbage_collect_fragments(self) -> int:
         return await self.store.garbage_collect_fragments()
 
+    def _presenter(self) -> StudioTranslationPresenter:
+        async def resolve_run_statuses(run_ids: set[str]) -> dict[str, str]:
+            statuses = {
+                run_id: self._run_statuses[run_id]
+                for run_id in run_ids
+                if run_id in self._run_statuses
+            }
+            if self.run_store is None:
+                return statuses
+            for run_id in run_ids - statuses.keys():
+                run = await self.run_store.get(run_id)
+                if run is None:
+                    continue
+                value = run.get("status") if isinstance(run, dict) else getattr(run, "status", None)
+                statuses[run_id] = str(getattr(value, "value", value) or "")
+            return statuses
+
+        return StudioTranslationPresenter(
+            event_log=self.event_log,
+            store=self.store,
+            run_store=self.run_store,
+            identity=self.identity,
+            run_status_resolver=resolve_run_statuses,
+        )
+
+
+class _ReadOnlySQLiteRunStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    async def get(self, run_id: str) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._get, run_id)
+
+    async def list(self, *, limit: int = 100, offset: int = 0, **_: Any) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(self._list, limit, offset)
+
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True)
+
+    def _get(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT data_json FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def _list(self, limit: int, offset: int) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT data_json FROM runs ORDER BY started_at DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+
+def open_active_observability_facade(
+    store: SQLiteObservationStore,
+    *,
+    event_log: Any,
+    run_store: Any,
+) -> ObservabilityFacade:
+    """Compose the active-container observability query boundary.
+
+    Intro:
+        Binds the live observation, event, and run stores without extra readers.
+
+    Examples:
+        `facade = open_active_observability_facade(store, event_log=log, run_store=runs)`
+        `container.observability = open_active_observability_facade(store, event_log=log, run_store=runs)`
+
+    Args:
+        store: Active canonical observation store.
+        event_log: Active AG event log.
+        run_store: Active authoritative run store.
+
+    Returns:
+        ObservabilityFacade: One active read/write boundary.
+
+    Notes:
+        The returned facade owns the observation store, not the shared event log.
+    """
+    return ObservabilityFacade(store, event_log=event_log, run_store=run_store)
+
 
 def open_observability_facade(
     workspace_root: str | Path,
     *,
     read_only: bool = True,
     policy: ObservationPolicy | None = None,
+    identity: ObservabilityIdentity | None = None,
+    run_statuses: dict[str, str] | None = None,
 ) -> ObservabilityFacade:
     """Open the canonical observation store for one workspace.
 
@@ -139,20 +673,35 @@ def open_observability_facade(
         workspace_root: Existing AetherGraph workspace root.
         read_only: Whether writes must be rejected.
         policy: Optional capture policy for writable use.
+        identity: Optional identity scope for translated reads.
+        run_statuses: Optional retained run-status overrides.
 
     Returns:
-        ObservabilityFacade: Facade bound to `events/observability.db`.
+        ObservabilityFacade: Facade over observations, canonical events, and runs.
 
     Notes:
         Missing workspaces or databases fail directly; there is no legacy fallback.
     """
     root = Path(workspace_root).expanduser().resolve()
-    if not root.is_dir():
-        raise FileNotFoundError(root)
+    event_path = root / "events" / "events.db"
+    observation_path = root / "events" / "observability.db"
+    run_path = root / "runs" / "runs.db"
+    if not root.is_dir() or not all(
+        path.is_file() for path in (event_path, observation_path, run_path)
+    ):
+        raise ObservabilityWorkspaceError("AetherGraph v2 observability workspace was not found")
+    from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
+
+    event_log = SqliteEventLog(str(event_path), read_only=read_only)
     return ObservabilityFacade(
         SQLiteObservationStore(
-            root / "events" / "observability.db",
+            observation_path,
             read_only=read_only,
             policy=policy,
-        )
+        ),
+        event_log=event_log,
+        run_store=_ReadOnlySQLiteRunStore(run_path),
+        identity=identity,
+        run_statuses=run_statuses,
+        owns_event_log=True,
     )

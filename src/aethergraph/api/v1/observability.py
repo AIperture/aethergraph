@@ -2,24 +2,19 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import UTC, datetime
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 
-from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.core.runtime.runtime_services import current_services
-from aethergraph.services.inspect.facade import (
-    InspectionFacade,
-    InspectionIdentity,
-    InspectionNotFoundError,
-    InspectionUnavailableError,
+from aethergraph.services.observability import (
+    ObservabilityFacade,
+    ObservabilityIdentity,
+    ObservabilityNotFoundError,
+    ObservabilityUnavailableError,
+)
+from aethergraph.services.observability.studio_translation import (
     _matches_scope,
     _paginate_rows,
-    _passes_identity_scope,
-    _present_llm_row,
-    _present_trace_row,
-    _scope_from_mapping,
-    _store_identity_scope,
 )
 
 from .deps import RequestIdentity, get_identity
@@ -37,6 +32,7 @@ from .schemas.inspect import (
 )
 
 router = APIRouter(prefix="/inspect", tags=["inspect"])
+trace_router = APIRouter(prefix="/api/trace", tags=["trace"])
 
 
 def _parse_window(value: datetime | None) -> datetime | None:
@@ -47,46 +43,24 @@ def _parse_window(value: datetime | None) -> datetime | None:
     return value
 
 
-def _inspection_identity(identity: RequestIdentity) -> InspectionIdentity:
-    return InspectionIdentity(
+def _observability_identity(identity: RequestIdentity) -> ObservabilityIdentity:
+    return ObservabilityIdentity(
         mode=identity.mode,
         user_id=identity.user_id,
         org_id=identity.org_id,
     )
 
 
-def _identity_scope(identity: RequestIdentity) -> tuple[str | None, str | None]:
-    return _store_identity_scope(_inspection_identity(identity))
-
-
-def _inspection_facade(identity: RequestIdentity) -> InspectionFacade:
+def _observability_facade(identity: RequestIdentity) -> ObservabilityFacade:
     container = current_services()
-
-    async def resolve_run_statuses(run_ids: set[str]) -> dict[str, str]:
-        run_manager = getattr(container, "run_manager", None)
-        if run_manager is None:
-            return {}
-        statuses: dict[str, str] = {}
-        for run_id in run_ids:
-            record = await run_manager.get_record(run_id)
-            if record is not None:
-                statuses[run_id] = (
-                    record.status.value
-                    if isinstance(record.status, RunStatus)
-                    else str(record.status)
-                )
-        return statuses
-
-    return InspectionFacade(
-        event_log=getattr(container, "eventlog", None),
-        observability=getattr(container, "observability", None),
-        identity=_inspection_identity(identity),
-        run_status_resolver=resolve_run_statuses,
-    )
+    facade = getattr(container, "observability", None)
+    if facade is None:
+        raise HTTPException(status_code=503, detail="Observability not configured")
+    return facade.for_identity(_observability_identity(identity))
 
 
-def _inspection_http_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, InspectionNotFoundError):
+def _observability_http_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ObservabilityNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
     return HTTPException(status_code=503, detail=str(exc))
 
@@ -109,24 +83,6 @@ async def _get_run_or_404(run_id: str, identity: RequestIdentity):
     return rec
 
 
-async def _collect_trace_rows(
-    *, run_id: str, since: datetime | None, until: datetime | None
-) -> list[dict[str, Any]]:
-    container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
-        raise HTTPException(status_code=503, detail="Event log not configured")
-    rows = await event_log.query(
-        scope_id=f"trace:run/{run_id}",
-        since=since,
-        until=until,
-        kinds=["trace"],
-        limit=None,
-    )
-    rows.sort(key=lambda row: row.get("ts") or 0.0)
-    return rows
-
-
 @router.get("/runs/{run_id}/trace", response_model=TraceEventListResponse)
 async def get_run_trace(
     run_id: str,
@@ -137,19 +93,13 @@ async def get_run_trace(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceEventListResponse:
     await _get_run_or_404(run_id, identity)
-    rows = await _collect_trace_rows(
-        run_id=run_id, since=_parse_window(from_), until=_parse_window(to)
+    return await _observability_facade(identity).list_inspect_traces(
+        since=_parse_window(from_),
+        until=_parse_window(to),
+        run_id=run_id,
+        cursor=cursor,
+        limit=limit,
     )
-    items = [
-        _present_trace_row(row)
-        for row in rows
-        if _passes_identity_scope(
-            _scope_from_mapping(row.get("payload") or {}),
-            _inspection_identity(identity),
-        )
-    ]
-    page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
-    return TraceEventListResponse(items=page, next_cursor=next_cursor)
 
 
 @router.get("/traces", response_model=TraceEventListResponse)
@@ -170,7 +120,7 @@ async def list_traces(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceEventListResponse:
     try:
-        return await _inspection_facade(identity).list_traces(
+        return await _observability_facade(identity).list_inspect_traces(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -185,8 +135,8 @@ async def list_traces(
             cursor=cursor,
             limit=limit,
         )
-    except InspectionUnavailableError as exc:
-        raise _inspection_http_error(exc) from exc
+    except ObservabilityUnavailableError as exc:
+        raise _observability_http_error(exc) from exc
 
 
 @router.get("/traces/{trace_id}", response_model=TraceEventListResponse)
@@ -196,22 +146,9 @@ async def get_trace_by_id(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceEventListResponse:
-    container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
-        raise HTTPException(status_code=503, detail="Event log not configured")
-    rows = await event_log.query(kinds=["trace"], limit=None)
-    items = []
-    for row in rows:
-        payload = row.get("payload") or {}
-        if payload.get("trace_id") != trace_id:
-            continue
-        event = _present_trace_row(row)
-        if _passes_identity_scope(event.scope, _inspection_identity(identity)):
-            items.append(event)
-    items.sort(key=lambda item: item.ts)
-    page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
-    return TraceEventListResponse(items=page, next_cursor=next_cursor)
+    return await _observability_facade(identity).list_inspect_traces(
+        trace_id=trace_id, cursor=cursor, limit=limit
+    )
 
 
 @router.get("/runs/{run_id}/trace/summary", response_model=TraceSummary)
@@ -222,10 +159,14 @@ async def get_run_trace_summary(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceSummary:
     await _get_run_or_404(run_id, identity)
-    rows = await _collect_trace_rows(
-        run_id=run_id, since=_parse_window(from_), until=_parse_window(to)
-    )
-    events = [_present_trace_row(row) for row in rows]
+    events = (
+        await _observability_facade(identity).list_inspect_traces(
+            since=_parse_window(from_),
+            until=_parse_window(to),
+            run_id=run_id,
+            limit=2_147_483_647,
+        )
+    ).items
     trace_ids = sorted({event.trace_id for event in events if event.trace_id})
     failing_services = Counter(event.service for event in events if event.error is not None)
     latest_error_ts = max((event.ts for event in events if event.error is not None), default=None)
@@ -250,23 +191,13 @@ async def get_run_llm_calls(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallListResponse:
     await _get_run_or_404(run_id, identity)
-    container = current_services()
-    observability = getattr(container, "observability", None)
-    store = observability.store if observability is not None else None
-    if store is None:
-        raise HTTPException(status_code=503, detail="LLM observation store not configured")
-    user_id, org_id = _identity_scope(identity)
-    rows = await store.query_llm_calls(
+    return await _observability_facade(identity).list_inspect_llm_calls(
         run_id=run_id,
         since=_parse_window(from_),
         until=_parse_window(to),
-        user_id=user_id,
-        org_id=org_id,
-        limit=None,
+        cursor=cursor,
+        limit=limit,
     )
-    items = [_present_llm_row(row) for row in rows]
-    page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
-    return LLMCallListResponse(items=page, next_cursor=next_cursor)
 
 
 @router.get("/llm-calls", response_model=LLMCallListResponse)
@@ -288,7 +219,7 @@ async def list_llm_calls(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallListResponse:
     try:
-        return await _inspection_facade(identity).list_llm_calls(
+        return await _observability_facade(identity).list_inspect_llm_calls(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -304,8 +235,8 @@ async def list_llm_calls(
             cursor=cursor,
             limit=limit,
         )
-    except InspectionUnavailableError as exc:
-        raise _inspection_http_error(exc) from exc
+    except ObservabilityUnavailableError as exc:
+        raise _observability_http_error(exc) from exc
 
 
 @router.get("/llm-calls/{call_id}", response_model=LLMCallRecord)
@@ -314,9 +245,9 @@ async def get_llm_call(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallRecord:
     try:
-        return await _inspection_facade(identity).get_llm_call(call_id)
-    except (InspectionUnavailableError, InspectionNotFoundError) as exc:
-        raise _inspection_http_error(exc) from exc
+        return await _observability_facade(identity).get_inspect_llm_call(call_id)
+    except (ObservabilityUnavailableError, ObservabilityNotFoundError) as exc:
+        raise _observability_http_error(exc) from exc
 
 
 @router.get("/runs/{run_id}/llm-summary", response_model=LLMSummary)
@@ -327,21 +258,14 @@ async def get_run_llm_summary(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMSummary:
     await _get_run_or_404(run_id, identity)
-    container = current_services()
-    observability = getattr(container, "observability", None)
-    store = observability.store if observability is not None else None
-    if store is None:
-        raise HTTPException(status_code=503, detail="LLM observation store not configured")
-    user_id, org_id = _identity_scope(identity)
-    rows = await store.query_llm_calls(
-        run_id=run_id,
-        since=_parse_window(from_),
-        until=_parse_window(to),
-        user_id=user_id,
-        org_id=org_id,
-        limit=None,
-    )
-    items = [_present_llm_row(row) for row in rows]
+    items = (
+        await _observability_facade(identity).list_inspect_llm_calls(
+            run_id=run_id,
+            since=_parse_window(from_),
+            until=_parse_window(to),
+            limit=2_147_483_647,
+        )
+    ).items
     by_model: Counter[str] = Counter()
     prompt_tokens = 0
     completion_tokens = 0
@@ -380,15 +304,15 @@ async def get_run_logs(
 ) -> InspectLogListResponse:
     await _get_run_or_404(run_id, identity)
     try:
-        return await _inspection_facade(identity).list_logs(
+        return await _observability_facade(identity).list_inspect_logs(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
             cursor=cursor,
             limit=limit,
         )
-    except InspectionUnavailableError as exc:
-        raise _inspection_http_error(exc) from exc
+    except ObservabilityUnavailableError as exc:
+        raise _observability_http_error(exc) from exc
 
 
 @router.get("/logs", response_model=InspectLogListResponse)
@@ -410,7 +334,7 @@ async def list_logs(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> InspectLogListResponse:
     try:
-        return await _inspection_facade(identity).list_logs(
+        return await _observability_facade(identity).list_inspect_logs(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -426,8 +350,8 @@ async def list_logs(
             cursor=cursor,
             limit=limit,
         )
-    except InspectionUnavailableError as exc:
-        raise _inspection_http_error(exc) from exc
+    except ObservabilityUnavailableError as exc:
+        raise _observability_http_error(exc) from exc
 
 
 @router.get("/agent-event-types", response_model=AgentEventTypeListResponse)
@@ -468,14 +392,14 @@ async def get_errors(
 ) -> InspectLogListResponse:
     try:
         records = (
-            await _inspection_facade(identity).list_logs(
+            await _observability_facade(identity).list_inspect_logs(
                 since=_parse_window(from_),
                 until=_parse_window(to),
                 limit=2_147_483_647,
             )
         ).items
-    except InspectionUnavailableError as exc:
-        raise _inspection_http_error(exc) from exc
+    except ObservabilityUnavailableError as exc:
+        raise _observability_http_error(exc) from exc
     items: list[InspectLogRecord] = []
     for record in records:
         if record.level not in {"warning", "error", "critical"}:
@@ -561,7 +485,7 @@ async def list_agent_events(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> AgentEventListResponse:
     try:
-        return await _inspection_facade(identity).list_agent_events(
+        return await _observability_facade(identity).list_inspect_agent_events(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -574,5 +498,102 @@ async def list_agent_events(
             cursor=cursor,
             limit=limit,
         )
-    except InspectionUnavailableError as exc:
-        raise _inspection_http_error(exc) from exc
+    except ObservabilityUnavailableError as exc:
+        raise _observability_http_error(exc) from exc
+
+
+def _required_trace(value: dict | None) -> dict:
+    if value is None:
+        raise HTTPException(status_code=404, detail="Trace was not found")
+    return value
+
+
+@trace_router.get("/sessions")
+async def list_trace_sessions(
+    limit: int = Query(50, ge=1, le=200),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    return await _observability_facade(identity).list_trace_sessions(limit=limit, cursor=cursor)
+
+
+@trace_router.get("/traces/{trace_id}")
+async def get_trace_session(
+    trace_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    facade = _observability_facade(identity)
+    tree = _required_trace(await facade.inspect_trace(trace_id))
+    run = tree["runs"][0]
+    return {
+        "trace_id": trace_id,
+        "session_id": run["session_id"],
+        "graph_id": run["graph_id"],
+        "graph_topology": tree["graph_topologies_by_trace_id"][trace_id],
+        "spans": tree["spans_by_trace_id"][trace_id],
+        "agent_states": tree["agent_states_by_trace_id"][trace_id],
+        "plans": tree["plans_by_trace_id"][trace_id],
+        "started_at": run["started_at"],
+        "ended_at": run.get("ended_at"),
+        "status": run["status"],
+    }
+
+
+@trace_router.get("/traces/{trace_id}/tree")
+async def get_trace_tree(
+    trace_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    return _required_trace(await _observability_facade(identity).inspect_trace(trace_id))
+
+
+@trace_router.get("/traces/{trace_id}/graph")
+async def get_trace_graph(
+    trace_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    return _required_trace(await _observability_facade(identity).get_trace_graph(trace_id))
+
+
+@trace_router.get("/traces/{trace_id}/spans")
+async def get_trace_spans(
+    trace_id: str,
+    kind: str | None = Query(None),  # noqa: B008
+    agent_id: str | None = Query(None),  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    return _required_trace(
+        await _observability_facade(identity).get_trace_spans(
+            trace_id, kind=kind, agent_id=agent_id
+        )
+    )
+
+
+@trace_router.get("/traces/{trace_id}/plans")
+async def get_trace_plans(
+    trace_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    return _required_trace(await _observability_facade(identity).get_trace_plans(trace_id))
+
+
+@trace_router.get("/traces/{trace_id}/context-snapshots/{snapshot_id}")
+async def get_trace_context_snapshot(
+    trace_id: str,
+    snapshot_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    return _required_trace(
+        await _observability_facade(identity).get_trace_context_snapshot(trace_id, snapshot_id)
+    )
+
+
+@trace_router.get("/traces/{trace_id}/agents/{agent_id}/states")
+async def get_trace_agent_states(
+    trace_id: str,
+    agent_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    return _required_trace(
+        await _observability_facade(identity).get_trace_agent_states(trace_id, agent_id)
+    )

@@ -253,14 +253,10 @@ def create_app(
 
     app.include_router(router=webui_router, prefix="/api/v1")
 
-    # Mount engine trace router if the engine package is installed
-    try:
-        from aethergraph_engine._internal.trace import trace_router
+    from aethergraph.api.v1.observability import trace_router
 
-        app.include_router(trace_router)
-        logger.info("Engine trace router mounted at /api/trace")
-    except ImportError:
-        pass
+    app.include_router(trace_router)
+    logger.info("AetherGraph observability router mounted at /api/trace")
 
     # Install services globally so run()/tools see the same container
     install_services(container)

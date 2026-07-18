@@ -72,6 +72,7 @@ from aethergraph.services.observability import (
     RetentionJanitor,
     RetentionPolicy,
     SQLiteObservationStore,
+    open_active_observability_facade,
 )
 
 # ---- Planning components ----
@@ -284,8 +285,15 @@ def build_default_container(
         capture_mode=cfg.llm.observability.capture_mode,
         full_prompt_ttl_days=cfg.observability.retention.max_full_prompt_age_days,
     )
+    eventlog = build_event_log(cfg)
     observation_store = SQLiteObservationStore(observation_path, policy=observation_policy)
-    observability = ObservabilityFacade(observation_store)
+    run_store = build_run_store(cfg)
+    session_store = build_session_store(cfg)
+    observability = open_active_observability_facade(
+        observation_store,
+        event_log=eventlog,
+        run_store=run_store,
+    )
     retention_cfg = cfg.observability.retention
     retention_janitor = RetentionJanitor(
         observation_store,
@@ -301,10 +309,6 @@ def build_default_container(
         ),
         interval_seconds=retention_cfg.janitor_interval_seconds,
     )
-
-    # event log for metering and channel events --
-    # TODO: make configurable from cfg
-    eventlog = build_event_log(cfg)
 
     # core services
     logger_factory = StdLoggerService.build(
@@ -420,7 +424,6 @@ def build_default_container(
     )
 
     # run store and manager
-    run_store = build_run_store(cfg)
     run_result_store = build_run_result_store(cfg)
     run_cancellation_registry = RunCancellationRegistry()
     run_manager = RunManager(
@@ -432,8 +435,6 @@ def build_default_container(
         cancellation_registry=run_cancellation_registry,
         max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
     )
-    session_store = build_session_store(cfg)
-
     # rate limiter
     rl_settings = cfg.rate_limit
     rate_limiter = SimpleRateLimiter(
