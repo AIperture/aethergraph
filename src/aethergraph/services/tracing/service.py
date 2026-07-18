@@ -4,7 +4,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import Token
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -13,10 +12,6 @@ from typing import Any, Protocol
 import uuid
 
 from aethergraph.core.runtime.runtime_metering import current_meter_context
-
-
-def utc_now_ts() -> float:
-    return datetime.now(UTC).timestamp()
 
 
 def _json_safe(value: Any) -> Any:
@@ -380,25 +375,3 @@ class NoopTracer(BaseTracer):
 
     async def _append_trace_event(self, trace_id: str, payload: dict[str, Any]) -> None:
         return
-
-
-class EventLogTracer(BaseTracer):
-    def __init__(self, *, event_log: Any, event_hub: Any | None = None) -> None:
-        self.event_log = event_log
-        self.event_hub = event_hub
-
-    async def _append_trace_event(self, trace_id: str, payload: dict[str, Any]) -> None:
-        run_id = payload.get("run_id") or "unknown"
-        row = {
-            "id": f"evt_{uuid.uuid4().hex}",
-            "ts": utc_now_ts(),
-            "scope_id": f"trace:run/{run_id}",
-            "kind": "trace",
-            "payload": payload,
-            "tags": list(payload.get("tags") or []),
-            "user_id": payload.get("user_id"),
-            "org_id": payload.get("org_id"),
-        }
-        await self.event_log.append(row)
-        if self.event_hub is not None:
-            await self.event_hub.broadcast(row)

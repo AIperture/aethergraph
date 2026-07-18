@@ -1,5 +1,4 @@
 from .service import (
-    EventLogTracer,
     NoopTracer,
     TracerProtocol,
     TraceSpan,
@@ -10,7 +9,6 @@ from .service import (
 )
 
 __all__ = [
-    "EventLogTracer",
     "NoopTracer",
     "TraceSpan",
     "TracerProtocol",
