@@ -135,15 +135,51 @@ def tool(
     args_schema: dict[str, Any] | None = None,
     result_schema: dict[str, Any] | None = None,
     examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
-    artifact_outputs: list[Any] | tuple[Any, ...] | None = None,
+    slot_outputs: list[Any] | tuple[Any, ...] | None = None,
     availability: str = "normal",
     approval: str = "none",
 ):
-    """
-    Dual-mode decorator for plain functions and DualStageTool classes.
+    """Declare a dual-mode Tool for graph and immediate execution.
 
-    - Graph mode: builds a tool node inside `@graphify`
-    - Immediate mode: executes native Python directly everywhere else
+    The decorator records one versioned Tool definition, including optional
+    semantic slot outputs, and preserves the existing immediate/graph
+    execution behavior.
+
+    Examples:
+        Declare a normal Tool:
+        ```python
+        @tool(description="Read a document.")
+        def read_document(path: str) -> dict:
+            return {"path": path}
+        ```
+
+        Declare a required semantic slot output:
+        ```python
+        @tool(slot_outputs=[{"slot_key": "report", "required": True}])
+        def build_report() -> dict:
+            return {"summary": "created"}
+        ```
+
+    Args:
+        outputs: Graph-node output names for the legacy graph execution layer.
+        inputs: Optional explicit model-visible input parameter names.
+        name: Optional public Tool name.
+        version: Authored Tool version.
+        description: Optional public Tool description.
+        args_schema: Optional explicit JSON Schema for model arguments.
+        result_schema: Optional object schema for structured result data.
+        examples: Optional bounded authored examples.
+        slot_outputs: Optional semantic slot-output declarations.
+        availability: Runtime surface stage for the Tool.
+        approval: Approval tier for Tool execution.
+
+    Returns:
+        Callable: Decorator that attaches the canonical Tool definition and
+        preserves immediate and graph-mode invocation.
+
+    Notes:
+        Slot output declarations contain semantic keys only. The executed Tool
+        reports actual resource effects in its result.
     """
 
     def _wrap(obj):
@@ -160,7 +196,7 @@ def tool(
             args_schema=args_schema,
             result_schema=result_schema,
             examples=examples,
-            artifact_outputs=artifact_outputs,
+            slot_outputs=slot_outputs,
             availability=availability,
             approval=approval,
         )

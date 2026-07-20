@@ -3,10 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
 import inspect
+import re
 from types import NoneType, UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v2"
+TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v3"
 TOOL_APPROVAL_TIERS = frozenset({"none", "expensive", "always"})
 TOOL_AVAILABILITY = frozenset({"normal", "plan_proposal", "plan_lifecycle"})
 
@@ -96,13 +97,13 @@ class ToolDefinition:
     args_schema: dict[str, Any]
     result_schema: dict[str, Any]
     examples: tuple[dict[str, Any], ...] = ()
-    artifact_outputs: tuple[dict[str, Any], ...] = ()
+    slot_outputs: tuple[dict[str, Any], ...] = ()
     availability: Literal["normal", "plan_proposal", "plan_lifecycle"] = "normal"
     approval: Literal["none", "expensive", "always"] = "none"
     injections: tuple[tuple[str, str], ...] = ()
     implementation_module: str = ""
     implementation_symbol: str = ""
-    api_version: Literal["aethergraph.tool/v2"] = TOOL_DEFINITION_API_VERSION
+    api_version: Literal["aethergraph.tool/v3"] = TOOL_DEFINITION_API_VERSION
     kind: Literal["tool"] = "tool"
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,7 +118,7 @@ class ToolDefinition:
             "args_schema": deepcopy(self.args_schema),
             "result_schema": deepcopy(self.result_schema),
             "examples": deepcopy(list(self.examples)),
-            "artifact_outputs": deepcopy(list(self.artifact_outputs)),
+            "slot_outputs": deepcopy(list(self.slot_outputs)),
             "availability": self.availability,
             "approval": self.approval,
             "injections": [
@@ -139,7 +140,7 @@ def build_tool_definition(
     args_schema: dict[str, Any] | None,
     result_schema: dict[str, Any] | None,
     examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
-    artifact_outputs: list[Any] | tuple[Any, ...] | None,
+    slot_outputs: list[Any] | tuple[Any, ...] | None,
     availability: str,
     approval: str,
 ) -> ToolDefinition:
@@ -152,11 +153,7 @@ def build_tool_definition(
             "tool result_schema must be an object schema for the structured " "result data payload"
         )
     normalized_examples = _normalize_mapping_items(examples, field_name="examples")
-    normalized_artifact_outputs = _normalize_mapping_items(
-        artifact_outputs,
-        field_name="artifact_outputs",
-        allow_to_dict=True,
-    )
+    normalized_slot_outputs = _normalize_slot_outputs(slot_outputs)
     signature = inspect.signature(impl)
     try:
         type_hints = get_type_hints(impl)
@@ -213,7 +210,7 @@ def build_tool_definition(
             else schema_from_annotation(type_hints.get("return", signature.return_annotation))
         ),
         examples=normalized_examples,
-        artifact_outputs=normalized_artifact_outputs,
+        slot_outputs=normalized_slot_outputs,
         availability=availability,  # type: ignore[arg-type]
         approval=approval,  # type: ignore[arg-type]
         injections=tuple(injections),
@@ -236,6 +233,35 @@ def _normalize_mapping_items(
         if not isinstance(item, dict):
             raise TypeError(f"tool {field_name} entries must be dictionaries")
         normalized.append(deepcopy(item))
+    return tuple(normalized)
+
+
+def _normalize_slot_outputs(
+    values: list[Any] | tuple[Any, ...] | None,
+) -> tuple[dict[str, Any], ...]:
+    items = _normalize_mapping_items(
+        values,
+        field_name="slot_outputs",
+        allow_to_dict=True,
+    )
+    normalized: list[dict[str, Any]] = []
+    keys: set[str] = set()
+    for item in items:
+        unexpected = sorted(set(item) - {"slot_key", "required"})
+        if unexpected:
+            raise ValueError(
+                "tool slot_outputs contain unsupported fields: " + ", ".join(unexpected)
+            )
+        key = str(item.get("slot_key") or "")
+        if not re.fullmatch(r"[a-z][a-z0-9_.-]*", key):
+            raise ValueError("tool slot_outputs require stable semantic slot_key values")
+        if key in keys:
+            raise ValueError("tool slot_outputs cannot contain duplicate slot keys")
+        required = item.get("required", False)
+        if not isinstance(required, bool):
+            raise TypeError("tool slot_outputs required must be a boolean")
+        keys.add(key)
+        normalized.append({"slot_key": key, "required": required})
     return tuple(normalized)
 
 

@@ -21,7 +21,7 @@ def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
 
     definition = search.__aether_tool_definition__
 
-    assert definition.api_version == "aethergraph.tool/v2"
+    assert definition.api_version == "aethergraph.tool/v3"
     assert definition.name == "search"
     assert definition.approval == "expensive"
     assert definition.inputs == ("query", "limit")
@@ -88,3 +88,14 @@ def test_tool_accepts_arbitrary_object_explicit_result_schema() -> None:
         "type": "object",
         "additionalProperties": True,
     }
+
+
+def test_tool_declares_minimal_semantic_slot_outputs() -> None:
+    @tool(slot_outputs=[{"slot_key": "report", "required": True}])
+    def build_report() -> dict[str, str]:
+        return {"summary": "created"}
+
+    definition = build_report.__aether_tool_definition__
+
+    assert definition.slot_outputs == ({"slot_key": "report", "required": True},)
+    assert definition.to_dict()["slot_outputs"] == [{"slot_key": "report", "required": True}]
