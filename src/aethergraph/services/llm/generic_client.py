@@ -112,7 +112,7 @@ class GenericLLMClient(
         compatibility_policy: str = "compat",
         # observability
         observation_sink: LLMObservationSink | None = None,
-        observation_capture_mode: CaptureMode = "metadata",
+        observation_capture_mode: CaptureMode = "manifest",
         # identity
         profile_name: str | None = None,
     ):

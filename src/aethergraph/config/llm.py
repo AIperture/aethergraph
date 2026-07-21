@@ -81,7 +81,7 @@ class LLMProfile(BaseModel):
 
 
 class LLMObservabilitySettings(BaseModel):
-    capture_mode: Literal["off", "metadata", "manifest", "full"] = "metadata"
+    capture_mode: Literal["off", "metadata", "manifest", "full"] = "manifest"
 
 
 class LLMSettings(BaseModel):

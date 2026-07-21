@@ -118,7 +118,7 @@ def _apply_env_overrides_to_profile(
                 "deepseek": "DEEPSEEK_API_KEY",
                 "openrouter": "OPENROUTER_API_KEY",
                 "azure": "AZURE_OPENAI_KEY",
-            }.get(p.provider, None)  # type: ignore[index]
+            }.get(p.provider)  # type: ignore[index]
 
     # Finally, store the resolved key back into api_key for the client factory
     if api_key:
@@ -133,7 +133,7 @@ def client_from_profile(
     *,
     profile_name: str | None = None,
     observation_sink: LLMObservationSink | None = None,
-    observation_capture_mode: CaptureMode = "metadata",
+    observation_capture_mode: CaptureMode = "manifest",
 ) -> GenericLLMClient:
     # At this point, _apply_env_overrides_to_profile has already filled
     # p.base_url, p.api_key, etc. as much as possible.
@@ -162,7 +162,7 @@ def build_llm_clients(
     secrets: Secrets,
     *,
     observation_sink: LLMObservationSink | None = None,
-    observation_capture_mode: CaptureMode = "metadata",
+    observation_capture_mode: CaptureMode = "manifest",
 ) -> dict[str, GenericLLMClient]:
     """Returns dict of {profile_name: client}, always includes 'default' if enabled."""
     if not cfg.enabled:

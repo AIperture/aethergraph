@@ -7,7 +7,7 @@ from .models import CaptureMode
 
 @dataclass(frozen=True)
 class ObservationPolicy:
-    capture_mode: CaptureMode = "metadata"
+    capture_mode: CaptureMode = "manifest"
     renderer_version: str = "ag-provider-request-v1"
     max_attributes_bytes: int = 16 * 1024
     max_fragment_bytes: int = 8 * 1024 * 1024

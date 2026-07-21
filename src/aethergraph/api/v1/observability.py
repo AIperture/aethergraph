@@ -17,6 +17,10 @@ from aethergraph.services.observability.studio_translation import (
     _matches_scope,
     _paginate_rows,
 )
+from aethergraph.services.observability.trace_projection import (
+    TraceProjectionService,
+    TraceReader,
+)
 
 from .deps import RequestIdentity, get_identity
 from .schemas.inspect import (
@@ -509,6 +513,185 @@ def _required_trace(value: dict | None) -> dict:
     if value is None:
         raise HTTPException(status_code=404, detail="Trace was not found")
     return value
+
+
+def _runtime_trace_projection(
+    identity: RequestIdentity,
+) -> tuple[ObservabilityFacade, TraceProjectionService]:
+    """Build the connected-runtime-only v2 projection for one request identity."""
+    facade = _observability_facade(identity)
+    return facade, TraceProjectionService(TraceReader(facade))
+
+
+def _required_projection(value: object | None) -> object:
+    if value is None:
+        raise HTTPException(status_code=404, detail="Runtime trace turn was not found")
+    return value
+
+
+def _cursor_offset(cursor: str | None) -> int:
+    try:
+        return max(0, int(cursor or "0"))
+    except ValueError:
+        return 0
+
+
+@trace_router.get("/v2/sessions")
+async def _v2_list_runtime_trace_sessions(
+    limit: int = Query(50, ge=1, le=200),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    """List canonical turn groups from the connected AG runtime."""
+    _facade, projection = _runtime_trace_projection(identity)
+    groups = await projection.list_turn_groups()
+    offset = _cursor_offset(cursor)
+    selected = groups[offset : offset + limit]
+    next_offset = offset + len(selected)
+    return {
+        "items": [group.to_dict() for group in selected],
+        "next_cursor": str(next_offset) if next_offset < len(groups) else None,
+        "has_more": next_offset < len(groups),
+    }
+
+
+@trace_router.get("/v2/sessions/{session_id}")
+async def _v2_get_runtime_trace_session(
+    session_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    """Read one canonical connected-runtime session group."""
+    _facade, projection = _runtime_trace_projection(identity)
+    result = _required_projection(await projection.session_detail(session_id))
+    return result.to_dict()  # type: ignore[union-attr]
+
+
+@trace_router.get("/v2/turns/{root_run_id}")
+async def _v2_get_runtime_turn(
+    root_run_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    """Read one connected-runtime turn with its root and dispatch children."""
+    _facade, projection = _runtime_trace_projection(identity)
+    result = _required_projection(await projection.turn_detail(root_run_id))
+    return result.to_dict()  # type: ignore[union-attr]
+
+
+@trace_router.get("/v2/turns/{root_run_id}/plans")
+async def _v2_get_runtime_turn_plans(
+    root_run_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    """Read normalized plan snapshots across every run in a runtime turn."""
+    _facade, projection = _runtime_trace_projection(identity)
+    result = _required_projection(await projection.plan_timeline(root_run_id))
+    return result.to_dict()  # type: ignore[union-attr]
+
+
+@trace_router.get("/v2/turns/{root_run_id}/context-snapshots/{snapshot_id}")
+async def _v2_get_runtime_context_snapshot(
+    root_run_id: str,
+    snapshot_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> dict:
+    """Hydrate one captured prompt manifest belonging to a runtime turn."""
+    _facade, projection = _runtime_trace_projection(identity)
+    result = _required_projection(await projection.context_snapshot(root_run_id, snapshot_id))
+    return result.to_dict()  # type: ignore[union-attr]
+
+
+async def _v2_runtime_turn_run_ids(
+    projection: TraceProjectionService, root_run_id: str
+) -> list[str]:
+    found = await projection.find_group(root_run_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Runtime trace turn was not found")
+    group, _events = found
+    return group.run_ids
+
+
+@trace_router.get("/v2/turns/{root_run_id}/logs", response_model=InspectLogListResponse)
+async def _v2_list_runtime_turn_logs(
+    root_run_id: str,
+    from_: datetime | None = Query(None, alias="from"),  # noqa: B008
+    to: datetime | None = Query(None),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    limit: int = Query(100, ge=1, le=500),  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> InspectLogListResponse:
+    """List logs across the root and dispatch-child runs of one runtime turn."""
+    facade, projection = _runtime_trace_projection(identity)
+    offset = _cursor_offset(cursor)
+    run_ids = await _v2_runtime_turn_run_ids(projection, root_run_id)
+    pages = [
+        await facade.list_inspect_logs(
+            run_id=run_id,
+            since=_parse_window(from_),
+            until=_parse_window(to),
+            limit=offset + limit,
+        )
+        for run_id in run_ids
+    ]
+    items = sorted(
+        (item for page in pages for item in page.items),
+        key=lambda item: item.ts,
+        reverse=True,
+    )
+    end = offset + limit
+    has_more = len(items) > end or any(page.next_cursor for page in pages)
+    return InspectLogListResponse(
+        items=items[offset:end], next_cursor=str(end) if has_more else None
+    )
+
+
+@trace_router.get("/v2/turns/{root_run_id}/llm-calls", response_model=LLMCallListResponse)
+async def _v2_list_runtime_turn_llm_calls(
+    root_run_id: str,
+    from_: datetime | None = Query(None, alias="from"),  # noqa: B008
+    to: datetime | None = Query(None),  # noqa: B008
+    cursor: str | None = Query(None),  # noqa: B008
+    limit: int = Query(100, ge=1, le=500),  # noqa: B008
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> LLMCallListResponse:
+    """List LLM calls across every run belonging to one runtime turn."""
+    facade, projection = _runtime_trace_projection(identity)
+    offset = _cursor_offset(cursor)
+    run_ids = await _v2_runtime_turn_run_ids(projection, root_run_id)
+    pages = [
+        await facade.list_inspect_llm_calls(
+            run_id=run_id,
+            since=_parse_window(from_),
+            until=_parse_window(to),
+            limit=offset + limit,
+        )
+        for run_id in run_ids
+    ]
+    items = sorted(
+        (item for page in pages for item in page.items),
+        key=lambda item: item.ts,
+        reverse=True,
+    )
+    end = offset + limit
+    has_more = len(items) > end or any(page.next_cursor for page in pages)
+    return LLMCallListResponse(items=items[offset:end], next_cursor=str(end) if has_more else None)
+
+
+@trace_router.get("/v2/turns/{root_run_id}/llm-calls/{call_id}", response_model=LLMCallRecord)
+async def _v2_get_runtime_turn_llm_call(
+    root_run_id: str,
+    call_id: str,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> LLMCallRecord:
+    """Read one full LLM call only when it belongs to the selected runtime turn."""
+    facade, projection = _runtime_trace_projection(identity)
+    run_ids = set(await _v2_runtime_turn_run_ids(projection, root_run_id))
+    try:
+        item = await facade.get_inspect_llm_call(call_id)
+    except (ObservabilityUnavailableError, ObservabilityNotFoundError) as exc:
+        raise _observability_http_error(exc) from exc
+    if item.scope.run_id not in run_ids:
+        raise HTTPException(status_code=404, detail="LLM call was not found in this turn")
+    return item
 
 
 @trace_router.get("/sessions")

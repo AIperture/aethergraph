@@ -314,6 +314,14 @@ async def test_default_container_uses_sqlite_and_no_jsonl_or_persisted_tracer(
     assert rows[0]["capture_mode"] == "manifest"
 
 
+def test_llm_observability_defaults_to_manifest_capture() -> None:
+    settings = AppSettings()
+    policy = ObservationPolicy()
+
+    assert settings.llm.observability.capture_mode == "manifest"
+    assert policy.capture_mode == "manifest"
+
+
 @pytest.mark.asyncio
 async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> None:
     client = GenericLLMClient(

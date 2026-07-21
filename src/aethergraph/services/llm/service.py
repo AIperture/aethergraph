@@ -81,7 +81,7 @@ class LLMService:
                 compatibility_policy=compatibility_policy
                 or getattr(template, "compatibility_policy", "compat"),
                 observation_sink=getattr(template, "observation_sink", None),
-                observation_capture_mode=getattr(template, "observation_capture_mode", "metadata"),
+                observation_capture_mode=getattr(template, "observation_capture_mode", "manifest"),
             )
             self._clients[profile] = client
             self._profiles[profile] = self._updated_profile(
