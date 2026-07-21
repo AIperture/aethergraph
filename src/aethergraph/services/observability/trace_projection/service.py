@@ -152,6 +152,7 @@ class TraceProjectionService:
         segments = build_segments(
             events,
             child_run_ids={child.run_id for child in group.children},
+            resumption_run_ids={run.run_id for run in group.resumptions},
             dispatches=dispatches,
             agent_names=agent_names,
         )
@@ -299,9 +300,9 @@ def _bucket_by_run(events: list[EngineEvent]) -> dict[str, list[EngineEvent]]:
 def _events_for_group(
     group: TurnGroup, events_by_run: dict[str, list[EngineEvent]]
 ) -> list[EngineEvent]:
-    collected: list[EngineEvent] = []
-    for run_id in group.run_ids:
-        collected.extend(events_by_run.get(run_id, []))
+    run_order = {run_id: index for index, run_id in enumerate(group.run_ids)}
+    collected = [event for run_id in group.run_ids for event in events_by_run.get(run_id, [])]
+    collected.sort(key=lambda event: (event.ts, run_order[event.run_id]))
     return collected
 
 
@@ -318,13 +319,14 @@ def _turn_summary(group: TurnGroup, events: list[EngineEvent]) -> TurnSummary:
         (event.text for event in events if event.kind == "agent_engine.user_request"),
         "",
     )
+    latest_run = max(group.members, key=lambda item: item.started_epoch)
     return TurnSummary(
         root_run_id=group.root.run_id,
         turn_id=group.turn_id,
         session_id=group.root.session_id or group.root.run_id,
         started_at=group.root.started_at,
-        ended_at=group.root.finished_at,
-        status=group.root.status,
+        ended_at=latest_run.finished_at,
+        status=latest_run.status,
         user_text_preview=_preview(user_text),
         agent_count=len(agents),
         cycle_count=cycle_count,

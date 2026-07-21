@@ -1,9 +1,8 @@
 """Run-level structure: turn grouping, dispatch pairing, run tree, graph.
 
-The join model follows canonical runtime identity: turns group by
-`turn_id`; a turn's root run has no inbound dispatch continuation; a dispatch
-links to a child run by `(target_agent_instance_id, temporal order)` because the
-child run never persists the parent dispatch token.
+The join model follows canonical runtime identity: every trace-bearing run with
+the same `turn_id` belongs to one turn, and dispatched child runs link by their
+persisted dispatch token.
 """
 
 from __future__ import annotations
@@ -19,15 +18,26 @@ _DISPATCH_RETURNED = "agent_engine.dispatch_returned"
 
 @dataclass(frozen=True)
 class TurnGroup:
-    """One turn: its root run and any dispatch child runs."""
+    """One turn containing its root, dispatch children, and resumed run segments."""
 
     turn_id: str
     root: RunInfo
     children: list[RunInfo]
+    resumptions: list[RunInfo]
+
+    @property
+    def members(self) -> list[RunInfo]:
+        return [
+            self.root,
+            *sorted(
+                [*self.children, *self.resumptions],
+                key=lambda item: item.started_epoch,
+            ),
+        ]
 
     @property
     def run_ids(self) -> list[str]:
-        return [self.root.run_id, *(child.run_id for child in self.children)]
+        return [member.run_id for member in self.members]
 
 
 @dataclass(frozen=True)
@@ -60,35 +70,71 @@ def resolve_event_turn_ids(runs: list[RunInfo], events: list[EngineEvent]) -> li
     identity therefore overrides missing or stale run metadata before grouping.
     """
     event_turn_by_run: dict[str, str] = {}
+    event_run_ids: set[str] = set()
     for event in events:
+        event_run_ids.add(event.run_id)
         if event.turn_id:
             event_turn_by_run.setdefault(event.run_id, event.turn_id)
-    return [replace(run, turn_id=event_turn_by_run.get(run.run_id, run.turn_id)) for run in runs]
+    initially_resolved = [
+        replace(
+            run,
+            turn_id=event_turn_by_run.get(run.run_id, run.turn_id),
+            has_engine_events=run.run_id in event_run_ids,
+        )
+        for run in runs
+    ]
+
+    by_run_id: dict[str, RunInfo] = {}
+    turn_aliases: dict[str, str] = {}
+    repaired: dict[str, RunInfo] = {}
+    for run in sorted(initially_resolved, key=lambda item: item.started_epoch):
+        raw_turn_id = run.turn_id
+        effective_turn_id = turn_aliases.get(raw_turn_id, raw_turn_id)
+        if run.is_resumption and run.resume_owner_run_id:
+            owner = by_run_id.get(run.resume_owner_run_id)
+            owner_turn_id = "" if owner is None else owner.turn_id
+            if owner_turn_id:
+                if raw_turn_id and raw_turn_id != owner_turn_id:
+                    turn_aliases[raw_turn_id] = owner_turn_id
+                effective_turn_id = owner_turn_id
+        effective = replace(run, turn_id=effective_turn_id)
+        by_run_id[effective.run_id] = effective
+        repaired[effective.run_id] = effective
+    return [repaired[run.run_id] for run in runs]
 
 
 def group_turns(runs: list[RunInfo]) -> list[TurnGroup]:
     """Group runs into turns, newest root first.
 
-    A run with no inbound dispatch continuation is a turn root. Child runs
-    attach to the root that shares their `turn_id`. Runs without a `turn_id`
-    (older single-run turns) are each their own root, keyed by run id.
+    The earliest non-child run is the stable turn root. Later non-child runs are
+    resumption segments, and dispatched children retain their separate role.
+    Infrastructure runs are excluded. A legacy event-bearing run without a
+    `turn_id` remains visible under its run identity.
     """
-    roots: dict[str, RunInfo] = {}
-    children_by_turn: dict[str, list[RunInfo]] = {}
+    runs_by_turn: dict[str, list[RunInfo]] = {}
     for run in runs:
+        if run.is_infrastructure:
+            continue
+        if not run.turn_id and not run.has_engine_events:
+            continue
         turn_key = run.turn_id or run.run_id
-        if run.is_child and run.turn_id:
-            children_by_turn.setdefault(turn_key, []).append(run)
-        elif turn_key not in roots or run.started_epoch < roots[turn_key].started_epoch:
-            roots[turn_key] = run
+        runs_by_turn.setdefault(turn_key, []).append(run)
 
     groups: list[TurnGroup] = []
-    for turn_key, root in roots.items():
-        children = sorted(
-            children_by_turn.get(turn_key, []),
-            key=lambda item: item.started_epoch,
+    for turn_key, members in runs_by_turn.items():
+        ordered = sorted(members, key=lambda item: item.started_epoch)
+        roots = [run for run in ordered if not run.is_child]
+        if not roots:
+            continue
+        root = roots[0]
+        groups.append(
+            TurnGroup(
+                turn_id=root.turn_id or turn_key,
+                root=root,
+                children=[run for run in ordered if run.is_child],
+                resumptions=roots[1:],
+            )
         )
-        groups.append(TurnGroup(turn_id=root.turn_id or turn_key, root=root, children=children))
     groups.sort(key=lambda group: group.root.started_epoch, reverse=True)
     return groups
 
@@ -139,30 +185,17 @@ def link_children(
     dispatches: list[DispatchInfo],
     children: list[RunInfo],
 ) -> list[DispatchInfo]:
-    """Resolve each dispatch's child run by target agent + temporal order.
-
-    The Nth dispatch targeting agent X binds to the Nth child run whose
-    `agent_id` is X (both ordered by time). In-process dispatches — targets
-    with no spawned child run — keep `child_run_id = None`.
-    """
-    children_by_agent: dict[str, list[str]] = {}
-    for child in sorted(children, key=lambda item: item.started_epoch):
-        children_by_agent.setdefault(child.agent_id, []).append(child.run_id)
-
-    cursor: dict[str, int] = {}
+    """Resolve each dispatch's child run by exact persisted dispatch token."""
+    child_by_token = {
+        child.dispatch_token: child.run_id for child in children if child.dispatch_token
+    }
     resolved: list[DispatchInfo] = []
     for dispatch in sorted(dispatches, key=lambda item: item.entered_ts):
-        target = dispatch.target_agent_instance_id
-        available = children_by_agent.get(target, [])
-        index = cursor.get(target, 0)
-        child_run_id = available[index] if index < len(available) else None
-        if child_run_id is not None:
-            cursor[target] = index + 1
         resolved.append(
             DispatchInfo(
                 **{
                     **dispatch.__dict__,
-                    "child_run_id": child_run_id,
+                    "child_run_id": child_by_token.get(dispatch.dispatch_token),
                 }
             )
         )
@@ -170,7 +203,7 @@ def link_children(
 
 
 def build_run_tree(group: TurnGroup, dispatches: list[DispatchInfo]) -> list[RunNode]:
-    """Flat run tree: root first, then children with their dispatch linkage."""
+    """Flat run tree with child dispatch and parent-resumption linkage."""
     dispatch_by_child = {d.child_run_id: d for d in dispatches if d.child_run_id}
     nodes: list[RunNode] = [
         RunNode(
@@ -185,19 +218,23 @@ def build_run_tree(group: TurnGroup, dispatches: list[DispatchInfo]) -> list[Run
             ended_at=group.root.finished_at,
         )
     ]
-    for child in group.children:
-        dispatch = dispatch_by_child.get(child.run_id)
+    for member in group.members[1:]:
+        dispatch = dispatch_by_child.get(member.run_id)
         nodes.append(
             RunNode(
-                run_id=child.run_id,
-                parent_run_id=dispatch.source_run_id if dispatch else group.root.run_id,
+                run_id=member.run_id,
+                parent_run_id=(
+                    dispatch.source_run_id
+                    if dispatch
+                    else member.resume_owner_run_id or group.root.run_id
+                ),
                 parent_dispatch_id=dispatch.dispatch_token if dispatch else None,
                 dispatch_mode=dispatch.dispatch_mode if dispatch else "",
-                agent_instance_id=child.agent_id,
-                agent_name=child.agent_id,
-                status=child.status,
-                started_at=child.started_at,
-                ended_at=child.finished_at,
+                agent_instance_id=member.agent_id,
+                agent_name=member.agent_id,
+                status=member.status,
+                started_at=member.started_at,
+                ended_at=member.finished_at,
             )
         )
     return nodes

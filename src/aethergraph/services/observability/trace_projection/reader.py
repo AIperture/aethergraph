@@ -80,6 +80,11 @@ class RunInfo:
     finished_at: str | None
     turn_id: str
     is_child: bool
+    dispatch_token: str
+    is_resumption: bool
+    resume_owner_run_id: str
+    is_infrastructure: bool
+    has_engine_events: bool
     source_agent_instance_id: str
     target_agent_instance_id: str
     raw: dict[str, Any] = field(default_factory=dict)
@@ -166,16 +171,33 @@ def _run_info(run: dict[str, Any]) -> RunInfo:
     user_request = dict(original_inputs.get("user_request") or {})
     continuation = dict(original_inputs.get("continuation_payload") or {})
     continuation_kind = str(continuation.get("kind") or "")
+    continuation_payload = dict(continuation.get("payload") or {})
+    dispatch_intent = dict(continuation_payload.get("dispatch_intent") or {})
+    resumption = dict(original_inputs.get("resumption_payload") or {})
+    tags = {str(tag) for tag in (run.get("tags") or [])}
+    graph_id = str(run.get("graph_id") or "")
     return RunInfo(
         run_id=str(run.get("run_id") or ""),
         session_id=str(run.get("session_id") or ""),
         agent_id=str(run.get("agent_id") or ""),
-        graph_id=str(run.get("graph_id") or ""),
+        graph_id=graph_id,
         status=_status_text(run.get("status")),
         started_at=to_iso(run.get("started_at")),
         finished_at=to_iso(run.get("finished_at")) or None,
-        turn_id=str(user_request.get("turn_id") or ""),
+        turn_id=str(
+            user_request.get("turn_id")
+            or continuation_payload.get("turn_id")
+            or resumption.get("turn_id")
+            or ""
+        ),
         is_child=continuation_kind in _DISPATCH_CONTINUATION_KINDS,
+        dispatch_token=str(dispatch_intent.get("dispatch_token") or ""),
+        is_resumption=str(resumption.get("kind") or "") == "child_completed",
+        resume_owner_run_id=str(resumption.get("owner_run_id") or ""),
+        is_infrastructure=(
+            "notifier" in tags or graph_id == "aethergraph_engine._internal_completion_notifier"
+        ),
+        has_engine_events=False,
         source_agent_instance_id=str(continuation.get("source_agent_instance_id") or ""),
         target_agent_instance_id=str(continuation.get("target_agent_instance_id") or ""),
         raw=run,

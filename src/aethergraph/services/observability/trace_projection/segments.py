@@ -98,6 +98,7 @@ def build_segments(
     events: list[EngineEvent],
     *,
     child_run_ids: set[str],
+    resumption_run_ids: set[str],
     dispatches: list[DispatchInfo],
     agent_names: dict[str, str],
 ) -> list[AgentSegment]:
@@ -133,6 +134,7 @@ def build_segments(
         if kind == "agent_engine.agent_entered":
             entry_kind = _entry_kind(
                 is_child=run_id in child_run_ids,
+                is_resumption=run_id in resumption_run_ids,
                 first_in_run=run_segment_count.get(run_id, 0) == 0,
             )
             builder = _SegmentBuilder(
@@ -213,10 +215,12 @@ def build_segments(
     return [builder.build() for builder in segments]
 
 
-def _entry_kind(*, is_child: bool, first_in_run: bool) -> str:
+def _entry_kind(*, is_child: bool, is_resumption: bool, first_in_run: bool) -> str:
     """A run's first agent window is the user turn (root) or the dispatch
     (child); every re-entry resumes after a dispatch round-trip."""
     if not first_in_run:
+        return "return"
+    if is_resumption:
         return "return"
     return "dispatch" if is_child else "user_turn"
 
