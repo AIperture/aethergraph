@@ -1162,21 +1162,41 @@ class RunManager:
     async def _ensure_cancellation_handle(self, run_id: str) -> RunCancellationHandle:
         return await self._get_cancellation_registry().create(run_id)
 
-    async def cancel_run(self, run_id: str) -> RunRecord | None:
-        """
-        Best-effort cancellation for a run.
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> RunRecord | None:
+        """Request best-effort cancellation and preserve its semantic cause.
 
-        Behaviour:
-        - If the run is found and not yet terminal:
-            - Mark status = cancellation_requested and persist.
-            - Look up scheduler in sched_registry and call terminate().
-        - If the run is already terminal, return it unchanged.
-        - If no record is found, we still try scheduler-level termination
-          (in case the run hasn't been persisted yet), then return None.
+        Examples:
+            Cancel a user-requested run:
+            ```python
+            await manager.cancel_run("run-1")
+            ```
 
-        The actual transition to RunStatus.canceled happens inside
-        _run_and_finalize() when the scheduler raises asyncio.CancelledError.
+            Cancel a child owned by a stopped parent:
+            ```python
+            await manager.cancel_run("run-child", reason="parent_cancelled")
+            ```
+
+        Args:
+            run_id: Exact run identity to cancel.
+            reason: Exact supported cancellation cause.
+
+        Returns:
+            RunRecord | None: Current run record when present, otherwise
+            `None` after best-effort cancellation dispatch.
+
+        Notes:
+            The scheduler remains responsible for physical termination and the
+            existing terminal `RunStatus.canceled` transition.
         """
+
+        reason = str(reason or "")
+        if reason not in {"user_requested", "parent_cancelled"}:
+            raise ValueError(f"Unsupported cancellation reason: {reason}")
         record: RunRecord | None = None
         if self._store is not None:
             record = await self._store.get(run_id)
@@ -1218,9 +1238,10 @@ class RunManager:
 
         # No record in store – still try to terminate scheduler, then bail
         if record is None:
-            if handle is not None:
-                await handle.request_cancel()
-            else:
+            if handle is None:
+                handle = await self._ensure_cancellation_handle(run_id)
+            await handle.request_cancel(reason=reason)
+            if handle.adapter_kind is None:
                 await _terminate_scheduler()
             return None
 
@@ -1249,7 +1270,7 @@ class RunManager:
                 else None,
             )
 
-        await handle.request_cancel(reason="user_requested")
+        await handle.request_cancel(reason=reason)
         if handle.adapter_kind is None:
             backend_state = await _terminate_scheduler()
             if backend_state:

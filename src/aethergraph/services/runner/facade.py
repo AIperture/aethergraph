@@ -378,11 +378,13 @@ class RunFacade:
             await span.fail(exc, metadata={"target_run_id": run_id})
             raise
 
-    async def cancel_run(self, run_id: str) -> None:
-        """
-        Request best-effort cancellation for a run id.
-
-        This method delegates to `run_manager.cancel_run(...)`.
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> None:
+        """Request best-effort cancellation with an exact semantic cause.
 
         Examples:
             Cancel a spawned run:
@@ -396,30 +398,65 @@ class RunFacade:
                 await runner().cancel_run(run_id)
             ```
 
+            Cancel a child because its parent stopped:
+            ```python
+            await runner().cancel_run(run_id, reason="parent_cancelled")
+            ```
+
         Args:
             run_id: Run identifier to cancel.
+            reason: Exact cancellation cause transported to the target run.
 
         Returns:
             None: Cancellation is requested asynchronously.
 
         Notes:
-            Cancellation may not be immediate; scheduler termination is
-            best-effort.
+            Supported causes are enforced by the run manager. Cancellation may
+            not be immediate; scheduler termination is best-effort.
         """
         tracer = resolve_tracer()
         span = await tracer.start_span(
             service="runner",
             operation="cancel_run",
-            request={"run_id": run_id},
+            request={"run_id": run_id, "reason": reason},
             tags=["runner", "cancel"],
             metadata={"target_run_id": run_id},
         )
         try:
-            await self.run_manager.cancel_run(run_id)
+            await self.run_manager.cancel_run(run_id, reason=reason)
             await span.finish(response={"cancelled": True}, metadata={"target_run_id": run_id})
         except Exception as exc:
             await span.fail(exc, metadata={"target_run_id": run_id})
             raise
+
+    async def cancellation_reason(self) -> str:
+        """Return the exact cancellation cause for the current bound run.
+
+        Examples:
+            Read the cause after cancellation:
+            ```python
+            reason = await runner().cancellation_reason()
+            ```
+
+            Read an unbound facade:
+            ```python
+            assert await unbound_runner.cancellation_reason() == ""
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str: Exact stored cause, or an empty string when unavailable.
+
+        Notes:
+            This method does not request cancellation or mutate its handle.
+        """
+
+        if not self.current_run_id:
+            return ""
+        handle = await get_run_cancellation_registry().get(self.current_run_id)
+        return "" if handle is None else str(handle.cancel_reason or "")
 
     async def is_cancel_requested(self) -> bool:
         if not self.current_run_id:

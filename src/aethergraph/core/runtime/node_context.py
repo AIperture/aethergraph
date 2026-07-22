@@ -272,7 +272,12 @@ class NodeContext:
             return_outputs=return_outputs,
         )
 
-    async def cancel_run(self, run_id: str) -> None:
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> None:
         """
         Deprecated wrapper for `context.runner().cancel_run(...)`.
 
@@ -290,8 +295,14 @@ class NodeContext:
             await context.runner().cancel_run(run_id)
             ```
 
+            Preserve a parent-driven cause:
+            ```python
+            await context.cancel_run(run_id, reason="parent_cancelled")
+            ```
+
         Args:
             run_id: Run identifier to cancel.
+            reason: Exact cancellation cause transported to the target run.
 
         Returns:
             None: Cancellation is requested asynchronously.
@@ -304,7 +315,7 @@ class NodeContext:
             DeprecationWarning,
             stacklevel=2,
         )
-        await self.runner().cancel_run(run_id)
+        await self.runner().cancel_run(run_id, reason=reason)
 
     def planner(self) -> "NodePlanner":
         if self._planner_facade is None:

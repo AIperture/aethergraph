@@ -532,16 +532,26 @@ async def test_run_facade_bound_cancellation_helpers(monkeypatch):
     cancel_registry = RunCancellationRegistry()
 
     class FakeRunManager:
-        async def cancel_run(self, run_id: str) -> None:
+        def __init__(self) -> None:
+            self.reasons: list[str] = []
+
+        async def cancel_run(
+            self,
+            run_id: str,
+            *,
+            reason: str = "user_requested",
+        ) -> None:
+            self.reasons.append(reason)
             handle = await cancel_registry.create(run_id)
-            await handle.request_cancel()
+            await handle.request_cancel(reason=reason)
 
     monkeypatch.setattr(
         "aethergraph.services.runner.facade.get_run_cancellation_registry",
         lambda: cancel_registry,
     )
 
-    facade = RunFacade(run_manager=FakeRunManager(), current_run_id="run-abc")
+    manager = FakeRunManager()
+    facade = RunFacade(run_manager=manager, current_run_id="run-abc")
     event = await facade.thread_cancel_event()
     assert event.is_set() is False
     assert await facade.is_cancel_requested() is False
@@ -550,8 +560,15 @@ async def test_run_facade_bound_cancellation_helpers(monkeypatch):
     await handle.request_cancel()
 
     assert await facade.is_cancel_requested() is True
+    assert await facade.cancellation_reason() == "user_requested"
     with pytest.raises(RuntimeError, match="cancellation requested"):
         await facade.raise_if_cancel_requested()
+
+    await facade.cancel_run("run-child", reason="parent_cancelled")
+    assert manager.reasons == ["parent_cancelled"]
+    child = await cancel_registry.get("run-child")
+    assert child is not None
+    assert child.cancel_reason == "parent_cancelled"
 
 
 @pytest.mark.asyncio
