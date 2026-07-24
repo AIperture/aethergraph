@@ -166,7 +166,8 @@ def tool(
         name: Optional public Tool name.
         version: Authored Tool version.
         description: Optional public Tool description.
-        args_schema: Optional explicit JSON Schema for model arguments.
+        args_schema: Optional complete Draft 2020-12 object schema or compact
+            field-map shorthand for model arguments.
         result_schema: Optional object schema for structured result data.
         examples: Optional bounded authored examples.
         slot_outputs: Optional semantic slot-output declarations.
@@ -179,7 +180,8 @@ def tool(
 
     Notes:
         Slot output declarations contain semantic keys only. The executed Tool
-        reports actual resource effects in its result.
+        reports actual resource effects in its result. Tool definitions always
+        store one normalized full object schema regardless of authoring form.
     """
 
     def _wrap(obj):

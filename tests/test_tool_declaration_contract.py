@@ -21,7 +21,7 @@ def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
 
     definition = search.__aether_tool_definition__
 
-    assert definition.api_version == "aethergraph.tool/v3"
+    assert definition.api_version == "aethergraph.tool/v4"
     assert definition.name == "search"
     assert definition.approval == "expensive"
     assert definition.inputs == ("query", "limit")
@@ -61,6 +61,88 @@ def test_tool_supports_literal_schema_and_explicit_public_name() -> None:
         "enum": ["first", "second"],
         "type": "string",
     }
+
+
+def test_tool_normalizes_compact_argument_schema_to_canonical_object() -> None:
+    @tool(
+        args_schema={
+            "query": {"type": "string", "required": True},
+            "limit": {"type": "integer", "default": 5},
+        }
+    )
+    def search(**kwargs) -> dict[str, object]:
+        return kwargs
+
+    assert search.__aether_tool_definition__.args_schema == {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "limit": {"type": "integer", "default": 5},
+        },
+        "additionalProperties": False,
+        "required": ["query"],
+    }
+
+
+def test_tool_preserves_and_validates_local_schema_references() -> None:
+    schema = {
+        "type": "object",
+        "$defs": {
+            "operation": {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "create"},
+                    "name": {"type": "string"},
+                },
+                "required": ["kind", "name"],
+                "additionalProperties": False,
+            }
+        },
+        "properties": {
+            "operations": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/operation"},
+            }
+        },
+        "required": ["operations"],
+        "additionalProperties": False,
+    }
+
+    @tool(args_schema=schema)
+    def mutate(**kwargs) -> dict[str, object]:
+        return kwargs
+
+    assert mutate.__aether_tool_definition__.args_schema == schema
+
+
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [
+        (
+            {
+                "type": "object",
+                "properties": {"value": {"$ref": "https://example.com/value"}},
+            },
+            "only local",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"value": {"$ref": "#/$defs/missing"}},
+            },
+            "unresolved",
+        ),
+    ],
+)
+def test_tool_rejects_unsafe_or_unresolved_schema_references(
+    schema: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+
+        @tool(args_schema=schema)
+        def invalid(**kwargs) -> dict[str, object]:
+            return kwargs
 
 
 def test_tool_rejects_unknown_approval_policy() -> None:

@@ -7,7 +7,9 @@ import re
 from types import NoneType, UnionType
 from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
-TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v3"
+from .schema import normalize_tool_args_schema
+
+TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v4"
 TOOL_APPROVAL_TIERS = frozenset({"none", "expensive", "always"})
 TOOL_AVAILABILITY = frozenset({"normal", "plan_proposal", "plan_lifecycle"})
 
@@ -45,9 +47,6 @@ def schema_from_annotation(annotation: Any) -> dict[str, Any]:
         }
     if origin in {Union, UnionType}:
         variants = [schema_from_annotation(item) for item in args]
-        non_null = [item for item in variants if item.get("type") != "null"]
-        if len(non_null) == 1 and len(non_null) != len(variants):
-            return {**non_null[0], "nullable": True}
         return {"anyOf": variants}
     if origin is Literal:
         values = list(args)
@@ -103,7 +102,7 @@ class ToolDefinition:
     injections: tuple[tuple[str, str], ...] = ()
     implementation_module: str = ""
     implementation_symbol: str = ""
-    api_version: Literal["aethergraph.tool/v3"] = TOOL_DEFINITION_API_VERSION
+    api_version: Literal["aethergraph.tool/v4"] = TOOL_DEFINITION_API_VERSION
     kind: Literal["tool"] = "tool"
 
     def to_dict(self) -> dict[str, Any]:
@@ -203,7 +202,9 @@ def build_tool_definition(
         version=str(version or "1"),
         inputs=selected_inputs,
         outputs=tuple(outputs or ["result"]),
-        args_schema=deepcopy(args_schema) if args_schema is not None else inferred_args_schema,
+        args_schema=normalize_tool_args_schema(
+            args_schema if args_schema is not None else inferred_args_schema
+        ),
         result_schema=(
             deepcopy(result_schema)
             if result_schema is not None
