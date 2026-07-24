@@ -30,6 +30,11 @@ from aethergraph.services.llm.observability import (
     LLMObservationRecord,
     LLMObservationSink,
 )
+from aethergraph.services.llm.structured_output import (
+    PreparedStructuredOutput,
+    StructuredOutputPolicy,
+    prepare_structured_output,
+)
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     ImageFormat,
@@ -46,6 +51,7 @@ from aethergraph.services.llm.usage import (
     normalized_usage_metrics,
 )
 from aethergraph.services.llm.utils import (
+    _ensure_system_json_directive,
     _extract_json_text,
     _strip_schema_enforced_json_fence,
     _validate_json_schema,
@@ -113,6 +119,7 @@ class GenericLLMClient(
         thinking_budget: int | None = None,
         reasoning_summary: str | None = None,
         compatibility_policy: str = "compat",
+        structured_output_policy: StructuredOutputPolicy = "best_available",
         # observability
         observation_sink: LLMObservationSink | None = None,
         observation_capture_mode: CaptureMode = "manifest",
@@ -166,6 +173,7 @@ class GenericLLMClient(
         self.thinking_budget = thinking_budget
         self.reasoning_summary = reasoning_summary
         self.compatibility_policy = compatibility_policy or "compat"
+        self.structured_output_policy = structured_output_policy
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
@@ -350,6 +358,7 @@ class GenericLLMClient(
         strict_schema: bool,
         validate_json: bool,
         deprecated_parameters: tuple[str, ...],
+        prepared_structured_output: PreparedStructuredOutput | None,
         extra_params: dict[str, Any],
     ) -> dict[str, Any]:
         args = {
@@ -357,6 +366,11 @@ class GenericLLMClient(
             "model": model,
             "profile_name": self.profile_name,
             "compatibility_policy": self.compatibility_policy,
+            "structured_output_policy": (
+                prepared_structured_output.policy
+                if prepared_structured_output is not None
+                else self.structured_output_policy
+            ),
             "reasoning_effort": reasoning_effort,
             "thinking_mode": extra_params.get("thinking_mode", self.thinking_mode),
             "thinking_budget": extra_params.get("thinking_budget", self.thinking_budget),
@@ -372,6 +386,26 @@ class GenericLLMClient(
             else None,
             "json_schema_present": bool(json_schema) if output_format == "json_schema" else None,
             "deprecated_parameters": list(deprecated_parameters) or None,
+            "structured_output_mode": (
+                prepared_structured_output.mode if prepared_structured_output is not None else None
+            ),
+            "structured_output_capability_source": (
+                prepared_structured_output.capabilities.source
+                if prepared_structured_output is not None
+                else None
+            ),
+            "structured_output_projection_diagnostics": (
+                [
+                    {
+                        "code": item.code,
+                        "path": item.path,
+                        "message": item.message,
+                    }
+                    for item in prepared_structured_output.diagnostics
+                ]
+                if prepared_structured_output is not None and prepared_structured_output.diagnostics
+                else None
+            ),
             "temperature": extra_params.get("temperature"),
             "top_p": extra_params.get("top_p"),
             "tool_choice": extra_params.get("tool_choice"),
@@ -932,7 +966,6 @@ class GenericLLMClient(
         )
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
-        fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
         reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
         if "thinking_mode" not in kw and self.thinking_mode is not None:
             kw["thinking_mode"] = self.thinking_mode
@@ -941,6 +974,35 @@ class GenericLLMClient(
         model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
         call_name = kw.pop("call_name", None)
+        canonical_json_schema = json_schema
+        canonical_strict_validation = strict_schema
+        prepared_structured_output: PreparedStructuredOutput | None = None
+        if output_format == "json_schema" and json_schema is not None:
+            effective_policy = self.structured_output_policy
+            if "fail_on_unsupported" in deprecated_parameters:
+                effective_policy = "native_required" if fail_on_unsupported else "best_available"
+            prepared_structured_output = prepare_structured_output(
+                StructuredOutputRequest(name=schema_name, schema=json_schema),
+                provider=self.provider,
+                model=model,
+                policy=effective_policy,
+                allow_native_strict=strict_schema,
+            )
+            schema_name = prepared_structured_output.provider_schema_name
+            strict_schema = prepared_structured_output.provider_strict
+            json_schema = prepared_structured_output.provider_schema
+            if prepared_structured_output.mode in {"native_strict", "native_schema"}:
+                output_format = "json_schema"
+            elif prepared_structured_output.mode == "json_object":
+                output_format = "json_object"
+            else:
+                output_format = "json_object"
+            if prepared_structured_output.prompt_guidance:
+                messages = _ensure_system_json_directive(
+                    messages,
+                    schema=canonical_json_schema,
+                )
+        fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
         request_args = self._build_request_args(
             model=model,
             reasoning_effort=reasoning_effort,
@@ -951,6 +1013,7 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             deprecated_parameters=deprecated_parameters,
+            prepared_structured_output=prepared_structured_output,
             extra_params=kw,
         )
         provider_request_args = self._build_provider_request_args(
@@ -974,6 +1037,10 @@ class GenericLLMClient(
                 + ", ".join(deprecated_parameters)
                 + ". Removal is scheduled for AetherGraph 0.2.0."
             )
+        if prepared_structured_output is not None:
+            compatibility_notes.extend(
+                item.message for item in prepared_structured_output.diagnostics
+            )
         observation_record = self._build_observation_record(
             call_type="chat",
             model=model,
@@ -981,7 +1048,7 @@ class GenericLLMClient(
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,
-            json_schema=json_schema,
+            json_schema=canonical_json_schema,
             schema_name=schema_name,
             strict_schema=strict_schema,
             validate_json=validate_json,
@@ -1038,8 +1105,8 @@ class GenericLLMClient(
             text = self._postprocess_structured_output(
                 text=text,
                 output_format=output_format,
-                json_schema=json_schema,
-                strict_schema=strict_schema,
+                json_schema=canonical_json_schema,
+                strict_schema=canonical_strict_validation,
                 validate_json=validate_json,
             )
 
@@ -1217,6 +1284,7 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             validate_json=validate_json,
             deprecated_parameters=deprecated_parameters,
+            prepared_structured_output=None,
             extra_params=kw,
         )
         provider_request_args = self._build_provider_request_args(

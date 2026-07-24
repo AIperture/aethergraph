@@ -12,7 +12,11 @@ from aethergraph.config.llm_env import encode_llm_profile_env
 from aethergraph.services.llm import StructuredOutputRequest
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.service import LLMService
-from aethergraph.services.llm.types import LLMUnsupportedFeatureError
+from aethergraph.services.llm.structured_output import prepare_structured_output
+from aethergraph.services.llm.types import (
+    LLMStructuredOutputCapabilityError,
+    LLMUnsupportedFeatureError,
+)
 
 
 class _FakeResponse:
@@ -54,6 +58,152 @@ def test_structured_output_request_detaches_caller_schema() -> None:
 
     assert request.name == "Answer"
     assert request.schema == {"type": "object", "properties": {}}
+
+
+def test_openai_closed_schema_selects_native_strict_output() -> None:
+    prepared = prepare_structured_output(
+        StructuredOutputRequest(
+            "Answer",
+            {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": False,
+            },
+        ),
+        provider="openai",
+        model="gpt-5-mini",
+    )
+
+    assert prepared.mode == "native_strict"
+    assert prepared.provider_strict
+    assert prepared.provider_schema == prepared.canonical_schema
+
+
+def test_openai_free_form_schema_preserves_semantics_in_native_schema_mode() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "inferred": {"type": "object", "additionalProperties": True},
+        },
+        "required": ["inferred"],
+        "additionalProperties": False,
+    }
+
+    prepared = prepare_structured_output(
+        StructuredOutputRequest("MetalensExtract", schema),
+        provider="openai",
+        model="gpt-5-mini",
+    )
+
+    assert prepared.mode == "native_schema"
+    assert not prepared.provider_strict
+    assert prepared.provider_schema == schema
+    assert prepared.provider_schema["properties"]["inferred"]["additionalProperties"] is True
+    assert any(item.code == "strict_object_not_closed" for item in prepared.diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_openai_free_form_schema_is_sent_with_strict_disabled() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "inferred": {"type": "object", "additionalProperties": True},
+        },
+        "required": ["inferred"],
+        "additionalProperties": False,
+    }
+    payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": '{"inferred":{"x":1}}'}],
+            }
+        ],
+        "usage": {},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-5-mini", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, _usage = await client.chat(
+        [{"role": "user", "content": "extract"}],
+        structured_output=StructuredOutputRequest("MetalensExtract", schema),
+    )
+
+    assert json.loads(text) == {"inferred": {"x": 1}}
+    assert fake_http.last_json is not None
+    response_schema = fake_http.last_json["text"]["format"]
+    assert response_schema["type"] == "json_schema"
+    assert response_schema["strict"] is False
+    assert response_schema["schema"]["properties"]["inferred"]["additionalProperties"] is True
+
+
+def test_native_required_rejects_deepseek_before_transport() -> None:
+    with pytest.raises(LLMStructuredOutputCapabilityError, match="native_required"):
+        prepare_structured_output(
+            StructuredOutputRequest("Answer", {"type": "object"}),
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            policy="native_required",
+        )
+
+
+@pytest.mark.asyncio
+async def test_deepseek_uses_json_object_guidance_and_canonical_validation() -> None:
+    client = GenericLLMClient(provider="deepseek", model="deepseek-v4-pro")
+    seen: dict[str, Any] = {}
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        seen["messages"] = messages
+        seen.update(kwargs)
+        return '{"answer":7}', {}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    with pytest.raises(Exception, match="string"):
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            structured_output=StructuredOutputRequest(
+                "Answer",
+                {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+
+    assert seen["output_format"] == "json_object"
+    assert seen["json_schema"] is None
+    assert "JSON Schema" in seen["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_profile_native_required_fails_before_provider_dispatch() -> None:
+    client = GenericLLMClient(
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        structured_output_policy="native_required",
+    )
+    dispatched = False
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return "{}", {}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    with pytest.raises(LLMStructuredOutputCapabilityError):
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            structured_output=StructuredOutputRequest("Answer", {"type": "object"}),
+        )
+
+    assert not dispatched
 
 
 @pytest.mark.asyncio
@@ -514,6 +664,19 @@ def test_encode_llm_profile_env_includes_compatibility_policy() -> None:
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__REASONING_EFFORT"] == "high"
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__THINKING_MODE"] == "auto"
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__COMPATIBILITY_POLICY"] == "compat"
+
+
+def test_encode_llm_profile_env_includes_structured_output_policy() -> None:
+    env = encode_llm_profile_env(
+        "DEEPSEEK",
+        LLMProfilePayload(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            structured_output_policy="native_required",
+        ),
+    )
+
+    assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__STRUCTURED_OUTPUT_POLICY"] == "native_required"
 
 
 def test_encode_llm_profile_env_includes_explicit_vision_fields() -> None:

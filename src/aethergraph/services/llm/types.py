@@ -104,6 +104,67 @@ class LLMUnsupportedFeatureError(RuntimeError):
         super().__init__(msg)
 
 
+class LLMStructuredOutputCapabilityError(RuntimeError):
+    """Fail a structured request before transport when policy cannot be met."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        model: str | None,
+        policy: str,
+        detail: str,
+    ) -> None:
+        """
+        Build one provider-neutral structured-output capability failure.
+
+        Examples:
+            Construct a native-required failure:
+                ```python
+                error = LLMStructuredOutputCapabilityError(
+                    provider="deepseek",
+                    model="deepseek-chat",
+                    policy="native_required",
+                    detail="No native schema capability.",
+                )
+                assert "native_required" in str(error)
+                ```
+
+            Inspect stable fields:
+                ```python
+                error = LLMStructuredOutputCapabilityError(
+                    provider="custom",
+                    model=None,
+                    policy="native_required",
+                    detail="Unknown capability.",
+                )
+                assert error.provider == "custom"
+                ```
+
+        Args:
+            provider: Configured provider name.
+            model: Configured model or deployment identifier.
+            policy: Profile-owned structured-output policy.
+            detail: Deterministic capability or projection explanation.
+
+        Returns:
+            None: Initializes the exception.
+
+        Notes:
+            This error occurs before provider transport and should not be
+            treated as malformed model output.
+        """
+
+        super().__init__(
+            f"Structured output policy '{policy}' cannot be satisfied by "
+            f"provider '{provider}' / model '{model or '?'}': {detail}"
+        )
+        self.provider = provider
+        self.model = model
+        self.policy = policy
+        self.detail = detail
+
+
 class LLMError(RuntimeError):
     """Base class for typed LLM service failures."""
 

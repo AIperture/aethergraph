@@ -17,6 +17,12 @@ class LLMProfile(BaseModel):
         default="compat",
         description="How to handle requested capabilities that are not natively supported by the provider.",
     )
+    structured_output_policy: Literal["best_available", "native_required"] = Field(
+        default="best_available",
+        description=(
+            "Select the strongest safe structured-output mode or require native schema enforcement."
+        ),
+    )
 
     # provider-specific
     azure_deployment: str | None = None
