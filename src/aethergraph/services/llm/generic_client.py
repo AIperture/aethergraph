@@ -13,7 +13,7 @@ import warnings
 
 import httpx
 
-from aethergraph.config.config import RateLimitSettings
+from aethergraph.config.config import LLMUsageQuotaSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
@@ -42,9 +42,10 @@ from aethergraph.services.llm.types import (
     ImageFormat,
     ImageGenerationResult,
     ImageResponseFormat,
-    LLMCallBudgetExceededError,
-    LLMInputTooLargeError,
-    LLMRunBudgetExceededError,
+    LLMContextWindowExceededError,
+    LLMRequestEstimate,
+    LLMRunQuotaExceededError,
+    LLMRunQuotaWouldExceedError,
     LLMStructuredOutputCapabilityError,
     LLMStructuredOutputParseError,
     LLMStructuredOutputProviderRequestError,
@@ -158,8 +159,8 @@ class GenericLLMClient(
         timeout: float = 60.0,
         # metering
         metering: MeteringService | None = None,
-        # rate limit
-        rate_limit_cfg: RateLimitSettings | None = None,
+        # infrastructure usage quota
+        usage_quota_cfg: LLMUsageQuotaSettings | None = None,
         # thinking / reasoning
         reasoning_effort: str | None = None,
         thinking_mode: str | None = None,
@@ -167,6 +168,7 @@ class GenericLLMClient(
         reasoning_summary: str | None = None,
         compatibility_policy: str = "compat",
         structured_output_policy: StructuredOutputPolicy = "best_available",
+        context_window_tokens: int | None = None,
         # observability
         observation_sink: LLMObservationSink | None = None,
         observation_capture_mode: CaptureMode = "manifest",
@@ -209,10 +211,7 @@ class GenericLLMClient(
 
         self.metering = metering
 
-        # Rate limit settings
-        self._rate_limit_cfg = rate_limit_cfg
-        self._per_run_calls: dict[str, int] = {}
-        self._per_run_tokens: dict[str, int] = {}
+        self._usage_quota_cfg = usage_quota_cfg
 
         # Thinking / reasoning config
         self.reasoning_effort = reasoning_effort
@@ -221,6 +220,9 @@ class GenericLLMClient(
         self.reasoning_summary = reasoning_summary
         self.compatibility_policy = compatibility_policy or "compat"
         self.structured_output_policy = structured_output_policy
+        self.context_window_tokens = (
+            int(context_window_tokens) if context_window_tokens is not None else None
+        )
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
@@ -704,60 +706,34 @@ class GenericLLMClient(
 
         return prompt_i, completion_i
 
-    def _get_rate_limit_cfg(self) -> RateLimitSettings | None:
-        if self._rate_limit_cfg is not None:
-            return self._rate_limit_cfg
-        # Lazy-load from container if available
+    def _get_usage_quota_cfg(self) -> LLMUsageQuotaSettings | None:
+        if self._usage_quota_cfg is not None:
+            return self._usage_quota_cfg
         try:
             from aethergraph.core.runtime.runtime_services import (
-                current_services,  # local import to avoid cycles
+                current_services,
             )
 
             container = current_services()
             settings = getattr(container, "settings", None)
-            if settings is not None and getattr(settings, "rate_limit", None) is not None:
-                self._rate_limit_cfg = settings.rate_limit
-                return self._rate_limit_cfg
+            if settings is not None and getattr(settings, "llm_usage_quota", None) is not None:
+                self._usage_quota_cfg = settings.llm_usage_quota
+                return self._usage_quota_cfg
         except Exception:
             pass
+        return None
 
-    def _enforce_llm_limits_for_run(self, *, usage: dict[str, Any]) -> None:
-        cfg = self._get_rate_limit_cfg()
-        if cfg is None or not cfg.enabled:
-            return
-
-        # get current run_id from context
+    @staticmethod
+    def _quota_state() -> tuple[str, dict[str, int]] | None:
         ctx = current_meter_context.get()
         run_id = ctx.get("run_id")
         if not run_id:
-            # no run_id context; cannot enforce per-run limits
-            return
-
-        prompt_tokens, completion_tokens = self._normalize_usage(usage)
-        total_tokens = prompt_tokens + completion_tokens
-
-        calls = self._per_run_calls.get(run_id, 0) + 1
-        tokens = self._per_run_tokens.get(run_id, 0) + total_tokens
-
-        # store updated counts
-        self._per_run_calls[run_id] = calls
-        self._per_run_tokens[run_id] = tokens
-
-        if cfg.max_llm_calls_per_run and calls > cfg.max_llm_calls_per_run:
-            raise LLMCallBudgetExceededError(
-                run_id=str(run_id),
-                calls=calls,
-                limit=int(cfg.max_llm_calls_per_run),
-            )
-
-        if cfg.max_llm_tokens_per_run and tokens > cfg.max_llm_tokens_per_run:
-            raise LLMRunBudgetExceededError(
-                run_id=str(run_id),
-                total_tokens=tokens,
-                limit=int(cfg.max_llm_tokens_per_run),
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-            )
+            return None
+        state = ctx.setdefault(
+            "_llm_usage_quota_state",
+            {"calls": 0, "input_tokens": 0, "output_tokens": 0},
+        )
+        return str(run_id), state
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
@@ -787,35 +763,187 @@ class GenericLLMClient(
                     total += self._estimate_text_tokens(str(content))
         return total
 
-    def _preflight_llm_limits_for_run(
+    def estimate_chat_request(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_output_tokens: int | None,
+        structured_output: StructuredOutputRequest | None = None,
+        json_schema: dict[str, Any] | None = None,
+        tools: Any = None,
+        model: str | None = None,
+    ) -> LLMRequestEstimate:
+        """Estimate the current chat request without accumulated run usage.
+
+        The estimate uses an explicit approximation and includes canonical
+        structured-output and Tool payloads when supplied.
+
+        Examples:
+            Estimate a plain request:
+                ```python
+                estimate = client.estimate_chat_request(
+                    [{"role": "user", "content": "Hello"}],
+                    max_output_tokens=256,
+                )
+                assert estimate.reserved_output_tokens == 256
+                ```
+
+            Include one structured response schema:
+                ```python
+                estimate = client.estimate_chat_request(
+                    messages,
+                    max_output_tokens=512,
+                    structured_output=request,
+                )
+                assert estimate.estimated_input_tokens > 0
+                ```
+
+        Args:
+            messages: Current provider-neutral chat messages.
+            max_output_tokens: Maximum output tokens reserved for this call.
+            structured_output: Canonical structured-output request, if any.
+            json_schema: Prepared or legacy canonical JSON Schema, if any.
+            tools: Provider-neutral Tool declaration payload, if any.
+            model: Optional per-call model override.
+
+        Returns:
+            LLMRequestEstimate: Current-request estimate and configured context
+            capacity.
+
+        Notes:
+            The current implementation is deliberately labelled
+            ``approximate_chars_div_4``. It is suitable for admission warnings,
+            not billing.
+        """
+
+        estimated_input_tokens = self._estimate_messages_tokens(messages)
+        schema = structured_output.schema if structured_output is not None else json_schema
+        if schema is not None:
+            estimated_input_tokens += self._estimate_text_tokens(
+                json.dumps(schema, ensure_ascii=False, sort_keys=True, default=str)
+            )
+        if tools is not None:
+            estimated_input_tokens += self._estimate_text_tokens(
+                json.dumps(tools, ensure_ascii=False, sort_keys=True, default=str)
+            )
+        reserved_output_tokens = max(0, int(max_output_tokens or 0))
+        return LLMRequestEstimate(
+            model=str(model or self.model),
+            estimated_input_tokens=estimated_input_tokens,
+            reserved_output_tokens=reserved_output_tokens,
+            estimated_total_tokens=estimated_input_tokens + reserved_output_tokens,
+            context_window_tokens=self.context_window_tokens,
+            source="approximate_chars_div_4",
+        )
+
+    def _preflight_llm_request(self, estimate: LLMRequestEstimate) -> None:
+        if (
+            estimate.context_window_tokens is not None
+            and estimate.estimated_total_tokens > estimate.context_window_tokens
+        ):
+            raise LLMContextWindowExceededError(
+                model=estimate.model,
+                estimated_input_tokens=estimate.estimated_input_tokens,
+                reserved_output_tokens=estimate.reserved_output_tokens,
+                estimated_total_tokens=estimate.estimated_total_tokens,
+                limit=estimate.context_window_tokens,
+                estimate_source=estimate.source,
+            )
+
+        cfg = self._get_usage_quota_cfg()
+        quota_state = self._quota_state()
+        if cfg is None or quota_state is None:
+            return
+        run_id, state = quota_state
+        checks = (
+            ("llm_calls", state["calls"], 1, cfg.max_calls_per_run),
+            (
+                "input_tokens",
+                state["input_tokens"],
+                estimate.estimated_input_tokens,
+                cfg.max_input_tokens_per_run,
+            ),
+            (
+                "output_tokens",
+                state["output_tokens"],
+                estimate.reserved_output_tokens,
+                cfg.max_output_tokens_per_run,
+            ),
+            (
+                "total_tokens",
+                state["input_tokens"] + state["output_tokens"],
+                estimate.estimated_total_tokens,
+                cfg.max_total_tokens_per_run,
+            ),
+        )
+        for quota, consumed, requested, configured_limit in checks:
+            if configured_limit is None:
+                continue
+            limit = int(configured_limit)
+            projected = consumed + requested
+            if projected > limit:
+                raise LLMRunQuotaWouldExceedError(
+                    run_id=run_id,
+                    quota=quota,
+                    consumed=consumed,
+                    requested=requested,
+                    projected=projected,
+                    limit=limit,
+                    phase="would be exceeded before provider dispatch",
+                )
+
+    def _record_llm_quota_usage(
         self,
         *,
-        messages: list[dict[str, Any]],
-        max_output_tokens: int | None,
-    ) -> None:
-        cfg = self._get_rate_limit_cfg()
-        if cfg is None or not cfg.enabled or not cfg.max_llm_tokens_per_run:
-            return
+        usage: dict[str, Any],
+    ) -> LLMRunQuotaExceededError | None:
+        cfg = self._get_usage_quota_cfg()
+        if cfg is None:
+            return None
+        quota_state = self._quota_state()
+        if quota_state is None:
+            return None
+        run_id, state = quota_state
+        normalized = normalize_llm_usage(usage)
+        input_tokens = int(normalized["input_tokens"])
+        output_tokens = int(normalized["output_tokens"])
+        state["calls"] += 1
+        state["input_tokens"] += input_tokens
+        state["output_tokens"] += output_tokens
 
-        ctx = current_meter_context.get()
-        run_id = ctx.get("run_id")
-        if not run_id:
-            return
-
-        spent_tokens = int(self._per_run_tokens.get(run_id, 0) or 0)
-        estimated_input_tokens = self._estimate_messages_tokens(messages)
-        reserved_output_tokens = max(0, int(max_output_tokens or 0))
-        projected_total_tokens = spent_tokens + estimated_input_tokens + reserved_output_tokens
-        limit = int(cfg.max_llm_tokens_per_run)
-        if projected_total_tokens > limit:
-            raise LLMInputTooLargeError(
-                run_id=str(run_id),
-                spent_tokens=spent_tokens,
-                estimated_input_tokens=estimated_input_tokens,
-                reserved_output_tokens=reserved_output_tokens,
-                projected_total_tokens=projected_total_tokens,
-                limit=limit,
-            )
+        checks = (
+            ("llm_calls", state["calls"], 1, cfg.max_calls_per_run),
+            (
+                "input_tokens",
+                state["input_tokens"],
+                input_tokens,
+                cfg.max_input_tokens_per_run,
+            ),
+            (
+                "output_tokens",
+                state["output_tokens"],
+                output_tokens,
+                cfg.max_output_tokens_per_run,
+            ),
+            (
+                "total_tokens",
+                state["input_tokens"] + state["output_tokens"],
+                input_tokens + output_tokens,
+                cfg.max_total_tokens_per_run,
+            ),
+        )
+        for quota, projected, requested, configured_limit in checks:
+            if configured_limit is not None and projected > int(configured_limit):
+                return LLMRunQuotaExceededError(
+                    run_id=run_id,
+                    quota=quota,
+                    consumed=projected - requested,
+                    requested=requested,
+                    projected=projected,
+                    limit=int(configured_limit),
+                    phase="was exceeded by actual provider usage",
+                )
+        return None
 
     def _current_dimensions(self) -> dict[str, Any]:
         ctx = current_meter_context.get()
@@ -1166,6 +1294,22 @@ class GenericLLMClient(
                 provider_request_args,
                 prepared_structured_output.provider_request_fields,
             )
+        request_estimate = self.estimate_chat_request(
+            messages,
+            max_output_tokens=max_output_tokens,
+            json_schema=canonical_json_schema,
+            tools=kw.get("tools"),
+            model=model,
+        )
+        request_args.update(
+            {
+                "estimated_input_tokens": request_estimate.estimated_input_tokens,
+                "reserved_output_tokens": request_estimate.reserved_output_tokens,
+                "estimated_request_tokens": request_estimate.estimated_total_tokens,
+                "request_estimate_source": request_estimate.source,
+                "model_context_window_tokens": request_estimate.context_window_tokens,
+            }
+        )
         compatibility_notes = self._build_compatibility_notes(
             output_format=output_format,
             request_args=request_args,
@@ -1222,10 +1366,7 @@ class GenericLLMClient(
 
         start = time.perf_counter()
         try:
-            self._preflight_llm_limits_for_run(
-                messages=messages,
-                max_output_tokens=max_output_tokens,
-            )
+            self._preflight_llm_request(request_estimate)
             # Provider-specific call (now symmetric)
             text, usage = await self._chat_dispatch(
                 messages,
@@ -1264,15 +1405,14 @@ class GenericLLMClient(
             observation_record.usage = usage or {}
             observation_record.latency_ms = latency_ms
 
-            # Enforce rate limits (existing)
-            self._enforce_llm_limits_for_run(usage=usage)
-
-            # Metering (existing)
+            quota_error = self._record_llm_quota_usage(usage=usage)
             await self._record_llm_usage(
                 model=model,
                 usage=usage,
                 latency_ms=latency_ms,
             )
+            if quota_error is not None:
+                raise quota_error
             await self._emit_observation(observation_record)
             await span.finish(
                 response={
@@ -1447,6 +1587,22 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             extra_params=kw,
         )
+        request_estimate = self.estimate_chat_request(
+            messages,
+            max_output_tokens=max_output_tokens,
+            json_schema=json_schema if isinstance(json_schema, dict) else None,
+            tools=kw.get("tools"),
+            model=model,
+        )
+        request_args.update(
+            {
+                "estimated_input_tokens": request_estimate.estimated_input_tokens,
+                "reserved_output_tokens": request_estimate.reserved_output_tokens,
+                "estimated_request_tokens": request_estimate.estimated_total_tokens,
+                "request_estimate_source": request_estimate.source,
+                "model_context_window_tokens": request_estimate.context_window_tokens,
+            }
+        )
         compatibility_notes = self._build_compatibility_notes(
             output_format=output_format,
             request_args=request_args,
@@ -1507,10 +1663,7 @@ class GenericLLMClient(
             _thinking_budget = None
 
         try:
-            self._preflight_llm_limits_for_run(
-                messages=messages,
-                max_output_tokens=max_output_tokens,
-            )
+            self._preflight_llm_request(request_estimate)
             if self.provider == "openai":
                 text, usage = await self._chat_openai_responses_stream(
                     messages,
@@ -1573,9 +1726,10 @@ class GenericLLMClient(
             observation_record.usage = usage or {}
             observation_record.latency_ms = latency_ms
 
-            # Rate limits + metering as usual
-            self._enforce_llm_limits_for_run(usage=usage)
+            quota_error = self._record_llm_quota_usage(usage=usage)
             await self._record_llm_usage(model=model, usage=usage, latency_ms=latency_ms)
+            if quota_error is not None:
+                raise quota_error
             await self._emit_observation(observation_record)
             await span.finish(
                 response={
@@ -1848,12 +2002,13 @@ class GenericLLMClient(
                 **kw,
             )
 
-            self._enforce_llm_limits_for_run(usage=result.usage or {})
-
             latency_ms = int((time.perf_counter() - start) * 1000)
+            quota_error = self._record_llm_quota_usage(usage=result.usage or {})
             await self._record_llm_usage(
                 model=model, usage=result.usage or {}, latency_ms=latency_ms
             )
+            if quota_error is not None:
+                raise quota_error
             await span.finish(
                 response={"usage": result.usage or {}, "images_count": len(result.images or [])},
                 metadata=self._current_dimensions(),

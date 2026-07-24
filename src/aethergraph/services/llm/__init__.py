@@ -8,6 +8,11 @@ from .structured_output import (
     resolve_structured_output_capabilities,
 )
 from .types import (
+    LLMContextWindowExceededError,
+    LLMRequestEstimate,
+    LLMRunQuotaError,
+    LLMRunQuotaExceededError,
+    LLMRunQuotaWouldExceedError,
     LLMStructuredOutputCapabilityError,
     LLMStructuredOutputError,
     LLMStructuredOutputParseError,
@@ -19,6 +24,11 @@ from .types import (
 )
 
 __all__ = [
+    "LLMContextWindowExceededError",
+    "LLMRequestEstimate",
+    "LLMRunQuotaError",
+    "LLMRunQuotaExceededError",
+    "LLMRunQuotaWouldExceedError",
     "LLMStructuredOutputCapabilityError",
     "LLMStructuredOutputError",
     "LLMStructuredOutputParseError",

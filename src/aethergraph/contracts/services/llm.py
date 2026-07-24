@@ -3,6 +3,12 @@ from typing import Any, Protocol
 
 
 class LLMClientProtocol(Protocol):
+    def estimate_chat_request(
+        self,
+        messages: list[dict[str, Any]],
+        **kw: Any,
+    ) -> Any: ...
+
     async def chat(self, messages: list[dict[str, Any]], **kw) -> tuple[str, dict[str, int]]: ...
     async def raw(
         self,

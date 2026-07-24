@@ -193,60 +193,84 @@ class LLMStructuredOutputValidationError(LLMStructuredOutputError):
     """Parsed output failed the caller's canonical JSON Schema."""
 
 
-class LLMCallBudgetExceededError(LLMError):
-    def __init__(self, *, run_id: str, calls: int, limit: int):
-        super().__init__(
-            f"LLM call limit exceeded for this run ({calls} > {limit}). "
-            "Consider simplifying the graph or raising the limit."
-        )
-        self.run_id = run_id
-        self.calls = calls
-        self.limit = limit
+@dataclass(frozen=True)
+class LLMRequestEstimate:
+    """Describe one provider-neutral chat request estimate.
+
+    The estimate covers the current request only. It never includes usage from
+    earlier calls in the run.
+    """
+
+    model: str
+    estimated_input_tokens: int
+    reserved_output_tokens: int
+    estimated_total_tokens: int
+    context_window_tokens: int | None
+    source: str
 
 
-class LLMRunBudgetExceededError(LLMError):
+class LLMContextWindowExceededError(LLMError):
+    """Signal that one current request cannot fit its configured model window."""
+
     def __init__(
         self,
         *,
-        run_id: str,
-        total_tokens: int,
-        limit: int,
-        prompt_tokens: int,
-        completion_tokens: int,
-    ):
-        super().__init__(
-            f"LLM token limit exceeded for this run ({total_tokens} > {limit}). "
-            "Consider simplifying the graph or raising the limit."
-        )
-        self.run_id = run_id
-        self.total_tokens = total_tokens
-        self.limit = limit
-        self.prompt_tokens = prompt_tokens
-        self.completion_tokens = completion_tokens
-
-
-class LLMInputTooLargeError(LLMError):
-    def __init__(
-        self,
-        *,
-        run_id: str,
-        spent_tokens: int,
+        model: str,
         estimated_input_tokens: int,
         reserved_output_tokens: int,
-        projected_total_tokens: int,
+        estimated_total_tokens: int,
         limit: int,
-    ):
+        estimate_source: str,
+    ) -> None:
         super().__init__(
-            "LLM request exceeds the remaining token budget for this run "
-            f"({projected_total_tokens} > {limit}). "
-            "Consider simplifying the graph or raising the limit."
+            "LLM request exceeds the configured model context window "
+            f"(estimated_input={estimated_input_tokens}, "
+            f"reserved_output={reserved_output_tokens}, "
+            f"estimated_total={estimated_total_tokens}, limit={limit}, "
+            f"model='{model}', estimate_source='{estimate_source}')."
         )
-        self.run_id = run_id
-        self.spent_tokens = spent_tokens
+        self.model = model
         self.estimated_input_tokens = estimated_input_tokens
         self.reserved_output_tokens = reserved_output_tokens
-        self.projected_total_tokens = projected_total_tokens
+        self.estimated_total_tokens = estimated_total_tokens
         self.limit = limit
+        self.estimate_source = estimate_source
+
+
+class LLMRunQuotaError(LLMError):
+    """Base class for infrastructure-owned per-run LLM quota failures."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        quota: str,
+        consumed: int,
+        requested: int,
+        projected: int,
+        limit: int,
+        phase: str,
+    ) -> None:
+        super().__init__(
+            f"LLM infrastructure quota '{quota}' {phase} "
+            f"(consumed={consumed}, requested={requested}, "
+            f"projected={projected}, limit={limit}, run_id='{run_id}')."
+        )
+        self.run_id = run_id
+        self.quota = quota
+        self.consumed = consumed
+        self.requested = requested
+        self.projected = projected
+        self.limit = limit
+        self.phase = phase
+
+
+class LLMRunQuotaWouldExceedError(LLMRunQuotaError):
+    """Reject a call before transport when it would cross an AG quota."""
+
+
+class LLMRunQuotaExceededError(LLMRunQuotaError):
+    """Report actual provider usage that crossed an AG quota."""
 
 
 @dataclass

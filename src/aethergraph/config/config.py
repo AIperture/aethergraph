@@ -24,9 +24,18 @@ class RateLimitSettings(BaseSettings):
     burst_max_runs: int = 10
     burst_window_seconds: int = 10
 
-    # Optional LLM caps *per run*
-    max_llm_calls_per_run: int = 200
-    max_llm_tokens_per_run: int = 200_000
+
+class LLMUsageQuotaSettings(BaseSettings):
+    """Configure optional infrastructure-owned LLM quotas.
+
+    Quotas are disabled when their value is ``None``. Agent-loop budgets belong
+    to the agent engine and are intentionally not given implicit AG defaults.
+    """
+
+    max_calls_per_run: int | None = Field(default=None, ge=0)
+    max_input_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_output_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_total_tokens_per_run: int | None = Field(default=None, ge=0)
 
 
 class LoggingSettings(BaseModel):
@@ -186,6 +195,7 @@ class AppSettings(BaseSettings):
     deploy_mode: Literal["local", "demo", "cloud"] = "local"
 
     rate_limit: RateLimitSettings = RateLimitSettings()
+    llm_usage_quota: LLMUsageQuotaSettings = LLMUsageQuotaSettings()
     logging: LoggingSettings = LoggingSettings()
     slack: SlackSettings = SlackSettings()
     telegram: TelegramSettings = TelegramSettings()

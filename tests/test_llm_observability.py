@@ -6,13 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from aethergraph.config.config import AppSettings, RateLimitSettings
+from aethergraph.config.config import AppSettings, LLMUsageQuotaSettings
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.observability import ConsoleLLMObservationSink
-from aethergraph.services.llm.types import LLMInputTooLargeError, LLMRunBudgetExceededError
+from aethergraph.services.llm.types import (
+    LLMContextWindowExceededError,
+    LLMRunQuotaExceededError,
+    LLMRunQuotaWouldExceedError,
+)
 from aethergraph.services.observability import (
     LLMObservationRecord,
     ObservabilityFacade,
@@ -323,13 +327,12 @@ def test_llm_observability_defaults_to_manifest_capture() -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> None:
+async def test_llm_chat_preflight_uses_explicit_usage_quota_before_dispatch() -> None:
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
-        rate_limit_cfg=RateLimitSettings(enabled=True, max_llm_tokens_per_run=200),
+        usage_quota_cfg=LLMUsageQuotaSettings(max_total_tokens_per_run=200),
     )
-    client._per_run_tokens["run-preflight-tight"] = 180
     dispatched = False
 
     async def fake_chat_dispatch(messages, **kwargs):
@@ -338,9 +341,18 @@ async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> 
         return "unexpected", {"prompt_tokens": 1, "completion_tokens": 1}
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
-    token = current_meter_context.set({"run_id": "run-preflight-tight"})
+    token = current_meter_context.set(
+        {
+            "run_id": "run-preflight-tight",
+            "_llm_usage_quota_state": {
+                "calls": 1,
+                "input_tokens": 170,
+                "output_tokens": 10,
+            },
+        }
+    )
     try:
-        with pytest.raises(LLMInputTooLargeError) as exc_info:
+        with pytest.raises(LLMRunQuotaWouldExceedError) as exc_info:
             await client.chat(
                 [{"role": "user", "content": "x" * 120}],
                 max_output_tokens=40,
@@ -350,15 +362,16 @@ async def test_llm_chat_preflight_uses_rate_limit_override_before_dispatch() -> 
 
     assert dispatched is False
     assert exc_info.value.limit == 200
-    assert exc_info.value.projected_total_tokens > 200
+    assert exc_info.value.projected > 200
+    assert exc_info.value.consumed == 180
 
 
 @pytest.mark.asyncio
-async def test_llm_post_call_budget_violation_raises_typed_error() -> None:
+async def test_llm_post_call_quota_violation_raises_typed_error() -> None:
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
-        rate_limit_cfg=RateLimitSettings(enabled=True, max_llm_tokens_per_run=50),
+        usage_quota_cfg=LLMUsageQuotaSettings(max_total_tokens_per_run=50),
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
@@ -367,10 +380,45 @@ async def test_llm_post_call_budget_violation_raises_typed_error() -> None:
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     token = current_meter_context.set({"run_id": "run-post"})
     try:
-        with pytest.raises(LLMRunBudgetExceededError) as exc_info:
+        with pytest.raises(LLMRunQuotaExceededError) as exc_info:
             await client.chat([{"role": "user", "content": "hello"}])
     finally:
         current_meter_context.reset(token)
 
-    assert exc_info.value.total_tokens == 55
+    assert exc_info.value.projected == 55
     assert exc_info.value.limit == 50
+
+
+@pytest.mark.asyncio
+async def test_llm_context_window_is_current_request_only() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        context_window_tokens=20,
+    )
+    dispatched = False
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return "unexpected", {"prompt_tokens": 1, "completion_tokens": 1}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+    with pytest.raises(LLMContextWindowExceededError) as exc_info:
+        await client.chat(
+            [{"role": "user", "content": "x" * 80}],
+            max_output_tokens=10,
+        )
+
+    assert dispatched is False
+    assert exc_info.value.estimated_total_tokens > 20
+    assert exc_info.value.limit == 20
+
+
+def test_llm_usage_quota_defaults_to_unbounded() -> None:
+    quota = AppSettings().llm_usage_quota
+
+    assert quota.max_calls_per_run is None
+    assert quota.max_input_tokens_per_run is None
+    assert quota.max_output_tokens_per_run is None
+    assert quota.max_total_tokens_per_run is None

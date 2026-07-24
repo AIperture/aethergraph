@@ -23,6 +23,14 @@ class LLMProfile(BaseModel):
             "Select the strongest safe structured-output mode or require native schema enforcement."
         ),
     )
+    context_window_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Explicit model context-window capacity. When omitted, AG records "
+            "request estimates but leaves context admission to the provider."
+        ),
+    )
 
     # provider-specific
     azure_deployment: str | None = None

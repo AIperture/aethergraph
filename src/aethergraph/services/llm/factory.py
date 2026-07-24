@@ -153,6 +153,7 @@ def client_from_profile(
         thinking_mode=p.thinking_mode,
         compatibility_policy=p.compatibility_policy,
         structured_output_policy=p.structured_output_policy,
+        context_window_tokens=p.context_window_tokens,
         thinking_budget=p.thinking_budget,
         reasoning_summary=p.reasoning_summary,
         observation_sink=observation_sink,

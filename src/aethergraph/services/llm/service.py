@@ -54,6 +54,7 @@ class LLMService:
         thinking_mode: str | None = None,
         compatibility_policy: str | None = None,
         structured_output_policy: StructuredOutputPolicy | None = None,
+        context_window_tokens: int | None = None,
         vision_enabled: bool | None = None,
         vision_max_images: int | None = None,
         vision_max_image_bytes: int | None = None,
@@ -101,6 +102,7 @@ class LLMService:
             compatibility_policy: Optional unsupported-feature policy.
             structured_output_policy: Optional structured-output capability
                 policy.
+            context_window_tokens: Optional model context-window capacity.
             vision_enabled: Optional image-input capability flag.
             vision_max_images: Optional maximum images per vision call.
             vision_max_image_bytes: Optional maximum bytes per image.
@@ -138,6 +140,11 @@ class LLMService:
                     "structured_output_policy",
                     "best_available",
                 ),
+                context_window_tokens=(
+                    context_window_tokens
+                    if context_window_tokens is not None
+                    else getattr(template, "context_window_tokens", None)
+                ),
                 observation_sink=getattr(template, "observation_sink", None),
                 observation_capture_mode=getattr(template, "observation_capture_mode", "manifest"),
             )
@@ -153,6 +160,7 @@ class LLMService:
                 thinking_mode=thinking_mode,
                 compatibility_policy=compatibility_policy,
                 structured_output_policy=structured_output_policy,
+                context_window_tokens=context_window_tokens,
                 vision_enabled=vision_enabled,
                 vision_max_images=vision_max_images,
                 vision_max_image_bytes=vision_max_image_bytes,
@@ -190,6 +198,8 @@ class LLMService:
             c.compatibility_policy = compatibility_policy
         if structured_output_policy is not None:
             c.structured_output_policy = structured_output_policy
+        if context_window_tokens is not None:
+            c.context_window_tokens = int(context_window_tokens)
         if reasoning_effort is not None:
             c.reasoning_effort = reasoning_effort
         if thinking_mode is not None:
@@ -205,6 +215,7 @@ class LLMService:
             thinking_mode=thinking_mode,
             compatibility_policy=compatibility_policy,
             structured_output_policy=structured_output_policy,
+            context_window_tokens=context_window_tokens,
             vision_enabled=vision_enabled,
             vision_max_images=vision_max_images,
             vision_max_image_bytes=vision_max_image_bytes,
@@ -231,6 +242,7 @@ class LLMService:
         thinking_mode: str | None,
         compatibility_policy: str | None,
         structured_output_policy: StructuredOutputPolicy | None,
+        context_window_tokens: int | None,
         vision_enabled: bool | None,
         vision_max_images: int | None,
         vision_max_image_bytes: int | None,
@@ -262,6 +274,8 @@ class LLMService:
             updated.compatibility_policy = compatibility_policy  # type: ignore[assignment]
         if structured_output_policy is not None:
             updated.structured_output_policy = structured_output_policy
+        if context_window_tokens is not None:
+            updated.context_window_tokens = int(context_window_tokens)
         if vision_enabled is not None:
             updated.vision_enabled = vision_enabled
         if vision_max_images is not None:
