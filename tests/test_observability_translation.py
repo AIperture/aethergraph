@@ -170,6 +170,16 @@ async def test_v2_presenter_projects_semantic_events_and_metadata_context(
         text="Dispatched researcher",
         ts="2026-07-17T00:00:06+00:00",
     )
+    await append(
+        "return-1",
+        "agent_engine.return_intent",
+        {
+            "dispatch_token": "dispatch-1",
+            "status": "completed",
+        },
+        text="Research completed",
+        ts="2026-07-17T00:00:06.500000+00:00",
+    )
     await event_log.append(
         {
             "ts": "2026-07-17T00:00:07+00:00",
@@ -201,6 +211,9 @@ async def test_v2_presenter_projects_semantic_events_and_metadata_context(
     }
     tool = next(span for span in spans if span["kind"] == "tool_call")
     assert tool["payload"]["resource_links"][0]["resource_key"] == "artifact:report-1"
+    dispatch = next(span for span in spans if span["span_id"] == "dispatch-1")
+    assert dispatch["status"] == "completed"
+    assert dispatch["payload"]["result_summary"] == "Research completed"
     assert (await facade.get_trace_plans("run-1"))["items"][0]["plan"]["goal"] == "Investigate"
     graph = await facade.get_trace_graph("run-1")
     assert graph["edges"]["dispatch-1"]["target_node_id"] == "researcher"

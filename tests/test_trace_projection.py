@@ -3,6 +3,7 @@ from __future__ import annotations
 from aethergraph.services.observability.trace_projection.linking import (
     DispatchInfo,
     build_run_tree,
+    dispatch_infos,
     group_turns,
     link_children,
     resolve_event_turn_ids,
@@ -185,3 +186,49 @@ def test_dispatch_children_link_by_token_and_resumptions_link_to_owner_run() -> 
     resume = next(node for node in tree if node.run_id == "resume")
     assert resume.parent_run_id == "root"
     assert resume.parent_dispatch_id is None
+
+
+def test_dispatch_info_pairs_parent_return_intent_by_exact_token() -> None:
+    def dispatch_event(
+        event_id: str,
+        kind: str,
+        ts: int,
+        text: str,
+        data: dict[str, object],
+    ) -> EngineEvent:
+        return EngineEvent(
+            event_id=event_id,
+            ts=float(ts),
+            iso=f"2026-01-01T00:00:0{ts}+00:00",
+            run_id="root",
+            session_id="session-1",
+            kind=kind,
+            text=text,
+            agent_instance_id="planner",
+            turn_id="turn-1",
+            tags=["agent_engine", "turn:turn-1"],
+            data=data,
+        )
+
+    [dispatch] = dispatch_infos(
+        [
+            dispatch_event(
+                "entered",
+                "agent_engine.dispatch_entered",
+                1,
+                "Inspect",
+                {"dispatch_token": "dispatch-1", "status": "dispatched"},
+            ),
+            dispatch_event(
+                "returned",
+                "agent_engine.return_intent",
+                2,
+                "Inspection complete",
+                {"dispatch_token": "dispatch-1", "status": "completed"},
+            ),
+        ]
+    )
+
+    assert dispatch.status == "completed"
+    assert dispatch.return_text == "Inspection complete"
+    assert dispatch.ended_at == "2026-01-01T00:00:02+00:00"

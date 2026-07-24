@@ -13,7 +13,7 @@ from .models import RunNode, TraceGraph, TraceGraphEdge, TraceGraphNode
 from .reader import EngineEvent, RunInfo
 
 _DISPATCH_ENTERED = "agent_engine.dispatch_entered"
-_DISPATCH_RETURNED = "agent_engine.dispatch_returned"
+_RETURN_INTENT = "agent_engine.return_intent"
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class TurnGroup:
 
 @dataclass(frozen=True)
 class DispatchInfo:
-    """One paired dispatch_entered(+dispatch_returned) on a source run."""
+    """One `dispatch_entered` paired with its parent-owned `return_intent`."""
 
     dispatch_token: str
     source_run_id: str
@@ -140,10 +140,10 @@ def group_turns(runs: list[RunInfo]) -> list[TurnGroup]:
 
 
 def dispatch_infos(events: list[EngineEvent]) -> list[DispatchInfo]:
-    """Pair dispatch_entered with dispatch_returned by token, in entry order."""
+    """Pair `dispatch_entered` with `return_intent` by token in entry order."""
     returned: dict[str, EngineEvent] = {}
     for event in events:
-        if event.kind == _DISPATCH_RETURNED:
+        if event.kind == _RETURN_INTENT:
             token = str(event.data.get("dispatch_token") or "")
             if token:
                 returned[token] = event

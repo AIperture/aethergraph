@@ -960,7 +960,7 @@ class StudioTranslationPresenter:
         returned_by_token = {
             str((row.get("data") or {}).get("dispatch_token") or ""): row
             for row in events
-            if row.get("kind") == "agent_engine.dispatch_returned"
+            if row.get("kind") == "agent_engine.return_intent"
         }
         spans: list[dict[str, Any]] = []
         for sequence_no, row in enumerate(events):
@@ -969,7 +969,7 @@ class StudioTranslationPresenter:
                 event_kind
                 in {
                     "agent_engine.tool_result",
-                    "agent_engine.dispatch_returned",
+                    "agent_engine.return_intent",
                 }
                 or ".plan_" in event_kind
             ):
