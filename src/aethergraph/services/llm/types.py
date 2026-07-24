@@ -250,6 +250,7 @@ class LLMRunQuotaError(LLMError):
         projected: int,
         limit: int,
         phase: str,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             f"LLM infrastructure quota '{quota}' {phase} "
@@ -263,6 +264,7 @@ class LLMRunQuotaError(LLMError):
         self.projected = projected
         self.limit = limit
         self.phase = phase
+        self.usage = copy.deepcopy(usage) if usage is not None else None
 
 
 class LLMRunQuotaWouldExceedError(LLMRunQuotaError):

@@ -942,6 +942,7 @@ class GenericLLMClient(
                     projected=projected,
                     limit=int(configured_limit),
                     phase="was exceeded by actual provider usage",
+                    usage=normalized,
                 )
         return None
 
