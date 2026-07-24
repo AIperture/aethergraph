@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from aethergraph.api.v1 import settings as settings_api
 from aethergraph.api.v1.schemas.settings import LLMProfilePayload
 from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profile_env
@@ -15,6 +16,10 @@ from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.structured_output import prepare_structured_output
 from aethergraph.services.llm.types import (
     LLMStructuredOutputCapabilityError,
+    LLMStructuredOutputProviderRequestError,
+    LLMStructuredOutputRefusalError,
+    LLMStructuredOutputTruncationError,
+    LLMStructuredOutputValidationError,
     LLMUnsupportedFeatureError,
 )
 
@@ -78,6 +83,8 @@ def test_openai_closed_schema_selects_native_strict_output() -> None:
     assert prepared.mode == "native_strict"
     assert prepared.provider_strict
     assert prepared.provider_schema == prepared.canonical_schema
+    assert len(prepared.canonical_schema_fingerprint) == 64
+    assert prepared.provider_schema_fingerprint == prepared.canonical_schema_fingerprint
 
 
 def test_openai_free_form_schema_preserves_semantics_in_native_schema_mode() -> None:
@@ -173,6 +180,17 @@ async def test_openrouter_uses_the_prepared_native_schema_request() -> None:
     assert actual["type"] == "json_schema"
     assert actual["json_schema"]["strict"] is True
     assert sink.records[0].provider_request_args["response_format"] == actual
+    request_args = sink.records[0].request_args
+    assert request_args["structured_output_policy"] == "best_available"
+    assert request_args["structured_output_effective_mode"] == "native_strict"
+    assert request_args["structured_output_capability_source"].startswith("ag_static/")
+    assert len(request_args["structured_output_canonical_schema_fingerprint"]) == 64
+    assert (
+        request_args["structured_output_provider_schema_fingerprint"]
+        == request_args["structured_output_canonical_schema_fingerprint"]
+    )
+    assert request_args["structured_output_validation_outcome"] == "passed"
+    assert request_args["structured_output_response_state"] == "completed"
 
 
 def test_native_required_rejects_deepseek_before_transport() -> None:
@@ -218,10 +236,12 @@ async def test_deepseek_uses_json_object_guidance_and_canonical_validation() -> 
 
 @pytest.mark.asyncio
 async def test_profile_native_required_fails_before_provider_dispatch() -> None:
+    sink = _ObservationSink()
     client = GenericLLMClient(
         provider="deepseek",
         model="deepseek-v4-pro",
         structured_output_policy="native_required",
+        observation_sink=sink,
     )
     dispatched = False
 
@@ -239,6 +259,76 @@ async def test_profile_native_required_fails_before_provider_dispatch() -> None:
         )
 
     assert not dispatched
+    assert len(sink.records) == 1
+    request_args = sink.records[0].request_args
+    assert request_args["structured_output_effective_mode"] == "unavailable"
+    assert request_args["structured_output_validation_outcome"] == "not_run"
+    assert request_args["structured_output_response_state"] == ("capability_rejected")
+    assert request_args["structured_output_capability_source"].startswith("ag_static/")
+    assert len(request_args["structured_output_canonical_schema_fingerprint"]) == 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "validation_outcome", "response_state"),
+    [
+        (
+            LLMStructuredOutputProviderRequestError("rejected"),
+            "not_run",
+            "provider_request_rejected",
+        ),
+        (
+            LLMStructuredOutputRefusalError("refused"),
+            "not_run",
+            "refused",
+        ),
+        (
+            LLMStructuredOutputTruncationError("truncated"),
+            "not_run",
+            "truncated",
+        ),
+        (
+            LLMStructuredOutputValidationError("invalid"),
+            "failed",
+            "canonical_validation_failed",
+        ),
+    ],
+)
+async def test_structured_output_failures_record_generic_state(
+    error: Exception,
+    validation_outcome: str,
+    response_state: str,
+) -> None:
+    sink = _ObservationSink()
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5-mini",
+        observation_sink=sink,
+    )
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        raise error
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    with pytest.raises(type(error)):
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            structured_output=StructuredOutputRequest(
+                "Answer",
+                {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+
+    assert len(sink.records) == 1
+    request_args = sink.records[0].request_args
+    assert request_args["structured_output_validation_outcome"] == validation_outcome
+    assert request_args["structured_output_response_state"] == response_state
 
 
 @pytest.mark.asyncio
@@ -782,7 +872,7 @@ def test_llm_service_exposes_explicit_profile_metadata() -> None:
     assert service.profile("missing") is None
 
 
-def test_llm_service_configure_profile_updates_vision_metadata() -> None:
+def test_llm_service_configure_profile_updates_runtime_metadata() -> None:
     client = GenericLLMClient(provider="openai", model="gpt-test")
     service = LLMService(
         clients={"default": client},
@@ -791,6 +881,7 @@ def test_llm_service_configure_profile_updates_vision_metadata() -> None:
 
     service.configure_profile(
         profile="default",
+        structured_output_policy="native_required",
         vision_enabled=True,
         vision_max_images=1,
         vision_max_image_bytes=1024,
@@ -804,6 +895,8 @@ def test_llm_service_configure_profile_updates_vision_metadata() -> None:
 
     profile = service.profile("default")
     assert profile is not None
+    assert profile.structured_output_policy == "native_required"
+    assert client.structured_output_policy == "native_required"
     assert profile.vision_enabled is True
     assert profile.vision_max_images == 1
     assert profile.vision_max_image_bytes == 1024
@@ -813,6 +906,47 @@ def test_llm_service_configure_profile_updates_vision_metadata() -> None:
     assert profile.vision_resize_jpeg_quality == 78
     assert profile.vision_resize_min_jpeg_quality == 62
     assert profile.vision_accepted_mime_types == ["image/png"]
+
+
+def test_settings_profile_view_includes_structured_output_policy() -> None:
+    view = settings_api._llm_profile_view(
+        LLMProfile(
+            provider="openai",
+            model="gpt-5-mini",
+            structured_output_policy="native_required",
+        )
+    )
+
+    assert view.structured_output_policy == "native_required"
+
+
+def test_settings_hot_reload_applies_structured_output_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-5-mini")
+    service = LLMService(
+        clients={"default": client},
+        profiles={
+            "default": LLMProfile(
+                provider="openai",
+                model="gpt-5-mini",
+            )
+        },
+    )
+    monkeypatch.setattr(
+        settings_api,
+        "current_services",
+        lambda: type("Services", (), {"llm": service})(),
+    )
+
+    settings_api._hot_reload_llm(
+        {"default": LLMProfilePayload(structured_output_policy="native_required")}
+    )
+
+    assert client.structured_output_policy == "native_required"
+    profile = service.profile("default")
+    assert profile is not None
+    assert profile.structured_output_policy == "native_required"
 
 
 @pytest.mark.asyncio

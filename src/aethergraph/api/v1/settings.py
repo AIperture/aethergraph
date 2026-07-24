@@ -105,6 +105,11 @@ def _llm_profile_view(profile) -> LLMProfileView:
         thinking_budget=profile.thinking_budget,
         reasoning_summary=profile.reasoning_summary,
         compatibility_policy=getattr(profile, "compatibility_policy", "compat"),
+        structured_output_policy=getattr(
+            profile,
+            "structured_output_policy",
+            "best_available",
+        ),
         vision_enabled=bool(getattr(profile, "vision_enabled", False)),
         vision_max_images=getattr(profile, "vision_max_images", None),
         vision_max_image_bytes=getattr(profile, "vision_max_image_bytes", None),
@@ -247,6 +252,8 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["thinking_mode"] = payload.thinking_mode
         if payload.compatibility_policy is not None:
             kwargs["compatibility_policy"] = payload.compatibility_policy
+        if payload.structured_output_policy is not None:
+            kwargs["structured_output_policy"] = payload.structured_output_policy
         if payload.vision_enabled is not None:
             kwargs["vision_enabled"] = payload.vision_enabled
         if payload.vision_max_images is not None:

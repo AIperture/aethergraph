@@ -33,7 +33,9 @@ from aethergraph.services.llm.observability import (
 from aethergraph.services.llm.structured_output import (
     PreparedStructuredOutput,
     StructuredOutputPolicy,
+    _schema_fingerprint,
     prepare_structured_output,
+    resolve_structured_output_capabilities,
 )
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
@@ -43,7 +45,11 @@ from aethergraph.services.llm.types import (
     LLMCallBudgetExceededError,
     LLMInputTooLargeError,
     LLMRunBudgetExceededError,
+    LLMStructuredOutputCapabilityError,
     LLMStructuredOutputParseError,
+    LLMStructuredOutputProviderRequestError,
+    LLMStructuredOutputRefusalError,
+    LLMStructuredOutputTruncationError,
     LLMStructuredOutputValidationError,
     LLMUnsupportedFeatureError,
     StructuredOutputRequest,
@@ -80,6 +86,28 @@ def _merge_request_fields(
         else:
             result[key] = copy.deepcopy(value)
     return result
+
+
+def _record_structured_output_failure(
+    request_args: dict[str, Any],
+    exc: Exception,
+) -> None:
+    validation_outcome = "not_run"
+    response_state = "runtime_error"
+    if isinstance(exc, LLMStructuredOutputProviderRequestError):
+        response_state = "provider_request_rejected"
+    elif isinstance(exc, LLMStructuredOutputRefusalError):
+        response_state = "refused"
+    elif isinstance(exc, LLMStructuredOutputTruncationError):
+        response_state = "truncated"
+    elif isinstance(exc, LLMStructuredOutputParseError):
+        validation_outcome = "parse_failed"
+        response_state = "invalid_json"
+    elif isinstance(exc, LLMStructuredOutputValidationError):
+        validation_outcome = "failed"
+        response_state = "canonical_validation_failed"
+    request_args["structured_output_validation_outcome"] = validation_outcome
+    request_args["structured_output_response_state"] = response_state
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -405,7 +433,7 @@ class GenericLLMClient(
             else None,
             "json_schema_present": bool(json_schema) if output_format == "json_schema" else None,
             "deprecated_parameters": list(deprecated_parameters) or None,
-            "structured_output_mode": (
+            "structured_output_effective_mode": (
                 prepared_structured_output.mode if prepared_structured_output is not None else None
             ),
             "structured_output_capability_source": (
@@ -424,6 +452,22 @@ class GenericLLMClient(
                 ]
                 if prepared_structured_output is not None and prepared_structured_output.diagnostics
                 else None
+            ),
+            "structured_output_canonical_schema_fingerprint": (
+                prepared_structured_output.canonical_schema_fingerprint
+                if prepared_structured_output is not None
+                else None
+            ),
+            "structured_output_provider_schema_fingerprint": (
+                prepared_structured_output.provider_schema_fingerprint
+                if prepared_structured_output is not None
+                else None
+            ),
+            "structured_output_validation_outcome": (
+                "pending" if prepared_structured_output is not None else None
+            ),
+            "structured_output_response_state": (
+                "pending" if prepared_structured_output is not None else None
             ),
             "temperature": extra_params.get("temperature"),
             "top_p": extra_params.get("top_p"),
@@ -1000,13 +1044,85 @@ class GenericLLMClient(
             effective_policy = self.structured_output_policy
             if "fail_on_unsupported" in deprecated_parameters:
                 effective_policy = "native_required" if fail_on_unsupported else "best_available"
-            prepared_structured_output = prepare_structured_output(
-                StructuredOutputRequest(name=schema_name, schema=json_schema),
-                provider=self.provider,
-                model=model,
-                policy=effective_policy,
-                allow_native_strict=strict_schema,
-            )
+            try:
+                prepared_structured_output = prepare_structured_output(
+                    StructuredOutputRequest(name=schema_name, schema=json_schema),
+                    provider=self.provider,
+                    model=model,
+                    policy=effective_policy,
+                    allow_native_strict=strict_schema,
+                )
+            except LLMStructuredOutputCapabilityError as exc:
+                capabilities = resolve_structured_output_capabilities(
+                    self.provider,
+                    model,
+                )
+                request_args = self._build_request_args(
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                    output_format=output_format,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    strict_schema=strict_schema,
+                    validate_json=validate_json,
+                    deprecated_parameters=deprecated_parameters,
+                    prepared_structured_output=None,
+                    extra_params=kw,
+                )
+                request_args.update(
+                    {
+                        "structured_output_policy": effective_policy,
+                        "structured_output_effective_mode": "unavailable",
+                        "structured_output_capability_source": capabilities.source,
+                        "structured_output_canonical_schema_fingerprint": (
+                            _schema_fingerprint(json_schema)
+                        ),
+                        "structured_output_validation_outcome": "not_run",
+                        "structured_output_response_state": "capability_rejected",
+                        "structured_output_projection_diagnostics": [
+                            {
+                                "code": "capability_policy_unsatisfied",
+                                "path": "$",
+                                "message": exc.detail,
+                            }
+                        ],
+                    }
+                )
+                compatibility_notes = [
+                    exc.detail,
+                    *(
+                        [
+                            "Deprecated structured-output parameters used: "
+                            + ", ".join(deprecated_parameters)
+                            + ". Removal is scheduled for AetherGraph 0.2.0."
+                        ]
+                        if deprecated_parameters
+                        else []
+                    ),
+                ]
+                observation_record = self._build_observation_record(
+                    call_type="chat",
+                    model=model,
+                    messages=messages,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                    output_format=output_format,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    strict_schema=strict_schema,
+                    validate_json=validate_json,
+                    extra_params=kw,
+                    request_args=request_args,
+                    provider_request_args={},
+                    compatibility_notes=compatibility_notes,
+                    trace_payload=trace_payload,
+                    call_name=call_name,
+                )
+                observation_record.error_type = type(exc).__name__
+                observation_record.error_message = str(exc)
+                await self._emit_observation(observation_record)
+                raise
             schema_name = prepared_structured_output.provider_schema_name
             strict_schema = prepared_structured_output.provider_strict
             json_schema = prepared_structured_output.provider_schema
@@ -1138,6 +1254,9 @@ class GenericLLMClient(
                 strict_schema=canonical_strict_validation,
                 validate_json=validate_json,
             )
+            if prepared_structured_output is not None:
+                request_args["structured_output_validation_outcome"] = "passed"
+                request_args["structured_output_response_state"] = "completed"
 
             latency_ms = int((time.perf_counter() - start) * 1000)
             normalized_usage = normalize_llm_usage(usage)
@@ -1170,6 +1289,8 @@ class GenericLLMClient(
             )
             return text, usage
         except Exception as exc:
+            if prepared_structured_output is not None:
+                _record_structured_output_failure(request_args, exc)
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -60,7 +62,7 @@ class LLMProfileView(BaseModel):
     thinking_budget: int | None = None
     reasoning_summary: str | None = None
     compatibility_policy: str = "compat"
-    structured_output_policy: str = "best_available"
+    structured_output_policy: Literal["best_available", "native_required"] = "best_available"
     vision_enabled: bool = False
     vision_max_images: int | None = None
     vision_max_image_bytes: int | None = None
@@ -84,7 +86,7 @@ class LLMProfilePayload(BaseModel):
     reasoning_effort: str | None = None
     thinking_mode: str | None = None
     compatibility_policy: str | None = None
-    structured_output_policy: str | None = None
+    structured_output_policy: Literal["best_available", "native_required"] | None = None
     vision_enabled: bool | None = None
     vision_max_images: int | None = None
     vision_max_image_bytes: int | None = None

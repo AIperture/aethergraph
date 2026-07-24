@@ -8,6 +8,7 @@ from aethergraph.config.llm import LLMProfile
 from ..secrets.base import Secrets
 from .generic_client import GenericLLMClient
 from .providers import Provider
+from .structured_output import StructuredOutputPolicy
 
 logger = logging.getLogger("aethergraph.services.llm")
 
@@ -52,6 +53,7 @@ class LLMService:
         reasoning_effort: str | None = None,
         thinking_mode: str | None = None,
         compatibility_policy: str | None = None,
+        structured_output_policy: StructuredOutputPolicy | None = None,
         vision_enabled: bool | None = None,
         vision_max_images: int | None = None,
         vision_max_image_bytes: int | None = None,
@@ -63,9 +65,59 @@ class LLMService:
         vision_accepted_mime_prefixes: list[str] | tuple[str, ...] | None = None,
         vision_accepted_mime_types: list[str] | tuple[str, ...] | None = None,
     ) -> GenericLLMClient:
-        """
-        Create or update a profile in memory. Returns the client.
-        Does NOT persist anything outside this process.
+        """Create or update one in-memory LLM profile and client.
+
+        The service applies supplied values to the named client and its
+        canonical profile metadata. It does not persist configuration.
+
+        Examples:
+            Update the default model:
+            ```python
+            client = service.configure_profile(
+                profile="default",
+                provider="openai",
+                model="gpt-5-mini",
+            )
+            ```
+
+            Require native structured output for a named profile:
+            ```python
+            client = service.configure_profile(
+                profile="extractor",
+                structured_output_policy="native_required",
+            )
+            ```
+
+        Args:
+            profile: Profile name to create or update.
+            provider: Optional provider override.
+            model: Optional model override.
+            base_url: Optional provider base URL override.
+            api_key: Optional in-memory API key override.
+            azure_deployment: Optional Azure deployment override.
+            timeout: Optional HTTP timeout in seconds.
+            reasoning_effort: Optional provider-neutral reasoning effort.
+            thinking_mode: Optional provider-neutral thinking mode.
+            compatibility_policy: Optional unsupported-feature policy.
+            structured_output_policy: Optional structured-output capability
+                policy.
+            vision_enabled: Optional image-input capability flag.
+            vision_max_images: Optional maximum images per vision call.
+            vision_max_image_bytes: Optional maximum bytes per image.
+            vision_resize_enabled: Optional image resize flag.
+            vision_resize_max_dimension: Optional resized width/height ceiling.
+            vision_resize_max_pixels: Optional resized pixel-count ceiling.
+            vision_resize_jpeg_quality: Optional initial JPEG quality.
+            vision_resize_min_jpeg_quality: Optional minimum JPEG quality.
+            vision_accepted_mime_prefixes: Optional accepted MIME prefixes.
+            vision_accepted_mime_types: Optional accepted exact MIME types.
+
+        Returns:
+            GenericLLMClient: Updated or newly created client.
+
+        Notes:
+            Persistence remains the host application's responsibility. Studio
+            persists profiles before invoking this hot-reload boundary.
         """
         if profile not in self._clients:
             template = self._clients.get("default")
@@ -80,6 +132,12 @@ class LLMService:
                 thinking_mode=thinking_mode or getattr(template, "thinking_mode", None),
                 compatibility_policy=compatibility_policy
                 or getattr(template, "compatibility_policy", "compat"),
+                structured_output_policy=structured_output_policy
+                or getattr(
+                    template,
+                    "structured_output_policy",
+                    "best_available",
+                ),
                 observation_sink=getattr(template, "observation_sink", None),
                 observation_capture_mode=getattr(template, "observation_capture_mode", "manifest"),
             )
@@ -94,6 +152,7 @@ class LLMService:
                 reasoning_effort=reasoning_effort,
                 thinking_mode=thinking_mode,
                 compatibility_policy=compatibility_policy,
+                structured_output_policy=structured_output_policy,
                 vision_enabled=vision_enabled,
                 vision_max_images=vision_max_images,
                 vision_max_image_bytes=vision_max_image_bytes,
@@ -129,6 +188,8 @@ class LLMService:
                 logger.warning("Failed to close old httpx client")
         if compatibility_policy is not None:
             c.compatibility_policy = compatibility_policy
+        if structured_output_policy is not None:
+            c.structured_output_policy = structured_output_policy
         if reasoning_effort is not None:
             c.reasoning_effort = reasoning_effort
         if thinking_mode is not None:
@@ -143,6 +204,7 @@ class LLMService:
             reasoning_effort=reasoning_effort,
             thinking_mode=thinking_mode,
             compatibility_policy=compatibility_policy,
+            structured_output_policy=structured_output_policy,
             vision_enabled=vision_enabled,
             vision_max_images=vision_max_images,
             vision_max_image_bytes=vision_max_image_bytes,
@@ -168,6 +230,7 @@ class LLMService:
         reasoning_effort: str | None,
         thinking_mode: str | None,
         compatibility_policy: str | None,
+        structured_output_policy: StructuredOutputPolicy | None,
         vision_enabled: bool | None,
         vision_max_images: int | None,
         vision_max_image_bytes: int | None,
@@ -197,6 +260,8 @@ class LLMService:
             updated.thinking_mode = thinking_mode  # type: ignore[assignment]
         if compatibility_policy is not None:
             updated.compatibility_policy = compatibility_policy  # type: ignore[assignment]
+        if structured_output_policy is not None:
+            updated.structured_output_policy = structured_output_policy
         if vision_enabled is not None:
             updated.vision_enabled = vision_enabled
         if vision_max_images is not None:

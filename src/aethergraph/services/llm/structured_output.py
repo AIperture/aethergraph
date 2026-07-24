@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import hashlib
+import json
 import re
 from typing import Any, Literal
 
@@ -42,12 +44,51 @@ class SchemaProjectionDiagnostic:
 
 @dataclass(frozen=True)
 class PreparedStructuredOutput:
-    """Resolved provider-facing view of one canonical structured request."""
+    """Represent one resolved provider-facing structured-output request.
+
+    The value keeps canonical validation truth separate from the exact
+    provider request fragment and records stable schema identities.
+
+    Examples:
+        Inspect the effective mode:
+        ```python
+        assert prepared.mode in {"native_strict", "native_schema"}
+        ```
+
+        Correlate canonical and projected schemas:
+        ```python
+        assert len(prepared.canonical_schema_fingerprint) == 64
+        ```
+
+    Args:
+        mode: Effective provider enforcement mode.
+        policy: Requested profile-owned capability policy.
+        canonical_schema: Original caller-owned validation schema copy.
+        canonical_schema_fingerprint: Stable canonical schema SHA-256.
+        provider_schema: Exact projected provider schema, when present.
+        provider_schema_fingerprint: Stable projected schema SHA-256, when
+            present.
+        provider_schema_name: Provider-safe schema name.
+        provider_strict: Whether provider strict enforcement is requested.
+        prompt_guidance: Whether JSON/schema guidance is added to the prompt.
+        provider_request_fields: Exact provider request fragment.
+        capabilities: Resolved provider/model capabilities.
+        diagnostics: Reasons a stronger enforcement mode was unavailable.
+
+    Returns:
+        PreparedStructuredOutput: Immutable resolved request description.
+
+    Notes:
+        Fingerprints identify schema content but never replace canonical local
+        validation.
+    """
 
     mode: StructuredOutputMode
     policy: StructuredOutputPolicy
     canonical_schema: dict[str, Any]
+    canonical_schema_fingerprint: str
     provider_schema: dict[str, Any] | None
+    provider_schema_fingerprint: str | None
     provider_schema_name: str
     provider_strict: bool
     prompt_guidance: bool
@@ -347,13 +388,18 @@ def _prepared(
     prompt_guidance: bool = False,
     diagnostics: list[SchemaProjectionDiagnostic] | None = None,
 ) -> PreparedStructuredOutput:
+    provider_schema = (
+        copy.deepcopy(canonical) if mode in {"native_strict", "native_schema"} else None
+    )
     return PreparedStructuredOutput(
         mode=mode,
         policy=policy,
         canonical_schema=canonical,
-        provider_schema=copy.deepcopy(canonical)
-        if mode in {"native_strict", "native_schema"}
-        else None,
+        canonical_schema_fingerprint=_schema_fingerprint(canonical),
+        provider_schema=provider_schema,
+        provider_schema_fingerprint=(
+            _schema_fingerprint(provider_schema) if provider_schema is not None else None
+        ),
         provider_schema_name=_provider_schema_name(request.name),
         provider_strict=strict,
         prompt_guidance=prompt_guidance,
@@ -367,6 +413,16 @@ def _prepared(
         capabilities=capabilities,
         diagnostics=tuple(diagnostics or ()),
     )
+
+
+def _schema_fingerprint(schema: dict[str, Any]) -> str:
+    body = json.dumps(
+        schema,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
 def _provider_request_fields(
