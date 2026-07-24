@@ -1,3 +1,4 @@
+import copy
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -10,10 +11,80 @@ ImageResponseFormat = Literal["b64_json", "url"]  # url only for dall-e models t
 
 
 @dataclass(frozen=True)
-class JsonSchemaSpec:
+class StructuredOutputRequest:
+    """
+    Request provider-neutral structured output from an LLM chat call.
+
+    Examples:
+        Define a compact object response:
+            ```python
+            request = StructuredOutputRequest(
+                name="Answer",
+                schema={
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                },
+            )
+            ```
+
+        Pass the request through the ordinary client:
+            ```python
+            text, usage = await context.llm().chat(
+                [{"role": "user", "content": "Answer briefly."}],
+                structured_output=request,
+            )
+            ```
+
+    Args:
+        name: Stable logical name for the root response schema.
+        schema: Canonical caller-owned JSON Schema used for local validation.
+
+    Notes:
+        The request is provider-neutral. Provider capability selection and any
+        provider-specific schema projection remain internal to AetherGraph.
+    """
+
     name: str
     schema: dict[str, Any]
-    strict: bool = True
+
+    def __post_init__(self) -> None:
+        """
+        Validate and detach the request from caller-owned mutable schema data.
+
+        Examples:
+            Preserve the supplied schema:
+                ```python
+                request = StructuredOutputRequest("Answer", {"type": "object"})
+                assert request.schema["type"] == "object"
+                ```
+
+            Reject an empty schema name:
+                ```python
+                try:
+                    StructuredOutputRequest("", {"type": "object"})
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            self: Newly initialized structured-output request.
+
+        Returns:
+            None: The frozen instance is validated and its schema is detached.
+
+        Notes:
+            JSON Schema remains arbitrary provider-neutral data; AetherGraph
+            does not import an engine contract to interpret its domain meaning.
+        """
+
+        normalized_name = str(self.name or "").strip()
+        if not normalized_name:
+            raise ValueError("structured output schema name must not be empty")
+        if not isinstance(self.schema, dict):
+            raise TypeError("structured output schema must be a JSON object")
+        object.__setattr__(self, "name", normalized_name)
+        object.__setattr__(self, "schema", copy.deepcopy(self.schema))
 
 
 @dataclass(frozen=True)

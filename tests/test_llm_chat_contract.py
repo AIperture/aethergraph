@@ -9,6 +9,7 @@ import pytest
 from aethergraph.api.v1.schemas.settings import LLMProfilePayload
 from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profile_env
+from aethergraph.services.llm import StructuredOutputRequest
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.types import LLMUnsupportedFeatureError
@@ -35,6 +36,119 @@ class _FakeHttpClient:
     async def post(self, url: str, headers: dict[str, str], json: dict[str, Any], timeout=None):
         self.last_json = json
         return _FakeResponse(self.payload)
+
+
+class _ObservationSink:
+    def __init__(self) -> None:
+        self.records = []
+
+    async def emit(self, record, *, capture_mode) -> None:
+        self.records.append(record)
+
+
+def test_structured_output_request_detaches_caller_schema() -> None:
+    schema = {"type": "object", "properties": {}}
+
+    request = StructuredOutputRequest(name=" Answer ", schema=schema)
+    schema["properties"]["late"] = {"type": "string"}
+
+    assert request.name == "Answer"
+    assert request.schema == {"type": "object", "properties": {}}
+
+
+@pytest.mark.asyncio
+async def test_new_and_deprecated_structured_forms_normalize_identically() -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test")
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+    seen: list[dict[str, Any]] = []
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        seen.append(dict(kwargs))
+        return '{"answer":"ok"}', {}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    await client.chat(
+        [{"role": "user", "content": "hello"}],
+        structured_output=StructuredOutputRequest("Answer", schema),
+    )
+    with pytest.warns(DeprecationWarning, match="removed in 0.2.0"):
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            output_format="json_schema",
+            json_schema=schema,
+            schema_name="Answer",
+            strict_schema=True,
+            validate_json=True,
+        )
+
+    normalized_keys = (
+        "output_format",
+        "json_schema",
+        "schema_name",
+        "strict_schema",
+        "validate_json",
+        "fail_on_unsupported",
+    )
+    assert {key: seen[0][key] for key in normalized_keys} == {
+        key: seen[1][key] for key in normalized_keys
+    }
+
+
+@pytest.mark.asyncio
+async def test_structured_output_rejects_mixed_deprecated_parameters() -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test")
+    dispatched = False
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return "{}", {}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            structured_output=StructuredOutputRequest("Answer", {"type": "object"}),
+            json_schema={"type": "object"},
+        )
+
+    assert not dispatched
+
+
+@pytest.mark.asyncio
+async def test_deprecated_structured_parameters_are_observable() -> None:
+    sink = _ObservationSink()
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=sink,
+    )
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        return '{"answer":"ok"}', {}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    with pytest.warns(DeprecationWarning):
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            output_format="json_schema",
+            json_schema={"type": "object"},
+            schema_name="Answer",
+        )
+
+    record = sink.records[0]
+    assert record.request_args["deprecated_parameters"] == [
+        "json_schema",
+        "schema_name",
+    ]
+    assert any("0.2.0" in note for note in record.compatibility_notes)
 
 
 @pytest.mark.asyncio

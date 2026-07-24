@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.services.llm import StructuredOutputRequest
 
 
 @dataclass
@@ -175,11 +176,10 @@ class InputParser:
         try:
             raw, _usage = await self.llm.chat(
                 messages,
-                output_format="json",
-                json_schema=schema,
-                schema_name="ParsedInputs",
-                strict_schema=True,
-                validate_json=True,
+                structured_output=StructuredOutputRequest(
+                    name="ParsedInputs",
+                    schema=schema,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             # Hard LLM failure → all fields still missing; surface error to user.

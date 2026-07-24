@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from aethergraph.core.runtime.node_context import NodeContext
+from aethergraph.services.llm import StructuredOutputRequest
 from aethergraph.services.llm.generic_client import GenericLLMClient
 
 from .types import (
@@ -151,11 +152,10 @@ async def _handle_plan(
             *history,
             {"role": "user", "content": user_prompt},
         ],
-        output_format="json",
-        json_schema=BUILDER_PLAN_WRAPPER_SCHEMA,
-        schema_name="BuilderPlanWrapper",
-        strict_schema=True,
-        validate_json=True,
+        structured_output=StructuredOutputRequest(
+            name="BuilderPlanWrapper",
+            schema=BUILDER_PLAN_WRAPPER_SCHEMA,
+        ),
         max_output_tokens=2048,
     )
 

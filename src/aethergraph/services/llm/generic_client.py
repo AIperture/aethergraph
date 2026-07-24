@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 import contextlib
+import copy
 import json
 import logging
 import os
 import time
 from typing import Any
+import warnings
 
 import httpx
 
@@ -37,6 +39,7 @@ from aethergraph.services.llm.types import (
     LLMInputTooLargeError,
     LLMRunBudgetExceededError,
     LLMUnsupportedFeatureError,
+    StructuredOutputRequest,
 )
 from aethergraph.services.llm.usage import (
     normalize_llm_usage,
@@ -179,6 +182,132 @@ class GenericLLMClient(
             return fail_on_unsupported
         return self.compatibility_policy == "strict"
 
+    def _normalize_structured_output(
+        self,
+        *,
+        output_format: ChatOutputFormat,
+        structured_output: StructuredOutputRequest | None,
+        json_schema: dict[str, Any] | None | object,
+        schema_name: str | object,
+        strict_schema: bool | object,
+        validate_json: bool | object,
+        fail_on_unsupported: bool | None | object,
+    ) -> tuple[
+        ChatOutputFormat,
+        dict[str, Any] | None,
+        str,
+        bool,
+        bool,
+        bool | None,
+        tuple[str, ...],
+    ]:
+        """
+        Normalize new and deprecated structured-output call forms.
+
+        Examples:
+            Normalize the provider-neutral request:
+                ```python
+                values = client._normalize_structured_output(
+                    output_format="text",
+                    structured_output=StructuredOutputRequest(
+                        "Answer", {"type": "object"}
+                    ),
+                    json_schema=_UNSET,
+                    schema_name=_UNSET,
+                    strict_schema=_UNSET,
+                    validate_json=_UNSET,
+                    fail_on_unsupported=_UNSET,
+                )
+                assert values[0] == "json_schema"
+                ```
+
+            Reject mixed new and deprecated parameters:
+                ```python
+                try:
+                    client._normalize_structured_output(
+                        output_format="text",
+                        structured_output=StructuredOutputRequest(
+                            "Answer", {"type": "object"}
+                        ),
+                        json_schema={"type": "object"},
+                        schema_name=_UNSET,
+                        strict_schema=_UNSET,
+                        validate_json=_UNSET,
+                        fail_on_unsupported=_UNSET,
+                    )
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            output_format: Requested legacy text or JSON output mode.
+            structured_output: New provider-neutral schema request.
+            json_schema: Deprecated schema argument or the internal unset marker.
+            schema_name: Deprecated schema-name argument or the unset marker.
+            strict_schema: Deprecated strict-validation flag or the unset marker.
+            validate_json: Deprecated local-JSON flag or the unset marker.
+            fail_on_unsupported: Deprecated provider-failure flag or the unset marker.
+
+        Returns:
+            tuple: Normalized internal output fields and deprecated parameter names.
+
+        Notes:
+            Deprecated fields remain accepted through AetherGraph `0.1.x` and
+            are scheduled for removal in `0.2.0`.
+        """
+
+        supplied = tuple(
+            name
+            for name, value in (
+                ("json_schema", json_schema),
+                ("schema_name", schema_name),
+                ("strict_schema", strict_schema),
+                ("validate_json", validate_json),
+                ("fail_on_unsupported", fail_on_unsupported),
+            )
+            if value is not _UNSET
+        )
+        if structured_output is not None:
+            if supplied:
+                names = ", ".join(supplied)
+                raise ValueError(
+                    "structured_output cannot be combined with deprecated "
+                    f"structured-output parameters: {names}"
+                )
+            if output_format != "text":
+                raise ValueError(
+                    "structured_output determines the output format and cannot "
+                    "be combined with a non-text output_format"
+                )
+            return (
+                "json_schema",
+                copy.deepcopy(structured_output.schema),
+                structured_output.name,
+                True,
+                True,
+                None,
+                (),
+            )
+
+        if supplied:
+            warnings.warn(
+                "json_schema, schema_name, strict_schema, validate_json, and "
+                "fail_on_unsupported are deprecated; pass structured_output="
+                "StructuredOutputRequest(...) instead. Legacy parameters remain "
+                "supported through AetherGraph 0.1.x and will be removed in 0.2.0.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+        return (
+            output_format,
+            None if json_schema is _UNSET else json_schema,
+            "output" if schema_name is _UNSET else str(schema_name),
+            True if strict_schema is _UNSET else bool(strict_schema),
+            True if validate_json is _UNSET else bool(validate_json),
+            None if fail_on_unsupported is _UNSET else fail_on_unsupported,
+            supplied,
+        )
+
     @staticmethod
     def _map_deepseek_reasoning_effort(reasoning_effort: str) -> str:
         mapping = {
@@ -220,6 +349,7 @@ class GenericLLMClient(
         schema_name: str,
         strict_schema: bool,
         validate_json: bool,
+        deprecated_parameters: tuple[str, ...],
         extra_params: dict[str, Any],
     ) -> dict[str, Any]:
         args = {
@@ -241,6 +371,7 @@ class GenericLLMClient(
             if output_format == "json_schema" and schema_name != "output"
             else None,
             "json_schema_present": bool(json_schema) if output_format == "json_schema" else None,
+            "deprecated_parameters": list(deprecated_parameters) or None,
             "temperature": extra_params.get("temperature"),
             "top_p": extra_params.get("top_p"),
             "tool_choice": extra_params.get("tool_choice"),
@@ -714,11 +845,12 @@ class GenericLLMClient(
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
         output_format: ChatOutputFormat = "text",
-        json_schema: dict[str, Any] | None = None,
-        schema_name: str = "output",
-        strict_schema: bool = True,
-        validate_json: bool = True,
-        fail_on_unsupported: bool | None = None,
+        structured_output: StructuredOutputRequest | None = None,
+        json_schema: dict[str, Any] | None | object = _UNSET,
+        schema_name: str | object = _UNSET,
+        strict_schema: bool | object = _UNSET,
+        validate_json: bool | object = _UNSET,
+        fail_on_unsupported: bool | None | object = _UNSET,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         """
@@ -735,12 +867,18 @@ class GenericLLMClient(
             ])
             ```
 
-            Requesting structured output with a JSON schema:
+            Request structured output with canonical JSON Schema:
             ```python
             response, usage = await context.llm().chat(
                 messages=[{"role": "user", "content": "Summarize this text."}],
-                output_format="json",
-                json_schema={"type": "object", "properties": {"summary": {"type": "string"}}}
+                structured_output=StructuredOutputRequest(
+                    name="Summary",
+                    schema={
+                        "type": "object",
+                        "properties": {"summary": {"type": "string"}},
+                    },
+                ),
+            )
             ```
 
         Args:
@@ -748,11 +886,12 @@ class GenericLLMClient(
             reasoning_effort: Optional string to control model reasoning depth.
             max_output_tokens: Optional maximum number of output tokens.
             output_format: Output format, e.g., "text" or "json".
-            json_schema: Optional JSON schema for validating structured output.
-            schema_name: Name for the root schema object (default: "output").
-            strict_schema: If True, enforce strict schema validation.
-            validate_json: If True, validate JSON output against schema.
-            fail_on_unsupported: If True, raise error for unsupported features.
+            structured_output: Provider-neutral canonical schema request.
+            json_schema: Deprecated schema argument; removed in `0.2.0`.
+            schema_name: Deprecated root schema name; removed in `0.2.0`.
+            strict_schema: Deprecated strict-validation flag; removed in `0.2.0`.
+            validate_json: Deprecated local-validation flag; removed in `0.2.0`.
+            fail_on_unsupported: Deprecated provider-failure flag; removed in `0.2.0`.
             **kw: Additional provider-specific keyword arguments.
                 Common cross-provider options include:
                 - model: override default model name.
@@ -769,9 +908,28 @@ class GenericLLMClient(
 
         Notes:
             - This method centralizes handling of different LLM providers, ensuring consistent behavior.
-            - Structured output support allows for robust integration with downstream systems.
+            - Deprecated structured-output parameters remain operational through
+              `0.1.x`, emit `DeprecationWarning`, and cannot be mixed with
+              `structured_output`.
             - Rate limiting and metering help manage resource usage effectively.
         """
+        (
+            output_format,
+            json_schema,
+            schema_name,
+            strict_schema,
+            validate_json,
+            fail_on_unsupported,
+            deprecated_parameters,
+        ) = self._normalize_structured_output(
+            output_format=output_format,
+            structured_output=structured_output,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            fail_on_unsupported=fail_on_unsupported,
+        )
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
@@ -792,6 +950,7 @@ class GenericLLMClient(
             schema_name=schema_name,
             strict_schema=strict_schema,
             validate_json=validate_json,
+            deprecated_parameters=deprecated_parameters,
             extra_params=kw,
         )
         provider_request_args = self._build_provider_request_args(
@@ -809,6 +968,12 @@ class GenericLLMClient(
             request_args=request_args,
             provider_request_args=provider_request_args,
         )
+        if deprecated_parameters:
+            compatibility_notes.append(
+                "Deprecated structured-output parameters used: "
+                + ", ".join(deprecated_parameters)
+                + ". Removal is scheduled for AetherGraph 0.2.0."
+            )
         observation_record = self._build_observation_record(
             call_type="chat",
             model=model,
@@ -939,11 +1104,12 @@ class GenericLLMClient(
         reasoning_summary: str | None | object = _UNSET,
         max_output_tokens: int | None = None,
         output_format: ChatOutputFormat = "text",
-        json_schema: dict[str, Any] | None = None,
-        schema_name: str = "output",
-        strict_schema: bool = True,
-        validate_json: bool = True,
-        fail_on_unsupported: bool | None = None,
+        structured_output: StructuredOutputRequest | None = None,
+        json_schema: dict[str, Any] | None | object = _UNSET,
+        schema_name: str | object = _UNSET,
+        strict_schema: bool | object = _UNSET,
+        validate_json: bool | object = _UNSET,
+        fail_on_unsupported: bool | None | object = _UNSET,
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
         **kw: Any,
@@ -983,11 +1149,12 @@ class GenericLLMClient(
                 default when omitted; pass None to disable for this call.
             max_output_tokens: Optional maximum number of output tokens.
             output_format: Output format, e.g., "text" or "json".
-            json_schema: Optional JSON schema for validating structured output.
-            schema_name: Name for the root schema object (default: "output").
-            strict_schema: If True, enforce strict schema validation.
-            validate_json: If True, validate JSON output against schema.
-            fail_on_unsupported: If True, raise error for unsupported features.
+            structured_output: Provider-neutral schema request; streaming rejects it.
+            json_schema: Deprecated schema argument; removed in `0.2.0`.
+            schema_name: Deprecated root schema name; removed in `0.2.0`.
+            strict_schema: Deprecated strict-validation flag; removed in `0.2.0`.
+            validate_json: Deprecated local-validation flag; removed in `0.2.0`.
+            fail_on_unsupported: Deprecated provider-failure flag; removed in `0.2.0`.
             on_delta: Optional callback function to handle real-time text deltas.
             on_thinking_delta: Optional callback for thinking/reasoning token deltas.
             **kw: Additional provider-specific keyword arguments.
@@ -1007,6 +1174,23 @@ class GenericLLMClient(
             - Rate limiting and usage metering are applied consistently across providers.
         """
 
+        (
+            output_format,
+            json_schema,
+            schema_name,
+            strict_schema,
+            validate_json,
+            fail_on_unsupported,
+            deprecated_parameters,
+        ) = self._normalize_structured_output(
+            output_format=output_format,
+            structured_output=structured_output,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            fail_on_unsupported=fail_on_unsupported,
+        )
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
@@ -1032,6 +1216,7 @@ class GenericLLMClient(
             schema_name=schema_name,
             strict_schema=strict_schema,
             validate_json=validate_json,
+            deprecated_parameters=deprecated_parameters,
             extra_params=kw,
         )
         provider_request_args = self._build_provider_request_args(
@@ -1049,6 +1234,12 @@ class GenericLLMClient(
             request_args=request_args,
             provider_request_args=provider_request_args,
         )
+        if deprecated_parameters:
+            compatibility_notes.append(
+                "Deprecated structured-output parameters used: "
+                + ", ".join(deprecated_parameters)
+                + ". Removal is scheduled for AetherGraph 0.2.0."
+            )
         observation_record = self._build_observation_record(
             call_type="chat_stream",
             model=model,
@@ -1331,8 +1522,7 @@ class GenericLLMClient(
                 remainder_obj = None
             if remainder_obj == obj:
                 logging.getLogger(__name__).warning(
-                    "Model stuttered: returned identical JSON object twice. "
-                    "Deduplicating silently."
+                    "Model stuttered: returned identical JSON object twice. Deduplicating silently."
                 )
             else:
                 raise RuntimeError(

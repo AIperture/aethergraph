@@ -6,6 +6,7 @@ import inspect
 from typing import Any
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.services.llm import StructuredOutputRequest
 
 from .action_catalog import ActionCatalog
 from .flow_validator import FlowValidator
@@ -269,7 +270,7 @@ class ActionPlanner:
         )
 
         if ctx.instruction:
-            return f"{default}\n\n" f"Primary task instructions:\n{ctx.instruction.strip()}"
+            return f"{default}\n\nPrimary task instructions:\n{ctx.instruction.strip()}"
 
         return default
 
@@ -294,11 +295,7 @@ class ActionPlanner:
 
         raw, _usage = await self.llm.chat(
             messages,
-            output_format="json",
-            json_schema=schema,
-            schema_name="Plan",
-            strict_schema=True,
-            validate_json=True,
+            structured_output=StructuredOutputRequest(name="Plan", schema=schema),
         )
 
         # 1) Already a dict: perfect.
@@ -337,7 +334,7 @@ class ActionPlanner:
                         return json.loads(candidate)
                     except json.JSONDecodeError as exc2:
                         raise PlanDecodingError(
-                            f"Cannot parse JSON from LLM response (substring). " f"Error: {exc2}",
+                            f"Cannot parse JSON from LLM response (substring). Error: {exc2}",
                             raw_text=raw,
                         ) from exc2
 

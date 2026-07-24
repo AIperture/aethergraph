@@ -14,6 +14,7 @@ from aethergraph.plugins.agents.graph_builder.registration_utils import (
     _propose_app_config_via_llm,
     _resolve_registration_target,
 )
+from aethergraph.services.llm import StructuredOutputRequest
 from aethergraph.services.llm.generic_client import GenericLLMClient
 
 from .types import (
@@ -328,11 +329,10 @@ async def _handle_plan_v2(
                 *history,
                 {"role": "user", "content": user_prompt},
             ],
-            output_format="json",
-            json_schema=BUILDER_PLAN_WRAPPER_SCHEMA,
-            schema_name="BuilderPlanWrapperV2",
-            strict_schema=True,
-            validate_json=True,
+            structured_output=StructuredOutputRequest(
+                name="BuilderPlanWrapperV2",
+                schema=BUILDER_PLAN_WRAPPER_SCHEMA,
+            ),
             max_output_tokens=2048,
         )
     except Exception:

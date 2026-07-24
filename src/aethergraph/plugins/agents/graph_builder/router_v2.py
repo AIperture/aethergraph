@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from aethergraph.core.runtime.node_context import NodeContext
+from aethergraph.services.llm import StructuredOutputRequest
 
 from .types import (
     ROUTER_JSON_SCHEMA,
@@ -155,11 +156,10 @@ async def _llm_route(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        output_format="json",
-        json_schema=ROUTER_JSON_SCHEMA,
-        schema_name="GraphBuilderRouteV2",
-        strict_schema=True,
-        validate_json=True,
+        structured_output=StructuredOutputRequest(
+            name="GraphBuilderRouteV2",
+            schema=ROUTER_JSON_SCHEMA,
+        ),
         max_output_tokens=256,
     )
     obj = json.loads(resp) if isinstance(resp, str) else resp

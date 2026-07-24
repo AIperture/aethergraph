@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from aethergraph.core.runtime.node_context import NodeContext
+from aethergraph.services.llm import StructuredOutputRequest
 
 from .types import (
     ROUTER_JSON_SCHEMA,
@@ -66,8 +67,8 @@ async def _llm_route_if_needed(
     """
     If the heuristic landed on CHAT but the message smells "buildy", call the LLM router.
 
-    Uses context.llm().chat(..., output_format="json", json_schema=ROUTER_JSON_SCHEMA)
-    so we get a strict JSON object back.
+    Uses context.llm().chat(..., structured_output=...) so we get a
+    schema-constrained JSON object back.
     """
     if decision["branch"] != GraphBuilderBranch.CHAT:
         return decision
@@ -114,11 +115,10 @@ async def _llm_route_if_needed(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            output_format="json",
-            json_schema=ROUTER_JSON_SCHEMA,
-            schema_name="GraphBuilderRoute",
-            strict_schema=True,
-            validate_json=True,
+            structured_output=StructuredOutputRequest(
+                name="GraphBuilderRoute",
+                schema=ROUTER_JSON_SCHEMA,
+            ),
             max_output_tokens=256,
         )
     except Exception:
