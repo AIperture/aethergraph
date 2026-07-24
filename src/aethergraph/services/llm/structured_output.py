@@ -51,6 +51,7 @@ class PreparedStructuredOutput:
     provider_schema_name: str
     provider_strict: bool
     prompt_guidance: bool
+    provider_request_fields: dict[str, Any]
     capabilities: StructuredOutputCapabilities
     diagnostics: tuple[SchemaProjectionDiagnostic, ...] = ()
 
@@ -356,9 +357,67 @@ def _prepared(
         provider_schema_name=_provider_schema_name(request.name),
         provider_strict=strict,
         prompt_guidance=prompt_guidance,
+        provider_request_fields=_provider_request_fields(
+            capabilities.provider,
+            mode=mode,
+            schema_name=_provider_schema_name(request.name),
+            schema=canonical,
+            strict=strict,
+        ),
         capabilities=capabilities,
         diagnostics=tuple(diagnostics or ()),
     )
+
+
+def _provider_request_fields(
+    provider: str,
+    *,
+    mode: StructuredOutputMode,
+    schema_name: str,
+    schema: dict[str, Any],
+    strict: bool,
+) -> dict[str, Any]:
+    if mode == "prompt_json":
+        return {}
+    if provider == "openai":
+        response_format: dict[str, Any] = {"type": "json_object"}
+        if mode in {"native_strict", "native_schema"}:
+            response_format = {
+                "type": "json_schema",
+                "name": schema_name,
+                "schema": copy.deepcopy(schema),
+                "strict": strict,
+            }
+        return {"text": {"format": response_format}}
+    if provider == "anthropic":
+        return {
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": copy.deepcopy(schema),
+                }
+            }
+        }
+    if provider == "google":
+        generation_config: dict[str, Any] = {
+            "responseMimeType": "application/json",
+        }
+        if mode in {"native_strict", "native_schema"}:
+            generation_config["responseJsonSchema"] = copy.deepcopy(schema)
+        return {"generationConfig": generation_config}
+    if provider in {"azure", "openrouter", "lmstudio", "ollama", "deepseek"}:
+        response_format: dict[str, Any] = {"type": "json_object"}
+        if mode in {"native_strict", "native_schema"}:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "schema": copy.deepcopy(schema),
+                    "strict": strict,
+                },
+            }
+        return {"response_format": response_format}
+    return {}
 
 
 def _provider_schema_name(value: str) -> str:

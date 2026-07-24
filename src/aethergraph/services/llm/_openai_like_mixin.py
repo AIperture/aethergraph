@@ -46,8 +46,11 @@ class _OpenAILikeMixin:
 
         msg_for_provider = messages
         response_format = None
+        structured_output_fields = kw.pop("structured_output_fields", None)
 
-        if output_format == "json_object":
+        if structured_output_fields:
+            response_format = structured_output_fields.get("response_format")
+        elif output_format == "json_object":
             if self.provider == "lmstudio":
                 if fail_on_unsupported:
                     raise RuntimeError(

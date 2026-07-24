@@ -43,6 +43,7 @@ class _GeminiMixin:
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
+        structured_output_fields = kw.pop("structured_output_fields", None)
 
         if tools is not None:
             raise LLMUnsupportedFeatureError(
@@ -82,7 +83,9 @@ class _GeminiMixin:
                 gen_cfg["thinkingConfig"] = thinking_cfg
 
             # Gemini native structured outputs
-            if output_format == "json_object":
+            if structured_output_fields:
+                gen_cfg.update(structured_output_fields.get("generationConfig") or {})
+            elif output_format == "json_object":
                 gen_cfg["responseMimeType"] = "application/json"
             elif output_format == "json_schema":
                 if json_schema is None:

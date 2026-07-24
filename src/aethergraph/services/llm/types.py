@@ -96,7 +96,11 @@ class ImageInput:
     is_file_uri: bool = False  # Gemini file URIs
 
 
-class LLMUnsupportedFeatureError(RuntimeError):
+class LLMError(RuntimeError):
+    """Base class for typed LLM service failures."""
+
+
+class LLMUnsupportedFeatureError(LLMError):
     def __init__(self, provider: str, model: str | None, feature: str, detail: str | None = None):
         msg = f"Provider '{provider}' / model '{model or '?'}' does not support: {feature}"
         if detail:
@@ -104,7 +108,11 @@ class LLMUnsupportedFeatureError(RuntimeError):
         super().__init__(msg)
 
 
-class LLMStructuredOutputCapabilityError(RuntimeError):
+class LLMStructuredOutputError(LLMError):
+    """Base class for structured-output failures outside caller validation."""
+
+
+class LLMStructuredOutputCapabilityError(LLMStructuredOutputError):
     """Fail a structured request before transport when policy cannot be met."""
 
     def __init__(
@@ -165,8 +173,24 @@ class LLMStructuredOutputCapabilityError(RuntimeError):
         self.detail = detail
 
 
-class LLMError(RuntimeError):
-    """Base class for typed LLM service failures."""
+class LLMStructuredOutputProviderRequestError(LLMStructuredOutputError):
+    """Provider rejected a prepared structured-output request."""
+
+
+class LLMStructuredOutputRefusalError(LLMStructuredOutputError):
+    """Provider returned an explicit refusal instead of structured output."""
+
+
+class LLMStructuredOutputTruncationError(LLMStructuredOutputError):
+    """Provider ended a structured response before it was complete."""
+
+
+class LLMStructuredOutputParseError(LLMStructuredOutputError):
+    """Provider output was not one complete JSON value."""
+
+
+class LLMStructuredOutputValidationError(LLMStructuredOutputError):
+    """Parsed output failed the caller's canonical JSON Schema."""
 
 
 class LLMCallBudgetExceededError(LLMError):

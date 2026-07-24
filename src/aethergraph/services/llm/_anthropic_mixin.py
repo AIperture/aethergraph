@@ -159,12 +159,15 @@ class _AnthropicMixin:
             "temperature": temperature,
             "top_p": top_p,
         }
+        structured_output_fields = kw.pop("structured_output_fields", None)
         request_cache_control = _anthropic_cache_control(kw.get("cache_control"))
         if request_cache_control:
             payload["cache_control"] = request_cache_control
         if system_payload:
             payload["system"] = system_payload
-        if output_format == "json_schema":
+        if structured_output_fields:
+            payload.update(structured_output_fields)
+        elif output_format == "json_schema":
             if json_schema is None:
                 raise ValueError("output_format='json_schema' requires json_schema")
             payload["output_config"] = {

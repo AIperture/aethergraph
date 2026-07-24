@@ -43,6 +43,8 @@ from aethergraph.services.llm.types import (
     LLMCallBudgetExceededError,
     LLMInputTooLargeError,
     LLMRunBudgetExceededError,
+    LLMStructuredOutputParseError,
+    LLMStructuredOutputValidationError,
     LLMUnsupportedFeatureError,
     StructuredOutputRequest,
 )
@@ -61,6 +63,23 @@ from aethergraph.services.tracing import resolve_tracer
 DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 _UNSET = object()
+
+
+def _merge_request_fields(
+    base: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if (
+            key == "generationConfig"
+            and isinstance(value, dict)
+            and isinstance(result.get(key), dict)
+        ):
+            result[key] = _merge_request_fields(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -1026,6 +1045,11 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             extra_params=kw,
         )
+        if prepared_structured_output is not None:
+            provider_request_args = _merge_request_fields(
+                provider_request_args,
+                prepared_structured_output.provider_request_fields,
+            )
         compatibility_notes = self._build_compatibility_notes(
             output_format=output_format,
             request_args=request_args,
@@ -1098,6 +1122,11 @@ class GenericLLMClient(
                 strict_schema=strict_schema,
                 validate_json=validate_json,
                 fail_on_unsupported=fail_on_unsupported,
+                structured_output_fields=(
+                    prepared_structured_output.provider_request_fields
+                    if prepared_structured_output is not None
+                    else None
+                ),
                 **kw,
             )
 
@@ -1476,6 +1505,7 @@ class GenericLLMClient(
         strict_schema: bool,
         validate_json: bool,
         fail_on_unsupported: bool,
+        structured_output_fields: dict[str, Any] | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         # Extract cross-provider extras if any
@@ -1495,6 +1525,7 @@ class GenericLLMClient(
                 strict_schema=strict_schema,
                 tools=tools,
                 tool_choice=tool_choice,
+                structured_output_fields=structured_output_fields,
                 **kw,
             )
 
@@ -1512,6 +1543,7 @@ class GenericLLMClient(
                 tool_choice=tool_choice,
                 schema_name=schema_name,
                 strict_schema=strict_schema,
+                structured_output_fields=structured_output_fields,
                 **kw,
             )
 
@@ -1524,6 +1556,7 @@ class GenericLLMClient(
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
                 tool_choice=tool_choice,
+                structured_output_fields=structured_output_fields,
                 **kw,
             )
 
@@ -1540,6 +1573,7 @@ class GenericLLMClient(
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
                 schema_name=schema_name,
+                structured_output_fields=structured_output_fields,
                 **kw,
             )
 
@@ -1554,6 +1588,7 @@ class GenericLLMClient(
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
+                structured_output_fields=structured_output_fields,
                 **kw,
             )
 
@@ -1581,7 +1616,9 @@ class GenericLLMClient(
         try:
             obj = json.loads(json_text)
         except Exception as e:
-            raise RuntimeError(f"Model did not return valid JSON. Raw output:\n{text}") from e
+            raise LLMStructuredOutputParseError(
+                f"Model did not return valid JSON. Raw output:\n{text}"
+            ) from e
 
         if was_truncated and remainder:
             try:
@@ -1593,13 +1630,18 @@ class GenericLLMClient(
                     "Model stuttered: returned identical JSON object twice. Deduplicating silently."
                 )
             else:
-                raise RuntimeError(
+                raise LLMStructuredOutputParseError(
                     f"Model returned multiple JSON objects in a single response. "
                     f"Only one JSON object is allowed. Raw output:\n{text}"
                 )
 
         if json_schema is not None and strict_schema:
-            _validate_json_schema(obj, json_schema)
+            try:
+                _validate_json_schema(obj, json_schema)
+            except Exception as exc:
+                raise LLMStructuredOutputValidationError(
+                    f"Model output failed canonical JSON Schema validation: {exc}"
+                ) from exc
 
         # Canonical JSON string output (makes downstream robust)
         return json.dumps(obj, ensure_ascii=False)

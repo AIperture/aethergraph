@@ -12,6 +12,9 @@ from aethergraph.services.llm.types import (
     ChatOutputFormat,
     GeneratedImage,
     ImageGenerationResult,
+    LLMStructuredOutputProviderRequestError,
+    LLMStructuredOutputRefusalError,
+    LLMStructuredOutputTruncationError,
 )
 from aethergraph.services.llm.utils import (
     _guess_mime_from_format,
@@ -53,6 +56,7 @@ class _OpenAIMixin:
         input_messages = _normalize_openai_responses_input(messages)
 
         body: dict[str, Any] = {"model": model, "input": input_messages}
+        structured_output_fields = kw.pop("structured_output_fields", None)
 
         if reasoning_effort is not None:
             body["reasoning"] = {"effort": reasoning_effort}
@@ -60,7 +64,9 @@ class _OpenAIMixin:
             body["max_output_tokens"] = max_output_tokens
 
         # Structured output
-        if output_format == "json_object":
+        if structured_output_fields:
+            body.update(structured_output_fields)
+        elif output_format == "json_object":
             body["text"] = {"format": {"type": "json_object"}}
         elif output_format == "json_schema":
             if json_schema is None:
@@ -96,10 +102,19 @@ class _OpenAIMixin:
             try:
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:
+                if structured_output_fields:
+                    raise LLMStructuredOutputProviderRequestError(
+                        f"OpenAI rejected the prepared structured-output request: {e.response.text}"
+                    ) from e
                 raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
 
             data = r.json()
             usage = data.get("usage", {}) or {}
+            if structured_output_fields and data.get("status") == "incomplete":
+                raise LLMStructuredOutputTruncationError(
+                    "OpenAI structured response was incomplete: "
+                    f"{data.get('incomplete_details') or {}}"
+                )
 
             # If caller asked for raw provider payload, just return it as a JSON string
             if output_format == "raw":
@@ -116,6 +131,10 @@ class _OpenAIMixin:
                     if isinstance(item, dict) and item.get("type") == "message":
                         parts = item.get("content") or []
                         for p in parts:
+                            if isinstance(p, dict) and p.get("type") == "refusal":
+                                raise LLMStructuredOutputRefusalError(
+                                    str(p.get("refusal") or "OpenAI refused the request.")
+                                )
                             if isinstance(p, dict) and "text" in p:
                                 chunks.append(p["text"])
                 txt = "".join(chunks)

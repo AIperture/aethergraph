@@ -61,8 +61,11 @@ class _AzureMixin:
             "temperature": temperature,
             "top_p": top_p,
         }
+        structured_output_fields = kw.pop("structured_output_fields", None)
 
-        if output_format == "json_object":
+        if structured_output_fields:
+            payload.update(structured_output_fields)
+        elif output_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
             payload["messages"] = _ensure_system_json_directive(messages, schema=None)
         elif output_format == "json_schema":

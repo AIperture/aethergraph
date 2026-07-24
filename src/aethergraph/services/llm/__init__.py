@@ -7,10 +7,25 @@ from .structured_output import (
     prepare_structured_output,
     resolve_structured_output_capabilities,
 )
-from .types import LLMStructuredOutputCapabilityError, StructuredOutputRequest
+from .types import (
+    LLMStructuredOutputCapabilityError,
+    LLMStructuredOutputError,
+    LLMStructuredOutputParseError,
+    LLMStructuredOutputProviderRequestError,
+    LLMStructuredOutputRefusalError,
+    LLMStructuredOutputTruncationError,
+    LLMStructuredOutputValidationError,
+    StructuredOutputRequest,
+)
 
 __all__ = [
     "LLMStructuredOutputCapabilityError",
+    "LLMStructuredOutputError",
+    "LLMStructuredOutputParseError",
+    "LLMStructuredOutputProviderRequestError",
+    "LLMStructuredOutputRefusalError",
+    "LLMStructuredOutputTruncationError",
+    "LLMStructuredOutputValidationError",
     "StructuredOutputCapabilities",
     "StructuredOutputMode",
     "StructuredOutputPolicy",

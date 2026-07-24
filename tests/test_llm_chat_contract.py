@@ -140,6 +140,41 @@ async def test_openai_free_form_schema_is_sent_with_strict_disabled() -> None:
     assert response_schema["schema"]["properties"]["inferred"]["additionalProperties"] is True
 
 
+@pytest.mark.asyncio
+async def test_openrouter_uses_the_prepared_native_schema_request() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    payload = {
+        "choices": [{"message": {"content": '{"answer":"ok"}'}}],
+        "usage": {},
+    }
+    sink = _ObservationSink()
+    client = GenericLLMClient(
+        provider="openrouter",
+        model="openai/gpt-5-mini",
+        api_key="test",
+        observation_sink=sink,
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    await client.chat(
+        [{"role": "user", "content": "answer"}],
+        structured_output=StructuredOutputRequest("Answer", schema),
+    )
+
+    assert fake_http.last_json is not None
+    actual = fake_http.last_json["response_format"]
+    assert actual["type"] == "json_schema"
+    assert actual["json_schema"]["strict"] is True
+    assert sink.records[0].provider_request_args["response_format"] == actual
+
+
 def test_native_required_rejects_deepseek_before_transport() -> None:
     with pytest.raises(LLMStructuredOutputCapabilityError, match="native_required"):
         prepare_structured_output(
