@@ -222,26 +222,6 @@ class ToolExecution:
 
 
 @dataclass(frozen=True)
-class ValidationFailure:
-    failure_id: str
-    tool_name: str
-    summary: str
-    detail: str
-    repair_hint: str
-    failure_count: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "failure_id": self.failure_id,
-            "tool_name": self.tool_name,
-            "summary": self.summary,
-            "detail": self.detail,
-            "repair_hint": self.repair_hint,
-            "failure_count": self.failure_count,
-        }
-
-
-@dataclass(frozen=True)
 class CycleAction:
     tool_name: str
     args: dict[str, Any] | None
@@ -291,7 +271,6 @@ class Cycle:
     reasoning_summary: str
     context: CycleContext
     tool: ToolExecution | None
-    validation_failures: list[ValidationFailure]
     llm_call_id: str
 
     kind: str = "cycle"
@@ -309,7 +288,6 @@ class Cycle:
             "reasoning_summary": self.reasoning_summary,
             "context": self.context.to_dict(),
             "tool": self.tool.to_dict() if self.tool else None,
-            "validation_failures": [item.to_dict() for item in self.validation_failures],
             "llm_call_id": self.llm_call_id,
         }
 
@@ -638,5 +616,4 @@ __all__ = [
     "TraceSessionPage",
     "TurnDetail",
     "TurnSummary",
-    "ValidationFailure",
 ]

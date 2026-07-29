@@ -1163,7 +1163,6 @@ def _legacy_span_kind(event_kind: str) -> str | None:
         "agent_engine.dispatch_entered": "agent_dispatch",
         "agent_engine.decision": "react_cycle",
         "agent_engine.tool_call": "tool_call",
-        "agent_engine.action_validation_failed": "action_validation_failed",
         "agent_engine.runtime_error": "runtime_error",
         "agent_engine.interaction_waited": "interaction",
         "agent_engine.interaction_resumed": "interaction",

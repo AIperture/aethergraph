@@ -24,7 +24,6 @@ from .models import (
     RuntimeErrorItem,
     SegmentItem,
     ToolExecution,
-    ValidationFailure,
 )
 from .reader import EngineEvent
 
@@ -44,7 +43,6 @@ class _CycleBuilder:
     llm_call_id: str
     ended_at: str | None = None
     tool: ToolExecution | None = None
-    validation_failures: list[ValidationFailure] = field(default_factory=list)
 
     def build(self) -> Cycle:
         return Cycle(
@@ -58,7 +56,6 @@ class _CycleBuilder:
             reasoning_summary=self.reasoning_summary,
             context=self.context,
             tool=self.tool,
-            validation_failures=list(self.validation_failures),
             llm_call_id=self.llm_call_id,
         )
 
@@ -186,11 +183,6 @@ def build_segments(
             cycle.tool = _tool_execution(call, event)
             cycle.ended_at = event.iso
 
-        elif kind == "agent_engine.action_validation_failed":
-            cycle = cycles_by_id.get(event.caused_by_event_id)
-            if cycle is not None:
-                cycle.validation_failures.append(_validation_failure(event))
-
         elif kind == "agent_engine.dispatch_entered":
             segment = current(str(event.data.get("source_agent_instance_id") or agent_id), run_id)
             info = dispatch_by_entered.get(event.event_id)
@@ -290,19 +282,6 @@ def _tool_execution(call: EngineEvent, result: EngineEvent) -> ToolExecution:
         resource_links=links,
         started_at=call.iso,
         ended_at=result.iso,
-    )
-
-
-def _validation_failure(event: EngineEvent) -> ValidationFailure:
-    validation = dict(event.data.get("validation") or {})
-    selected = dict(event.data.get("selected_action") or {})
-    return ValidationFailure(
-        failure_id=event.event_id,
-        tool_name=str(selected.get("tool_name") or validation.get("tool_name") or ""),
-        summary=str(validation.get("summary") or event.text or ""),
-        detail=str(validation.get("detail") or ""),
-        repair_hint=str(validation.get("repair_hint") or ""),
-        failure_count=_int(event.data.get("failure_count")),
     )
 
 
