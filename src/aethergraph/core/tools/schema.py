@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, best_match
+from jsonschema.exceptions import SchemaError
+
+from aethergraph.core.schema_validation import (
+    SchemaValidationIssue,
+    first_schema_issue,
+)
 
 _FULL_SCHEMA_ROOT_KEYS = frozenset(
     {
@@ -28,15 +32,6 @@ _FULL_SCHEMA_ROOT_KEYS = frozenset(
         "unevaluatedProperties",
     }
 )
-
-
-@dataclass(frozen=True)
-class ToolSchemaIssue:
-    """Describe one exact Tool argument validation failure."""
-
-    path: str
-    message: str
-    validator: str
 
 
 def normalize_tool_args_schema(schema: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -80,18 +75,10 @@ def validate_tool_args(
     schema: Mapping[str, Any],
     *,
     path: str = "args",
-) -> ToolSchemaIssue | None:
+) -> SchemaValidationIssue | None:
     """Validate one Tool argument value against its canonical schema."""
 
-    error = best_match(Draft202012Validator(dict(schema)).iter_errors(value))
-    if error is None:
-        return None
-    segments = [path, *(str(item) for item in error.absolute_path)]
-    return ToolSchemaIssue(
-        path=".".join(segments),
-        message=error.message,
-        validator=str(error.validator or ""),
-    )
+    return first_schema_issue(value, schema, path=path)
 
 
 def _looks_like_full_schema(schema: Mapping[str, Any]) -> bool:
@@ -189,7 +176,7 @@ def _validate_local_references(schema: dict[str, Any]) -> None:
 
 
 __all__ = [
-    "ToolSchemaIssue",
+    "SchemaValidationIssue",
     "normalize_tool_args_schema",
     "validate_tool_args",
 ]

@@ -16,6 +16,7 @@ from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.structured_output import prepare_structured_output
 from aethergraph.services.llm.types import (
     LLMStructuredOutputCapabilityError,
+    LLMStructuredOutputParseError,
     LLMStructuredOutputProviderRequestError,
     LLMStructuredOutputRefusalError,
     LLMStructuredOutputTruncationError,
@@ -235,6 +236,99 @@ async def test_deepseek_uses_json_object_guidance_and_canonical_validation() -> 
 
 
 @pytest.mark.asyncio
+async def test_local_schema_failure_retains_provider_response_usage_and_exact_issue() -> None:
+    class _Metering:
+        def __init__(self) -> None:
+            self.records: list[dict[str, Any]] = []
+
+        async def record_llm(self, **record: Any) -> None:
+            self.records.append(record)
+
+    sink = _ObservationSink()
+    metering = _Metering()
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5-mini",
+        observation_sink=sink,
+        metering=metering,
+    )
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        return '{"answer":7}', {"prompt_tokens": 11, "completion_tokens": 3}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    with pytest.raises(LLMStructuredOutputValidationError) as exc_info:
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            structured_output=StructuredOutputRequest(
+                "Answer",
+                {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+
+    error = exc_info.value
+    assert error.code == "schema_invalid"
+    assert error.path == "$.answer"
+    assert error.validator == "type"
+    assert error.invalid_value == "7"
+    assert error.expected == ("string",)
+    assert len(error.canonical_schema_fingerprint) == 64
+
+    assert len(sink.records) == 1
+    record = sink.records[0]
+    assert record.raw_text == '{"answer":7}'
+    assert record.usage == {"prompt_tokens": 11, "completion_tokens": 3}
+    assert record.request_args["structured_output_response_state"] == "schema_invalid"
+    assert record.request_args["structured_output_validation_outcome"] == "failed"
+    assert record.request_args["structured_output_error"]["path"] == "$.answer"
+    assert len(metering.records) == 1
+    assert metering.records[0]["prompt_tokens"] == 11
+    assert metering.records[0]["completion_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_local_json_parse_failure_retains_raw_response_without_copying_it_to_error() -> None:
+    sink = _ObservationSink()
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5-mini",
+        observation_sink=sink,
+    )
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        return '{"answer":', {"prompt_tokens": 5, "completion_tokens": 1}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+
+    with pytest.raises(LLMStructuredOutputParseError) as exc_info:
+        await client.chat(
+            [{"role": "user", "content": "hello"}],
+            structured_output=StructuredOutputRequest(
+                "Answer",
+                {
+                    "type": "object",
+                    "properties": {"answer": {"type": "string"}},
+                    "required": ["answer"],
+                    "additionalProperties": False,
+                },
+            ),
+        )
+
+    error = exc_info.value
+    assert error.code == "invalid_json"
+    assert error.response_state == "invalid_json"
+    assert '{"answer":' not in str(error)
+    assert sink.records[0].raw_text == '{"answer":'
+    assert sink.records[0].usage == {"prompt_tokens": 5, "completion_tokens": 1}
+
+
+@pytest.mark.asyncio
 async def test_profile_native_required_fails_before_provider_dispatch() -> None:
     sink = _ObservationSink()
     client = GenericLLMClient(
@@ -288,9 +382,15 @@ async def test_profile_native_required_fails_before_provider_dispatch() -> None:
             "truncated",
         ),
         (
-            LLMStructuredOutputValidationError("invalid"),
+            LLMStructuredOutputValidationError(
+                code="schema_invalid",
+                summary="invalid",
+                path="$.answer",
+                validator="type",
+                response_state="schema_invalid",
+            ),
             "failed",
-            "canonical_validation_failed",
+            "schema_invalid",
         ),
     ],
 )

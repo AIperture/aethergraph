@@ -5,6 +5,7 @@ from typing import Literal
 import pytest
 
 from aethergraph import tool
+from aethergraph.core.tools.schema import validate_tool_args
 
 
 def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
@@ -181,3 +182,89 @@ def test_tool_declares_minimal_semantic_slot_outputs() -> None:
 
     assert definition.slot_outputs == ({"slot_key": "report", "required": True},)
     assert definition.to_dict()["slot_outputs"] == [{"slot_key": "report", "required": True}]
+
+
+def test_tool_schema_reports_exact_discriminated_operator_error() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "operations": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "op": {"const": "add_step"},
+                                "step": {"type": "object"},
+                            },
+                            "required": ["op", "step"],
+                            "additionalProperties": False,
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "op": {"const": "drop_step"},
+                                "step_id": {"type": "string"},
+                            },
+                            "required": ["op", "step_id"],
+                            "additionalProperties": False,
+                        },
+                    ]
+                },
+            }
+        },
+        "required": ["operations"],
+        "additionalProperties": False,
+    }
+
+    issue = validate_tool_args(
+        {"operations": [{"op": "change_step", "step_id": "step-1"}]},
+        schema,
+    )
+
+    assert issue is not None
+    assert issue.path == "args.operations[0].op"
+    assert issue.validator == "const"
+    assert issue.invalid_value == '"change_step"'
+    assert issue.expected == ("add_step", "drop_step")
+    assert "not an allowed op" in issue.message
+
+
+def test_tool_schema_selects_matching_discriminator_branch() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "op": {"const": "add_step"},
+                            "step": {"type": "object"},
+                        },
+                        "required": ["op", "step"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "op": {"const": "drop_step"},
+                            "step_id": {"type": "string"},
+                        },
+                        "required": ["op", "step_id"],
+                        "additionalProperties": False,
+                    },
+                ]
+            }
+        },
+        "required": ["operation"],
+        "additionalProperties": False,
+    }
+
+    issue = validate_tool_args({"operation": {"op": "drop_step"}}, schema)
+
+    assert issue is not None
+    assert issue.path == "args.operation"
+    assert issue.validator == "required"
+    assert "step_id" in issue.message

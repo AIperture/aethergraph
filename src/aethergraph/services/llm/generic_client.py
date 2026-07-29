@@ -17,6 +17,7 @@ from aethergraph.config.config import LLMUsageQuotaSettings
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.core.schema_validation import first_schema_issue
 from aethergraph.services.llm._anthropic_mixin import _AnthropicMixin
 from aethergraph.services.llm._azure_mixin import _AzureMixin
 from aethergraph.services.llm._gemini_mixin import _GeminiMixin
@@ -50,6 +51,7 @@ from aethergraph.services.llm.types import (
     LLMStructuredOutputParseError,
     LLMStructuredOutputProviderRequestError,
     LLMStructuredOutputRefusalError,
+    LLMStructuredOutputResponseError,
     LLMStructuredOutputTruncationError,
     LLMStructuredOutputValidationError,
     LLMUnsupportedFeatureError,
@@ -63,7 +65,6 @@ from aethergraph.services.llm.utils import (
     _ensure_system_json_directive,
     _extract_json_text,
     _strip_schema_enforced_json_fence,
-    _validate_json_schema,
 )
 from aethergraph.services.tracing import resolve_tracer
 
@@ -103,12 +104,14 @@ def _record_structured_output_failure(
         response_state = "truncated"
     elif isinstance(exc, LLMStructuredOutputParseError):
         validation_outcome = "parse_failed"
-        response_state = "invalid_json"
+        response_state = exc.response_state
     elif isinstance(exc, LLMStructuredOutputValidationError):
         validation_outcome = "failed"
-        response_state = "canonical_validation_failed"
+        response_state = exc.response_state
     request_args["structured_output_validation_outcome"] = validation_outcome
     request_args["structured_output_response_state"] = response_state
+    if isinstance(exc, LLMStructuredOutputResponseError):
+        request_args["structured_output_error"] = exc.to_dict()
 
 
 # ---- Helpers --------------------------------------------------------------
@@ -1366,10 +1369,11 @@ class GenericLLMClient(
         )
 
         start = time.perf_counter()
+        normalized_usage: dict[str, int] = {}
         try:
             self._preflight_llm_request(request_estimate)
             # Provider-specific call (now symmetric)
-            text, usage = await self._chat_dispatch(
+            provider_text, usage = await self._chat_dispatch(
                 messages,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -1388,9 +1392,24 @@ class GenericLLMClient(
                 **kw,
             )
 
-            # JSON postprocessing/validation is centralized here (consistent behavior)
+            observation_record.raw_text = str(provider_text or "")
+            observation_record.usage = usage or {}
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
+            normalized_usage = normalize_llm_usage(usage)
+
+            quota_error = self._record_llm_quota_usage(usage=usage)
+            await self._record_llm_usage(
+                model=model,
+                usage=usage,
+                latency_ms=observation_record.latency_ms,
+            )
+            if quota_error is not None:
+                raise quota_error
+
+            # Canonical parsing/validation happens only after response evidence
+            # and provider usage have been retained and accounted.
             text = self._postprocess_structured_output(
-                text=text,
+                text=observation_record.raw_text,
                 output_format=output_format,
                 json_schema=canonical_json_schema,
                 strict_schema=canonical_strict_validation,
@@ -1400,20 +1419,7 @@ class GenericLLMClient(
                 request_args["structured_output_validation_outcome"] = "passed"
                 request_args["structured_output_response_state"] = "completed"
 
-            latency_ms = int((time.perf_counter() - start) * 1000)
-            normalized_usage = normalize_llm_usage(usage)
-            observation_record.raw_text = text
-            observation_record.usage = usage or {}
-            observation_record.latency_ms = latency_ms
-
-            quota_error = self._record_llm_quota_usage(usage=usage)
-            await self._record_llm_usage(
-                model=model,
-                usage=usage,
-                latency_ms=latency_ms,
-            )
-            if quota_error is not None:
-                raise quota_error
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             await self._emit_observation(observation_record)
             await span.finish(
                 response={
@@ -1425,7 +1431,7 @@ class GenericLLMClient(
                 metrics={
                     **(usage or {}),
                     **normalized_usage_metrics(normalized_usage),
-                    "latency_ms": latency_ms,
+                    "latency_ms": observation_record.latency_ms,
                 },
             )
             return text, usage
@@ -1439,7 +1445,10 @@ class GenericLLMClient(
             await span.fail(
                 exc,
                 metadata=self._current_dimensions(),
-                metrics={"latency_ms": observation_record.latency_ms or 0},
+                metrics={
+                    **normalized_usage_metrics(normalized_usage),
+                    "latency_ms": observation_record.latency_ms or 0,
+                },
             )
             raise
         finally:
@@ -1891,10 +1900,19 @@ class GenericLLMClient(
         json_text, was_truncated, remainder = _extract_json_text(candidate)
         try:
             obj = json.loads(json_text)
-        except Exception as e:
+        except json.JSONDecodeError as exc:
             raise LLMStructuredOutputParseError(
-                f"Model did not return valid JSON. Raw output:\n{text}"
-            ) from e
+                code="invalid_json",
+                summary=(
+                    "Model output was not valid JSON " f"(line {exc.lineno}, column {exc.colno})."
+                ),
+                path="$",
+                validator="json",
+                canonical_schema_fingerprint=(
+                    _schema_fingerprint(json_schema) if json_schema is not None else ""
+                ),
+                response_state="invalid_json",
+            ) from exc
 
         if was_truncated and remainder:
             try:
@@ -1907,17 +1925,33 @@ class GenericLLMClient(
                 )
             else:
                 raise LLMStructuredOutputParseError(
-                    f"Model returned multiple JSON objects in a single response. "
-                    f"Only one JSON object is allowed. Raw output:\n{text}"
+                    code="multiple_json_values",
+                    summary=("Model returned multiple JSON values; exactly one is required."),
+                    path="$",
+                    validator="json",
+                    canonical_schema_fingerprint=(
+                        _schema_fingerprint(json_schema) if json_schema is not None else ""
+                    ),
+                    response_state="invalid_json",
                 )
 
         if json_schema is not None and strict_schema:
-            try:
-                _validate_json_schema(obj, json_schema)
-            except Exception as exc:
+            issue = first_schema_issue(obj, json_schema, path="$")
+            if issue is not None:
                 raise LLMStructuredOutputValidationError(
-                    f"Model output failed canonical JSON Schema validation: {exc}"
-                ) from exc
+                    code="schema_invalid",
+                    summary=(
+                        "Model output failed canonical JSON Schema validation: "
+                        f"{issue.path}: {issue.message}"
+                    ),
+                    path=issue.path,
+                    schema_path=issue.schema_path,
+                    validator=issue.validator,
+                    invalid_value=issue.invalid_value,
+                    expected=issue.expected,
+                    canonical_schema_fingerprint=_schema_fingerprint(json_schema),
+                    response_state="schema_invalid",
+                )
 
         # Canonical JSON string output (makes downstream robust)
         return json.dumps(obj, ensure_ascii=False)

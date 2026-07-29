@@ -185,11 +185,52 @@ class LLMStructuredOutputTruncationError(LLMStructuredOutputError):
     """Provider ended a structured response before it was complete."""
 
 
-class LLMStructuredOutputParseError(LLMStructuredOutputError):
+class LLMStructuredOutputResponseError(LLMStructuredOutputError):
+    """Describe one bounded local structured-response validation failure."""
+
+    def __init__(
+        self,
+        *,
+        code: str,
+        summary: str,
+        path: str = "",
+        schema_path: str = "",
+        validator: str = "",
+        invalid_value: str = "",
+        expected: tuple[Any, ...] = (),
+        canonical_schema_fingerprint: str = "",
+        response_state: str,
+    ) -> None:
+        super().__init__(summary)
+        self.code = str(code)
+        self.summary = str(summary)
+        self.path = str(path)
+        self.schema_path = str(schema_path)
+        self.validator = str(validator)
+        self.invalid_value = str(invalid_value)
+        self.expected = tuple(expected)
+        self.canonical_schema_fingerprint = str(canonical_schema_fingerprint)
+        self.response_state = str(response_state)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "summary": self.summary,
+            "path": self.path,
+            "schema_path": self.schema_path,
+            "validator": self.validator,
+            "invalid_value": self.invalid_value,
+            "expected": list(self.expected),
+            "canonical_schema_fingerprint": self.canonical_schema_fingerprint,
+            "response_state": self.response_state,
+        }
+
+
+class LLMStructuredOutputParseError(LLMStructuredOutputResponseError):
     """Provider output was not one complete JSON value."""
 
 
-class LLMStructuredOutputValidationError(LLMStructuredOutputError):
+class LLMStructuredOutputValidationError(LLMStructuredOutputResponseError):
     """Parsed output failed the caller's canonical JSON Schema."""
 
 
