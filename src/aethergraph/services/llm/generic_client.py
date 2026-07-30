@@ -31,6 +31,10 @@ from aethergraph.services.llm.observability import (
     LLMObservationRecord,
     LLMObservationSink,
 )
+from aethergraph.services.llm.prompt_cache import (
+    PreparedPromptCache,
+    prepare_prompt_cache,
+)
 from aethergraph.services.llm.structured_output import (
     PreparedStructuredOutput,
     StructuredOutputPolicy,
@@ -55,6 +59,7 @@ from aethergraph.services.llm.types import (
     LLMStructuredOutputTruncationError,
     LLMStructuredOutputValidationError,
     LLMUnsupportedFeatureError,
+    PromptCacheRequest,
     StructuredOutputRequest,
 )
 from aethergraph.services.llm.usage import (
@@ -1075,6 +1080,7 @@ class GenericLLMClient(
         max_output_tokens: int | None = None,
         output_format: ChatOutputFormat = "text",
         structured_output: StructuredOutputRequest | None = None,
+        prompt_cache: PromptCacheRequest | None = None,
         json_schema: dict[str, Any] | None | object = _UNSET,
         schema_name: str | object = _UNSET,
         strict_schema: bool | object = _UNSET,
@@ -1110,12 +1116,24 @@ class GenericLLMClient(
             )
             ```
 
+            Cache a stable header and append-only transcript boundary:
+            ```python
+            response, usage = await context.llm().chat(
+                messages,
+                prompt_cache=PromptCacheRequest(
+                    stable_message_indexes=(0, 4),
+                    prefix_family="research-agent.v2",
+                ),
+            )
+            ```
+
         Args:
             messages: List of message dicts, each with "role" and "content" keys.
             reasoning_effort: Optional string to control model reasoning depth.
             max_output_tokens: Optional maximum number of output tokens.
             output_format: Output format, e.g., "text" or "json".
             structured_output: Provider-neutral canonical schema request.
+            prompt_cache: Provider-neutral stable-prefix cache request.
             json_schema: Deprecated schema argument; removed in `0.2.0`.
             schema_name: Deprecated root schema name; removed in `0.2.0`.
             strict_schema: Deprecated strict-validation flag; removed in `0.2.0`.
@@ -1172,6 +1190,7 @@ class GenericLLMClient(
         canonical_json_schema = json_schema
         canonical_strict_validation = strict_schema
         prepared_structured_output: PreparedStructuredOutput | None = None
+        prepared_prompt_cache: PreparedPromptCache | None = None
         if output_format == "json_schema" and json_schema is not None:
             effective_policy = self.structured_output_policy
             if "fail_on_unsupported" in deprecated_parameters:
@@ -1269,6 +1288,16 @@ class GenericLLMClient(
                     messages,
                     schema=canonical_json_schema,
                 )
+        provider_messages = messages
+        if prompt_cache is not None:
+            prepared_prompt_cache = prepare_prompt_cache(
+                prompt_cache,
+                messages,
+                provider=self.provider,
+                model=model,
+                scope_dimensions=self._current_dimensions(),
+            )
+            provider_messages = list(prepared_prompt_cache.messages)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
         request_args = self._build_request_args(
             model=model,
@@ -1298,6 +1327,9 @@ class GenericLLMClient(
                 provider_request_args,
                 prepared_structured_output.provider_request_fields,
             )
+        if prepared_prompt_cache is not None:
+            request_args["prompt_cache"] = copy.deepcopy(prepared_prompt_cache.observation)
+            provider_request_args["prompt_cache"] = copy.deepcopy(prepared_prompt_cache.observation)
         request_estimate = self.estimate_chat_request(
             messages,
             max_output_tokens=max_output_tokens,
@@ -1374,7 +1406,7 @@ class GenericLLMClient(
             self._preflight_llm_request(request_estimate)
             # Provider-specific call (now symmetric)
             provider_text, usage = await self._chat_dispatch(
-                messages,
+                provider_messages,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 max_output_tokens=max_output_tokens,
@@ -1387,6 +1419,11 @@ class GenericLLMClient(
                 structured_output_fields=(
                     prepared_structured_output.provider_request_fields
                     if prepared_structured_output is not None
+                    else None
+                ),
+                prompt_cache_fields=(
+                    prepared_prompt_cache.provider_request_fields
+                    if prepared_prompt_cache is not None
                     else None
                 ),
                 **kw,
@@ -1791,6 +1828,7 @@ class GenericLLMClient(
         validate_json: bool,
         fail_on_unsupported: bool,
         structured_output_fields: dict[str, Any] | None = None,
+        prompt_cache_fields: dict[str, Any] | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         # Extract cross-provider extras if any
@@ -1811,6 +1849,7 @@ class GenericLLMClient(
                 tools=tools,
                 tool_choice=tool_choice,
                 structured_output_fields=structured_output_fields,
+                prompt_cache_fields=prompt_cache_fields,
                 **kw,
             )
 

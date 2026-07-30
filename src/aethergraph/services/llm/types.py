@@ -5,6 +5,7 @@ from typing import Any, Literal
 ChatOutputFormat = Literal[
     "text", "json_object", "json_schema", "raw", "json"
 ]  # "json" is a deprecated alias of "json_object"
+PromptCacheStrategy = Literal["stable_prefix"]
 
 ImageFormat = Literal["png", "jpeg", "webp"]
 ImageResponseFormat = Literal["b64_json", "url"]  # url only for dall-e models typically
@@ -85,6 +86,105 @@ class StructuredOutputRequest:
             raise TypeError("structured output schema must be a JSON object")
         object.__setattr__(self, "name", normalized_name)
         object.__setattr__(self, "schema", copy.deepcopy(self.schema))
+
+
+@dataclass(frozen=True)
+class PromptCacheRequest:
+    """
+    Request provider-neutral caching for stable message-prefix boundaries.
+
+    The request identifies message indexes whose complete prefixes are stable.
+    Provider capability resolution and request translation remain internal to
+    AetherGraph and never change the semantic message order.
+
+    Examples:
+        Mark a stable system header:
+            ```python
+            request = PromptCacheRequest(
+                stable_message_indexes=(0,),
+                prefix_family="assistant.instructions.v1",
+            )
+            ```
+
+        Mark an append-only transcript:
+            ```python
+            request = PromptCacheRequest(
+                stable_message_indexes=(0, 2, 4),
+                prefix_family="session.transcript.v3",
+            )
+            assert request.strategy == "stable_prefix"
+            ```
+
+    Args:
+        stable_message_indexes: Sorted, unique zero-based message indexes that
+            end cache-eligible stable prefixes.
+        prefix_family: Caller-owned stable identity for the prompt family.
+        strategy: Provider-neutral cache strategy. Only `stable_prefix` is
+            supported.
+
+    Returns:
+        PromptCacheRequest: An immutable, validated cache request.
+
+    Notes:
+        The prefix family is used to derive an opaque provider cache key. It
+        must not contain credentials or other secret values.
+    """
+
+    stable_message_indexes: tuple[int, ...]
+    prefix_family: str
+    strategy: PromptCacheStrategy = "stable_prefix"
+
+    def __post_init__(self) -> None:
+        """
+        Validate and normalize one prompt-cache request.
+
+        The method converts the supplied indexes to an immutable tuple and
+        rejects ambiguous or non-prefix ordering before provider dispatch.
+
+        Examples:
+            Normalize a list supplied by a dynamic caller:
+                ```python
+                request = PromptCacheRequest([0, 2], "ledger.v1")
+                assert request.stable_message_indexes == (0, 2)
+                ```
+
+            Reject duplicate boundaries:
+                ```python
+                try:
+                    PromptCacheRequest((0, 0), "ledger.v1")
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            self: Newly initialized prompt-cache request.
+
+        Returns:
+            None: The frozen instance is validated and normalized in place.
+
+        Notes:
+            Message-list bounds are validated by `GenericLLMClient.chat()`
+            because the request value intentionally does not own messages.
+        """
+
+        if self.strategy != "stable_prefix":
+            raise ValueError("prompt cache strategy must be 'stable_prefix'")
+        family = str(self.prefix_family or "").strip()
+        if not family:
+            raise ValueError("prompt cache prefix_family must not be empty")
+        if len(family) > 256:
+            raise ValueError("prompt cache prefix_family must be at most 256 characters")
+        indexes = tuple(self.stable_message_indexes)
+        if not indexes:
+            raise ValueError("prompt cache stable_message_indexes must not be empty")
+        if any(isinstance(index, bool) or not isinstance(index, int) for index in indexes):
+            raise TypeError("prompt cache message indexes must be integers")
+        if any(index < 0 for index in indexes):
+            raise ValueError("prompt cache message indexes must be non-negative")
+        if tuple(sorted(set(indexes))) != indexes:
+            raise ValueError("prompt cache message indexes must be sorted and unique")
+        object.__setattr__(self, "stable_message_indexes", indexes)
+        object.__setattr__(self, "prefix_family", family)
 
 
 @dataclass(frozen=True)

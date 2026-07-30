@@ -20,6 +20,7 @@ from .types import (
     LLMStructuredOutputRefusalError,
     LLMStructuredOutputTruncationError,
     LLMStructuredOutputValidationError,
+    PromptCacheRequest,
     StructuredOutputRequest,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "LLMStructuredOutputRefusalError",
     "LLMStructuredOutputTruncationError",
     "LLMStructuredOutputValidationError",
+    "PromptCacheRequest",
     "StructuredOutputCapabilities",
     "StructuredOutputMode",
     "StructuredOutputPolicy",

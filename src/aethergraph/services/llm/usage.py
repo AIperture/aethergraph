@@ -28,10 +28,19 @@ def normalize_llm_usage(usage: dict[str, Any] | None) -> dict[str, Any]:
                 cache_read_tokens,
                 _int_or_zero(details.get("cached_tokens")),
             )
+            cache_write_tokens = max(
+                cache_write_tokens,
+                _first_int(
+                    details,
+                    "cache_write_tokens",
+                    "cache_creation_tokens",
+                    "cache_creation_input_tokens",
+                ),
+            )
 
     if "uncached_input_tokens" in raw:
         uncached_input_tokens = _int_or_zero(raw.get("uncached_input_tokens"))
-    elif "prompt_tokens" in raw:
+    elif "prompt_tokens" in raw or "input_tokens_details" in raw:
         uncached_input_tokens = max(
             0,
             input_tokens - cache_read_tokens - cache_write_tokens,

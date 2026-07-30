@@ -45,6 +45,7 @@ class _OpenAIMixin:
         strict_schema: bool,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        prompt_cache_fields: dict[str, Any] | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         await self._ensure_client()
@@ -57,6 +58,8 @@ class _OpenAIMixin:
 
         body: dict[str, Any] = {"model": model, "input": input_messages}
         structured_output_fields = kw.pop("structured_output_fields", None)
+        if prompt_cache_fields:
+            body.update(prompt_cache_fields)
 
         if reasoning_effort is not None:
             body["reasoning"] = {"effort": reasoning_effort}

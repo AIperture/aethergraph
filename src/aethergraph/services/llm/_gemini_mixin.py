@@ -112,6 +112,7 @@ class _GeminiMixin:
             usage = {
                 "input_tokens": int(um.get("promptTokenCount", 0) or 0),
                 "output_tokens": int(um.get("candidatesTokenCount", 0) or 0),
+                "cache_read_tokens": int(um.get("cachedContentTokenCount", 0) or 0),
             }
 
             if output_format == "raw":

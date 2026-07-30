@@ -377,9 +377,12 @@ def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[di
                     continue
                 t = p.get("type")
                 if t in ("input_text", "input_image"):
-                    blocks.append(p)
+                    blocks.append(dict(p))
                 elif t in ("text", "output_text"):
-                    blocks.append({"type": "input_text", "text": p.get("text", "")})
+                    block = {"type": "input_text", "text": p.get("text", "")}
+                    if "prompt_cache_breakpoint" in p:
+                        block["prompt_cache_breakpoint"] = p["prompt_cache_breakpoint"]
+                    blocks.append(block)
                 elif t == "image_url":
                     url = (p.get("image_url") or {}).get("url") or p.get("url")
                     if isinstance(url, str):
