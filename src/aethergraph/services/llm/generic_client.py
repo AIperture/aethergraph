@@ -35,6 +35,13 @@ from aethergraph.services.llm.prompt_cache import (
     PreparedPromptCache,
     prepare_prompt_cache,
 )
+from aethergraph.services.llm.provider_transport import (
+    LLMProviderRequestError,
+    ProviderCallResult,
+    ProviderRateGate,
+    ProviderRetryExecutor,
+    ProviderRetrySettings,
+)
 from aethergraph.services.llm.structured_output import (
     PreparedStructuredOutput,
     StructuredOutputPolicy,
@@ -58,7 +65,6 @@ from aethergraph.services.llm.types import (
     LLMRunQuotaWouldExceedError,
     LLMStructuredOutputCapabilityError,
     LLMStructuredOutputParseError,
-    LLMStructuredOutputProviderRequestError,
     LLMStructuredOutputRefusalError,
     LLMStructuredOutputResponseError,
     LLMStructuredOutputTruncationError,
@@ -106,7 +112,7 @@ def _record_structured_output_failure(
 ) -> None:
     validation_outcome = "not_run"
     response_state = "runtime_error"
-    if isinstance(exc, LLMStructuredOutputProviderRequestError):
+    if isinstance(exc, LLMProviderRequestError):
         response_state = "provider_request_rejected"
     elif isinstance(exc, LLMStructuredOutputRefusalError):
         response_state = "refused"
@@ -182,6 +188,9 @@ class GenericLLMClient(
         compatibility_policy: str = "compat",
         structured_output_policy: StructuredOutputPolicy = "best_available",
         context_window_tokens: int | None = None,
+        retry_settings: ProviderRetrySettings | None = None,
+        rate_limit_group: str | None = None,
+        rate_gate: ProviderRateGate | None = None,
         # observability
         observation_sink: LLMObservationSink | None = None,
         observation_capture_mode: CaptureMode = "manifest",
@@ -192,6 +201,11 @@ class GenericLLMClient(
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
         self.embed_model = None  # will be deprecated in favor of a separate EmbeddingsClient
         self._retry = _Retry()
+        self._provider_retry = ProviderRetryExecutor(
+            retry_settings,
+            rate_gate=rate_gate,
+        )
+        self.rate_limit_group = rate_limit_group
         self._client = httpx.AsyncClient(timeout=timeout)
         self._bound_loop = None
         self._timeout = timeout
@@ -1469,30 +1483,37 @@ class GenericLLMClient(
         try:
             self._preflight_llm_request(request_estimate)
             # Provider-specific call (now symmetric)
-            provider_value, usage = await self._chat_dispatch(
-                provider_messages,
+            provider_result = await self._provider_retry.execute(
+                lambda: self._chat_dispatch(
+                    provider_messages,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                    output_format=output_format,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    strict_schema=strict_schema,
+                    validate_json=validate_json,
+                    fail_on_unsupported=fail_on_unsupported,
+                    structured_output_fields=(
+                        prepared_structured_output.provider_request_fields
+                        if prepared_structured_output is not None
+                        else None
+                    ),
+                    prompt_cache_fields=(
+                        prepared_prompt_cache.provider_request_fields
+                        if prepared_prompt_cache is not None
+                        else None
+                    ),
+                    tool_request=tool_request,
+                    **kw,
+                ),
+                provider=self.provider,
                 model=model,
-                reasoning_effort=reasoning_effort,
-                max_output_tokens=max_output_tokens,
-                output_format=output_format,
-                json_schema=json_schema,
-                schema_name=schema_name,
-                strict_schema=strict_schema,
-                validate_json=validate_json,
-                fail_on_unsupported=fail_on_unsupported,
-                structured_output_fields=(
-                    prepared_structured_output.provider_request_fields
-                    if prepared_structured_output is not None
-                    else None
-                ),
-                prompt_cache_fields=(
-                    prepared_prompt_cache.provider_request_fields
-                    if prepared_prompt_cache is not None
-                    else None
-                ),
-                tool_request=tool_request,
-                **kw,
+                operation="chat",
+                rate_limit_group=self.rate_limit_group,
             )
+            provider_value, usage = provider_result.value
 
             observation_record.raw_text = (
                 provider_value.observation_text()
@@ -1828,19 +1849,26 @@ class GenericLLMClient(
                     **kw,
                 )
             else:
-                text, usage = await self._chat_dispatch(
-                    messages,
+                provider_result = await self._provider_retry.execute(
+                    lambda: self._chat_dispatch(
+                        messages,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        max_output_tokens=max_output_tokens,
+                        output_format=output_format,
+                        json_schema=json_schema,
+                        schema_name=schema_name,
+                        strict_schema=strict_schema,
+                        validate_json=validate_json,
+                        fail_on_unsupported=fail_on_unsupported,
+                        **kw,
+                    ),
+                    provider=self.provider,
                     model=model,
-                    reasoning_effort=reasoning_effort,
-                    max_output_tokens=max_output_tokens,
-                    output_format=output_format,
-                    json_schema=json_schema,
-                    schema_name=schema_name,
-                    strict_schema=strict_schema,
-                    validate_json=validate_json,
-                    fail_on_unsupported=fail_on_unsupported,
-                    **kw,
+                    operation="chat",
+                    rate_limit_group=self.rate_limit_group,
                 )
+                text, usage = provider_result.value
                 if on_delta is not None and text:
                     await on_delta(text)
 
@@ -1908,7 +1936,7 @@ class GenericLLMClient(
         prompt_cache_fields: dict[str, Any] | None = None,
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
-    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         # Extract cross-provider extras if any
         tools = kw.pop("tools", None)
         tool_choice = kw.pop("tool_choice", None)

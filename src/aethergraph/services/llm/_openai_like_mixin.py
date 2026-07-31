@@ -7,6 +7,10 @@ from typing import Any
 
 import httpx
 
+from aethergraph.services.llm.provider_transport import (
+    ProviderCallResult,
+    checked_response_metadata,
+)
 from aethergraph.services.llm.types import ChatOutputFormat
 from aethergraph.services.llm.utils import _ensure_system_json_directive
 
@@ -37,7 +41,7 @@ class _OpenAILikeMixin:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -102,22 +106,19 @@ class _OpenAILikeMixin:
                 headers=self._headers_openai_like(),
                 json=body,
             )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                raise RuntimeError(f"OpenAI-like chat/completions error: {e.response.text}") from e
+            metadata = checked_response_metadata(self.provider, model, "chat", r)
 
             data = r.json()
             usage = data.get("usage", {}) or {}
 
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
+                return ProviderCallResult((txt, usage), metadata)
 
             txt, _ = _first_text(data.get("choices", []))
-            return txt, usage
+            return ProviderCallResult((txt, usage), metadata)
 
-        return await self._retry.run(_call)
+        return await _call()
 
     async def _chat_openai_like_chat_completions_stream(
         self,

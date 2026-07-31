@@ -8,9 +8,12 @@ from typing import Any
 
 import httpx
 
+from aethergraph.services.llm.provider_transport import (
+    ProviderCallResult,
+    checked_response_metadata,
+)
 from aethergraph.services.llm.tool_calling import (
     LLMToolCallCapabilityError,
-    LLMToolCallProviderRequestError,
     LLMToolCallResponseError,
     ToolCall,
     ToolCallRequest,
@@ -175,7 +178,7 @@ class _AnthropicMixin:
         tools: list[dict[str, Any]] | None = None,
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
-    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -272,35 +275,14 @@ class _AnthropicMixin:
                 },
                 json=payload,
             )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                body = e.response.text or ""
-                if tool_request is not None:
-                    raise LLMToolCallProviderRequestError(
-                        provider="anthropic",
-                        status_code=e.response.status_code,
-                        message=(
-                            "Anthropic rejected the prepared native Tool-call " f"request: {body}"
-                        ),
-                    ) from e
-                if e.response.status_code == 404:
-                    hint = (
-                        "Anthropic returned 404. Common causes:\n"
-                        "1) base_url should be https://api.anthropic.com (no /v1 suffix)\n"
-                        "2) model id is invalid / unavailable for your key\n"
-                        f"Request URL: {e.request.url}\n"
-                    )
-                    raise RuntimeError(hint + "Response body:\n" + body) from e
-
-                raise RuntimeError(f"Anthropic API error ({e.response.status_code}): {body}") from e
+            metadata = checked_response_metadata("anthropic", model, "chat", r)
 
             data = r.json()
             usage = data.get("usage", {}) or {}
 
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
+                return ProviderCallResult((txt, usage), metadata)
 
             if tool_request is not None:
                 if data.get("stop_reason") == "max_tokens":
@@ -311,13 +293,13 @@ class _AnthropicMixin:
                             "native Tool selection."
                         ),
                     )
-                return _anthropic_tool_call_response(data), usage
+                return ProviderCallResult((_anthropic_tool_call_response(data), usage), metadata)
 
             blocks = data.get("content") or []
             txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-            return txt, usage
+            return ProviderCallResult((txt, usage), metadata)
 
-        return await self._retry.run(_call)
+        return await _call()
 
     # ------------------------------------------------------------------
     # Chat – streaming (with extended thinking support)

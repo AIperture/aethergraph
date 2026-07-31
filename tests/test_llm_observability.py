@@ -12,6 +12,7 @@ from aethergraph.services.container.default_container import build_default_conta
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.observability import ConsoleLLMObservationSink
+from aethergraph.services.llm.provider_transport import ProviderCallResult
 from aethergraph.services.llm.types import (
     LLMContextWindowExceededError,
     LLMRunQuotaExceededError,
@@ -202,7 +203,7 @@ async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path:
     )
 
     async def successful_dispatch(messages, **kwargs):
-        return "hello back", {"prompt_tokens": 11, "completion_tokens": 7}
+        return ProviderCallResult(("hello back", {"prompt_tokens": 11, "completion_tokens": 7}))
 
     client._chat_dispatch = successful_dispatch  # type: ignore[method-assign]
     token = current_meter_context.set({"run_id": "run-success"})
@@ -241,7 +242,7 @@ async def test_observation_sink_failure_cannot_change_a_successful_llm_result() 
     )
 
     async def successful_dispatch(messages, **kwargs):
-        return "provider result", {"prompt_tokens": 3, "completion_tokens": 2}
+        return ProviderCallResult(("provider result", {"prompt_tokens": 3, "completion_tokens": 2}))
 
     client._chat_dispatch = successful_dispatch  # type: ignore[method-assign]
     text, usage = await client.chat([{"role": "user", "content": "hello"}])
@@ -274,11 +275,16 @@ async def test_metering_is_independent_of_capture_mode(tmp_path: Path, mode: str
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return "ok", {
-            "prompt_tokens": 10,
-            "completion_tokens": 2,
-            "prompt_tokens_details": {"cached_tokens": 4},
-        }
+        return ProviderCallResult(
+            (
+                "ok",
+                {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "prompt_tokens_details": {"cached_tokens": 4},
+                },
+            )
+        )
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     await client.chat([{"role": "user", "content": "hello"}])
@@ -306,7 +312,9 @@ async def test_default_container_uses_sqlite_and_no_jsonl_or_persisted_tracer(
     client = container.llm.get()
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return "container output", {"prompt_tokens": 9, "completion_tokens": 1}
+        return ProviderCallResult(
+            ("container output", {"prompt_tokens": 9, "completion_tokens": 1})
+        )
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     await client.chat([{"role": "user", "content": "from container"}])
@@ -338,7 +346,7 @@ async def test_llm_chat_preflight_uses_explicit_usage_quota_before_dispatch() ->
     async def fake_chat_dispatch(messages, **kwargs):
         nonlocal dispatched
         dispatched = True
-        return "unexpected", {"prompt_tokens": 1, "completion_tokens": 1}
+        return ProviderCallResult(("unexpected", {"prompt_tokens": 1, "completion_tokens": 1}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     token = current_meter_context.set(
@@ -375,7 +383,7 @@ async def test_llm_post_call_quota_violation_raises_typed_error() -> None:
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return "hello back", {"prompt_tokens": 30, "completion_tokens": 25}
+        return ProviderCallResult(("hello back", {"prompt_tokens": 30, "completion_tokens": 25}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     token = current_meter_context.set({"run_id": "run-post"})
@@ -401,7 +409,7 @@ async def test_llm_context_window_is_current_request_only() -> None:
     async def fake_chat_dispatch(messages, **kwargs):
         nonlocal dispatched
         dispatched = True
-        return "unexpected", {"prompt_tokens": 1, "completion_tokens": 1}
+        return ProviderCallResult(("unexpected", {"prompt_tokens": 1, "completion_tokens": 1}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     with pytest.raises(LLMContextWindowExceededError) as exc_info:

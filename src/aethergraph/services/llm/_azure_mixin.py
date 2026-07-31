@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
-
+from aethergraph.services.llm.provider_transport import (
+    ProviderCallResult,
+    checked_response_metadata,
+)
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     GeneratedImage,
@@ -43,7 +45,7 @@ class _AzureMixin:
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -86,22 +88,19 @@ class _AzureMixin:
                 headers={"api-key": self.api_key, "Content-Type": "application/json"},
                 json=payload,
             )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                raise RuntimeError(f"Azure chat/completions error: {e.response.text}") from e
+            metadata = checked_response_metadata("azure", model, "chat", r)
 
             data = r.json()
             usage = data.get("usage", {}) or {}
 
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
+                return ProviderCallResult((txt, usage), metadata)
 
             txt, _ = _first_text(data.get("choices", []))
-            return txt, usage
+            return ProviderCallResult((txt, usage), metadata)
 
-        return await self._retry.run(_call)
+        return await _call()
 
     async def _image_azure_generate(
         self,

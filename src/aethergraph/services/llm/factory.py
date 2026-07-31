@@ -8,6 +8,7 @@ from aethergraph.config.llm import LLMProfile, LLMSettings
 from ..secrets.base import Secrets
 from .generic_client import GenericLLMClient
 from .observability import CaptureMode, LLMObservationSink
+from .provider_transport import ProviderRateGate
 from .providers import Provider
 
 
@@ -137,6 +138,7 @@ def client_from_profile(
     profile_name: str | None = None,
     observation_sink: LLMObservationSink | None = None,
     observation_capture_mode: CaptureMode = "manifest",
+    rate_gate: ProviderRateGate | None = None,
 ) -> GenericLLMClient:
     # At this point, _apply_env_overrides_to_profile has already filled
     # p.base_url, p.api_key, etc. as much as possible.
@@ -149,6 +151,9 @@ def client_from_profile(
         api_key=api_key,
         azure_deployment=p.azure_deployment,
         timeout=p.timeout,
+        retry_settings=p.retry,
+        rate_limit_group=p.rate_limit_group,
+        rate_gate=rate_gate,
         reasoning_effort=p.reasoning_effort,
         thinking_mode=p.thinking_mode,
         compatibility_policy=p.compatibility_policy,
@@ -173,6 +178,8 @@ def build_llm_clients(
     if not cfg.enabled:
         return {}
 
+    rate_gate = ProviderRateGate()
+
     # Mutate cfg.llm.default in-place with env defaults
     default_profile = _apply_env_overrides_to_profile(
         name="default",
@@ -187,6 +194,7 @@ def build_llm_clients(
             profile_name="default",
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
+            rate_gate=rate_gate,
         )
     }
 
@@ -204,6 +212,7 @@ def build_llm_clients(
             profile_name=name,
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
+            rate_gate=rate_gate,
         )
 
     return clients

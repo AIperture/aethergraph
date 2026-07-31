@@ -1,5 +1,14 @@
 """Public provider-neutral LLM service contracts."""
 
+from .provider_transport import (
+    LLMProviderRequestError,
+    ProviderCallResult,
+    ProviderRateGate,
+    ProviderRateLimitSnapshot,
+    ProviderResponseMetadata,
+    ProviderRetrySettings,
+    ProviderTransportAttempt,
+)
 from .structured_output import (
     StructuredOutputCapabilities,
     StructuredOutputMode,
@@ -36,6 +45,7 @@ from .types import (
 
 __all__ = [
     "LLMContextWindowExceededError",
+    "LLMProviderRequestError",
     "LLMRequestEstimate",
     "LLMRunQuotaError",
     "LLMRunQuotaExceededError",
@@ -52,6 +62,12 @@ __all__ = [
     "LLMToolCallProviderRequestError",
     "LLMToolCallResponseError",
     "PromptCacheRequest",
+    "ProviderCallResult",
+    "ProviderRateGate",
+    "ProviderRateLimitSnapshot",
+    "ProviderResponseMetadata",
+    "ProviderRetrySettings",
+    "ProviderTransportAttempt",
     "StructuredOutputCapabilities",
     "StructuredOutputMode",
     "StructuredOutputPolicy",

@@ -6,6 +6,7 @@ import httpx
 from pydantic import ValidationError
 import pytest
 
+from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
     ProviderCallResult,
@@ -351,3 +352,43 @@ async def test_retry_executor_refuses_provider_delay_beyond_policy_budget() -> N
 def test_retry_settings_reject_inverted_backoff_bounds() -> None:
     with pytest.raises(ValidationError):
         ProviderRetrySettings(base_delay_s=2.0, max_backoff_s=1.0)
+
+
+@pytest.mark.asyncio
+async def test_generic_chat_recovers_from_temporary_structured_output_429() -> None:
+    fake_time = _FakeTime()
+    client = GenericLLMClient(provider="openai", model="gpt-5-nano", api_key="test")
+    client._provider_retry = ProviderRetryExecutor(
+        rate_gate=ProviderRateGate(clock=fake_time.clock, sleep=fake_time.sleep),
+        clock=fake_time.clock,
+        random_unit=lambda: 0.0,
+    )
+    calls = 0
+
+    async def dispatch(messages, **kwargs) -> ProviderCallResult[tuple[str, dict[str, int]]]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise LLMProviderRequestError(
+                provider="openai",
+                model="gpt-5-nano",
+                operation="chat",
+                code="provider_rate_limited",
+                message="Rate limit reached.",
+                retryable=True,
+                status_code=429,
+                metadata=ProviderResponseMetadata(retry_after_s=0.598),
+            )
+        return ProviderCallResult(('{"answer":"ok"}', {"output_tokens": 3}))
+
+    client._chat_dispatch = dispatch  # type: ignore[method-assign]
+
+    text, usage = await client.chat(
+        [{"role": "user", "content": "answer"}],
+        output_format="json_object",
+    )
+
+    assert text == '{"answer": "ok"}'
+    assert usage == {"output_tokens": 3}
+    assert calls == 2
+    assert fake_time.sleeps == [pytest.approx(0.598)]

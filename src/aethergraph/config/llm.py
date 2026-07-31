@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
+from aethergraph.services.llm.provider_transport import ProviderRetrySettings
 from aethergraph.services.llm.providers import Provider
 
 
@@ -11,6 +12,13 @@ class LLMProfile(BaseModel):
     embed_model: str | None = None  # separate embedding model
     base_url: str | None = None
     timeout: float = 60.0
+    retry: ProviderRetrySettings = Field(default_factory=ProviderRetrySettings)
+    rate_limit_group: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Optional shared provider quota bucket used by the container rate gate.",
+    )
     reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
     thinking_mode: Literal["auto", "on", "off"] | None = None
     compatibility_policy: Literal["compat", "strict"] = Field(
@@ -110,6 +118,13 @@ class EmbeddingProfile(BaseModel):
     model: str = "text-embedding-3-small"
     base_url: str | None = None
     timeout: float = 60.0
+    retry: ProviderRetrySettings = Field(default_factory=ProviderRetrySettings)
+    rate_limit_group: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description="Optional shared provider quota bucket used by the container rate gate.",
+    )
 
     # provider-specific
     azure_deployment: str | None = None

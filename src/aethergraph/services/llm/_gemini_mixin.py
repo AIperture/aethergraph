@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
-
+from aethergraph.services.llm.provider_transport import (
+    ProviderCallResult,
+    checked_response_metadata,
+)
 from aethergraph.services.llm.tool_calling import (
-    LLMToolCallProviderRequestError,
     LLMToolCallResponseError,
     ToolCall,
     ToolCallRequest,
@@ -93,7 +94,7 @@ class _GeminiMixin:
         tools: list[dict[str, Any]] | None = None,
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
-    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -190,21 +191,7 @@ class _GeminiMixin:
                 headers={"Content-Type": "application/json"},
                 json=payload,
             )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if tool_request is not None:
-                    raise LLMToolCallProviderRequestError(
-                        provider="google",
-                        status_code=e.response.status_code,
-                        message=(
-                            "Gemini rejected the prepared native Tool-call "
-                            f"request: {e.response.text}"
-                        ),
-                    ) from e
-                raise RuntimeError(
-                    f"Gemini generateContent failed ({e.response.status_code}): {e.response.text}"
-                ) from e
+            metadata = checked_response_metadata("google", model, "chat", r)
 
             data = r.json()
             um = data.get("usageMetadata") or {}
@@ -216,7 +203,7 @@ class _GeminiMixin:
 
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
+                return ProviderCallResult((txt, usage), metadata)
 
             cand = (data.get("candidates") or [{}])[0]
             if tool_request is not None:
@@ -228,11 +215,11 @@ class _GeminiMixin:
                             "native Tool selection."
                         ),
                     )
-                return _gemini_tool_call_response(cand), usage
+                return ProviderCallResult((_gemini_tool_call_response(cand), usage), metadata)
             txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
-            return txt, usage
+            return ProviderCallResult((txt, usage), metadata)
 
-        return await self._retry.run(_call)
+        return await _call()
 
     async def _image_gemini_generate(
         self,

@@ -1,6 +1,7 @@
 """Provider-neutral HTTP transport contracts and classification."""
 
 from .classification import (
+    checked_response_metadata,
     classify_http_error,
     classify_transport_error,
     provider_response_metadata,
@@ -25,6 +26,7 @@ __all__ = [
     "ProviderRetryExecutor",
     "ProviderRetrySettings",
     "ProviderTransportAttempt",
+    "checked_response_metadata",
     "classify_http_error",
     "classify_transport_error",
     "provider_response_metadata",

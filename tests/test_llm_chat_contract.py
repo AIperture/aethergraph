@@ -19,12 +19,15 @@ from aethergraph.services.llm import (
     ToolDefinition,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
+from aethergraph.services.llm.provider_transport import (
+    LLMProviderRequestError,
+    ProviderCallResult,
+)
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.structured_output import prepare_structured_output
 from aethergraph.services.llm.types import (
     LLMStructuredOutputCapabilityError,
     LLMStructuredOutputParseError,
-    LLMStructuredOutputProviderRequestError,
     LLMStructuredOutputRefusalError,
     LLMStructuredOutputTruncationError,
     LLMStructuredOutputValidationError,
@@ -435,7 +438,7 @@ async def test_deepseek_uses_json_object_guidance_and_canonical_validation() -> 
     async def fake_chat_dispatch(messages, **kwargs):
         seen["messages"] = messages
         seen.update(kwargs)
-        return '{"answer":7}', {}
+        return ProviderCallResult(('{"answer":7}', {}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -477,7 +480,7 @@ async def test_local_schema_failure_retains_provider_response_usage_and_exact_is
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return '{"answer":7}', {"prompt_tokens": 11, "completion_tokens": 3}
+        return ProviderCallResult(('{"answer":7}', {"prompt_tokens": 11, "completion_tokens": 3}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -525,7 +528,7 @@ async def test_caller_owned_validation_returns_unvalidated_provider_response() -
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return '{"calls":[1,2]}', {"prompt_tokens": 5, "completion_tokens": 3}
+        return ProviderCallResult(('{"calls":[1,2]}', {"prompt_tokens": 5, "completion_tokens": 3}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     text, usage = await client.chat(
@@ -565,7 +568,7 @@ async def test_local_json_parse_failure_retains_raw_response_without_copying_it_
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return '{"answer":', {"prompt_tokens": 5, "completion_tokens": 1}
+        return ProviderCallResult(('{"answer":', {"prompt_tokens": 5, "completion_tokens": 1}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -605,7 +608,7 @@ async def test_profile_native_required_fails_before_provider_dispatch() -> None:
     async def fake_chat_dispatch(messages, **kwargs):
         nonlocal dispatched
         dispatched = True
-        return "{}", {}
+        return ProviderCallResult(("{}", {}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -630,7 +633,14 @@ async def test_profile_native_required_fails_before_provider_dispatch() -> None:
     ("error", "validation_outcome", "response_state"),
     [
         (
-            LLMStructuredOutputProviderRequestError("rejected"),
+            LLMProviderRequestError(
+                provider="openai",
+                model="gpt-5-mini",
+                operation="chat",
+                code="provider_request_rejected",
+                message="rejected",
+                retryable=False,
+            ),
             "not_run",
             "provider_request_rejected",
         ),
@@ -706,7 +716,7 @@ async def test_new_and_deprecated_structured_forms_normalize_identically() -> No
 
     async def fake_chat_dispatch(messages, **kwargs):
         seen.append(dict(kwargs))
-        return '{"answer":"ok"}', {}
+        return ProviderCallResult(('{"answer":"ok"}', {}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -745,7 +755,7 @@ async def test_structured_output_rejects_mixed_deprecated_parameters() -> None:
     async def fake_chat_dispatch(messages, **kwargs):
         nonlocal dispatched
         dispatched = True
-        return "{}", {}
+        return ProviderCallResult(("{}", {}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -769,7 +779,7 @@ async def test_deprecated_structured_parameters_are_observable() -> None:
     )
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return '{"answer":"ok"}', {}
+        return ProviderCallResult(('{"answer":"ok"}', {}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -794,7 +804,7 @@ async def test_chat_json_alias_warns_and_returns_canonical_json() -> None:
     client = GenericLLMClient(provider="openai", model="gpt-test")
 
     async def fake_chat_dispatch(messages, **kwargs):
-        return '{"b":2,"a":1}', {"prompt_tokens": 1, "completion_tokens": 1}
+        return ProviderCallResult(('{"b":2,"a":1}', {"prompt_tokens": 1, "completion_tokens": 1}))
 
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
 
@@ -829,11 +839,11 @@ async def test_chat_uses_profile_compatibility_policy_when_fail_flag_omitted() -
 
     async def fake_dispatch_strict(messages, **kwargs):
         strict_seen.update(kwargs)
-        return "ok", {}
+        return ProviderCallResult(("ok", {}))
 
     async def fake_dispatch_compat(messages, **kwargs):
         compat_seen.update(kwargs)
-        return "ok", {}
+        return ProviderCallResult(("ok", {}))
 
     strict_client._chat_dispatch = fake_dispatch_strict  # type: ignore[method-assign]
     compat_client._chat_dispatch = fake_dispatch_compat  # type: ignore[method-assign]
@@ -872,7 +882,7 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
 
-    text, usage = await client._chat_openai_like_chat_completions(  # type: ignore[misc]
+    result = await client._chat_openai_like_chat_completions(  # type: ignore[misc]
         [{"role": "user", "content": "hello"}],
         model="deepseek-v4-pro",
         reasoning_effort="xhigh",
@@ -881,6 +891,7 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
         json_schema=None,
         fail_on_unsupported=False,
     )
+    text, usage = result.value
 
     assert json.loads(text) == {"answer": "ok"}
     assert usage["completion_tokens"] == 4
@@ -1004,7 +1015,7 @@ async def test_anthropic_without_cache_control_keeps_classic_system_string() -> 
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
 
-    text, usage = await client._chat_anthropic_messages(  # type: ignore[misc]
+    result = await client._chat_anthropic_messages(  # type: ignore[misc]
         [
             {"role": "system", "content": "Stable rules."},
             {"role": "user", "content": "hello"},
@@ -1014,6 +1025,7 @@ async def test_anthropic_without_cache_control_keeps_classic_system_string() -> 
         json_schema=None,
         fail_on_unsupported=False,
     )
+    text, usage = result.value
 
     assert text == "ok"
     assert usage["input_tokens"] == 3
@@ -1043,7 +1055,7 @@ async def test_anthropic_cache_control_passes_through_system_and_messages() -> N
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
 
-    text, usage = await client._chat_anthropic_messages(  # type: ignore[misc]
+    result = await client._chat_anthropic_messages(  # type: ignore[misc]
         [
             {
                 "role": "system",
@@ -1072,6 +1084,7 @@ async def test_anthropic_cache_control_passes_through_system_and_messages() -> N
         fail_on_unsupported=False,
         cache_control={"type": "ephemeral"},
     )
+    text, usage = result.value
 
     assert text == "ok"
     assert usage["cache_read_input_tokens"] == 50

@@ -74,7 +74,7 @@ def provider_response_metadata(
     """
 
     normalized_provider = str(provider or "").lower()
-    headers = response.headers
+    headers = getattr(response, "headers", httpx.Headers())
     request_id = _first_header(
         headers,
         (
@@ -106,6 +106,54 @@ def provider_response_metadata(
         retry_after_s=retry_after_s,
         rate_limits=rate_limits,
     )
+
+
+def checked_response_metadata(
+    provider: str,
+    model: str | None,
+    operation: str,
+    response: httpx.Response,
+    *,
+    now: datetime | None = None,
+) -> ProviderResponseMetadata:
+    """
+    Validate a provider response and return its normalized safe metadata.
+
+    Examples:
+        Retain metadata from a successful response:
+            ```python
+            response = httpx.Response(200, headers={"x-request-id": "req-1"})
+            metadata = checked_response_metadata("openai", "gpt-5-nano", "chat", response)
+            assert metadata.request_id == "req-1"
+            ```
+
+        Raise the canonical error for a failed response:
+            ```python
+            response = httpx.Response(429, json={"error": {"message": "Busy"}})
+            try:
+                checked_response_metadata("openai", "gpt-5-nano", "chat", response)
+            except LLMProviderRequestError as error:
+                assert error.code == "provider_rate_limited"
+            ```
+
+    Args:
+        provider: Configured provider identifier.
+        model: Provider model or deployment identifier when known.
+        operation: Logical provider operation such as chat or embedding.
+        response: Provider HTTP response to validate and normalize.
+        now: Optional deterministic UTC wall clock for absolute reset values.
+
+    Returns:
+        ProviderResponseMetadata: Sanitized metadata for a successful response.
+
+    Notes:
+        This is the single adapter boundary for HTTP status classification.
+        It does not parse or retain the response body on success.
+    """
+
+    if int(response.status_code) >= 400:
+        raise classify_http_error(provider, model, operation, response, now=now)
+    return provider_response_metadata(provider, response, now=now)
 
 
 def classify_http_error(

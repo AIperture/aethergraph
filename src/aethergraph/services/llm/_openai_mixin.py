@@ -8,8 +8,11 @@ from typing import Any
 
 import httpx
 
+from aethergraph.services.llm.provider_transport import (
+    ProviderCallResult,
+    checked_response_metadata,
+)
 from aethergraph.services.llm.tool_calling import (
-    LLMToolCallProviderRequestError,
     LLMToolCallResponseError,
     ToolCall,
     ToolCallRequest,
@@ -19,7 +22,6 @@ from aethergraph.services.llm.types import (
     ChatOutputFormat,
     GeneratedImage,
     ImageGenerationResult,
-    LLMStructuredOutputProviderRequestError,
     LLMStructuredOutputRefusalError,
     LLMStructuredOutputTruncationError,
 )
@@ -128,7 +130,7 @@ class _OpenAIMixin:
         tool_request: ToolCallRequest | None = None,
         prompt_cache_fields: dict[str, Any] | None = None,
         **kw: Any,
-    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -206,23 +208,7 @@ class _OpenAIMixin:
                 json=body,
                 timeout=request_timeout,
             )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if tool_request is not None:
-                    raise LLMToolCallProviderRequestError(
-                        provider="openai",
-                        status_code=e.response.status_code,
-                        message=(
-                            "OpenAI rejected the prepared native Tool-call "
-                            f"request: {e.response.text}"
-                        ),
-                    ) from e
-                if structured_output_fields:
-                    raise LLMStructuredOutputProviderRequestError(
-                        f"OpenAI rejected the prepared structured-output request: {e.response.text}"
-                    ) from e
-                raise RuntimeError(f"OpenAI Responses API error: {e.response.text}") from e
+            metadata = checked_response_metadata("openai", model, "chat", r)
 
             data = r.json()
             usage = data.get("usage", {}) or {}
@@ -241,12 +227,12 @@ class _OpenAIMixin:
             # If caller asked for raw provider payload, just return it as a JSON string
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
-                return txt, usage
+                return ProviderCallResult((txt, usage), metadata)
 
             # Existing parsing logic for message-only flows
             output = data.get("output")
             if tool_request is not None:
-                return _openai_tool_call_response(data), usage
+                return ProviderCallResult((_openai_tool_call_response(data), usage), metadata)
             txt = ""
 
             if isinstance(output, list) and output:
@@ -277,9 +263,9 @@ class _OpenAIMixin:
             else:
                 txt = ""
 
-            return txt, usage
+            return ProviderCallResult((txt, usage), metadata)
 
-        return await self._retry.run(_call)
+        return await _call()
 
     # ------------------------------------------------------------------
     # Chat – streaming
