@@ -16,7 +16,7 @@ PromptCacheMode = Literal["explicit", "implicit", "unavailable"]
 _OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
 _PROMPT_CACHE_KEY_PREFIX = "agpc_"
 
-_OPENAI_EXPLICIT_BOUNDARY_LIMIT = 4
+_OPENAI_MAX_NEW_WRITES_PER_REQUEST = 4
 _ANTHROPIC_BOUNDARY_LIMIT = 4
 _OPENAI_VERSION_PATTERN = re.compile(r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?")
 _CACHE_SCOPE_KEYS = ("org_id", "app_id", "agent_id")
@@ -29,6 +29,16 @@ class PreparedPromptCache:
     messages: tuple[dict[str, Any], ...]
     provider_request_fields: dict[str, Any]
     observation: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _PromptCacheCapability:
+    """Provider cache-marker semantics resolved for one model family."""
+
+    mode: PromptCacheMode
+    capability_source: str
+    max_total_boundaries: int | None = None
+    max_new_writes_per_request: int | None = None
 
 
 def prepare_prompt_cache(
@@ -91,14 +101,19 @@ def prepare_prompt_cache(
     _validate_message_indexes(request.stable_message_indexes, messages)
     normalized_provider = str(provider or "").strip().lower()
     normalized_model = str(model or "").strip().lower()
-    mode, limit, capability_source = _resolve_capability(
+    capability = _resolve_capability(
         normalized_provider,
         normalized_model,
     )
-    selected_indexes = _select_boundaries(
-        request.stable_message_indexes,
-        limit=limit,
-    )
+    if capability.mode != "explicit":
+        selected_indexes: tuple[int, ...] = ()
+    elif capability.max_total_boundaries is None:
+        selected_indexes = request.stable_message_indexes
+    else:
+        selected_indexes = _select_boundaries(
+            request.stable_message_indexes,
+            limit=capability.max_total_boundaries,
+        )
     translated_messages = copy.deepcopy(messages)
     provider_fields: dict[str, Any] = {}
     tool_contract_fingerprint = tool_call_request_fingerprint(tool_request)
@@ -110,13 +125,13 @@ def prepare_prompt_cache(
         tool_contract_fingerprint=tool_contract_fingerprint,
     )
 
-    if normalized_provider == "openai" and mode == "explicit":
+    if normalized_provider == "openai" and capability.mode == "explicit":
         translated_messages = _mark_openai_boundaries(
             translated_messages,
             selected_indexes,
         )
         provider_fields = _openai_explicit_fields(key)
-    elif normalized_provider == "anthropic" and mode == "explicit":
+    elif normalized_provider == "anthropic" and capability.mode == "explicit":
         translated_messages = _mark_anthropic_boundaries(
             translated_messages,
             selected_indexes,
@@ -125,12 +140,14 @@ def prepare_prompt_cache(
     observation = {
         "strategy": request.strategy,
         "requested_boundary_count": len(request.stable_message_indexes),
-        "effective_boundary_count": len(selected_indexes) if mode == "explicit" else 0,
-        "effective_mode": mode,
-        "capability_source": capability_source,
+        "effective_boundary_count": (len(selected_indexes) if capability.mode == "explicit" else 0),
+        "effective_mode": capability.mode,
+        "capability_source": capability.capability_source,
         "key_fingerprint": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
         "tool_contract_fingerprint": tool_contract_fingerprint[:16],
     }
+    if capability.max_new_writes_per_request is not None:
+        observation["max_new_writes_per_request"] = capability.max_new_writes_per_request
     return PreparedPromptCache(
         messages=tuple(translated_messages),
         provider_request_fields=provider_fields,
@@ -152,24 +169,37 @@ def _validate_message_indexes(
         )
 
 
-def _resolve_capability(provider: str, model: str) -> tuple[PromptCacheMode, int, str]:
+def _resolve_capability(provider: str, model: str) -> _PromptCacheCapability:
     if provider == "openai":
         match = _OPENAI_VERSION_PATTERN.match(model)
         if match is not None:
             major = int(match.group("major"))
             minor = int(match.group("minor") or 0)
             if major > 5 or (major == 5 and minor >= 6):
-                return (
-                    "explicit",
-                    _OPENAI_EXPLICIT_BOUNDARY_LIMIT,
-                    "openai_explicit_model_family",
+                return _PromptCacheCapability(
+                    mode="explicit",
+                    capability_source="openai_explicit_model_family",
+                    max_new_writes_per_request=(_OPENAI_MAX_NEW_WRITES_PER_REQUEST),
                 )
-        return "implicit", 0, "openai_conservative_implicit"
+        return _PromptCacheCapability(
+            mode="implicit",
+            capability_source="openai_conservative_implicit",
+        )
     if provider == "anthropic" and model.startswith("claude-"):
-        return "explicit", _ANTHROPIC_BOUNDARY_LIMIT, "anthropic_messages"
+        return _PromptCacheCapability(
+            mode="explicit",
+            capability_source="anthropic_messages",
+            max_total_boundaries=_ANTHROPIC_BOUNDARY_LIMIT,
+        )
     if provider == "google" and model.startswith("gemini-"):
-        return "implicit", 0, "gemini_generate_content"
-    return "unavailable", 0, "provider_model_unavailable"
+        return _PromptCacheCapability(
+            mode="implicit",
+            capability_source="gemini_generate_content",
+        )
+    return _PromptCacheCapability(
+        mode="unavailable",
+        capability_source="provider_model_unavailable",
+    )
 
 
 def _select_boundaries(indexes: tuple[int, ...], *, limit: int) -> tuple[int, ...]:

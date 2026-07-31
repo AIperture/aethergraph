@@ -125,7 +125,10 @@ class PromptCacheRequest:
 
     Args:
         stable_message_indexes: Sorted, unique zero-based message indexes that
-            end cache-eligible stable prefixes.
+            end persistent cache-eligible stable prefixes. Callers retain an
+            index while its corresponding prefix remains in the prompt; the
+            provider decides whether that breakpoint is a new write or a
+            read-only match.
         prefix_family: Caller-owned stable identity for the prompt family.
         strategy: Provider-neutral cache strategy. Only `stable_prefix` is
             supported.

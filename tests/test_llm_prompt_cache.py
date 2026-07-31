@@ -86,6 +86,7 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
         "capability_source": "openai_explicit_model_family",
         "key_fingerprint": first.observation["key_fingerprint"],
         "tool_contract_fingerprint": "",
+        "max_new_writes_per_request": 4,
     }
     assert first.messages[0]["content"] == [
         {
@@ -112,6 +113,48 @@ def test_prepare_openai_assistant_boundary_uses_output_text() -> None:
             "prompt_cache_breakpoint": {"mode": "explicit"},
         }
     ]
+
+
+def test_prepare_openai_preserves_more_than_four_persistent_boundaries() -> None:
+    messages = [{"role": "user", "content": f"stable segment {index}"} for index in range(6)]
+
+    prepared = prepare_prompt_cache(
+        PromptCacheRequest(tuple(range(6)), "agent.ledger.v1"),
+        messages,
+        provider="openai",
+        model="gpt-5.6",
+    )
+
+    marked = [
+        index
+        for index, message in enumerate(prepared.messages)
+        if message["content"][-1].get("prompt_cache_breakpoint") == {"mode": "explicit"}
+    ]
+    assert marked == list(range(6))
+    assert prepared.observation["requested_boundary_count"] == 6
+    assert prepared.observation["effective_boundary_count"] == 6
+    assert prepared.observation["max_new_writes_per_request"] == 4
+
+
+def test_prepare_openai_append_keeps_prior_breakpoints() -> None:
+    initial_messages = [
+        {"role": "user", "content": f"stable segment {index}"} for index in range(5)
+    ]
+    initial = prepare_prompt_cache(
+        PromptCacheRequest(tuple(range(5)), "agent.ledger.v1"),
+        initial_messages,
+        provider="openai",
+        model="gpt-5.6",
+    )
+    appended = prepare_prompt_cache(
+        PromptCacheRequest(tuple(range(6)), "agent.ledger.v1"),
+        [*initial_messages, {"role": "user", "content": "new stable segment"}],
+        provider="openai",
+        model="gpt-5.6",
+    )
+
+    assert appended.messages[:5] == initial.messages
+    assert appended.messages[5]["content"][-1]["prompt_cache_breakpoint"] == {"mode": "explicit"}
 
 
 def test_prepare_anthropic_limits_boundaries_and_preserves_latest() -> None:
