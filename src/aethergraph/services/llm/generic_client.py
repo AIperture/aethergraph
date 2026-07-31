@@ -349,7 +349,7 @@ class GenericLLMClient(
                 copy.deepcopy(structured_output.schema),
                 structured_output.name,
                 True,
-                True,
+                structured_output.validation_owner == "aethergraph",
                 None,
                 (),
             )
@@ -1189,6 +1189,9 @@ class GenericLLMClient(
         call_name = kw.pop("call_name", None)
         canonical_json_schema = json_schema
         canonical_strict_validation = strict_schema
+        canonical_validation_owner = (
+            structured_output.validation_owner if structured_output is not None else "aethergraph"
+        )
         prepared_structured_output: PreparedStructuredOutput | None = None
         prepared_prompt_cache: PreparedPromptCache | None = None
         if output_format == "json_schema" and json_schema is not None:
@@ -1223,6 +1226,7 @@ class GenericLLMClient(
                 )
                 request_args.update(
                     {
+                        "structured_output_validation_owner": canonical_validation_owner,
                         "structured_output_policy": effective_policy,
                         "structured_output_effective_mode": "unavailable",
                         "structured_output_capability_source": capabilities.source,
@@ -1323,6 +1327,7 @@ class GenericLLMClient(
             extra_params=kw,
         )
         if prepared_structured_output is not None:
+            request_args["structured_output_validation_owner"] = canonical_validation_owner
             provider_request_args = _merge_request_fields(
                 provider_request_args,
                 prepared_structured_output.provider_request_fields,
@@ -1453,8 +1458,12 @@ class GenericLLMClient(
                 validate_json=validate_json,
             )
             if prepared_structured_output is not None:
-                request_args["structured_output_validation_outcome"] = "passed"
-                request_args["structured_output_response_state"] = "completed"
+                if canonical_validation_owner == "caller":
+                    request_args["structured_output_validation_outcome"] = "delegated"
+                    request_args["structured_output_response_state"] = "returned_unvalidated"
+                else:
+                    request_args["structured_output_validation_outcome"] = "passed"
+                    request_args["structured_output_response_state"] = "completed"
 
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             await self._emit_observation(observation_record)

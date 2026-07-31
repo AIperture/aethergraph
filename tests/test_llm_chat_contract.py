@@ -64,6 +64,16 @@ def test_structured_output_request_detaches_caller_schema() -> None:
 
     assert request.name == "Answer"
     assert request.schema == {"type": "object", "properties": {}}
+    assert request.validation_owner == "aethergraph"
+
+
+def test_structured_output_request_rejects_unknown_validation_owner() -> None:
+    with pytest.raises(ValueError, match="validation_owner"):
+        StructuredOutputRequest(
+            name="Answer",
+            schema={"type": "object"},
+            validation_owner="engine",  # type: ignore[arg-type]
+        )
 
 
 def test_openai_closed_schema_selects_native_strict_output() -> None:
@@ -290,6 +300,46 @@ async def test_local_schema_failure_retains_provider_response_usage_and_exact_is
     assert len(metering.records) == 1
     assert metering.records[0]["prompt_tokens"] == 11
     assert metering.records[0]["completion_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_caller_owned_validation_returns_unvalidated_provider_response() -> None:
+    sink = _ObservationSink()
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5-mini",
+        observation_sink=sink,
+    )
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        return '{"calls":[1,2]}', {"prompt_tokens": 5, "completion_tokens": 3}
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+    text, usage = await client.chat(
+        [{"role": "user", "content": "select"}],
+        structured_output=StructuredOutputRequest(
+            "Action",
+            {
+                "type": "object",
+                "properties": {
+                    "calls": {
+                        "type": "array",
+                        "maxItems": 1,
+                    }
+                },
+                "required": ["calls"],
+                "additionalProperties": False,
+            },
+            validation_owner="caller",
+        ),
+    )
+
+    assert text == '{"calls":[1,2]}'
+    assert usage == {"prompt_tokens": 5, "completion_tokens": 3}
+    request_args = sink.records[0].request_args
+    assert request_args["structured_output_validation_owner"] == "caller"
+    assert request_args["structured_output_validation_outcome"] == "delegated"
+    assert request_args["structured_output_response_state"] == "returned_unvalidated"
 
 
 @pytest.mark.asyncio

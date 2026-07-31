@@ -6,6 +6,7 @@ ChatOutputFormat = Literal[
     "text", "json_object", "json_schema", "raw", "json"
 ]  # "json" is a deprecated alias of "json_object"
 PromptCacheStrategy = Literal["stable_prefix"]
+StructuredOutputValidationOwner = Literal["aethergraph", "caller"]
 
 ImageFormat = Literal["png", "jpeg", "webp"]
 ImageResponseFormat = Literal["b64_json", "url"]  # url only for dall-e models typically
@@ -40,6 +41,10 @@ class StructuredOutputRequest:
     Args:
         name: Stable logical name for the root response schema.
         schema: Canonical caller-owned JSON Schema used for local validation.
+        validation_owner: Component responsible for canonical response
+            validation after provider generation. The default keeps validation
+            in AetherGraph; `caller` returns the provider response for one
+            domain-specific validator.
 
     Notes:
         The request is provider-neutral. Provider capability selection and any
@@ -48,6 +53,7 @@ class StructuredOutputRequest:
 
     name: str
     schema: dict[str, Any]
+    validation_owner: StructuredOutputValidationOwner = "aethergraph"
 
     def __post_init__(self) -> None:
         """
@@ -84,6 +90,8 @@ class StructuredOutputRequest:
             raise ValueError("structured output schema name must not be empty")
         if not isinstance(self.schema, dict):
             raise TypeError("structured output schema must be a JSON object")
+        if self.validation_owner not in {"aethergraph", "caller"}:
+            raise ValueError("structured output validation_owner must be 'aethergraph' or 'caller'")
         object.__setattr__(self, "name", normalized_name)
         object.__setattr__(self, "schema", copy.deepcopy(self.schema))
 
