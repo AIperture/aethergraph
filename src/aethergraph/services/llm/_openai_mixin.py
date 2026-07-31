@@ -8,6 +8,13 @@ from typing import Any
 
 import httpx
 
+from aethergraph.services.llm.tool_calling import (
+    LLMToolCallProviderRequestError,
+    LLMToolCallResponseError,
+    ToolCall,
+    ToolCallRequest,
+    ToolCallResponse,
+)
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     GeneratedImage,
@@ -24,6 +31,79 @@ from aethergraph.services.llm.utils import (
 
 DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
+
+
+def _openai_tool_call_response(data: dict[str, Any]) -> ToolCallResponse:
+    """Normalize OpenAI response items without flattening Tool calls into text."""
+
+    calls: list[ToolCall] = []
+    text_parts: list[str] = []
+    for output_index, item in enumerate(list(data.get("output") or [])):
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call":
+            arguments = _openai_tool_arguments(
+                item.get("arguments"),
+                call_name=str(item.get("name") or ""),
+            )
+            calls.append(
+                ToolCall(
+                    call_id=str(
+                        item.get("call_id") or item.get("id") or f"openai-call-{output_index}"
+                    ),
+                    name=str(item.get("name") or ""),
+                    arguments=arguments,
+                    provider_metadata={
+                        "item_id": str(item.get("id") or ""),
+                        "status": str(item.get("status") or ""),
+                        "output_index": output_index,
+                    },
+                )
+            )
+            continue
+        if item.get("type") != "message":
+            continue
+        for part in list(item.get("content") or []):
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "refusal":
+                raise LLMToolCallResponseError(
+                    code="refused",
+                    message=str(part.get("refusal") or "OpenAI refused Tool selection."),
+                )
+            if "text" in part:
+                text_parts.append(str(part.get("text") or ""))
+    return ToolCallResponse(
+        calls=tuple(calls),
+        text="".join(text_parts),
+        finish_reason=str(data.get("status") or ""),
+        provider_metadata={
+            "response_id": str(data.get("id") or ""),
+            "output_item_count": len(list(data.get("output") or [])),
+        },
+    )
+
+
+def _openai_tool_arguments(value: Any, *, call_name: str) -> dict[str, Any]:
+    """Decode one OpenAI function-call argument object."""
+
+    if isinstance(value, dict):
+        return dict(value)
+    try:
+        decoded = json.loads(str(value or ""))
+    except json.JSONDecodeError as exc:
+        raise LLMToolCallResponseError(
+            code="invalid_arguments",
+            message=(f"OpenAI Tool call '{call_name or '?'}' returned invalid JSON arguments."),
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise LLMToolCallResponseError(
+            code="invalid_arguments",
+            message=(
+                f"OpenAI Tool call '{call_name or '?'}' arguments must decode " "to one object."
+            ),
+        )
+    return decoded
 
 
 class _OpenAIMixin:
@@ -45,9 +125,10 @@ class _OpenAIMixin:
         strict_schema: bool,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: Any = None,
+        tool_request: ToolCallRequest | None = None,
         prompt_cache_fields: dict[str, Any] | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -58,6 +139,16 @@ class _OpenAIMixin:
 
         body: dict[str, Any] = {"model": model, "input": input_messages}
         structured_output_fields = kw.pop("structured_output_fields", None)
+        if tool_request is not None and (
+            structured_output_fields
+            or output_format in {"json_object", "json_schema"}
+            or tools is not None
+            or tool_choice is not None
+        ):
+            raise ValueError(
+                "Native Tool calling cannot be combined with structured output "
+                "or legacy tools/tool_choice arguments"
+            )
         if prompt_cache_fields:
             body.update(prompt_cache_fields)
 
@@ -84,7 +175,20 @@ class _OpenAIMixin:
             }
 
         # Tools (Responses API style)
-        if tools is not None:
+        if tool_request is not None:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                    "strict": False,
+                }
+                for tool in tool_request.tools
+            ]
+            body["tool_choice"] = tool_request.choice
+            body["parallel_tool_calls"] = tool_request.max_calls > 1
+        elif tools is not None:
             body["tools"] = tools
         if tool_choice is not None:
             body["tool_choice"] = tool_choice
@@ -105,6 +209,15 @@ class _OpenAIMixin:
             try:
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:
+                if tool_request is not None:
+                    raise LLMToolCallProviderRequestError(
+                        provider="openai",
+                        status_code=e.response.status_code,
+                        message=(
+                            "OpenAI rejected the prepared native Tool-call "
+                            f"request: {e.response.text}"
+                        ),
+                    ) from e
                 if structured_output_fields:
                     raise LLMStructuredOutputProviderRequestError(
                         f"OpenAI rejected the prepared structured-output request: {e.response.text}"
@@ -113,11 +226,17 @@ class _OpenAIMixin:
 
             data = r.json()
             usage = data.get("usage", {}) or {}
-            if structured_output_fields and data.get("status") == "incomplete":
-                raise LLMStructuredOutputTruncationError(
-                    "OpenAI structured response was incomplete: "
-                    f"{data.get('incomplete_details') or {}}"
-                )
+            if data.get("status") == "incomplete":
+                detail = data.get("incomplete_details") or {}
+                if tool_request is not None:
+                    raise LLMToolCallResponseError(
+                        code="truncated",
+                        message=f"OpenAI Tool-call response was incomplete: {detail}",
+                    )
+                if structured_output_fields:
+                    raise LLMStructuredOutputTruncationError(
+                        "OpenAI structured response was incomplete: " f"{detail}"
+                    )
 
             # If caller asked for raw provider payload, just return it as a JSON string
             if output_format == "raw":
@@ -126,6 +245,8 @@ class _OpenAIMixin:
 
             # Existing parsing logic for message-only flows
             output = data.get("output")
+            if tool_request is not None:
+                return _openai_tool_call_response(data), usage
             txt = ""
 
             if isinstance(output, list) and output:

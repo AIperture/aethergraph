@@ -7,6 +7,13 @@ from typing import Any
 
 import httpx
 
+from aethergraph.services.llm.tool_calling import (
+    LLMToolCallProviderRequestError,
+    LLMToolCallResponseError,
+    ToolCall,
+    ToolCallRequest,
+    ToolCallResponse,
+)
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     GeneratedImage,
@@ -19,6 +26,54 @@ from aethergraph.services.llm.utils import (
     _normalize_base_url_no_trailing_slash,
     _to_gemini_parts,
 )
+
+
+def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
+    """Normalize Gemini function-call parts without flattening part boundaries."""
+
+    calls: list[ToolCall] = []
+    text_parts: list[str] = []
+    parts = list((candidate.get("content") or {}).get("parts") or [])
+    for part_index, part in enumerate(parts):
+        if not isinstance(part, dict):
+            continue
+        if "text" in part:
+            text_parts.append(str(part.get("text") or ""))
+        function_call = part.get("functionCall") or part.get("function_call")
+        if not isinstance(function_call, dict):
+            continue
+        arguments = function_call.get("args")
+        if not isinstance(arguments, dict):
+            raise LLMToolCallResponseError(
+                code="invalid_arguments",
+                message=(
+                    f"Gemini Tool call '{function_call.get('name') or '?'}' "
+                    "arguments must be an object."
+                ),
+            )
+        metadata: dict[str, Any] = {"part_index": part_index}
+        thought_signature = part.get("thoughtSignature") or part.get("thought_signature")
+        if thought_signature is not None:
+            metadata["thought_signature"] = thought_signature
+        calls.append(
+            ToolCall(
+                call_id=str(
+                    function_call.get("id") or part.get("id") or f"gemini-call-{part_index}"
+                ),
+                name=str(function_call.get("name") or ""),
+                arguments=dict(arguments),
+                provider_metadata=metadata,
+            )
+        )
+    return ToolCallResponse(
+        calls=tuple(calls),
+        text="".join(text_parts),
+        finish_reason=str(candidate.get("finishReason") or ""),
+        provider_metadata={
+            "candidate_index": int(candidate.get("index") or 0),
+            "part_count": len(parts),
+        },
+    )
 
 
 class _GeminiMixin:
@@ -36,8 +91,9 @@ class _GeminiMixin:
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
         tools: list[dict[str, Any]] | None = None,
+        tool_request: ToolCallRequest | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -52,6 +108,10 @@ class _GeminiMixin:
                 "provider-neutral tools",
                 "Gemini function declaration translation is not wired yet; refusing to pass tools through blindly.",
             )
+        if tool_request is not None and (
+            structured_output_fields or output_format in {"json_object", "json_schema"}
+        ):
+            raise ValueError("Native Tool calling cannot be combined with structured output")
 
         # Merge system messages into preamble
         system_parts: list[str] = []
@@ -93,7 +153,37 @@ class _GeminiMixin:
                 gen_cfg["responseMimeType"] = "application/json"
                 gen_cfg["responseJsonSchema"] = json_schema
 
-            payload = {"contents": turns, "generationConfig": gen_cfg}
+            payload: dict[str, Any] = {
+                "contents": turns,
+                "generationConfig": gen_cfg,
+            }
+            if tool_request is not None:
+                payload["tools"] = [
+                    {
+                        "functionDeclarations": [
+                            {
+                                "name": tool.name,
+                                "description": tool.description,
+                                "parameters": tool.input_schema,
+                            }
+                            for tool in tool_request.tools
+                        ]
+                    }
+                ]
+                function_calling_config: dict[str, Any] = {
+                    "mode": {
+                        "auto": "AUTO",
+                        "required": "ANY",
+                        "none": "NONE",
+                    }[tool_request.choice],
+                }
+                if tool_request.choice == "required":
+                    function_calling_config["allowedFunctionNames"] = [
+                        tool.name for tool in tool_request.tools
+                    ]
+                payload["toolConfig"] = {
+                    "functionCallingConfig": function_calling_config,
+                }
 
             r = await self._client.post(
                 f"{self.base_url}/v1/models/{model}:generateContent?key={self.api_key}",
@@ -103,6 +193,15 @@ class _GeminiMixin:
             try:
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:
+                if tool_request is not None:
+                    raise LLMToolCallProviderRequestError(
+                        provider="google",
+                        status_code=e.response.status_code,
+                        message=(
+                            "Gemini rejected the prepared native Tool-call "
+                            f"request: {e.response.text}"
+                        ),
+                    ) from e
                 raise RuntimeError(
                     f"Gemini generateContent failed ({e.response.status_code}): {e.response.text}"
                 ) from e
@@ -120,6 +219,16 @@ class _GeminiMixin:
                 return txt, usage
 
             cand = (data.get("candidates") or [{}])[0]
+            if tool_request is not None:
+                if str(cand.get("finishReason") or "").upper() == "MAX_TOKENS":
+                    raise LLMToolCallResponseError(
+                        code="truncated",
+                        message=(
+                            "Gemini stopped at maxOutputTokens before completing "
+                            "native Tool selection."
+                        ),
+                    )
+                return _gemini_tool_call_response(cand), usage
             txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
             return txt, usage
 

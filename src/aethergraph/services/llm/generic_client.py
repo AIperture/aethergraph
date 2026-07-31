@@ -42,6 +42,11 @@ from aethergraph.services.llm.structured_output import (
     prepare_structured_output,
     resolve_structured_output_capabilities,
 )
+from aethergraph.services.llm.tool_calling import (
+    LLMToolCallCapabilityError,
+    ToolCallRequest,
+    ToolCallResponse,
+)
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     ImageFormat,
@@ -777,6 +782,7 @@ class GenericLLMClient(
         *,
         max_output_tokens: int | None,
         structured_output: StructuredOutputRequest | None = None,
+        tool_request: ToolCallRequest | None = None,
         json_schema: dict[str, Any] | None = None,
         tools: Any = None,
         model: str | None = None,
@@ -811,7 +817,8 @@ class GenericLLMClient(
             max_output_tokens: Maximum output tokens reserved for this call.
             structured_output: Canonical structured-output request, if any.
             json_schema: Prepared or legacy canonical JSON Schema, if any.
-            tools: Provider-neutral Tool declaration payload, if any.
+            tool_request: Native provider Tool-selection request, if any.
+            tools: Legacy provider-neutral Tool declaration payload, if any.
             model: Optional per-call model override.
 
         Returns:
@@ -833,6 +840,22 @@ class GenericLLMClient(
         if tools is not None:
             estimated_input_tokens += self._estimate_text_tokens(
                 json.dumps(tools, ensure_ascii=False, sort_keys=True, default=str)
+            )
+        if tool_request is not None:
+            estimated_input_tokens += self._estimate_text_tokens(
+                json.dumps(
+                    [
+                        {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "input_schema": tool.input_schema,
+                        }
+                        for tool in tool_request.tools
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
             )
         reserved_output_tokens = max(0, int(max_output_tokens or 0))
         return LLMRequestEstimate(
@@ -1080,6 +1103,7 @@ class GenericLLMClient(
         max_output_tokens: int | None = None,
         output_format: ChatOutputFormat = "text",
         structured_output: StructuredOutputRequest | None = None,
+        tool_request: ToolCallRequest | None = None,
         prompt_cache: PromptCacheRequest | None = None,
         json_schema: dict[str, Any] | None | object = _UNSET,
         schema_name: str | object = _UNSET,
@@ -1087,7 +1111,7 @@ class GenericLLMClient(
         validate_json: bool | object = _UNSET,
         fail_on_unsupported: bool | None | object = _UNSET,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
         """
         Send a chat request to the LLM provider and return the response in a normalized format.
         This method handles provider-specific dispatch, output postprocessing,
@@ -1124,6 +1148,17 @@ class GenericLLMClient(
                     stable_message_indexes=(0, 4),
                     prefix_family="research-agent.v2",
                 ),
+                )
+            ```
+
+            Request one native Tool decision:
+            ```python
+            response, usage = await context.llm().chat(
+                messages,
+                tool_request=ToolCallRequest(
+                    tools=(ToolDefinition("lookup", "Look up a record.", schema),),
+                    max_calls=1,
+                ),
             )
             ```
 
@@ -1133,6 +1168,7 @@ class GenericLLMClient(
             max_output_tokens: Optional maximum number of output tokens.
             output_format: Output format, e.g., "text" or "json".
             structured_output: Provider-neutral canonical schema request.
+            tool_request: Provider-neutral native Tool-selection request.
             prompt_cache: Provider-neutral stable-prefix cache request.
             json_schema: Deprecated schema argument; removed in `0.2.0`.
             schema_name: Deprecated root schema name; removed in `0.2.0`.
@@ -1146,7 +1182,8 @@ class GenericLLMClient(
                 - tool_choice: tool selection strategy (e.g., "auto", "none", or provider-specific dict).
 
         Returns:
-            tuple[str, dict[str, int]]: The model response (text or structured output) and usage statistics.
+            tuple[str | ToolCallResponse, dict[str, int]]: Text or native
+                Tool-call response and provider usage statistics.
 
         Raises:
             NotImplementedError: If the provider is not supported.
@@ -1177,6 +1214,17 @@ class GenericLLMClient(
             validate_json=validate_json,
             fail_on_unsupported=fail_on_unsupported,
         )
+        if tool_request is not None:
+            if not isinstance(tool_request, ToolCallRequest):
+                raise TypeError("tool_request must be a ToolCallRequest")
+            if structured_output is not None or output_format in {
+                "json_object",
+                "json_schema",
+                "json",
+            }:
+                raise ValueError("Native Tool calling cannot be combined with structured output")
+            if kw.get("tools") is not None or kw.get("tool_choice") is not None:
+                raise ValueError("tool_request cannot be combined with legacy tools/tool_choice")
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
         reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
@@ -1326,6 +1374,15 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             extra_params=kw,
         )
+        if tool_request is not None:
+            tool_request_summary = {
+                "choice": tool_request.choice,
+                "max_calls": tool_request.max_calls,
+                "tool_names": [tool.name for tool in tool_request.tools],
+                "tool_count": len(tool_request.tools),
+            }
+            request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
+            provider_request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
         if prepared_structured_output is not None:
             request_args["structured_output_validation_owner"] = canonical_validation_owner
             provider_request_args = _merge_request_fields(
@@ -1339,6 +1396,7 @@ class GenericLLMClient(
             messages,
             max_output_tokens=max_output_tokens,
             json_schema=canonical_json_schema,
+            tool_request=tool_request,
             tools=kw.get("tools"),
             model=model,
         )
@@ -1410,7 +1468,7 @@ class GenericLLMClient(
         try:
             self._preflight_llm_request(request_estimate)
             # Provider-specific call (now symmetric)
-            provider_text, usage = await self._chat_dispatch(
+            provider_value, usage = await self._chat_dispatch(
                 provider_messages,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -1431,10 +1489,15 @@ class GenericLLMClient(
                     if prepared_prompt_cache is not None
                     else None
                 ),
+                tool_request=tool_request,
                 **kw,
             )
 
-            observation_record.raw_text = str(provider_text or "")
+            observation_record.raw_text = (
+                provider_value.observation_text()
+                if isinstance(provider_value, ToolCallResponse)
+                else str(provider_value or "")
+            )
             observation_record.usage = usage or {}
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             normalized_usage = normalize_llm_usage(usage)
@@ -1450,13 +1513,17 @@ class GenericLLMClient(
 
             # Canonical parsing/validation happens only after response evidence
             # and provider usage have been retained and accounted.
-            text = self._postprocess_structured_output(
-                text=observation_record.raw_text,
-                output_format=output_format,
-                json_schema=canonical_json_schema,
-                strict_schema=canonical_strict_validation,
-                validate_json=validate_json,
-            )
+            value: str | ToolCallResponse
+            if isinstance(provider_value, ToolCallResponse):
+                value = provider_value
+            else:
+                value = self._postprocess_structured_output(
+                    text=observation_record.raw_text,
+                    output_format=output_format,
+                    json_schema=canonical_json_schema,
+                    strict_schema=canonical_strict_validation,
+                    validate_json=validate_json,
+                )
             if prepared_structured_output is not None:
                 if canonical_validation_owner == "caller":
                     request_args["structured_output_validation_outcome"] = "delegated"
@@ -1469,7 +1536,7 @@ class GenericLLMClient(
             await self._emit_observation(observation_record)
             await span.finish(
                 response={
-                    "text": text,
+                    "text": observation_record.raw_text,
                     "usage": usage,
                     "normalized_usage": normalized_usage,
                 },
@@ -1480,7 +1547,7 @@ class GenericLLMClient(
                     "latency_ms": observation_record.latency_ms,
                 },
             )
-            return text, usage
+            return value, usage
         except Exception as exc:
             if prepared_structured_output is not None:
                 _record_structured_output_failure(request_args, exc)
@@ -1838,11 +1905,21 @@ class GenericLLMClient(
         fail_on_unsupported: bool,
         structured_output_fields: dict[str, Any] | None = None,
         prompt_cache_fields: dict[str, Any] | None = None,
+        tool_request: ToolCallRequest | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
         # Extract cross-provider extras if any
         tools = kw.pop("tools", None)
         tool_choice = kw.pop("tool_choice", None)
+        if tool_request is not None and self.provider not in {
+            "openai",
+            "anthropic",
+            "google",
+        }:
+            raise LLMToolCallCapabilityError(
+                provider=self.provider,
+                model=model,
+            )
 
         # OpenAI is now symmetric too
         if self.provider == "openai":
@@ -1857,6 +1934,7 @@ class GenericLLMClient(
                 strict_schema=strict_schema,
                 tools=tools,
                 tool_choice=tool_choice,
+                tool_request=tool_request,
                 structured_output_fields=structured_output_fields,
                 prompt_cache_fields=prompt_cache_fields,
                 **kw,
@@ -1905,6 +1983,7 @@ class GenericLLMClient(
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
+                tool_request=tool_request,
                 schema_name=schema_name,
                 structured_output_fields=structured_output_fields,
                 **kw,
@@ -1921,6 +2000,7 @@ class GenericLLMClient(
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
+                tool_request=tool_request,
                 structured_output_fields=structured_output_fields,
                 **kw,
             )

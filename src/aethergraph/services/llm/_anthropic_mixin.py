@@ -8,11 +8,59 @@ from typing import Any
 
 import httpx
 
+from aethergraph.services.llm.tool_calling import (
+    LLMToolCallProviderRequestError,
+    LLMToolCallResponseError,
+    ToolCall,
+    ToolCallRequest,
+    ToolCallResponse,
+)
 from aethergraph.services.llm.types import ChatOutputFormat, LLMUnsupportedFeatureError
 from aethergraph.services.llm.utils import _to_anthropic_blocks
 
 DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
+
+
+def _anthropic_tool_call_response(data: dict[str, Any]) -> ToolCallResponse:
+    """Normalize Anthropic content blocks into provider-neutral Tool calls."""
+
+    calls: list[ToolCall] = []
+    text_parts: list[str] = []
+    blocks = list(data.get("content") or [])
+    for block_index, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text_parts.append(str(block.get("text") or ""))
+            continue
+        if block.get("type") != "tool_use":
+            continue
+        arguments = block.get("input")
+        if not isinstance(arguments, dict):
+            raise LLMToolCallResponseError(
+                code="invalid_arguments",
+                message=(
+                    f"Anthropic Tool call '{block.get('name') or '?'}' input " "must be an object."
+                ),
+            )
+        calls.append(
+            ToolCall(
+                call_id=str(block.get("id") or f"anthropic-call-{block_index}"),
+                name=str(block.get("name") or ""),
+                arguments=dict(arguments),
+                provider_metadata={"content_block_index": block_index},
+            )
+        )
+    return ToolCallResponse(
+        calls=tuple(calls),
+        text="".join(text_parts),
+        finish_reason=str(data.get("stop_reason") or ""),
+        provider_metadata={
+            "response_id": str(data.get("id") or ""),
+            "content_block_count": len(blocks),
+        },
+    )
 
 
 def _anthropic_system_payload(
@@ -124,8 +172,9 @@ class _AnthropicMixin:
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
         tools: list[dict[str, Any]] | None = None,
+        tool_request: ToolCallRequest | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -136,6 +185,11 @@ class _AnthropicMixin:
                 "provider-neutral tools",
                 "Anthropic tool translation is not wired yet; refusing to drop tools silently.",
             )
+        structured_output_fields = kw.pop("structured_output_fields", None)
+        if tool_request is not None and (
+            structured_output_fields or output_format in {"json_object", "json_schema"}
+        ):
+            raise ValueError("Native Tool calling cannot be combined with structured output")
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
@@ -159,7 +213,6 @@ class _AnthropicMixin:
             "temperature": temperature,
             "top_p": top_p,
         }
-        structured_output_fields = kw.pop("structured_output_fields", None)
         request_cache_control = _anthropic_cache_control(kw.get("cache_control"))
         if request_cache_control:
             payload["cache_control"] = request_cache_control
@@ -182,6 +235,26 @@ class _AnthropicMixin:
             payload["thinking"] = {"type": "adaptive", "effort": reasoning_effort}
         elif thinking_mode == "on":
             payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget or 4096}
+        if tool_request is not None:
+            payload["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }
+                for tool in tool_request.tools
+            ]
+            choice_type = {
+                "auto": "auto",
+                "required": "any",
+                "none": "none",
+            }[tool_request.choice]
+            if choice_type == "any" and (reasoning_effort is not None or thinking_mode == "on"):
+                choice_type = "auto"
+            payload["tool_choice"] = {
+                "type": choice_type,
+                "disable_parallel_tool_use": tool_request.max_calls == 1,
+            }
         _validate_anthropic_cache_breakpoints(payload)
 
         async def _call():
@@ -198,6 +271,14 @@ class _AnthropicMixin:
                 r.raise_for_status()
             except httpx.HTTPStatusError as e:
                 body = e.response.text or ""
+                if tool_request is not None:
+                    raise LLMToolCallProviderRequestError(
+                        provider="anthropic",
+                        status_code=e.response.status_code,
+                        message=(
+                            "Anthropic rejected the prepared native Tool-call " f"request: {body}"
+                        ),
+                    ) from e
                 if e.response.status_code == 404:
                     hint = (
                         "Anthropic returned 404. Common causes:\n"
@@ -215,6 +296,17 @@ class _AnthropicMixin:
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
                 return txt, usage
+
+            if tool_request is not None:
+                if data.get("stop_reason") == "max_tokens":
+                    raise LLMToolCallResponseError(
+                        code="truncated",
+                        message=(
+                            "Anthropic stopped at max_tokens before completing "
+                            "native Tool selection."
+                        ),
+                    )
+                return _anthropic_tool_call_response(data), usage
 
             blocks = data.get("content") or []
             txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")

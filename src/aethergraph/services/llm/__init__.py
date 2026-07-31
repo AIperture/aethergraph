@@ -7,6 +7,16 @@ from .structured_output import (
     prepare_structured_output,
     resolve_structured_output_capabilities,
 )
+from .tool_calling import (
+    LLMToolCallCapabilityError,
+    LLMToolCallError,
+    LLMToolCallProviderRequestError,
+    LLMToolCallResponseError,
+    ToolCall,
+    ToolCallRequest,
+    ToolCallResponse,
+    ToolDefinition,
+)
 from .types import (
     LLMContextWindowExceededError,
     LLMRequestEstimate,
@@ -37,11 +47,19 @@ __all__ = [
     "LLMStructuredOutputRefusalError",
     "LLMStructuredOutputTruncationError",
     "LLMStructuredOutputValidationError",
+    "LLMToolCallCapabilityError",
+    "LLMToolCallError",
+    "LLMToolCallProviderRequestError",
+    "LLMToolCallResponseError",
     "PromptCacheRequest",
     "StructuredOutputCapabilities",
     "StructuredOutputMode",
     "StructuredOutputPolicy",
     "StructuredOutputRequest",
+    "ToolCall",
+    "ToolCallRequest",
+    "ToolCallResponse",
+    "ToolDefinition",
     "prepare_structured_output",
     "resolve_structured_output_capabilities",
 ]

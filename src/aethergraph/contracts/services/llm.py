@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 from collections.abc import Sequence
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from aethergraph.services.llm.tool_calling import ToolCallResponse
 
 
 class LLMClientProtocol(Protocol):
@@ -9,7 +14,11 @@ class LLMClientProtocol(Protocol):
         **kw: Any,
     ) -> Any: ...
 
-    async def chat(self, messages: list[dict[str, Any]], **kw) -> tuple[str, dict[str, int]]: ...
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        **kw: Any,
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]: ...
     async def raw(
         self,
         *,

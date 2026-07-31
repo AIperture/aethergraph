@@ -10,7 +10,12 @@ from aethergraph.api.v1 import settings as settings_api
 from aethergraph.api.v1.schemas.settings import LLMProfilePayload
 from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profile_env
-from aethergraph.services.llm import StructuredOutputRequest
+from aethergraph.services.llm import (
+    StructuredOutputRequest,
+    ToolCallRequest,
+    ToolCallResponse,
+    ToolDefinition,
+)
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.structured_output import prepare_structured_output
@@ -54,6 +59,175 @@ class _ObservationSink:
 
     async def emit(self, record, *, capture_mode) -> None:
         self.records.append(record)
+
+
+def _native_tool_request(*, max_calls: int = 2) -> ToolCallRequest:
+    return ToolCallRequest(
+        tools=(
+            ToolDefinition(
+                name="lookup",
+                description="Look up one record.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"key": {"type": "string"}},
+                    "required": ["key"],
+                },
+            ),
+            ToolDefinition(
+                name="finish",
+                description="Finish the task.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ),
+        max_calls=max_calls,
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_native_tool_items_preserve_multiple_call_boundaries() -> None:
+    payload = {
+        "id": "resp_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": '{"key":"A"}',
+                "status": "completed",
+            },
+            {
+                "type": "function_call",
+                "id": "fc_2",
+                "call_id": "call_2",
+                "name": "finish",
+                "arguments": "{}",
+                "status": "completed",
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, usage = await client.chat(
+        [{"role": "user", "content": "look up and finish"}],
+        tool_request=_native_tool_request(max_calls=2),
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert [call.call_id for call in response.calls] == ["call_1", "call_2"]
+    assert [call.name for call in response.calls] == ["lookup", "finish"]
+    assert response.calls[0].arguments == {"key": "A"}
+    assert usage["input_tokens"] == 10
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["parallel_tool_calls"] is True
+    assert fake_http.last_json["tool_choice"] == "required"
+    assert [tool["name"] for tool in fake_http.last_json["tools"]] == [
+        "lookup",
+        "finish",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_native_tool_blocks_preserve_multiple_call_boundaries() -> None:
+    payload = {
+        "id": "msg_1",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "lookup",
+                "input": {"key": "A"},
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "finish",
+                "input": {},
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "look up and finish"}],
+        tool_request=_native_tool_request(max_calls=2),
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert [call.call_id for call in response.calls] == ["toolu_1", "toolu_2"]
+    assert [call.name for call in response.calls] == ["lookup", "finish"]
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["tool_choice"] == {
+        "type": "any",
+        "disable_parallel_tool_use": False,
+    }
+    assert [tool["name"] for tool in fake_http.last_json["tools"]] == [
+        "lookup",
+        "finish",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() -> None:
+    payload = {
+        "candidates": [
+            {
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "id": "gemini_1",
+                                "name": "lookup",
+                                "args": {"key": "A"},
+                            },
+                            "thoughtSignature": "opaque",
+                        },
+                        {
+                            "functionCall": {
+                                "id": "gemini_2",
+                                "name": "finish",
+                                "args": {},
+                            }
+                        },
+                    ]
+                },
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
+    }
+    client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "look up and finish"}],
+        tool_request=_native_tool_request(max_calls=2),
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert [call.call_id for call in response.calls] == ["gemini_1", "gemini_2"]
+    assert response.calls[0].provider_metadata["thought_signature"] == "opaque"
+    assert fake_http.last_json is not None
+    function_config = fake_http.last_json["toolConfig"]["functionCallingConfig"]
+    assert function_config["mode"] == "ANY"
+    assert function_config["allowedFunctionNames"] == ["lookup", "finish"]
 
 
 def test_structured_output_request_detaches_caller_schema() -> None:
