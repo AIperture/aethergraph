@@ -1979,7 +1979,7 @@ class GenericLLMClient(
                 reasoning_effort=reasoning_effort,
                 max_output_tokens=max_output_tokens,
                 thinking_budget=kw.pop("thinking_budget", None),
-                thinking_mode=kw.get("thinking_mode"),
+                thinking_mode=kw.pop("thinking_mode", None),
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,

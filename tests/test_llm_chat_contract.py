@@ -11,6 +11,7 @@ from aethergraph.api.v1.schemas.settings import LLMProfilePayload
 from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profile_env
 from aethergraph.services.llm import (
+    LLMToolCallCapabilityError,
     PromptCacheRequest,
     StructuredOutputRequest,
     ToolCallRequest,
@@ -193,6 +194,30 @@ async def test_anthropic_native_tool_blocks_preserve_multiple_call_boundaries() 
         "lookup",
         "finish",
     ]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_does_not_silently_weaken_required_tool_choice() -> None:
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient({})
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(
+        LLMToolCallCapabilityError,
+        match="required_tool_choice_with_thinking",
+    ):
+        await client.chat(
+            [{"role": "user", "content": "look up"}],
+            tool_request=_native_tool_request(max_calls=1),
+            thinking_mode="on",
+        )
+
+    assert fake_http.last_json is None
 
 
 @pytest.mark.asyncio

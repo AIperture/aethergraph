@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from aethergraph.services.llm.tool_calling import (
+    LLMToolCallCapabilityError,
     LLMToolCallProviderRequestError,
     LLMToolCallResponseError,
     ToolCall,
@@ -250,7 +251,11 @@ class _AnthropicMixin:
                 "none": "none",
             }[tool_request.choice]
             if choice_type == "any" and (reasoning_effort is not None or thinking_mode == "on"):
-                choice_type = "auto"
+                raise LLMToolCallCapabilityError(
+                    provider="anthropic",
+                    model=model,
+                    feature="required_tool_choice_with_thinking",
+                )
             payload["tool_choice"] = {
                 "type": choice_type,
                 "disable_parallel_tool_use": tool_request.max_calls == 1,

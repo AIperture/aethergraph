@@ -20,7 +20,13 @@ class LLMToolCallError(LLMError):
 class LLMToolCallCapabilityError(LLMToolCallError):
     """Report that the selected provider cannot satisfy native Tool calling."""
 
-    def __init__(self, *, provider: str, model: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        provider: str,
+        model: str | None,
+        feature: str = "native_tool_calling",
+    ) -> None:
         """
         Initialize an unsupported native Tool-call capability failure.
 
@@ -49,6 +55,7 @@ class LLMToolCallCapabilityError(LLMToolCallError):
         Args:
             provider: Configured provider name.
             model: Configured model or deployment identifier.
+            feature: Exact native Tool capability the request requires.
 
         Returns:
             None: Initializes the exception.
@@ -60,13 +67,15 @@ class LLMToolCallCapabilityError(LLMToolCallError):
         normalized_provider = str(provider or "").strip()
         if not normalized_provider:
             raise ValueError("Tool-call provider must not be empty")
+        normalized_feature = str(feature or "native_tool_calling").strip()
         super().__init__(
             f"Provider '{normalized_provider}' / model '{model or '?'}' does not "
-            "support the AetherGraph native Tool-call transport."
+            f"support required capability '{normalized_feature}'."
         )
         self.code = "tool_calling_unsupported"
         self.provider = normalized_provider
         self.model = model
+        self.feature = normalized_feature
 
 
 class LLMToolCallProviderRequestError(LLMToolCallError):

@@ -268,3 +268,32 @@ def test_tool_schema_selects_matching_discriminator_branch() -> None:
     assert issue.path == "args.operation"
     assert issue.validator == "required"
     assert "step_id" in issue.message
+
+
+def test_tool_schema_reports_fields_that_match_prohibited_branch() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "mode": {"const": "summary"},
+            "queries": {"type": "array"},
+            "include": {"type": "array"},
+        },
+        "required": ["mode"],
+        "not": {
+            "anyOf": [
+                {"required": ["queries"]},
+                {"required": ["include"]},
+            ]
+        },
+    }
+
+    issue = validate_tool_args(
+        {"mode": "summary", "queries": [], "include": []},
+        schema,
+    )
+
+    assert issue is not None
+    assert issue.path == "args.queries"
+    assert issue.validator == "not"
+    assert "'queries', 'include'" in issue.message
+    assert "Remove prohibited fields" in issue.repair_hint
