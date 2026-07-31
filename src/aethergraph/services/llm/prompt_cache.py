@@ -224,12 +224,13 @@ def _mark_openai_boundaries(
 ) -> list[dict[str, Any]]:
     for index in indexes:
         message = messages[index]
+        role = str(message.get("role") or "user")
         content = message.get("content")
         marker = {"mode": "explicit"}
         if isinstance(content, str):
             message["content"] = [
                 {
-                    "type": "input_text",
+                    "type": ("output_text" if role == "assistant" else "input_text"),
                     "text": content,
                     "prompt_cache_breakpoint": marker,
                 }

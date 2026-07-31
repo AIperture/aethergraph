@@ -92,6 +92,23 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
     assert first.messages[1] == {"role": "user", "content": "volatile"}
 
 
+def test_prepare_openai_assistant_boundary_uses_output_text() -> None:
+    prepared = prepare_prompt_cache(
+        PromptCacheRequest((0,), "agent.ledger.v1"),
+        [{"role": "assistant", "content": "Prior Tool selection."}],
+        provider="openai",
+        model="gpt-5.6",
+    )
+
+    assert prepared.messages[0]["content"] == [
+        {
+            "type": "output_text",
+            "text": "Prior Tool selection.",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }
+    ]
+
+
 def test_prepare_anthropic_limits_boundaries_and_preserves_latest() -> None:
     messages = [{"role": "user", "content": str(index)} for index in range(6)]
 
@@ -185,6 +202,45 @@ async def test_openai_chat_sends_explicit_cache_fields_and_markers() -> None:
         "mode": "explicit"
     }
     assert "prompt_cache_breakpoint" not in str(fake_http.last_json["input"][1])
+
+
+@pytest.mark.asyncio
+async def test_openai_chat_preserves_assistant_history_as_output_text() -> None:
+    payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "ok"}],
+            }
+        ],
+        "usage": {},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-5.6", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, _usage = await client.chat(
+        [
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "request"},
+            {"role": "assistant", "content": "prior selection"},
+            {"role": "user", "content": "prior result"},
+        ],
+        prompt_cache=PromptCacheRequest((0, 2), "agent.ledger.v1"),
+    )
+
+    assert text == "ok"
+    assert fake_http.last_json is not None
+    assistant = fake_http.last_json["input"][2]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"] == [
+        {
+            "type": "output_text",
+            "text": "prior selection",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }
+    ]
 
 
 @pytest.mark.asyncio

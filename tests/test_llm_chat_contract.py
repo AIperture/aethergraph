@@ -11,6 +11,7 @@ from aethergraph.api.v1.schemas.settings import LLMProfilePayload
 from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profile_env
 from aethergraph.services.llm import (
+    PromptCacheRequest,
     StructuredOutputRequest,
     ToolCallRequest,
     ToolCallResponse,
@@ -108,14 +109,20 @@ async def test_openai_native_tool_items_preserve_multiple_call_boundaries() -> N
         ],
         "usage": {"input_tokens": 10, "output_tokens": 5},
     }
-    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    client = GenericLLMClient(provider="openai", model="gpt-5.6-test", api_key="test")
     fake_http = _FakeHttpClient(payload)
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
 
     response, usage = await client.chat(
-        [{"role": "user", "content": "look up and finish"}],
+        [
+            {"role": "system", "content": "stable instructions"},
+            {"role": "user", "content": "look up and finish"},
+            {"role": "assistant", "content": "prior Tool selection"},
+            {"role": "user", "content": "prior Tool result"},
+        ],
         tool_request=_native_tool_request(max_calls=2),
+        prompt_cache=PromptCacheRequest((0, 2), "agent.native-tools.v1"),
     )
 
     assert isinstance(response, ToolCallResponse)
@@ -126,6 +133,13 @@ async def test_openai_native_tool_items_preserve_multiple_call_boundaries() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["parallel_tool_calls"] is True
     assert fake_http.last_json["tool_choice"] == "required"
+    assert fake_http.last_json["input"][2]["content"] == [
+        {
+            "type": "output_text",
+            "text": "prior Tool selection",
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }
+    ]
     assert [tool["name"] for tool in fake_http.last_json["tools"]] == [
         "lookup",
         "finish",
