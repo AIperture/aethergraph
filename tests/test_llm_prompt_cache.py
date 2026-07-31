@@ -72,6 +72,7 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
 
     assert messages[0]["content"] == "header"
     assert first.provider_request_fields == second.provider_request_fields
+    assert len(first.provider_request_fields["prompt_cache_key"]) == 64
     assert first.observation == second.observation
     assert first.observation == {
         "strategy": "stable_prefix",
@@ -178,6 +179,7 @@ async def test_openai_chat_sends_explicit_cache_fields_and_markers() -> None:
     assert text == "ok"
     assert fake_http.last_json is not None
     assert fake_http.last_json["prompt_cache_key"].startswith("agpc_")
+    assert len(fake_http.last_json["prompt_cache_key"]) == 64
     assert fake_http.last_json["prompt_cache_options"] == {"mode": "explicit"}
     assert fake_http.last_json["input"][0]["content"][0]["prompt_cache_breakpoint"] == {
         "mode": "explicit"

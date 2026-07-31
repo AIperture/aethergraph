@@ -12,6 +12,8 @@ from typing import Any, Literal
 from .types import PromptCacheRequest
 
 PromptCacheMode = Literal["explicit", "implicit", "unavailable"]
+_OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
+_PROMPT_CACHE_KEY_PREFIX = "agpc_"
 
 _OPENAI_EXPLICIT_BOUNDARY_LIMIT = 4
 _ANTHROPIC_BOUNDARY_LIMIT = 4
@@ -108,10 +110,7 @@ def prepare_prompt_cache(
             translated_messages,
             selected_indexes,
         )
-        provider_fields = {
-            "prompt_cache_key": key,
-            "prompt_cache_options": {"mode": "explicit"},
-        }
+        provider_fields = _openai_explicit_fields(key)
     elif normalized_provider == "anthropic" and mode == "explicit":
         translated_messages = _mark_anthropic_boundaries(
             translated_messages,
@@ -202,7 +201,21 @@ def _derive_cache_key(
         sort_keys=True,
         separators=(",", ":"),
     )
-    return "agpc_" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    digest_length = _OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH - len(_PROMPT_CACHE_KEY_PREFIX)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:digest_length]
+    return _PROMPT_CACHE_KEY_PREFIX + digest
+
+
+def _openai_explicit_fields(key: str) -> dict[str, Any]:
+    if not key or len(key) > _OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH:
+        raise ValueError(
+            "OpenAI prompt_cache_key must contain between 1 and "
+            f"{_OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH} characters"
+        )
+    return {
+        "prompt_cache_key": key,
+        "prompt_cache_options": {"mode": "explicit"},
+    }
 
 
 def _mark_openai_boundaries(
