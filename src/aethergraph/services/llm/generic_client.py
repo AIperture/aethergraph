@@ -1348,6 +1348,7 @@ class GenericLLMClient(
                 provider=self.provider,
                 model=model,
                 scope_dimensions=self._current_dimensions(),
+                tool_request=tool_request,
             )
             provider_messages = list(prepared_prompt_cache.messages)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+import hashlib
 import json
 from typing import Any, Literal
 
@@ -302,6 +303,32 @@ class ToolCallRequest:
         object.__setattr__(self, "max_calls", int(self.max_calls))
 
 
+def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
+    """Return a deterministic fingerprint of the provider-visible Tool contract."""
+
+    if request is None:
+        return ""
+    payload = {
+        "choice": request.choice,
+        "max_calls": request.max_calls,
+        "tools": [
+            {
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            }
+            for tool in request.tools
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """Represent one provider-framed native Tool call."""
@@ -484,4 +511,5 @@ __all__ = [
     "ToolCallResponse",
     "ToolChoice",
     "ToolDefinition",
+    "tool_call_request_fingerprint",
 ]

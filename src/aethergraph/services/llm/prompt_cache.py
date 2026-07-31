@@ -9,6 +9,7 @@ import json
 import re
 from typing import Any, Literal
 
+from .tool_calling import ToolCallRequest, tool_call_request_fingerprint
 from .types import PromptCacheRequest
 
 PromptCacheMode = Literal["explicit", "implicit", "unavailable"]
@@ -37,6 +38,7 @@ def prepare_prompt_cache(
     provider: str,
     model: str,
     scope_dimensions: dict[str, Any] | None = None,
+    tool_request: ToolCallRequest | None = None,
 ) -> PreparedPromptCache:
     """
     Prepare one provider-neutral stable-prefix cache request.
@@ -75,6 +77,7 @@ def prepare_prompt_cache(
         model: Configured provider model identifier.
         scope_dimensions: Optional non-secret execution dimensions used only
             to isolate the opaque provider key.
+        tool_request: Exact provider-visible native Tool contract, when used.
 
     Returns:
         PreparedPromptCache: Detached translated messages, provider fields, and
@@ -98,11 +101,13 @@ def prepare_prompt_cache(
     )
     translated_messages = copy.deepcopy(messages)
     provider_fields: dict[str, Any] = {}
+    tool_contract_fingerprint = tool_call_request_fingerprint(tool_request)
     key = _derive_cache_key(
         provider=normalized_provider,
         model=normalized_model,
         prefix_family=request.prefix_family,
         scope_dimensions=scope_dimensions,
+        tool_contract_fingerprint=tool_contract_fingerprint,
     )
 
     if normalized_provider == "openai" and mode == "explicit":
@@ -124,6 +129,7 @@ def prepare_prompt_cache(
         "effective_mode": mode,
         "capability_source": capability_source,
         "key_fingerprint": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
+        "tool_contract_fingerprint": tool_contract_fingerprint[:16],
     }
     return PreparedPromptCache(
         messages=tuple(translated_messages),
@@ -185,6 +191,7 @@ def _derive_cache_key(
     model: str,
     prefix_family: str,
     scope_dimensions: dict[str, Any] | None,
+    tool_contract_fingerprint: str,
 ) -> str:
     dimensions = dict(scope_dimensions or {})
     stable_scope = {
@@ -196,6 +203,7 @@ def _derive_cache_key(
             "model": model,
             "prefix_family": prefix_family,
             "scope": stable_scope,
+            "tool_contract_fingerprint": tool_contract_fingerprint,
         },
         ensure_ascii=True,
         sort_keys=True,

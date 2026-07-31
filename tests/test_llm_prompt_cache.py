@@ -6,7 +6,11 @@ from typing import Any
 
 import pytest
 
-from aethergraph.services.llm import PromptCacheRequest
+from aethergraph.services.llm import (
+    PromptCacheRequest,
+    ToolCallRequest,
+    ToolDefinition,
+)
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.prompt_cache import prepare_prompt_cache
 
@@ -81,6 +85,7 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
         "effective_mode": "explicit",
         "capability_source": "openai_explicit_model_family",
         "key_fingerprint": first.observation["key_fingerprint"],
+        "tool_contract_fingerprint": "",
     }
     assert first.messages[0]["content"] == [
         {
@@ -167,6 +172,39 @@ def test_prepare_prompt_cache_rejects_out_of_range_index() -> None:
             provider="openai",
             model="gpt-5.6",
         )
+
+
+def test_tool_contract_changes_rotate_cache_identity() -> None:
+    request = PromptCacheRequest((0,), "agent.v1")
+    messages = [{"role": "system", "content": "stable"}]
+    first_tool_request = ToolCallRequest(
+        tools=(ToolDefinition("read", "Read.", {"type": "object"}),)
+    )
+    second_tool_request = ToolCallRequest(
+        tools=(ToolDefinition("write", "Write.", {"type": "object"}),)
+    )
+
+    first = prepare_prompt_cache(
+        request,
+        messages,
+        provider="openai",
+        model="gpt-5.6",
+        tool_request=first_tool_request,
+    )
+    second = prepare_prompt_cache(
+        request,
+        messages,
+        provider="openai",
+        model="gpt-5.6",
+        tool_request=second_tool_request,
+    )
+
+    assert first.provider_request_fields != second.provider_request_fields
+    assert first.observation["tool_contract_fingerprint"]
+    assert (
+        first.observation["tool_contract_fingerprint"]
+        != second.observation["tool_contract_fingerprint"]
+    )
 
 
 @pytest.mark.asyncio
