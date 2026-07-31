@@ -112,7 +112,7 @@ validation.
 Structured failures use generic AG exception types:
 
 - `LLMStructuredOutputCapabilityError`
-- `LLMStructuredOutputProviderRequestError`
+- `LLMProviderRequestError`
 - `LLMStructuredOutputRefusalError`
 - `LLMStructuredOutputTruncationError`
 - `LLMStructuredOutputParseError`

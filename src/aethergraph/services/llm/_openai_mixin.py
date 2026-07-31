@@ -6,8 +6,6 @@ from collections.abc import Awaitable, Callable
 import json
 from typing import Any
 
-import httpx
-
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
@@ -286,7 +284,7 @@ class _OpenAIMixin:
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         """
         Stream text using OpenAI Responses API.
 
@@ -377,11 +375,9 @@ class _OpenAIMixin:
                 headers=headers,
                 json=body,
             ) as r:
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    text = await r.aread()
-                    raise RuntimeError(f"OpenAI Responses streaming error: {text!r}") from e
+                if r.is_error:
+                    await r.aread()
+                metadata = checked_response_metadata("openai", model, "chat_stream", r)
 
                 # SSE: each event line is "data: {...}" + blank lines between events
                 async for line in r.aiter_lines():
@@ -403,9 +399,10 @@ class _OpenAIMixin:
 
                     await _handle_event(evt)
 
-        await self._retry.run(_call)
+                return metadata
 
-        return "".join(full_chunks), usage
+        metadata = await _call()
+        return ProviderCallResult(("".join(full_chunks), usage), metadata)
 
     # ------------------------------------------------------------------
     # Image generation
@@ -423,7 +420,7 @@ class _OpenAIMixin:
         response_format: Any | None,
         background: str | None,
         **kw: Any,
-    ) -> ImageGenerationResult:
+    ) -> ProviderCallResult[ImageGenerationResult]:
         assert self._client is not None
 
         url = f"{_normalize_base_url_no_trailing_slash(self.base_url)}/images/generations"
@@ -450,10 +447,7 @@ class _OpenAIMixin:
 
         async def _call():
             r = await self._client.post(url, headers=headers, json=body)
-            try:
-                r.raise_for_status()
-            except Exception as e:
-                raise RuntimeError(f"OpenAI image generation error: {r.text}") from e
+            metadata = checked_response_metadata("openai", model, "image", r)
 
             data = r.json()
             imgs: list[GeneratedImage] = []
@@ -469,6 +463,9 @@ class _OpenAIMixin:
                     )
                 )
 
-            return ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data)
+            return ProviderCallResult(
+                ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data),
+                metadata,
+            )
 
-        return await self._retry.run(_call)
+        return await _call()

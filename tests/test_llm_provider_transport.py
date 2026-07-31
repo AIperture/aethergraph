@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import httpx
@@ -7,6 +8,7 @@ from pydantic import ValidationError
 import pytest
 
 from aethergraph.services.llm.generic_client import GenericLLMClient
+from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
     ProviderCallResult,
@@ -392,3 +394,57 @@ async def test_generic_chat_recovers_from_temporary_structured_output_429() -> N
     assert usage == {"output_tokens": 3}
     assert calls == 2
     assert fake_time.sleeps == [pytest.approx(0.598)]
+
+
+@pytest.mark.asyncio
+async def test_embedding_client_uses_the_same_typed_retry_executor() -> None:
+    fake_time = _FakeTime()
+    responses = [
+        _response(
+            429,
+            json={"error": {"message": "Busy.", "code": "rate_limit_exceeded"}},
+            headers={"retry-after": "0.25"},
+        ),
+        _response(
+            200,
+            json={"data": [{"embedding": [0.1, 0.2]}]},
+            headers={"x-request-id": "embedding-success"},
+        ),
+    ]
+
+    class _FakeEmbeddingHttp:
+        async def post(self, url, *, headers, json):
+            return responses.pop(0)
+
+    client = GenericEmbeddingClient(provider="openai", model="embed-test", api_key="test")
+    client._provider_retry = ProviderRetryExecutor(
+        rate_gate=ProviderRateGate(clock=fake_time.clock, sleep=fake_time.sleep),
+        clock=fake_time.clock,
+        random_unit=lambda: 0.0,
+    )
+    client._client = _FakeEmbeddingHttp()  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    embeddings = await client.embed(["hello"])
+
+    assert embeddings == [[0.1, 0.2]]
+    assert responses == []
+    assert fake_time.sleeps == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_rate_gate_wait_propagates_cancellation_without_retaining_a_waiter() -> None:
+    sleep_started = asyncio.Event()
+
+    async def blocked_sleep(delay_s: float) -> None:
+        sleep_started.set()
+        await asyncio.Future()
+
+    gate = ProviderRateGate(sleep=blocked_sleep)
+    await gate.defer("openai:model", 30.0)
+    waiter = asyncio.create_task(gate.wait("openai:model"))
+    await sleep_started.wait()
+    waiter.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await waiter

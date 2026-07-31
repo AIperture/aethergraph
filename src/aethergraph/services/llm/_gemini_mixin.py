@@ -228,7 +228,7 @@ class _GeminiMixin:
         model: str,
         input_images: list[str] | None,
         **kw: Any,
-    ) -> ImageGenerationResult:
+    ) -> ProviderCallResult[ImageGenerationResult]:
         assert self._client is not None
 
         base = (
@@ -257,10 +257,7 @@ class _GeminiMixin:
                 headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
                 json=payload,
             )
-            try:
-                r.raise_for_status()
-            except Exception as e:
-                raise RuntimeError(f"Gemini image generation error: {r.text}") from e
+            metadata = checked_response_metadata("google", model, "image", r)
 
             data = r.json()
             cand = (data.get("candidates") or [{}])[0]
@@ -280,6 +277,9 @@ class _GeminiMixin:
                 "output_tokens": int(um.get("candidatesTokenCount", 0) or 0),
             }
 
-            return ImageGenerationResult(images=imgs, usage=usage, raw=data)
+            return ProviderCallResult(
+                ImageGenerationResult(images=imgs, usage=usage, raw=data),
+                metadata,
+            )
 
-        return await self._retry.run(_call)
+        return await _call()

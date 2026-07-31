@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import httpx
-
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
@@ -129,7 +127,7 @@ class _OpenAILikeMixin:
         max_output_tokens: int | None = None,
         on_delta: Any = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -160,11 +158,14 @@ class _OpenAILikeMixin:
                 headers=self._headers_openai_like(),
                 json=body,
             ) as r:
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    text = await r.aread()
-                    raise RuntimeError(f"OpenAI-like streaming error: {text!r}") from e
+                if r.is_error:
+                    await r.aread()
+                metadata = checked_response_metadata(
+                    self.provider,
+                    model,
+                    "chat_stream",
+                    r,
+                )
 
                 async for line in r.aiter_lines():
                     if not line or not line.startswith("data:"):
@@ -186,5 +187,7 @@ class _OpenAILikeMixin:
                     if evt.get("usage"):
                         usage = evt.get("usage") or usage
 
-        await self._retry.run(_call)
-        return "".join(chunks), usage
+                return metadata
+
+        metadata = await _call()
+        return ProviderCallResult(("".join(chunks), usage), metadata)

@@ -12,7 +12,13 @@ import httpx
 from aethergraph.contracts.services.llm import EmbeddingClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
-from aethergraph.services.llm.generic_client import _Retry
+from aethergraph.services.llm.provider_transport import (
+    ProviderCallResult,
+    ProviderRateGate,
+    ProviderRetryExecutor,
+    ProviderRetrySettings,
+    checked_response_metadata,
+)
 
 
 @dataclass
@@ -39,6 +45,9 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
     api_key: str | None = None
     azure_deployment: str | None = None
     timeout: float = 60.0
+    retry_settings: ProviderRetrySettings | None = None
+    rate_limit_group: str | None = None
+    rate_gate: ProviderRateGate | None = None
 
     # metering (optional, can be None)
     metering: MeteringService | None = None
@@ -83,7 +92,10 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         if self.provider == "azure" and self.azure_deployment is None:
             self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
 
-        self._retry = _Retry()
+        self._provider_retry = ProviderRetryExecutor(
+            self.retry_settings,
+            rate_gate=self.rate_gate,
+        )
         self._client: httpx.AsyncClient | None = None
 
     # ------------ client management -----------------
@@ -133,21 +145,38 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         # Resolve model (override > configured)
         model = model or self.model or "text-embedding-3-small"
 
-        # Dispatch by provider
-        if self.provider in {"openai", "openrouter", "lmstudio", "ollama"}:
-            embs = await self._embed_openai_like(texts, model=model, **kw)
-        elif self.provider == "azure":
-            embs = await self._embed_azure(texts, model=model, **kw)
-        elif self.provider == "google":
-            embs = await self._embed_google(texts, model=model, **kw)
-        elif self.provider == "anthropic":
+        if self.provider == "anthropic":
             raise NotImplementedError("Embeddings not supported for anthropic")
-        elif self.provider == "deepseek":
+        if self.provider == "deepseek":
             raise NotImplementedError("Embeddings not supported for deepseek")
-        elif self.provider == "dummy":
-            embs = await self._embed_dummy(texts, model=model, **kw)
-        else:  # pragma: no cover
+        if self.provider not in {
+            "openai",
+            "openrouter",
+            "lmstudio",
+            "ollama",
+            "azure",
+            "google",
+            "dummy",
+        }:  # pragma: no cover
             raise NotImplementedError(f"Unknown embedding provider: {self.provider}")
+
+        async def _attempt() -> ProviderCallResult[list[list[float]]]:
+            if self.provider in {"openai", "openrouter", "lmstudio", "ollama"}:
+                return await self._embed_openai_like(texts, model=model, **kw)
+            if self.provider == "azure":
+                return await self._embed_azure(texts, model=model, **kw)
+            if self.provider == "google":
+                return await self._embed_google(texts, model=model, **kw)
+            return ProviderCallResult(await self._embed_dummy(texts, model=model, **kw))
+
+        provider_result = await self._provider_retry.execute(
+            _attempt,
+            provider=self.provider,
+            model=model,
+            operation="embedding",
+            rate_limit_group=self.rate_limit_group,
+        )
+        embs = provider_result.value
 
         # ---- metering hook (best effort) ----
         metering = self.metering or current_metering()
@@ -203,7 +232,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         *,
         model: str,
         **kw: Any,
-    ) -> list[list[float]]:
+    ) -> ProviderCallResult[list[list[float]]]:
         assert self._client is not None
         url = f"{self.base_url}/embeddings"
         headers = self._headers_openai_like()
@@ -226,15 +255,10 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
 
         async def _call():
             r = await self._client.post(url, headers=headers, json=body)
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"Embeddings request failed ({e.response.status_code}): {e.response.text}"
-                ) from e
-            return parse(r.json())
+            metadata = checked_response_metadata(self.provider, model, "embedding", r)
+            return ProviderCallResult(parse(r.json()), metadata)
 
-        return await self._retry.run(_call)
+        return await _call()
 
     async def _embed_azure(
         self,
@@ -242,7 +266,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         *,
         model: str,
         **kw: Any,
-    ) -> list[list[float]]:
+    ) -> ProviderCallResult[list[list[float]]]:
         if not self.azure_deployment:
             raise RuntimeError(
                 "Azure embeddings requires AZURE_OPENAI_DEPLOYMENT (azure_deployment)"
@@ -275,15 +299,10 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
 
         async def _call():
             r = await self._client.post(url, headers=headers, json=body)
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"Embeddings request failed ({e.response.status_code}): {e.response.text}"
-                ) from e
-            return parse(r.json())
+            metadata = checked_response_metadata("azure", model, "embedding", r)
+            return ProviderCallResult(parse(r.json()), metadata)
 
-        return await self._retry.run(_call)
+        return await _call()
 
     async def _embed_google(
         self,
@@ -291,20 +310,13 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         *,
         model: str,
         **kw: Any,
-    ) -> list[list[float]]:
+    ) -> ProviderCallResult[list[list[float]]]:
         assert self._client is not None
         base = self.base_url.rstrip("/")
         api_key = self.api_key or os.getenv("GOOGLE_API_KEY") or ""
         headers = {"Content-Type": "application/json"}
 
-        # v1 and v1beta endpoints
         batch_url_v1 = f"{base}/v1/models/{model}:batchEmbedContents?key={api_key}"
-        embed_url_v1 = f"{base}/v1/models/{model}:embedContent?key={api_key}"
-        batch_url_v1beta = f"{base}/v1beta/models/{model}:batchEmbedContents?key={api_key}"
-        embed_url_v1beta = f"{base}/v1beta/models/{model}:embedContent?key={api_key}"
-
-        def parse_single(data: dict[str, Any]) -> list[float]:
-            return (data.get("embedding") or {}).get("values") or []
 
         def parse_batch(data: dict[str, Any]) -> list[list[float]]:
             embs: list[list[float]] = []
@@ -316,50 +328,13 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 )
             return embs
 
-        async def try_batch(url: str) -> list[list[float]] | None:
+        async def _call() -> ProviderCallResult[list[list[float]]]:
             body = {"requests": [{"content": {"parts": [{"text": t}]}} for t in texts]}
-            r = await self._client.post(url, headers=headers, json=body)
-            if r.status_code in (400, 404):
-                return None
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"Gemini batchEmbedContents failed ({e.response.status_code}): {e.response.text}"
-                ) from e
-            return parse_batch(r.json())
+            r = await self._client.post(batch_url_v1, headers=headers, json=body)
+            metadata = checked_response_metadata("google", model, "embedding", r)
+            return ProviderCallResult(parse_batch(r.json()), metadata)
 
-        async def call_single(url: str) -> list[list[float]]:
-            out: list[list[float]] = []
-            for t in texts:
-                r = await self._client.post(
-                    url, headers=headers, json={"content": {"parts": [{"text": t}]}}
-                )
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    raise RuntimeError(
-                        f"Gemini embedContent failed ({e.response.status_code}): {e.response.text}"
-                    ) from e
-                out.append(parse_single(r.json()))
-            if len(out) != len(texts):
-                raise RuntimeError(f"Gemini embeddings mismatch: got {len(out)} for {len(texts)}")
-            return out
-
-        async def _call():
-            # try v1 batch, then v1beta batch, then single
-            res = await try_batch(batch_url_v1)
-            if res is not None:
-                return res
-            res = await try_batch(batch_url_v1beta)
-            if res is not None:
-                return res
-            try:
-                return await call_single(embed_url_v1)
-            except RuntimeError:
-                return await call_single(embed_url_v1beta)
-
-        return await self._retry.run(_call)
+        return await _call()
 
     async def _embed_dummy(
         self,

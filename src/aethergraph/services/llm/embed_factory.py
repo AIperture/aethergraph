@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from aethergraph.config.llm import EmbeddingProfile, EmbeddingSettings
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
+from aethergraph.services.llm.provider_transport import ProviderRateGate
 from aethergraph.services.metering.eventlog_metering import MeteringService
 
 from ..secrets.base import Secrets
@@ -87,7 +88,7 @@ def _apply_env_overrides_to_embed_profile(
                 "google": "GOOGLE_API_KEY",
                 "openrouter": "OPENROUTER_API_KEY",
                 "azure": "AZURE_OPENAI_KEY",
-            }.get(p.provider, None)  # type: ignore[index]
+            }.get(p.provider)  # type: ignore[index]
 
     if api_key:
         p.api_key = SecretStr(api_key)
@@ -100,6 +101,7 @@ def embed_client_from_profile(
     secrets: Secrets,
     *,
     metering: MeteringService | None = None,
+    rate_gate: ProviderRateGate | None = None,
 ) -> GenericEmbeddingClient:
     api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
 
@@ -110,6 +112,9 @@ def embed_client_from_profile(
         api_key=api_key,
         azure_deployment=p.azure_deployment,
         timeout=p.timeout,
+        retry_settings=p.retry,
+        rate_limit_group=p.rate_limit_group,
+        rate_gate=rate_gate,
         metering=metering,
     )
 
@@ -119,10 +124,13 @@ def build_embedding_clients(
     secrets: Secrets,
     *,
     metering: MeteringService | None = None,
+    rate_gate: ProviderRateGate | None = None,
 ) -> dict[str, GenericEmbeddingClient]:
     """Returns dict of {profile_name: GenericEmbeddingClient}, always includes 'default' if enabled."""
     if not cfg.enabled:
         return {}
+
+    shared_rate_gate = rate_gate or ProviderRateGate()
 
     # Default profile
     default_profile = _apply_env_overrides_to_embed_profile(
@@ -132,7 +140,12 @@ def build_embedding_clients(
         secrets=secrets,
     )
     clients: dict[str, GenericEmbeddingClient] = {
-        "default": embed_client_from_profile(default_profile, secrets, metering=metering)
+        "default": embed_client_from_profile(
+            default_profile,
+            secrets,
+            metering=metering,
+            rate_gate=shared_rate_gate,
+        )
     }
 
     # Extra profiles
@@ -143,6 +156,11 @@ def build_embedding_clients(
             is_default=False,
             secrets=secrets,
         )
-        clients[name] = embed_client_from_profile(prof, secrets, metering=metering)
+        clients[name] = embed_client_from_profile(
+            prof,
+            secrets,
+            metering=metering,
+            rate_gate=shared_rate_gate,
+        )
 
     return clients

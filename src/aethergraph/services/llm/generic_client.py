@@ -41,6 +41,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRateGate,
     ProviderRetryExecutor,
     ProviderRetrySettings,
+    checked_response_metadata,
 )
 from aethergraph.services.llm.structured_output import (
     PreparedStructuredOutput,
@@ -130,22 +131,6 @@ def _record_structured_output_failure(
         request_args["structured_output_error"] = exc.to_dict()
 
 
-# ---- Helpers --------------------------------------------------------------
-class _Retry:
-    def __init__(self, tries=4, base=0.5, cap=8.0):
-        self.tries, self.base, self.cap = tries, base, cap
-
-    async def run(self, fn, *a, **k):
-        exc = None
-        for i in range(self.tries):
-            try:
-                return await fn(*a, **k)
-            except (httpx.ReadTimeout, httpx.ConnectError, httpx.HTTPStatusError) as e:
-                exc = e
-                await asyncio.sleep(min(self.cap, self.base * (2**i)))
-        raise exc
-
-
 # ---- Generic client -------------------------------------------------------
 class GenericLLMClient(
     _OpenAIMixin,
@@ -200,7 +185,6 @@ class GenericLLMClient(
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
         self.embed_model = None  # will be deprecated in favor of a separate EmbeddingsClient
-        self._retry = _Retry()
         self._provider_retry = ProviderRetryExecutor(
             retry_settings,
             rate_gate=rate_gate,
@@ -1810,44 +1794,65 @@ class GenericLLMClient(
         try:
             self._preflight_llm_request(request_estimate)
             if self.provider == "openai":
-                text, usage = await self._chat_openai_responses_stream(
-                    messages,
+                provider_result = await self._provider_retry.execute(
+                    lambda: self._chat_openai_responses_stream(
+                        messages,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        reasoning_summary=_reasoning_summary,
+                        max_output_tokens=max_output_tokens,
+                        output_format=output_format,
+                        json_schema=json_schema,
+                        schema_name=schema_name,
+                        strict_schema=strict_schema,
+                        fail_on_unsupported=fail_on_unsupported,
+                        on_delta=on_delta,
+                        on_thinking_delta=on_thinking_delta,
+                        **kw,
+                    ),
+                    provider=self.provider,
                     model=model,
-                    reasoning_effort=reasoning_effort,
-                    reasoning_summary=_reasoning_summary,
-                    max_output_tokens=max_output_tokens,
-                    output_format=output_format,
-                    json_schema=json_schema,
-                    schema_name=schema_name,
-                    strict_schema=strict_schema,
-                    fail_on_unsupported=fail_on_unsupported,
-                    on_delta=on_delta,
-                    on_thinking_delta=on_thinking_delta,
-                    **kw,
+                    operation="chat_stream",
+                    rate_limit_group=self.rate_limit_group,
                 )
+                text, usage = provider_result.value
             elif self.provider == "anthropic":
-                text, usage = await self._chat_anthropic_messages_stream(
-                    messages,
+                provider_result = await self._provider_retry.execute(
+                    lambda: self._chat_anthropic_messages_stream(
+                        messages,
+                        model=model,
+                        thinking_budget=_thinking_budget,
+                        max_output_tokens=max_output_tokens,
+                        output_format=output_format,
+                        json_schema=json_schema,
+                        fail_on_unsupported=fail_on_unsupported,
+                        on_delta=on_delta,
+                        on_thinking_delta=on_thinking_delta,
+                        reasoning_effort=reasoning_effort,
+                        **kw,
+                    ),
+                    provider=self.provider,
                     model=model,
-                    thinking_budget=_thinking_budget,
-                    max_output_tokens=max_output_tokens,
-                    output_format=output_format,
-                    json_schema=json_schema,
-                    fail_on_unsupported=fail_on_unsupported,
-                    on_delta=on_delta,
-                    on_thinking_delta=on_thinking_delta,
-                    reasoning_effort=reasoning_effort,
-                    **kw,
+                    operation="chat_stream",
+                    rate_limit_group=self.rate_limit_group,
                 )
+                text, usage = provider_result.value
             elif self.provider == "deepseek":
-                text, usage = await self._chat_openai_like_chat_completions_stream(
-                    messages,
+                provider_result = await self._provider_retry.execute(
+                    lambda: self._chat_openai_like_chat_completions_stream(
+                        messages,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                        max_output_tokens=max_output_tokens,
+                        on_delta=on_delta,
+                        **kw,
+                    ),
+                    provider=self.provider,
                     model=model,
-                    reasoning_effort=reasoning_effort,
-                    max_output_tokens=max_output_tokens,
-                    on_delta=on_delta,
-                    **kw,
+                    operation="chat_stream",
+                    rate_limit_group=self.rate_limit_group,
                 )
+                text, usage = provider_result.value
             else:
                 provider_result = await self._provider_retry.execute(
                     lambda: self._chat_dispatch(
@@ -2179,20 +2184,27 @@ class GenericLLMClient(
         start = time.perf_counter()
 
         try:
-            result = await self._image_dispatch(
-                prompt,
+            provider_result = await self._provider_retry.execute(
+                lambda: self._image_dispatch(
+                    prompt,
+                    model=model,
+                    n=n,
+                    size=size,
+                    quality=quality,
+                    style=style,
+                    output_format=output_format,
+                    response_format=response_format,
+                    background=background,
+                    input_images=input_images,
+                    azure_api_version=azure_api_version,
+                    **kw,
+                ),
+                provider=self.provider,
                 model=model,
-                n=n,
-                size=size,
-                quality=quality,
-                style=style,
-                output_format=output_format,
-                response_format=response_format,
-                background=background,
-                input_images=input_images,
-                azure_api_version=azure_api_version,
-                **kw,
+                operation="image",
+                rate_limit_group=self.rate_limit_group,
             )
+            result = provider_result.value
 
             latency_ms = int((time.perf_counter() - start) * 1000)
             quota_error = self._record_llm_quota_usage(usage=result.usage or {})
@@ -2230,7 +2242,7 @@ class GenericLLMClient(
         input_images: list[str] | None,
         azure_api_version: str | None,
         **kw: Any,
-    ) -> ImageGenerationResult:
+    ) -> ProviderCallResult[ImageGenerationResult]:
         if self.provider == "openai":
             return await self._image_openai_generate(
                 prompt,
@@ -2309,7 +2321,7 @@ class GenericLLMClient(
                 data = r.json()
                 return [d["embedding"] for d in data.get("data", [])]
 
-            return await self._retry.run(_call)
+            return await _call()
 
         if self.provider == "azure":
 
@@ -2328,7 +2340,7 @@ class GenericLLMClient(
                 data = r.json()
                 return [d["embedding"] for d in data.get("data", [])]
 
-            return await self._retry.run(_call)
+            return await _call()
 
         if self.provider == "google":
 
@@ -2348,7 +2360,7 @@ class GenericLLMClient(
                 data = r.json()
                 return [data.get("embedding", {}).get("values", [])]
 
-            return await self._retry.run(_call)
+            return await _call()
 
         if self.provider == "deepseek":
             raise NotImplementedError("Embeddings not supported for deepseek in this client")
@@ -2429,7 +2441,7 @@ class GenericLLMClient(
                     ) from e
                 return parse(r.json())
 
-            return await self._retry.run(_call)
+            return await _call()
 
         if self.provider == "azure":
             url = f"{self.base_url}/openai/deployments/{self.azure_deployment}/embeddings?api-version={azure_api_version}"
@@ -2459,7 +2471,7 @@ class GenericLLMClient(
                     ) from e
                 return parse(r.json())
 
-            return await self._retry.run(_call)
+            return await _call()
 
         if self.provider == "google":
             base = self.base_url.rstrip("/")
@@ -2528,7 +2540,7 @@ class GenericLLMClient(
                 except RuntimeError:
                     return await call_single(embed_url_v1beta)
 
-            return await self._retry.run(_call)
+            return await _call()
 
         raise NotImplementedError(f"Embeddings not supported for {self.provider}")
 
@@ -2621,16 +2633,17 @@ class GenericLLMClient(
                 json=json,
                 params=params,
             )
-            try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                raise RuntimeError(
-                    f"{self.provider} raw API error ({e.response.status_code}): {e.response.text}"
-                ) from e
+            metadata = checked_response_metadata(self.provider, self.model, "raw", r)
+            return ProviderCallResult(r if return_response else r.json(), metadata)
 
-            return r if return_response else r.json()
-
-        return await self._retry.run(_call)
+        result = await self._provider_retry.execute(
+            _call,
+            provider=self.provider,
+            model=self.model,
+            operation="raw",
+            rate_limit_group=self.rate_limit_group,
+        )
+        return result.value
 
 
 # Convenience factory

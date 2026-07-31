@@ -78,68 +78,6 @@ class LLMToolCallCapabilityError(LLMToolCallError):
         self.feature = normalized_feature
 
 
-class LLMToolCallProviderRequestError(LLMToolCallError):
-    """Report provider rejection of one prepared native Tool-call request."""
-
-    def __init__(
-        self,
-        *,
-        provider: str,
-        message: str,
-        status_code: int | None = None,
-    ) -> None:
-        """
-        Initialize a provider Tool-request rejection.
-
-        The exception separates non-repairable request rejection from malformed
-        model output so the Engine does not ask the model to repair a request it
-        never received successfully.
-
-        Examples:
-            Preserve an HTTP status:
-                ```python
-                error = LLMToolCallProviderRequestError(
-                    provider="openai",
-                    message="Invalid request.",
-                    status_code=400,
-                )
-                assert error.status_code == 400
-                ```
-
-            Preserve a provider without an HTTP status:
-                ```python
-                error = LLMToolCallProviderRequestError(
-                    provider="anthropic",
-                    message="Request rejected.",
-                )
-                assert error.code == "tool_request_rejected"
-                ```
-
-        Args:
-            provider: Stable configured provider name.
-            message: Bounded provider rejection diagnostic.
-            status_code: HTTP response status when available.
-
-        Returns:
-            None: Initializes the exception.
-
-        Notes:
-            Provider request errors are terminal for the current Engine run and
-            are never classified as model-output repair candidates.
-        """
-
-        normalized_provider = str(provider or "").strip()
-        normalized_message = str(message or "").strip()
-        if not normalized_provider:
-            raise ValueError("Tool-call provider must not be empty")
-        if not normalized_message:
-            raise ValueError("Tool-call provider error message must not be empty")
-        super().__init__(normalized_message)
-        self.code = "tool_request_rejected"
-        self.provider = normalized_provider
-        self.status_code = status_code
-
-
 class LLMToolCallResponseError(LLMToolCallError):
     """Describe one malformed or incomplete native Tool-call response."""
 
@@ -513,7 +451,6 @@ class ToolCallResponse:
 __all__ = [
     "LLMToolCallCapabilityError",
     "LLMToolCallError",
-    "LLMToolCallProviderRequestError",
     "LLMToolCallResponseError",
     "ToolCall",
     "ToolCallRequest",

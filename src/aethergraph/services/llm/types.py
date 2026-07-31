@@ -284,10 +284,6 @@ class LLMStructuredOutputCapabilityError(LLMStructuredOutputError):
         self.detail = detail
 
 
-class LLMStructuredOutputProviderRequestError(LLMStructuredOutputError):
-    """Provider rejected a prepared structured-output request."""
-
-
 class LLMStructuredOutputRefusalError(LLMStructuredOutputError):
     """Provider returned an explicit refusal instead of structured output."""
 

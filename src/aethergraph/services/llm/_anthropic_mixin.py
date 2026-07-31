@@ -6,8 +6,6 @@ from collections.abc import Awaitable, Callable
 import json
 from typing import Any
 
-import httpx
-
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
@@ -317,7 +315,7 @@ class _AnthropicMixin:
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
         **kw: Any,
-    ) -> tuple[str, dict[str, int]]:
+    ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         """
         Stream text using Anthropic Messages API with SSE.
 
@@ -389,13 +387,9 @@ class _AnthropicMixin:
                 headers=headers,
                 json=payload,
             ) as r:
-                try:
-                    r.raise_for_status()
-                except httpx.HTTPStatusError as e:
-                    body = await r.aread()
-                    raise RuntimeError(
-                        f"Anthropic streaming error ({e.response.status_code}): {body!r}"
-                    ) from e
+                if r.is_error:
+                    await r.aread()
+                metadata = checked_response_metadata("anthropic", model, "chat_stream", r)
 
                 # Anthropic SSE uses two-line format: "event: <type>\ndata: <json>"
                 pending_event_type: str | None = None
@@ -425,6 +419,8 @@ class _AnthropicMixin:
                         pending_event_type = None
 
                         await _handle_sse_event(event_type, data)
+
+                return metadata
 
         async def _handle_sse_event(event_type: str, data: dict[str, Any]):
             nonlocal usage
@@ -465,6 +461,5 @@ class _AnthropicMixin:
                 msg = err.get("message", "Unknown Anthropic streaming error")
                 raise RuntimeError(f"Anthropic streaming error: {msg}")
 
-        await self._retry.run(_call)
-
-        return "".join(text_chunks), usage
+        metadata = await _call()
+        return ProviderCallResult(("".join(text_chunks), usage), metadata)

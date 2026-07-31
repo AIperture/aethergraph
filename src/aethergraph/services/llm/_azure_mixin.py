@@ -116,7 +116,7 @@ class _AzureMixin:
         background: str | None,
         azure_api_version: str | None,
         **kw: Any,
-    ) -> ImageGenerationResult:
+    ) -> ProviderCallResult[ImageGenerationResult]:
         assert self._client is not None
 
         if not self.base_url or not self.azure_deployment:
@@ -148,10 +148,7 @@ class _AzureMixin:
 
         async def _call():
             r = await self._client.post(url, headers=headers, json=body)
-            try:
-                r.raise_for_status()
-            except Exception as e:
-                raise RuntimeError(f"Azure image generation error: {r.text}") from e
+            metadata = checked_response_metadata("azure", model, "image", r)
 
             data = r.json()
             imgs: list[GeneratedImage] = []
@@ -167,6 +164,9 @@ class _AzureMixin:
                     )
                 )
 
-            return ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data)
+            return ProviderCallResult(
+                ImageGenerationResult(images=imgs, usage=data.get("usage", {}) or {}, raw=data),
+                metadata,
+            )
 
-        return await self._retry.run(_call)
+        return await _call()

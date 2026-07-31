@@ -173,12 +173,13 @@ def build_llm_clients(
     *,
     observation_sink: LLMObservationSink | None = None,
     observation_capture_mode: CaptureMode = "manifest",
+    rate_gate: ProviderRateGate | None = None,
 ) -> dict[str, GenericLLMClient]:
     """Returns dict of {profile_name: client}, always includes 'default' if enabled."""
     if not cfg.enabled:
         return {}
 
-    rate_gate = ProviderRateGate()
+    shared_rate_gate = rate_gate or ProviderRateGate()
 
     # Mutate cfg.llm.default in-place with env defaults
     default_profile = _apply_env_overrides_to_profile(
@@ -194,7 +195,7 @@ def build_llm_clients(
             profile_name="default",
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
-            rate_gate=rate_gate,
+            rate_gate=shared_rate_gate,
         )
     }
 
@@ -212,7 +213,7 @@ def build_llm_clients(
             profile_name=name,
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
-            rate_gate=rate_gate,
+            rate_gate=shared_rate_gate,
         )
 
     return clients

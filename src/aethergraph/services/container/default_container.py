@@ -59,6 +59,7 @@ from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBack
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
+from aethergraph.services.llm.provider_transport import ProviderRateGate
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -394,17 +395,22 @@ def build_default_container(
         EnvSecrets()
     )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
     obs_cfg = cfg.llm.observability
+    provider_rate_gate = ProviderRateGate()
     llm_clients = build_llm_clients(
         cfg.llm,
         secrets,
         observation_sink=observability,
         observation_capture_mode=obs_cfg.capture_mode,
+        rate_gate=provider_rate_gate,
     )  # return {profile: GenericLLMClient}
     llm_profiles = {"default": cfg.llm.default, **dict(cfg.llm.profiles or {})}
     llm_service = LLMService(clients=llm_clients, profiles=llm_profiles) if llm_clients else None
 
     embed_clients = build_embedding_clients(
-        cfg.embed, secrets, metering=metering
+        cfg.embed,
+        secrets,
+        metering=metering,
+        rate_gate=provider_rate_gate,
     )  # return {profile: GenericEmbeddingClient}
     embed_service = EmbeddingService(clients=embed_clients) if embed_clients else None
     embed_client = embed_clients["default"] if embed_clients else None
