@@ -200,6 +200,64 @@ def classify_http_error(
     )
 
 
+def classify_transport_error(
+    provider: str,
+    model: str | None,
+    operation: str,
+    error: httpx.TransportError,
+) -> LLMProviderRequestError:
+    """
+    Classify an HTTP transport failure that has no provider response.
+
+    Examples:
+        Classify a replay-safe connection failure:
+            ```python
+            request = httpx.Request("POST", "https://provider.example")
+            failure = httpx.ConnectError("offline", request=request)
+            error = classify_transport_error("openai", "gpt-5-nano", "chat", failure)
+            assert error.retryable is True
+            ```
+
+        Keep a read timeout terminal by default:
+            ```python
+            request = httpx.Request("POST", "https://provider.example")
+            failure = httpx.ReadTimeout("late", request=request)
+            error = classify_transport_error("openai", "gpt-5-nano", "chat", failure)
+            assert error.retryable is False
+            ```
+
+    Args:
+        provider: Configured provider identifier.
+        model: Provider model or deployment identifier when known.
+        operation: Logical provider operation such as chat or embedding.
+        error: HTTPX transport failure raised before a usable response.
+
+    Returns:
+        LLMProviderRequestError: Canonical failure with conservative replay
+        safety encoded in its retryable field.
+
+    Notes:
+        Connect failures are retryable because no connection was established.
+        Read and write failures are terminal because the provider may already
+        have started processing the request.
+    """
+
+    retryable = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout))
+    code = "provider_connect_error" if retryable else "provider_transport_error"
+    if isinstance(error, httpx.ReadTimeout):
+        code = "provider_read_timeout"
+    elif isinstance(error, httpx.WriteError):
+        code = "provider_write_error"
+    return LLMProviderRequestError(
+        provider=provider,
+        model=model,
+        operation=operation,
+        code=code,
+        message=f"Provider transport failed: {type(error).__name__}.",
+        retryable=retryable,
+    )
+
+
 def _response_payload(response: httpx.Response) -> dict[str, Any]:
     try:
         payload = response.json()

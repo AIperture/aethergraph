@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Generic, Literal, TypeVar
 
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from ..types import LLMError
 
 ProviderAttemptOutcome = Literal["success", "error"]
@@ -15,6 +17,26 @@ ProviderRateLimitResource = Literal[
     "output_tokens",
     "unknown",
 ]
+
+
+class ProviderRetrySettings(BaseModel):
+    """Validated bounded retry policy shared by LLM and embedding profiles."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+    max_attempts: int = Field(default=4, ge=1, le=10)
+    max_elapsed_s: float = Field(default=30.0, ge=0.0, le=300.0)
+    base_delay_s: float = Field(default=0.5, ge=0.0, le=60.0)
+    max_backoff_s: float = Field(default=8.0, ge=0.0, le=120.0)
+    max_provider_delay_s: float = Field(default=30.0, ge=0.0, le=300.0)
+    jitter_ratio: float = Field(default=0.25, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _validate_delay_bounds(self) -> ProviderRetrySettings:
+        if self.max_backoff_s < self.base_delay_s:
+            raise ValueError("max_backoff_s must be greater than or equal to base_delay_s")
+        return self
 
 
 @dataclass(frozen=True)
@@ -61,6 +83,7 @@ class ProviderCallResult(Generic[ResultT]):
 
     value: ResultT
     metadata: ProviderResponseMetadata = ProviderResponseMetadata()
+    attempts: tuple[ProviderTransportAttempt, ...] = ()
 
 
 class LLMProviderRequestError(LLMError):

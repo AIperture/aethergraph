@@ -3,9 +3,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import httpx
+from pydantic import ValidationError
 import pytest
 
 from aethergraph.services.llm.provider_transport import (
+    LLMProviderRequestError,
+    ProviderCallResult,
+    ProviderRateGate,
+    ProviderResponseMetadata,
+    ProviderRetryExecutor,
+    ProviderRetrySettings,
     classify_http_error,
     provider_response_metadata,
 )
@@ -174,3 +181,173 @@ def test_local_provider_without_limit_headers_has_no_fabricated_snapshot(provide
     assert metadata.request_id is None
     assert metadata.retry_after_s is None
     assert metadata.rate_limits == ()
+
+
+class _FakeTime:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, delay_s: float) -> None:
+        self.sleeps.append(delay_s)
+        self.now += delay_s
+
+
+@pytest.mark.asyncio
+async def test_retry_executor_honors_provider_minimum_delay_then_succeeds() -> None:
+    fake_time = _FakeTime()
+    gate = ProviderRateGate(clock=fake_time.clock, sleep=fake_time.sleep)
+    executor = ProviderRetryExecutor(
+        rate_gate=gate,
+        clock=fake_time.clock,
+        random_unit=lambda: 0.0,
+    )
+    calls = 0
+
+    async def call() -> ProviderCallResult[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise LLMProviderRequestError(
+                provider="openai",
+                model="gpt-5-nano",
+                operation="chat",
+                code="provider_rate_limited",
+                message="Rate limit reached.",
+                retryable=True,
+                status_code=429,
+                metadata=ProviderResponseMetadata(retry_after_s=0.598),
+            )
+        return ProviderCallResult(
+            "ok",
+            ProviderResponseMetadata(request_id="req-success"),
+        )
+
+    result = await executor.execute(
+        call,
+        provider="openai",
+        model="gpt-5-nano",
+        operation="chat",
+    )
+
+    assert result.value == "ok"
+    assert calls == 2
+    assert fake_time.sleeps == [pytest.approx(0.598)]
+    assert [attempt.outcome for attempt in result.attempts] == ["error", "success"]
+    assert result.attempts[0].scheduled_delay_s == pytest.approx(0.598)
+    assert result.attempts[1].request_id == "req-success"
+
+
+@pytest.mark.asyncio
+async def test_retry_executor_does_not_retry_terminal_quota_error() -> None:
+    fake_time = _FakeTime()
+    executor = ProviderRetryExecutor(
+        rate_gate=ProviderRateGate(clock=fake_time.clock, sleep=fake_time.sleep),
+        clock=fake_time.clock,
+    )
+
+    async def call() -> ProviderCallResult[str]:
+        raise LLMProviderRequestError(
+            provider="openai",
+            model="gpt-5-nano",
+            operation="chat",
+            code="provider_quota_exhausted",
+            message="Credits exhausted.",
+            retryable=False,
+            status_code=429,
+        )
+
+    with pytest.raises(LLMProviderRequestError) as captured:
+        await executor.execute(
+            call,
+            provider="openai",
+            model="gpt-5-nano",
+            operation="chat",
+        )
+
+    assert len(captured.value.attempts) == 1
+    assert captured.value.attempts[0].retryable is False
+    assert fake_time.sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_retry_executor_retries_connect_error_but_not_read_timeout() -> None:
+    fake_time = _FakeTime()
+    executor = ProviderRetryExecutor(
+        rate_gate=ProviderRateGate(clock=fake_time.clock, sleep=fake_time.sleep),
+        clock=fake_time.clock,
+        random_unit=lambda: 0.0,
+    )
+    request = httpx.Request("POST", "https://provider.example/v1/responses")
+    connect_calls = 0
+
+    async def connect_then_success() -> ProviderCallResult[str]:
+        nonlocal connect_calls
+        connect_calls += 1
+        if connect_calls == 1:
+            raise httpx.ConnectError("offline", request=request)
+        return ProviderCallResult("connected")
+
+    result = await executor.execute(
+        connect_then_success,
+        provider="ollama",
+        model="local-model",
+        operation="chat",
+    )
+    assert result.value == "connected"
+    assert connect_calls == 2
+
+    async def read_timeout() -> ProviderCallResult[str]:
+        raise httpx.ReadTimeout("late", request=request)
+
+    with pytest.raises(LLMProviderRequestError) as captured:
+        await executor.execute(
+            read_timeout,
+            provider="openai",
+            model="gpt-5-nano",
+            operation="chat",
+        )
+    assert captured.value.code == "provider_read_timeout"
+    assert captured.value.retryable is False
+    assert len(captured.value.attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_executor_refuses_provider_delay_beyond_policy_budget() -> None:
+    fake_time = _FakeTime()
+    executor = ProviderRetryExecutor(
+        settings=ProviderRetrySettings(max_provider_delay_s=2.0),
+        rate_gate=ProviderRateGate(clock=fake_time.clock, sleep=fake_time.sleep),
+        clock=fake_time.clock,
+    )
+
+    async def call() -> ProviderCallResult[str]:
+        raise LLMProviderRequestError(
+            provider="openai",
+            model="gpt-5-nano",
+            operation="chat",
+            code="provider_rate_limited",
+            message="Try later.",
+            retryable=True,
+            metadata=ProviderResponseMetadata(retry_after_s=5.0),
+        )
+
+    with pytest.raises(LLMProviderRequestError) as captured:
+        await executor.execute(
+            call,
+            provider="openai",
+            model="gpt-5-nano",
+            operation="chat",
+        )
+
+    assert len(captured.value.attempts) == 1
+    assert captured.value.attempts[0].scheduled_delay_s is None
+    assert fake_time.sleeps == []
+
+
+def test_retry_settings_reject_inverted_backoff_bounds() -> None:
+    with pytest.raises(ValidationError):
+        ProviderRetrySettings(base_delay_s=2.0, max_backoff_s=1.0)
