@@ -326,6 +326,24 @@ def client(monkeypatch) -> TestClient:
                     },
                 },
             },
+            {
+                "id": "agent-entered-1",
+                "ts": 5.0,
+                "scope_id": "run-1",
+                "kind": "agent_engine.agent_entered",
+                "run_id": "run-1",
+                "session_id": "sess-1",
+                "agent_id": "agent-1",
+                "graph_id": "graph-1",
+                "user_id": "u1",
+                "org_id": "o1",
+                "text": "Agent entered",
+                "tags": ["agent_engine", "turn:turn-1"],
+                "data": {
+                    "turn_id": "turn-1",
+                    "agent_instance_id": "agent-1",
+                },
+            },
         ]
     )
     llm_rows = [
