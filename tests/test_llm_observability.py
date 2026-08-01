@@ -12,7 +12,13 @@ from aethergraph.services.container.default_container import build_default_conta
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.observability import ConsoleLLMObservationSink
-from aethergraph.services.llm.provider_transport import ProviderCallResult
+from aethergraph.services.llm.provider_transport import (
+    LLMProviderRequestError,
+    ProviderCallResult,
+    ProviderRateLimitSnapshot,
+    ProviderResponseMetadata,
+    ProviderRetrySettings,
+)
 from aethergraph.services.llm.types import (
     LLMContextWindowExceededError,
     LLMRunQuotaExceededError,
@@ -200,10 +206,44 @@ async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path:
         model="gpt-test",
         observation_sink=sink,
         observation_capture_mode="manifest",
+        retry_settings=ProviderRetrySettings(
+            base_delay_s=0.0,
+            max_backoff_s=0.0,
+            jitter_ratio=0.0,
+        ),
     )
 
+    dispatch_calls = 0
+
     async def successful_dispatch(messages, **kwargs):
-        return ProviderCallResult(("hello back", {"prompt_tokens": 11, "completion_tokens": 7}))
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        if dispatch_calls == 1:
+            raise LLMProviderRequestError(
+                provider="openai",
+                model="gpt-test",
+                operation="chat",
+                code="provider_rate_limited",
+                message="Rate limit reached.",
+                retryable=True,
+                status_code=429,
+                metadata=ProviderResponseMetadata(
+                    request_id="req-limited",
+                    retry_after_s=0.598,
+                    rate_limits=(
+                        ProviderRateLimitSnapshot(
+                            resource="tokens",
+                            limit=200000,
+                            remaining=34571,
+                            reset_after_s=0.598,
+                        ),
+                    ),
+                ),
+            )
+        return ProviderCallResult(
+            ("hello back", {"prompt_tokens": 11, "completion_tokens": 7}),
+            ProviderResponseMetadata(request_id="req-success"),
+        )
 
     client._chat_dispatch = successful_dispatch  # type: ignore[method-assign]
     token = current_meter_context.set({"run_id": "run-success"})
@@ -223,6 +263,29 @@ async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path:
     assert len(rows) == 2
     assert {row["error_type"] for row in rows} == {None, "RuntimeError"}
     assert len({row["llm_call_id"] for row in rows}) == 2
+    recovered = next(row for row in rows if row["error_type"] is None)
+    assert recovered["attempt_count"] == 2
+    assert recovered["retry_count"] == 1
+    assert recovered["total_retry_wait_ms"] == 598
+    detail = await store.get_llm_call(recovered["llm_call_id"])
+    assert detail is not None
+    assert detail["attempts"][0]["error_code"] == "provider_rate_limited"
+    assert detail["attempts"][0]["rate_limits"] == [
+        {
+            "resource": "tokens",
+            "limit": 200000,
+            "remaining": 34571,
+            "reset_after_s": 0.598,
+        }
+    ]
+    assert detail["attempts"][1]["request_id"] == "req-success"
+    inspect_page = await sink.list_inspect_llm_calls(run_id="run-success")
+    assert inspect_page.items[0].attempt_count == 2
+    assert inspect_page.items[0].retry_count == 1
+    assert inspect_page.items[0].attempts == []
+    inspect_detail = await sink.get_inspect_llm_call(recovered["llm_call_id"])
+    assert len(inspect_detail.attempts) == 2
+    assert inspect_detail.attempts[0].rate_limits[0].resource == "tokens"
     correlation = current_llm_call_correlation()
     assert correlation is not None
     assert correlation.llm_call_id in {row["llm_call_id"] for row in rows}

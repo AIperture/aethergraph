@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 import uuid
 
+from aethergraph.services.llm.provider_transport.models import ProviderTransportAttempt
+
 CaptureMode = Literal["off", "metadata", "manifest", "full"]
 ObservationStatus = Literal["ok", "error", "pending", "unknown"]
 
@@ -82,6 +84,7 @@ class LLMObservationRecord:
     error_type: str | None = None
     error_message: str | None = None
     prompt_manifest_id: str | None = None
+    attempts: tuple[ProviderTransportAttempt, ...] = ()
 
     @classmethod
     def new(

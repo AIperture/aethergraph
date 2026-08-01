@@ -80,6 +80,26 @@ class TraceSummary(BaseModel):
     latest_error_ts: float | None = None
 
 
+class LLMRateLimitSnapshot(BaseModel):
+    resource: str
+    limit: int | None = None
+    remaining: int | None = None
+    reset_after_s: float | None = None
+
+
+class LLMCallAttempt(BaseModel):
+    attempt_number: int
+    elapsed_ms: int
+    outcome: str
+    retryable: bool
+    status_code: int | None = None
+    error_code: str | None = None
+    request_id: str | None = None
+    provider_delay_ms: int | None = None
+    scheduled_delay_ms: int | None = None
+    rate_limits: list[LLMRateLimitSnapshot] = Field(default_factory=list)
+
+
 class LLMCallRecord(BaseModel):
     id: str
     ts: float
@@ -113,6 +133,10 @@ class LLMCallRecord(BaseModel):
     raw_text: str | None = None
     error_type: str | None = None
     error_message: str | None = None
+    attempt_count: int = 0
+    retry_count: int = 0
+    total_retry_wait_ms: int = 0
+    attempts: list[LLMCallAttempt] = Field(default_factory=list)
 
 
 class LLMCallListResponse(BaseModel):

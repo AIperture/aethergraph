@@ -1498,6 +1498,7 @@ class GenericLLMClient(
                 rate_limit_group=self.rate_limit_group,
             )
             provider_value, usage = provider_result.value
+            observation_record.attempts = provider_result.attempts
 
             observation_record.raw_text = (
                 provider_value.observation_text()
@@ -1555,6 +1556,8 @@ class GenericLLMClient(
             )
             return value, usage
         except Exception as exc:
+            if isinstance(exc, LLMProviderRequestError):
+                observation_record.attempts = exc.attempts
             if prepared_structured_output is not None:
                 _record_structured_output_failure(request_args, exc)
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
@@ -1877,6 +1880,8 @@ class GenericLLMClient(
                 if on_delta is not None and text:
                     await on_delta(text)
 
+            observation_record.attempts = provider_result.attempts
+
             latency_ms = int((time.perf_counter() - start) * 1000)
             normalized_usage = normalize_llm_usage(usage)
             observation_record.raw_text = text
@@ -1903,6 +1908,8 @@ class GenericLLMClient(
             )
             return text, usage
         except Exception as exc:
+            if isinstance(exc, LLMProviderRequestError):
+                observation_record.attempts = exc.attempts
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)

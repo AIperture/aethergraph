@@ -201,6 +201,10 @@ def _present_llm_row(row: dict[str, Any]) -> LLMCallRecord:
         raw_text=row.get("raw_text"),
         error_type=row.get("error_type"),
         error_message=row.get("error_message"),
+        attempt_count=int(row.get("attempt_count") or 0),
+        retry_count=int(row.get("retry_count") or 0),
+        total_retry_wait_ms=int(row.get("total_retry_wait_ms") or 0),
+        attempts=list(row.get("attempts") or []),
     )
 
 

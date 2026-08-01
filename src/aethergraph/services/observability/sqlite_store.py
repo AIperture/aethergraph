@@ -110,6 +110,23 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     response_fragment_id TEXT REFERENCES content_fragments(fragment_id)
 );
 
+CREATE TABLE IF NOT EXISTS llm_call_attempts (
+    llm_call_id TEXT NOT NULL REFERENCES llm_calls(llm_call_id) ON DELETE CASCADE,
+    attempt_number INTEGER NOT NULL,
+    elapsed_ms INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    retryable INTEGER NOT NULL,
+    status_code INTEGER,
+    error_code TEXT,
+    request_id TEXT,
+    provider_delay_ms INTEGER,
+    scheduled_delay_ms INTEGER,
+    rate_limits_json TEXT NOT NULL,
+    PRIMARY KEY (llm_call_id, attempt_number)
+);
+CREATE INDEX IF NOT EXISTS ix_llm_call_attempts_call
+    ON llm_call_attempts(llm_call_id, attempt_number);
+
 CREATE TABLE IF NOT EXISTS prompt_manifests (
     manifest_id TEXT PRIMARY KEY,
     llm_call_id TEXT NOT NULL UNIQUE REFERENCES llm_calls(llm_call_id) ON DELETE CASCADE,
@@ -396,6 +413,29 @@ class SQLiteObservationStore:
                     capture.response_fragment.fragment_id if capture.response_fragment else None,
                 ),
             )
+            for attempt in record.attempts:
+                conn.execute(
+                    """
+                    INSERT INTO llm_call_attempts(
+                        llm_call_id, attempt_number, elapsed_ms, outcome,
+                        retryable, status_code, error_code, request_id,
+                        provider_delay_ms, scheduled_delay_ms, rate_limits_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.llm_call_id,
+                        attempt.attempt_number,
+                        round(attempt.elapsed_s * 1_000),
+                        attempt.outcome,
+                        int(attempt.retryable),
+                        attempt.status_code,
+                        attempt.error_code,
+                        self._clip(attempt.request_id, 256),
+                        self._optional_milliseconds(attempt.provider_delay_s),
+                        self._optional_milliseconds(attempt.scheduled_delay_s),
+                        canonical_json([asdict(snapshot) for snapshot in attempt.rate_limits]),
+                    ),
+                )
             if capture.manifest_id is not None:
                 conn.execute(
                     """
@@ -574,7 +614,14 @@ class SQLiteObservationStore:
         sql = f"""
             SELECT c.*, o.occurred_at, o.tenant_id, o.project_id, o.org_id, o.user_id,
                    o.app_id, o.session_id, o.run_id, o.trace_id, o.agent_id,
-                   o.graph_id, o.node_id, o.turn_id, o.attributes_json
+                   o.graph_id, o.node_id, o.turn_id, o.attributes_json,
+                   (SELECT COUNT(*) FROM llm_call_attempts a
+                    WHERE a.llm_call_id = c.llm_call_id) AS attempt_count,
+                   (SELECT COUNT(*) FROM llm_call_attempts a
+                    WHERE a.llm_call_id = c.llm_call_id
+                      AND a.scheduled_delay_ms IS NOT NULL) AS retry_count,
+                   COALESCE((SELECT SUM(a.scheduled_delay_ms) FROM llm_call_attempts a
+                    WHERE a.llm_call_id = c.llm_call_id), 0) AS total_retry_wait_ms
             FROM llm_calls c JOIN observations o ON o.observation_id = c.observation_id
             {where} ORDER BY o.occurred_at DESC
         """
@@ -596,7 +643,14 @@ class SQLiteObservationStore:
                 """
                 SELECT c.*, o.occurred_at, o.tenant_id, o.project_id, o.org_id, o.user_id,
                        o.app_id, o.session_id, o.run_id, o.trace_id, o.agent_id,
-                       o.graph_id, o.node_id, o.turn_id, o.attributes_json
+                       o.graph_id, o.node_id, o.turn_id, o.attributes_json,
+                       (SELECT COUNT(*) FROM llm_call_attempts a
+                        WHERE a.llm_call_id = c.llm_call_id) AS attempt_count,
+                       (SELECT COUNT(*) FROM llm_call_attempts a
+                        WHERE a.llm_call_id = c.llm_call_id
+                          AND a.scheduled_delay_ms IS NOT NULL) AS retry_count,
+                       COALESCE((SELECT SUM(a.scheduled_delay_ms) FROM llm_call_attempts a
+                        WHERE a.llm_call_id = c.llm_call_id), 0) AS total_retry_wait_ms
                 FROM llm_calls c JOIN observations o ON o.observation_id = c.observation_id
                 WHERE c.llm_call_id = ?
                 """,
@@ -1129,6 +1183,9 @@ class SQLiteObservationStore:
         result["messages_preview"] = self._prompt_preview(result)
         result["raw_text_preview"] = None
         result["trace_payload_preview"] = result["attributes"].get("trace_payload")
+        result["attempts"] = (
+            self._llm_attempt_rows(result["llm_call_id"], conn=conn) if include_content else []
+        )
         manifest_id = result.get("prompt_manifest_id")
         if include_content and manifest_id:
             manifest = self._hydrate_prompt_manifest(manifest_id, conn=conn)
@@ -1144,6 +1201,36 @@ class SQLiteObservationStore:
                 if response:
                     result["raw_text"] = json.loads(response["body"]).get("text")
         return result
+
+    def _llm_attempt_rows(
+        self,
+        llm_call_id: str,
+        *,
+        conn: sqlite3.Connection,
+    ) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            """
+            SELECT attempt_number, elapsed_ms, outcome, retryable, status_code,
+                   error_code, request_id, provider_delay_ms,
+                   scheduled_delay_ms, rate_limits_json
+            FROM llm_call_attempts
+            WHERE llm_call_id = ?
+            ORDER BY attempt_number
+            """,
+            (llm_call_id,),
+        ).fetchall()
+        return [
+            {
+                **{key: value for key, value in dict(row).items() if key != "rate_limits_json"},
+                "retryable": bool(row["retryable"]),
+                "rate_limits": json.loads(row["rate_limits_json"]),
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    def _optional_milliseconds(value: float | None) -> int | None:
+        return None if value is None else round(value * 1_000)
 
     @staticmethod
     def _prompt_preview(result: dict[str, Any]) -> dict[str, Any] | None:
