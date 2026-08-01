@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 
@@ -33,7 +33,7 @@ class Continuation:
     next_wakeup_at: datetime | None = None
     attempts: int = 0
     channel: str | None = None
-    created_at: datetime = datetime.utcnow()
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     closed: bool = False  # ← NEW
     payload: dict[str, Any] | None = None  # set at creation time
 

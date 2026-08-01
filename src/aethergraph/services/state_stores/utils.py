@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -35,7 +35,7 @@ async def snapshot_from_graph(
         run_id=run_id,
         graph_id=graph_id,
         rev=rev,
-        created_at=datetime.utcnow().timestamp(),
+        created_at=datetime.now(UTC).timestamp(),
         spec_hash=spec_hash,
         state=json_state,
     )

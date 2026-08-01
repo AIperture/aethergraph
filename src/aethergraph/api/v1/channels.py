@@ -1,7 +1,7 @@
 # stub, to move the server.channels module here later
 
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect  # type: ignore
 
@@ -51,7 +51,7 @@ async def list_channel_events(
     TODO:
       - Integrate with channel/event store using cursor pagination.
     """
-    now = datetime.utcnow()
+    now = datetime.now(UTC)
     dummy = ChannelEvent(
         event_id="ch-evt-1",
         channel_id=channel_id,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from aethergraph.contracts.services.runs import RunResultStore
@@ -42,8 +42,8 @@ def _decode_result(doc: dict[str, Any]) -> RunResult:
         session_id=doc.get("session_id"),
         status=RunStatus(str(doc.get("status") or RunStatus.succeeded.value)),
         outputs=dict(doc.get("outputs") or {}),
-        created_at=_decode_dt(doc.get("created_at")) or datetime.utcnow(),
-        updated_at=_decode_dt(doc.get("updated_at")) or datetime.utcnow(),
+        created_at=_decode_dt(doc.get("created_at")) or datetime.now(UTC),
+        updated_at=_decode_dt(doc.get("updated_at")) or datetime.now(UTC),
         source=str(doc.get("source") or "direct"),
         snapshot_rev=doc.get("snapshot_rev"),
     )

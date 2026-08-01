@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from aethergraph.contracts.services.runs import RunStore
@@ -158,7 +158,7 @@ def _doc_to_runrecord(doc: dict[str, Any]) -> RunRecord:
         graph_id=doc["graph_id"],
         kind=doc.get("kind", "other"),
         status=_decode_status(doc.get("status")),
-        started_at=_decode_dt(doc.get("started_at")) or datetime.utcnow(),
+        started_at=_decode_dt(doc.get("started_at")) or datetime.now(UTC),
         finished_at=_decode_dt(doc.get("finished_at")),
         tags=list(doc.get("tags") or []),
         user_id=doc.get("user_id"),

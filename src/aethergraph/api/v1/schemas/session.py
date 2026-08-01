@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field  # type: ignore
+from pydantic import BaseModel, ConfigDict, Field  # type: ignore
 
 from aethergraph.core.runtime.run_types import SessionKind
 
@@ -44,6 +44,8 @@ class SessionRunsResponse(BaseModel):
 
 
 class SessionChatFile(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     artifact_id: str | None = None
     id: str | None = None
     url: str | None = None
@@ -52,9 +54,6 @@ class SessionChatFile(BaseModel):
     size: int | None = None
     uri: str | None = None
     renderer: Literal["image", "download", "vega", "plotly"] | None = None
-
-    class Config:
-        extra = "allow"
 
 
 class SessionChatEvent(BaseModel):

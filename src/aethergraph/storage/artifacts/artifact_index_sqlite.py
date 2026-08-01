@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import os
 import re
@@ -11,6 +12,12 @@ import uuid
 
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
+
+
+def _created_at_text(value: str | datetime | None) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat(" ")
+    return value
 
 
 class SqliteArtifactIndexSync:
@@ -287,7 +294,7 @@ class SqliteArtifactIndexSync:
                     "sha256": rec.get("sha256"),
                     "bytes": rec.get("bytes"),
                     "mime": rec.get("mime"),
-                    "created_at": rec.get("created_at"),
+                    "created_at": _created_at_text(rec.get("created_at")),
                     "labels_json": labels_json,
                     "metrics_json": metrics_json,
                     "pinned": int(rec.get("pinned") or 0),
@@ -505,7 +512,7 @@ class SqliteArtifactIndexSync:
                     a.node_id,
                     a.tool_name,
                     a.tool_version,
-                    a.created_at,
+                    _created_at_text(a.created_at),
                     labels_json,
                     a.kind,
                     a.mime,

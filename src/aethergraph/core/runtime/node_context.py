@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 import warnings
 
@@ -845,10 +845,7 @@ class NodeContext:
     def _now(self):
         if self.services.clock:
             return self.services.clock.now()
-        else:
-            from datetime import datetime
-
-            return datetime.utcnow()
+        return datetime.now(UTC)
 
     # ---- continuation helpers ----
     async def create_continuation(

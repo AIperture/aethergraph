@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, is_dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 import sqlite3
@@ -20,7 +20,7 @@ def _dt_to_ts(dt: datetime | None) -> float | None:
         return None
     if dt.tzinfo is None:
         # assume UTC if naive
-        return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
+        return dt.replace(tzinfo=UTC).timestamp()
     return dt.timestamp()
 
 
@@ -311,7 +311,7 @@ class SQLiteRunStoreSync:
             record = _decode_run(data)
 
             # Choose timestamp
-            ts = created_at or datetime.utcnow()
+            ts = created_at or datetime.now(UTC)
 
             # Update stats
             record.artifact_count = (record.artifact_count or 0) + 1

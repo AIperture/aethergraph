@@ -1,7 +1,7 @@
 # memory-related inspection
 
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 from typing import Annotated, Any
 
@@ -31,7 +31,7 @@ router = APIRouter(tags=["memory"])
 
 def _parse_ts(ts: str | float | int) -> datetime:
     if isinstance(ts, int | float):
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        return datetime.fromtimestamp(float(ts), tz=UTC)
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     return datetime.fromisoformat(ts)
@@ -253,7 +253,7 @@ def _event_to_api_event(evt: Event) -> MemoryEvent:
 
 def _doc_to_summary_entry(doc_id: str, doc: dict[str, Any]) -> MemorySummaryEntry:
     ts_str = doc.get("ts") or doc.get("created_at") or ""
-    created_at = _parse_ts(ts_str) if ts_str else datetime.utcnow()
+    created_at = _parse_ts(ts_str) if ts_str else datetime.now(UTC)
     tw = doc.get("time_window") or {}
     from_str = tw.get("from") or tw.get("start") or ""
     to_str = tw.get("to") or tw.get("end") or ""

@@ -53,7 +53,7 @@ class InMemoryResumeRouter:
         self.calls.append((run_id, node_id, token, payload))
 
 
-class TestContainer:
+class ChannelTestContainer:
     def __init__(self):
         self.kv_hot = InMemoryKVHot()
         self.cont_store = InMemoryContStore()
@@ -76,7 +76,7 @@ class TestContainer:
         self.channel_ingress = ChannelIngress(container=self, logger=self.logger)
 
 
-def build_app(container: TestContainer) -> FastAPI:
+def build_app(container: ChannelTestContainer) -> FastAPI:
     app = FastAPI()
     app.state.container = container
     app.state.settings = type("S", (), {})()  # minimal stub if needed
@@ -89,7 +89,7 @@ def build_app(container: TestContainer) -> FastAPI:
 
 @pytest.mark.anyio
 async def test_channel_http_roundtrip():
-    container = TestContainer()
+    container = ChannelTestContainer()
     app = build_app(container)
 
     # Create a waiting continuation manually
@@ -138,7 +138,7 @@ async def test_channel_http_roundtrip():
 
 @pytest.mark.anyio
 async def test_channel_http_accepts_canonical_attachments():
-    container = TestContainer()
+    container = ChannelTestContainer()
     app = build_app(container)
 
     cont = Continuation(
@@ -183,7 +183,7 @@ async def test_channel_http_accepts_canonical_attachments():
 
 @pytest.mark.anyio
 async def test_channel_prompt_preserves_interaction_rendering_hints():
-    container = TestContainer()
+    container = ChannelTestContainer()
     cont = Continuation(
         run_id="run-1",
         node_id="node-1",

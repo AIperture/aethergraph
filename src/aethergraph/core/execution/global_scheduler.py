@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 import inspect
 from typing import TYPE_CHECKING, Any
 
@@ -261,7 +261,7 @@ class GlobalForwardScheduler:
                     evt = RunEvent(
                         run_id=tgt.run_id,
                         status=status,
-                        timestamp=datetime.utcnow().timestamp(),
+                        timestamp=datetime.now(UTC).timestamp(),
                     )
                     await self._emit_run(evt)
                     break
@@ -472,7 +472,7 @@ class GlobalForwardScheduler:
                             node_id=node.node_id,
                             status=str(NodeStatus.DONE),
                             outputs=outs,
-                            timestamp=datetime.utcnow().timestamp(),
+                            timestamp=datetime.now(UTC).timestamp(),
                         )
                     )
                 elif result.status.startswith("WAITING_"):
@@ -486,7 +486,7 @@ class GlobalForwardScheduler:
                             node_id=node.node_id,
                             status=result.status,
                             outputs=node.outputs or {},
-                            timestamp=datetime.utcnow().timestamp(),
+                            timestamp=datetime.now(UTC).timestamp(),
                         )
                     )
                 elif result.status == NodeStatus.FAILED:
@@ -500,7 +500,7 @@ class GlobalForwardScheduler:
                             node_id=node.node_id,
                             status=str(NodeStatus.FAILED),
                             outputs=node.outputs or {},
-                            timestamp=datetime.utcnow().timestamp(),
+                            timestamp=datetime.now(UTC).timestamp(),
                         )
                     )
                     attempts = getattr(node, "attempts", 0)
@@ -525,7 +525,7 @@ class GlobalForwardScheduler:
                             node_id=node.node_id,
                             status=str(NodeStatus.SKIPPED),
                             outputs=node.outputs or {},
-                            timestamp=datetime.utcnow().timestamp(),
+                            timestamp=datetime.now(UTC).timestamp(),
                         )
                     )
                 elif result.status == NodeStatus.CANCELLED:
@@ -547,7 +547,7 @@ class GlobalForwardScheduler:
                             node_id=node.node_id,
                             status=str(NodeStatus.CANCELLED),
                             outputs=node.outputs or {},
-                            timestamp=datetime.utcnow().timestamp(),
+                            timestamp=datetime.now(UTC).timestamp(),
                         )
                     )
             except asyncio.CancelledError:
