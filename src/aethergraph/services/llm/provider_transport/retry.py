@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import hashlib
 import random
 import time
 from typing import TypeVar
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -31,6 +33,8 @@ class ProviderRetryExecutor:
         settings: ProviderRetrySettings | None = None,
         *,
         rate_gate: ProviderRateGate | None = None,
+        base_url: str | None = None,
+        credential: str | None = None,
         clock: Clock = time.monotonic,
         random_unit: RandomUnit = random.random,
     ) -> None:
@@ -52,6 +56,9 @@ class ProviderRetryExecutor:
         Args:
             settings: Validated retry limits and backoff parameters.
             rate_gate: Shared container-local provider rate gate.
+            base_url: Resolved provider endpoint used to isolate quota domains.
+            credential: Resolved provider credential, retained only as a
+                non-reversible in-memory fingerprint.
             clock: Monotonic clock used for elapsed and deadline budgets.
             random_unit: Random value supplier in the inclusive range zero to
                 one for bounded positive jitter.
@@ -66,6 +73,7 @@ class ProviderRetryExecutor:
 
         self.settings = settings or ProviderRetrySettings()
         self.rate_gate = rate_gate or ProviderRateGate(clock=clock)
+        self._rate_limit_scope = _rate_limit_scope(base_url, credential)
         self._clock = clock
         self._random_unit = random_unit
 
@@ -126,7 +134,12 @@ class ProviderRetryExecutor:
 
         start = self._clock()
         attempts: list[ProviderTransportAttempt] = []
-        key = _rate_gate_key(provider, model, rate_limit_group)
+        key = _rate_gate_key(
+            provider,
+            model,
+            rate_limit_group,
+            scope=self._rate_limit_scope,
+        )
         settings = self.settings
         max_attempts = settings.max_attempts if settings.enabled else 1
 
@@ -226,8 +239,38 @@ def _provider_delay_s(error: LLMProviderRequestError) -> float:
     return max(candidates, default=0.0)
 
 
-def _rate_gate_key(provider: str, model: str | None, group: str | None) -> str:
-    return f"{provider.lower()}:{group or model or 'default'}"
+def _rate_gate_key(
+    provider: str,
+    model: str | None,
+    group: str | None,
+    *,
+    scope: str,
+) -> str:
+    return f"{provider.lower()}:{scope}:{group or model or 'default'}"
+
+
+def _rate_limit_scope(base_url: str | None, credential: str | None) -> str:
+    endpoint = _normalized_base_url(base_url)
+    fingerprint = (
+        hashlib.sha256(credential.encode("utf-8")).hexdigest()[:16] if credential else "anonymous"
+    )
+    return f"{endpoint}:{fingerprint}"
+
+
+def _normalized_base_url(base_url: str | None) -> str:
+    value = str(base_url or "default").strip().rstrip("/")
+    parsed = urlsplit(value)
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            parsed.path.rstrip("/"),
+            parsed.query,
+            "",
+        )
+    )
 
 
 def _unit_interval(value: float) -> float:

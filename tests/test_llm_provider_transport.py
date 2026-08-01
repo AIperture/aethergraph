@@ -218,6 +218,16 @@ class _ControlledTime:
         released.set_result(None)
 
 
+class _RecordingRateGate(ProviderRateGate):
+    def __init__(self) -> None:
+        super().__init__()
+        self.keys: list[str] = []
+
+    async def wait(self, key: str) -> float:
+        self.keys.append(key)
+        return 0.0
+
+
 @pytest.mark.asyncio
 async def test_retry_executor_honors_provider_minimum_delay_then_succeeds() -> None:
     fake_time = _FakeTime()
@@ -261,6 +271,40 @@ async def test_retry_executor_honors_provider_minimum_delay_then_succeeds() -> N
     assert [attempt.outcome for attempt in result.attempts] == ["error", "success"]
     assert result.attempts[0].scheduled_delay_s == pytest.approx(0.598)
     assert result.attempts[1].request_id == "req-success"
+
+
+@pytest.mark.asyncio
+async def test_rate_gate_key_isolates_endpoint_and_credential_quota_domains() -> None:
+    gate = _RecordingRateGate()
+
+    async def call() -> ProviderCallResult[str]:
+        return ProviderCallResult("ok")
+
+    executors = [
+        ProviderRetryExecutor(
+            rate_gate=gate,
+            base_url=base_url,
+            credential=credential,
+        )
+        for base_url, credential in (
+            ("https://api.example.test/v1/", "secret-one"),
+            ("https://API.EXAMPLE.TEST/v1", "secret-one"),
+            ("https://other.example.test/v1", "secret-one"),
+            ("https://api.example.test/v1", "secret-two"),
+        )
+    ]
+    for executor in executors:
+        await executor.execute(
+            call,
+            provider="openai",
+            model="gpt-test",
+            operation="chat",
+            rate_limit_group="shared-tpm",
+        )
+
+    assert gate.keys[0] == gate.keys[1]
+    assert len(set(gate.keys)) == 3
+    assert all("secret-one" not in key and "secret-two" not in key for key in gate.keys)
 
 
 @pytest.mark.asyncio

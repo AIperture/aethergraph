@@ -184,10 +184,6 @@ class GenericLLMClient(
     ):
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
-        self._provider_retry = ProviderRetryExecutor(
-            retry_settings,
-            rate_gate=rate_gate,
-        )
         self.rate_limit_group = rate_limit_group
         self._client = httpx.AsyncClient(timeout=timeout)
         self._bound_loop = None
@@ -218,6 +214,12 @@ class GenericLLMClient(
             }[self.provider]
         )
         self.azure_deployment = azure_deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT")
+        self._provider_retry = ProviderRetryExecutor(
+            retry_settings,
+            rate_gate=rate_gate,
+            base_url=self.base_url,
+            credential=self.api_key,
+        )
 
         self.metering = metering
 

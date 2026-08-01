@@ -95,6 +95,8 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         self._provider_retry = ProviderRetryExecutor(
             self.retry_settings,
             rate_gate=self.rate_gate,
+            base_url=self.base_url,
+            credential=self.api_key,
         )
         self._client: httpx.AsyncClient | None = None
 
