@@ -160,3 +160,6 @@ exclude = [
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+  'error::DeprecationWarning:aethergraph\.',
+]
