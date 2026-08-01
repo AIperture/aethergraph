@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import random
 import time
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], Awaitable[None]]
+RandomUnit = Callable[[], float]
+
+_DEFAULT_COHORT_SPREAD_S = 0.05
 
 
 class ProviderRateGate:
@@ -18,6 +22,8 @@ class ProviderRateGate:
         *,
         clock: Clock = time.monotonic,
         sleep: Sleep = asyncio.sleep,
+        random_unit: RandomUnit = random.random,
+        cohort_spread_s: float = _DEFAULT_COHORT_SPREAD_S,
     ) -> None:
         """
         Construct an empty container-local gate.
@@ -36,6 +42,10 @@ class ProviderRateGate:
         Args:
             clock: Monotonic clock used for blocked-until deadlines.
             sleep: Cancellation-aware asynchronous sleep implementation.
+            random_unit: Random value supplier in the inclusive range zero to
+                one for deterministic cohort release jitter.
+            cohort_spread_s: Maximum spacing added between queued callers that
+                share one blocked deadline.
 
         Returns:
             None: Initializes an empty keyed gate.
@@ -47,7 +57,10 @@ class ProviderRateGate:
 
         self._clock = clock
         self._sleep = sleep
+        self._random_unit = random_unit
+        self._cohort_spread_s = max(0.0, float(cohort_spread_s))
         self._blocked_until: dict[str, float] = {}
+        self._release_cursor: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     async def defer(self, key: str, delay_s: float) -> float:
@@ -119,11 +132,21 @@ class ProviderRateGate:
         while True:
             async with self._lock:
                 blocked_until = self._blocked_until.get(key, 0.0)
-            remaining_s = blocked_until - self._clock()
+                now = self._clock()
+                if blocked_until <= now:
+                    self._blocked_until.pop(key, None)
+                    self._release_cursor.pop(key, None)
+                    return total_wait_s
+                release_cursor = self._release_cursor.get(key)
+                if release_cursor is None or release_cursor < blocked_until:
+                    release_at = blocked_until
+                else:
+                    jitter_unit = min(1.0, max(0.0, float(self._random_unit())))
+                    release_gap_s = self._cohort_spread_s * (0.5 + 0.5 * jitter_unit)
+                    release_at = release_cursor + release_gap_s
+                self._release_cursor[key] = release_at
+                remaining_s = release_at - now
             if remaining_s <= 0.0:
-                async with self._lock:
-                    if self._blocked_until.get(key, 0.0) <= self._clock():
-                        self._blocked_until.pop(key, None)
                 return total_wait_s
             total_wait_s += remaining_s
             await self._sleep(remaining_s)

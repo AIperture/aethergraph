@@ -199,6 +199,25 @@ class _FakeTime:
         self.now += delay_s
 
 
+class _ControlledTime:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.waits: list[tuple[float, asyncio.Future[None]]] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, delay_s: float) -> None:
+        released: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self.waits.append((delay_s, released))
+        await released
+
+    def release(self, index: int) -> None:
+        delay_s, released = self.waits[index]
+        self.now = max(self.now, delay_s)
+        released.set_result(None)
+
+
 @pytest.mark.asyncio
 async def test_retry_executor_honors_provider_minimum_delay_then_succeeds() -> None:
     fake_time = _FakeTime()
@@ -242,6 +261,80 @@ async def test_retry_executor_honors_provider_minimum_delay_then_succeeds() -> N
     assert [attempt.outcome for attempt in result.attempts] == ["error", "success"]
     assert result.attempts[0].scheduled_delay_s == pytest.approx(0.598)
     assert result.attempts[1].request_id == "req-success"
+
+
+@pytest.mark.asyncio
+async def test_shared_rate_gate_staggers_two_clients_after_the_same_block() -> None:
+    controlled_time = _ControlledTime()
+    gate = ProviderRateGate(
+        clock=controlled_time.clock,
+        sleep=controlled_time.sleep,
+        random_unit=lambda: 0.5,
+        cohort_spread_s=0.05,
+    )
+    executors = [
+        ProviderRetryExecutor(
+            rate_gate=gate,
+            clock=controlled_time.clock,
+            random_unit=lambda: 0.0,
+        )
+        for _ in range(2)
+    ]
+    first_attempt_count = 0
+    both_started = asyncio.Event()
+    calls = [0, 0]
+
+    def provider_call(client_index: int):
+        async def call() -> ProviderCallResult[str]:
+            nonlocal first_attempt_count
+            calls[client_index] += 1
+            if calls[client_index] == 1:
+                first_attempt_count += 1
+                if first_attempt_count == 2:
+                    both_started.set()
+                await both_started.wait()
+                raise LLMProviderRequestError(
+                    provider="openai",
+                    model="gpt-5-nano",
+                    operation="chat",
+                    code="provider_rate_limited",
+                    message="Rate limit reached.",
+                    retryable=True,
+                    status_code=429,
+                    metadata=ProviderResponseMetadata(retry_after_s=0.5),
+                )
+            return ProviderCallResult(f"client-{client_index}")
+
+        return call
+
+    tasks = [
+        asyncio.create_task(
+            executor.execute(
+                provider_call(index),
+                provider="openai",
+                model="gpt-5-nano",
+                operation="chat",
+            )
+        )
+        for index, executor in enumerate(executors)
+    ]
+    for _ in range(10):
+        if len(controlled_time.waits) == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert [delay for delay, _ in controlled_time.waits] == [
+        pytest.approx(0.5),
+        pytest.approx(0.5375),
+    ]
+    controlled_time.release(0)
+    await asyncio.sleep(0)
+    assert calls.count(2) == 1
+    controlled_time.release(1)
+
+    results = await asyncio.gather(*tasks)
+    assert {result.value for result in results} == {"client-0", "client-1"}
+    assert calls == [2, 2]
 
 
 @pytest.mark.asyncio
