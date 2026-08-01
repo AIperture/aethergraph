@@ -217,6 +217,31 @@ async def test_read_only_store_hydrates_attempts_after_schema_creation(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_read_only_store_projects_empty_attempts_for_older_schema(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "observability.db"
+    writable = SQLiteObservationStore(
+        path,
+        policy=ObservationPolicy(capture_mode="metadata"),
+    )
+    record = _record(run_id="run-before-attempt-schema")
+    await writable.append_llm_call(record)
+    with writable._connect() as conn:
+        conn.execute("DROP TABLE llm_call_attempts")
+
+    read_only = SQLiteObservationStore(path, read_only=True)
+    listed = await read_only.query_llm_calls(run_id=record.scope.run_id)
+    detail = await read_only.get_llm_call(record.llm_call_id)
+
+    assert listed[0]["attempt_count"] == 0
+    assert listed[0]["retry_count"] == 0
+    assert listed[0]["total_retry_wait_ms"] == 0
+    assert detail is not None
+    assert detail["attempts"] == []
+
+
+@pytest.mark.asyncio
 async def test_concurrent_writes_and_historical_reads_are_safe(tmp_path: Path) -> None:
     store = SQLiteObservationStore(
         tmp_path / "observability.db",

@@ -248,6 +248,7 @@ class SQLiteObservationStore:
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._initialize()
+        self._has_llm_call_attempts = self._table_exists("llm_call_attempts")
 
     def _connect(self) -> sqlite3.Connection:
         if self.read_only:
@@ -267,6 +268,16 @@ class SQLiteObservationStore:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(_SCHEMA)
+
+    def _table_exists(self, table_name: str) -> bool:
+        with self._connect() as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    (table_name,),
+                ).fetchone()
+                is not None
+            )
 
     async def close(self) -> None:
         return None
@@ -615,13 +626,7 @@ class SQLiteObservationStore:
             SELECT c.*, o.occurred_at, o.tenant_id, o.project_id, o.org_id, o.user_id,
                    o.app_id, o.session_id, o.run_id, o.trace_id, o.agent_id,
                    o.graph_id, o.node_id, o.turn_id, o.attributes_json,
-                   (SELECT COUNT(*) FROM llm_call_attempts a
-                    WHERE a.llm_call_id = c.llm_call_id) AS attempt_count,
-                   (SELECT COUNT(*) FROM llm_call_attempts a
-                    WHERE a.llm_call_id = c.llm_call_id
-                      AND a.scheduled_delay_ms IS NOT NULL) AS retry_count,
-                   COALESCE((SELECT SUM(a.scheduled_delay_ms) FROM llm_call_attempts a
-                    WHERE a.llm_call_id = c.llm_call_id), 0) AS total_retry_wait_ms
+                   {self._llm_attempt_aggregate_projection()}
             FROM llm_calls c JOIN observations o ON o.observation_id = c.observation_id
             {where} ORDER BY o.occurred_at DESC
         """
@@ -640,17 +645,11 @@ class SQLiteObservationStore:
     def _get_llm_call(self, llm_call_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
-                """
+                f"""
                 SELECT c.*, o.occurred_at, o.tenant_id, o.project_id, o.org_id, o.user_id,
                        o.app_id, o.session_id, o.run_id, o.trace_id, o.agent_id,
                        o.graph_id, o.node_id, o.turn_id, o.attributes_json,
-                       (SELECT COUNT(*) FROM llm_call_attempts a
-                        WHERE a.llm_call_id = c.llm_call_id) AS attempt_count,
-                       (SELECT COUNT(*) FROM llm_call_attempts a
-                        WHERE a.llm_call_id = c.llm_call_id
-                          AND a.scheduled_delay_ms IS NOT NULL) AS retry_count,
-                       COALESCE((SELECT SUM(a.scheduled_delay_ms) FROM llm_call_attempts a
-                        WHERE a.llm_call_id = c.llm_call_id), 0) AS total_retry_wait_ms
+                       {self._llm_attempt_aggregate_projection()}
                 FROM llm_calls c JOIN observations o ON o.observation_id = c.observation_id
                 WHERE c.llm_call_id = ?
                 """,
@@ -1208,6 +1207,8 @@ class SQLiteObservationStore:
         *,
         conn: sqlite3.Connection,
     ) -> list[dict[str, Any]]:
+        if not self._has_llm_call_attempts:
+            return []
         rows = conn.execute(
             """
             SELECT attempt_number, elapsed_ms, outcome, retryable, status_code,
@@ -1227,6 +1228,19 @@ class SQLiteObservationStore:
             }
             for row in rows
         ]
+
+    def _llm_attempt_aggregate_projection(self) -> str:
+        if not self._has_llm_call_attempts:
+            return "0 AS attempt_count, 0 AS retry_count, " "0 AS total_retry_wait_ms"
+        return """
+            (SELECT COUNT(*) FROM llm_call_attempts a
+             WHERE a.llm_call_id = c.llm_call_id) AS attempt_count,
+            (SELECT COUNT(*) FROM llm_call_attempts a
+             WHERE a.llm_call_id = c.llm_call_id
+               AND a.scheduled_delay_ms IS NOT NULL) AS retry_count,
+            COALESCE((SELECT SUM(a.scheduled_delay_ms) FROM llm_call_attempts a
+             WHERE a.llm_call_id = c.llm_call_id), 0) AS total_retry_wait_ms
+        """.strip()
 
     @staticmethod
     def _optional_milliseconds(value: float | None) -> int | None:
