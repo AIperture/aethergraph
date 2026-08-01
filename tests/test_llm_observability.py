@@ -18,6 +18,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRateLimitSnapshot,
     ProviderResponseMetadata,
     ProviderRetrySettings,
+    ProviderTransportAttempt,
 )
 from aethergraph.services.llm.types import (
     LLMContextWindowExceededError,
@@ -87,6 +88,14 @@ async def test_manifest_reconstructs_exact_provider_request_and_deduplicates_fra
         policy=ObservationPolicy(capture_mode="manifest"),
     )
     first = _record(run_id="run-1")
+    first.attempts = (
+        ProviderTransportAttempt(
+            attempt_number=1,
+            elapsed_s=0.01,
+            outcome="success",
+            retryable=False,
+        ),
+    )
     second = _record(run_id="run-2")
 
     await store.append_llm_call(first)
@@ -173,9 +182,38 @@ async def test_deletion_retains_shared_fragments_until_final_reference(tmp_path:
 
     assert preview.shared_fragment_bytes_retained > 0
     assert deleted_first.deleted_observations == 1
+    with store._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM llm_call_attempts").fetchone()[0] == 0
     assert middle.fragments == before.fragments
     assert deleted_second.deleted_fragments == before.fragments
     assert after.fragments == 0
+
+
+@pytest.mark.asyncio
+async def test_read_only_store_hydrates_attempts_after_schema_creation(tmp_path: Path) -> None:
+    path = tmp_path / "observability.db"
+    writable = SQLiteObservationStore(
+        path,
+        policy=ObservationPolicy(capture_mode="metadata"),
+    )
+    record = _record(run_id="run-read-only")
+    record.attempts = (
+        ProviderTransportAttempt(
+            attempt_number=1,
+            elapsed_s=0.02,
+            outcome="success",
+            retryable=False,
+            request_id="req-read-only",
+        ),
+    )
+    await writable.append_llm_call(record)
+
+    read_only = SQLiteObservationStore(path, read_only=True)
+    detail = await read_only.get_llm_call(record.llm_call_id)
+
+    assert detail is not None
+    assert detail["attempt_count"] == 1
+    assert detail["attempts"][0]["request_id"] == "req-read-only"
 
 
 @pytest.mark.asyncio
