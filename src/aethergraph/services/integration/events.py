@@ -5,9 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 import sqlite3
 from typing import Literal, Protocol
+from uuid import uuid4
 
-from aethergraph.contracts.integration import SemanticEvent
+from aethergraph.contracts.integration import (
+    ExternalSessionBinding,
+    IngressEnvelope,
+    IntegrationRoute,
+    SemanticEvent,
+)
 from aethergraph.contracts.storage.event_log import EventLog
+from aethergraph.services.channel.resources import InputResource
 
 
 class SemanticEventStoreError(RuntimeError):
@@ -62,6 +69,124 @@ class PersistedSemanticEvent:
 
     cursor: int
     event: SemanticEvent
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedInboundEvent:
+    """One canonical inbound event paired with its durable EventLog cursor."""
+
+    cursor: int
+    event_id: str
+
+
+class EventLogInboundEventStore:
+    """Persist canonical inbound commands in the shared AG EventLog."""
+
+    def __init__(self, event_log: EventLog) -> None:
+        """Bind inbound persistence to the Host's existing event log.
+
+        The store records the closed envelope, resolved route and binding, and
+        materialized resource references before any resume or root dispatch.
+
+        Examples:
+            Bind the Host event log:
+            ```python
+            store = EventLogInboundEventStore(container.eventlog)
+            ```
+
+            Share storage with semantic events:
+            ```python
+            inbound = EventLogInboundEventStore(event_log)
+            semantic = EventLogSemanticEventStore(event_log)
+            ```
+
+        Args:
+            event_log: Canonical AG event log with durable append cursors.
+
+        Returns:
+            None.
+
+        Notes:
+            Raw provider payloads and secret material are not accepted.
+        """
+        self.event_log = event_log
+
+    async def append(
+        self,
+        *,
+        deployment_id: str,
+        route: IntegrationRoute,
+        binding: ExternalSessionBinding,
+        envelope: IngressEnvelope,
+        resources: tuple[InputResource, ...],
+    ) -> PersistedInboundEvent:
+        """Append one validated canonical ingress event before dispatch.
+
+        The assigned cursor is reused by the terminal `IngressReceipt` and
+        remains stable across Host restart.
+
+        Examples:
+            Persist a text command:
+            ```python
+            record = await store.append(
+                deployment_id="deployment-1",
+                route=route,
+                binding=binding,
+                envelope=envelope,
+                resources=(),
+            )
+            ```
+
+            Persist materialized attachments:
+            ```python
+            record = await store.append(
+                deployment_id=deployment_id,
+                route=route,
+                binding=binding,
+                envelope=envelope,
+                resources=resources,
+            )
+            ```
+
+        Args:
+            deployment_id: Exact Host deployment identity.
+            route: Exact immutable manifest route.
+            binding: Durable external-to-AG session binding.
+            envelope: Closed canonical ingress envelope.
+            resources: Materialized or validated attachment resources.
+
+        Returns:
+            PersistedInboundEvent: Generated event identity and durable cursor.
+
+        Notes:
+            This method performs no continuation resolution or root dispatch.
+        """
+        event_id = f"ingress-{uuid4().hex}"
+        cursor = await self.event_log.append(
+            {
+                "id": event_id,
+                "scope_id": f"integration:{deployment_id}:{binding.ag_session_id}",
+                "_partition_scope_id": f"integration:{deployment_id}:{binding.ag_session_id}",
+                "kind": "integration.ingress.accepted",
+                "tags": ["integration", "ingress", f"route:{route.route_id}"],
+                "ts": envelope.received_at,
+                "deployment_id": deployment_id,
+                "session_id": binding.ag_session_id,
+                "event_id": event_id,
+                "payload": {
+                    "route": route.model_dump(mode="json"),
+                    "binding": binding.model_dump(mode="json"),
+                    "envelope": envelope.model_dump(mode="json"),
+                    "resources": [resource.to_dict() for resource in resources],
+                },
+            }
+        )
+        if not isinstance(cursor, int) or cursor < 1:
+            raise SemanticEventStoreError(
+                code="integration.semantic_event_cursor_required",
+                message="Canonical EventLog append did not return a durable cursor.",
+            )
+        return PersistedInboundEvent(cursor=cursor, event_id=event_id)
 
 
 class SemanticEventStore(Protocol):

@@ -1,7 +1,12 @@
 """Provider-neutral services for unified integration ingress."""
 
+from .context import VerifiedAttachment, VerifiedIntegrationContext
+from .coordinator import IngressCoordinatorError, IntegrationIngressCoordinator
+from .dispatch import AGRootTurnDispatcher, RootTurnDispatcher
 from .events import (
+    EventLogInboundEventStore,
     EventLogSemanticEventStore,
+    PersistedInboundEvent,
     PersistedSemanticEvent,
     SemanticEventStore,
     SemanticEventStoreError,
@@ -12,11 +17,14 @@ from .idempotency import (
     IngressIdempotencyStore,
     SQLiteIngressIdempotencyStore,
 )
-from .routes import (
-    IntegrationRouteError,
-    ManifestRouteResolver,
-    VerifiedIntegrationContext,
+from .interactions import (
+    InteractionResolutionError,
+    InteractionResolver,
+    ResolvedInteraction,
+    build_interaction_payload,
 )
+from .resources import ResourceIngress, ResourceIngressError, ResourceIngressPolicy
+from .routes import IntegrationRouteError, ManifestRouteResolver
 from .session_bindings import (
     BindingResolution,
     ExternalSessionBindingStore,
@@ -26,18 +34,32 @@ from .session_bindings import (
 
 __all__ = [
     "BindingResolution",
+    "AGRootTurnDispatcher",
+    "EventLogInboundEventStore",
     "ExternalSessionBindingStore",
     "EventLogSemanticEventStore",
     "IngressClaim",
+    "IngressCoordinatorError",
     "IngressIdempotencyError",
     "IngressIdempotencyStore",
     "IntegrationRouteError",
+    "IntegrationIngressCoordinator",
+    "InteractionResolutionError",
+    "InteractionResolver",
     "ManifestRouteResolver",
     "PersistedSemanticEvent",
+    "PersistedInboundEvent",
+    "ResolvedInteraction",
+    "ResourceIngress",
+    "ResourceIngressError",
+    "ResourceIngressPolicy",
+    "RootTurnDispatcher",
     "SQLiteExternalSessionBindingStore",
     "SQLiteIngressIdempotencyStore",
     "SessionBindingError",
     "SemanticEventStore",
     "SemanticEventStoreError",
     "VerifiedIntegrationContext",
+    "VerifiedAttachment",
+    "build_interaction_payload",
 ]

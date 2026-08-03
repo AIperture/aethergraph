@@ -1312,6 +1312,7 @@ class ChannelSession:
 
             cont_payload = {
                 "_channel_wait_kind": kind,
+                "_interaction_id": f"interaction-{uuid.uuid4().hex}",
                 **payload,
             }
             cont = await self.ctx.create_continuation(

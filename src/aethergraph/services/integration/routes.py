@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal
 
 from aethergraph.contracts.integration import (
     HostManifest,
     IngressEnvelope,
-    IntegrationKind,
     IntegrationRoute,
 )
+
+from .context import VerifiedIntegrationContext
 
 
 class IntegrationRouteError(RuntimeError):
@@ -58,15 +58,6 @@ class IntegrationRouteError(RuntimeError):
         """
         super().__init__(message)
         self.code = code
-
-
-@dataclass(frozen=True, slots=True)
-class VerifiedIntegrationContext:
-    """Authenticated transport identity supplied to canonical ingress."""
-
-    integration_id: str
-    integration_kind: IntegrationKind
-    external_tenant_id: str
 
 
 class ManifestRouteResolver:

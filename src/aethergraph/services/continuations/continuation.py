@@ -59,4 +59,8 @@ class Continuation:
             "created_at": self.created_at.isoformat(),
             "closed": self.closed,
             "payload": self.payload,
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "app_id": self.app_id,
+            "graph_id": self.graph_id,
         }
