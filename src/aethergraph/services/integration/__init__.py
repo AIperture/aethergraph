@@ -2,6 +2,11 @@
 
 from .context import VerifiedAttachment, VerifiedIntegrationContext
 from .coordinator import IngressCoordinatorError, IntegrationIngressCoordinator
+from .delivery import (
+    SemanticDeliveryError,
+    SemanticEventChannelAdapter,
+    SemanticEventEmitter,
+)
 from .dispatch import AGRootTurnDispatcher, RootTurnDispatcher
 from .events import (
     EventLogInboundEventStore,
@@ -60,6 +65,9 @@ __all__ = [
     "SessionBindingError",
     "SemanticEventStore",
     "SemanticEventStoreError",
+    "SemanticDeliveryError",
+    "SemanticEventChannelAdapter",
+    "SemanticEventEmitter",
     "VerifiedIntegrationContext",
     "VerifiedAttachment",
     "build_interaction_payload",

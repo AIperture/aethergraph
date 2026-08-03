@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aethergraph.contracts.integration import HostManifest
+from aethergraph.contracts.integration import HostManifest, IntegrationKind
 
 from .coordinator import IntegrationIngressCoordinator
+from .delivery import SemanticEventChannelAdapter, SemanticEventEmitter
 from .dispatch import AGRootTurnDispatcher
-from .events import EventLogInboundEventStore
+from .events import EventLogInboundEventStore, EventLogSemanticEventStore
 from .idempotency import SQLiteIngressIdempotencyStore
 from .interactions import InteractionResolver
 from .resources import ResourceIngress, ResourceIngressPolicy
@@ -66,6 +67,33 @@ def install_integration_ingress(
         if database_path is not None
         else Path(container.root) / ("integration/operations.db")
     )
+    semantic_events = EventLogSemanticEventStore(container.eventlog)
+    emitter = SemanticEventEmitter(
+        deployment_id=manifest.deployment_id,
+        store=semantic_events,
+    )
+    container.channels.register_adapter(
+        "endpoint",
+        SemanticEventChannelAdapter(emitter=emitter),
+    )
+    provider_prefixes = {
+        IntegrationKind.SLACK: "slack",
+        IntegrationKind.TELEGRAM: "tg",
+    }
+    enabled_kinds = {
+        route.integration_kind for route in manifest.integration_routes if route.enabled
+    }
+    for kind, prefix in provider_prefixes.items():
+        if kind not in enabled_kinds:
+            continue
+        downstream = container.channels.adapters.get(prefix)
+        if downstream is None:
+            raise RuntimeError(f"Enabled {kind.value} route requires the {prefix!r} adapter.")
+        container.channels.register_adapter(
+            prefix,
+            SemanticEventChannelAdapter(emitter=emitter, downstream=downstream),
+        )
+
     coordinator = IntegrationIngressCoordinator(
         manifest=manifest,
         route_resolver=ManifestRouteResolver(manifest),
@@ -78,5 +106,6 @@ def install_integration_ingress(
         root_dispatcher=AGRootTurnDispatcher(container),
     )
     container.host_manifest = manifest
+    container.semantic_events = semantic_events
     container.integration_ingress = coordinator
     return coordinator

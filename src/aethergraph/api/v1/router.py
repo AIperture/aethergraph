@@ -1,10 +1,10 @@
 from fastapi import APIRouter  # type: ignore
 
+from .agent_endpoints import router as agent_endpoints_router
 from .agents import router as agents_router
 from .apps import router as apps_router
 from .artifacts import router as artifacts_router
 from .auth import router as auth_router
-from .channels import router as channels_router
 from .graphs import router as graphs_router
 from .identity import router as identity_router
 from .memory import router as memory_router
@@ -23,7 +23,7 @@ router.include_router(auth_router)
 router.include_router(runs_router)
 router.include_router(graphs_router)
 router.include_router(artifacts_router)
-router.include_router(channels_router)
+router.include_router(agent_endpoints_router)
 router.include_router(memory_router)
 router.include_router(observability_router)
 router.include_router(stats_router)

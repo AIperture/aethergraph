@@ -254,6 +254,7 @@ class DefaultContainer:
     # installed only by an explicit immutable AG Host deployment
     host_manifest: HostManifest | None = None
     integration_ingress: Any | None = None
+    semantic_events: Any | None = None
 
     # opt-in host runtime output capture; disabled for normal CLI/server hosts
     runtime_output_sink: Any | None = None

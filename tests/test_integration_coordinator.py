@@ -180,6 +180,13 @@ def _coordinator(
 
 @pytest.mark.asyncio
 async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
+    class _Channels:
+        def __init__(self) -> None:
+            self.adapters = {"slack": SimpleNamespace(capabilities=set(), send=None)}
+
+        def register_adapter(self, prefix, adapter) -> None:
+            self.adapters[prefix] = adapter
+
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
     container = SimpleNamespace(
         root=str(tmp_path),
@@ -189,6 +196,7 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
         eventlog=event_log,
         resume_router=_ResumeRouter(),
         run_manager=SimpleNamespace(),
+        channels=_Channels(),
     )
     manifest = _manifest(_route())
 
@@ -197,6 +205,8 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
     assert container.integration_ingress is coordinator
     assert container.host_manifest is manifest
     assert coordinator.manifest is manifest
+    assert container.semantic_events is not None
+    assert "endpoint" in container.channels.adapters
     assert (tmp_path / "integration" / "operations.db").is_file()
     with pytest.raises(RuntimeError, match="already installed"):
         install_integration_ingress(container=container, manifest=manifest)
