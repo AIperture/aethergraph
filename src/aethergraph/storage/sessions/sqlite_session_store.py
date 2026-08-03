@@ -178,6 +178,7 @@ class SQLiteSessionStoreSync:
     def create(
         self,
         *,
+        session_id: str | None = None,
         kind: SessionKind,
         user_id: str | None = None,
         org_id: str | None = None,
@@ -185,22 +186,37 @@ class SQLiteSessionStoreSync:
         source: str = "webui",
         external_ref: str | None = None,
     ) -> Session:
-        now = datetime.now(UTC)
-        sess = Session(
-            session_id=str(uuid.uuid4()),
-            kind=kind,
-            title=title,
-            title_source="manual" if (title or "").strip() else None,
-            user_id=user_id,
-            org_id=org_id,
-            source=source,
-            external_ref=external_ref,
-            created_at=now,
-            updated_at=now,
-            artifact_count=0,
-            last_artifact_at=None,
-        )
-        return self._upsert(sess)
+        with self._lock:
+            if session_id is not None:
+                existing = self.get(session_id)
+                if existing is not None:
+                    expected = (kind, user_id, org_id, source, external_ref)
+                    actual = (
+                        existing.kind,
+                        existing.user_id,
+                        existing.org_id,
+                        existing.source,
+                        existing.external_ref,
+                    )
+                    if actual != expected:
+                        raise ValueError(f"Session identity collision: {session_id}")
+                    return existing
+            now = datetime.now(UTC)
+            sess = Session(
+                session_id=session_id or str(uuid.uuid4()),
+                kind=kind,
+                title=title,
+                title_source="manual" if (title or "").strip() else None,
+                user_id=user_id,
+                org_id=org_id,
+                source=source,
+                external_ref=external_ref,
+                created_at=now,
+                updated_at=now,
+                artifact_count=0,
+                last_artifact_at=None,
+            )
+            return self._upsert(sess)
 
     def get(self, session_id: str) -> Session | None:
         with self._lock:
@@ -321,6 +337,7 @@ class SQLiteSessionStore(SessionStore):
     async def create(
         self,
         *,
+        session_id: str | None = None,
         kind: SessionKind,
         user_id: str | None = None,
         org_id: str | None = None,
@@ -331,6 +348,7 @@ class SQLiteSessionStore(SessionStore):
         # Delegate to sync create (which already constructs Session correctly)
         return await asyncio.to_thread(
             self._sync.create,
+            session_id=session_id,
             kind=kind,
             user_id=user_id,
             org_id=org_id,

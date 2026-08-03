@@ -19,6 +19,7 @@ from aethergraph.contracts.integration import (
     SemanticEventKind,
 )
 from aethergraph.services.integration import BindingResolution, ManifestRouteResolver
+from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
 
 _DIGEST = "a" * 64
 
@@ -112,6 +113,7 @@ def _app() -> tuple[FastAPI, SimpleNamespace]:
         integration_ingress=ingress,
         host_manifest=manifest,
         semantic_events=SimpleNamespace(),
+        session_store=InMemorySessionStore(),
     )
     app = FastAPI()
     app.state.container = container
@@ -151,6 +153,11 @@ async def test_endpoint_session_and_ingress_use_manifest_route() -> None:
     assert call["envelope"].endpoint_id == "support"
     assert call["envelope"].external_identity.conversation_id == session_id
     assert call["envelope"].origin_address.channel_key.startswith("endpoint:support:session/")
+    stored = await container.session_store.get(session_id)
+    assert stored is not None
+    assert stored.external_ref == "agent-endpoint:support"
+    binding = container.integration_ingress.binding_store.by_conversation[session_id]
+    assert binding.ag_session_id == session_id
 
 
 @pytest.mark.anyio

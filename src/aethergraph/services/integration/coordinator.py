@@ -5,11 +5,19 @@ from __future__ import annotations
 from typing import Literal
 from uuid import uuid4
 
-from aethergraph.contracts.integration import HostManifest, IngressEnvelope, IngressReceipt
+from aethergraph.contracts.integration import (
+    ArtifactAvailablePayload,
+    HostManifest,
+    IngressEnvelope,
+    IngressReceipt,
+    InputAcceptedPayload,
+    SemanticEvent,
+    SemanticEventKind,
+)
 
 from .context import VerifiedIntegrationContext
 from .dispatch import RootTurnDispatcher
-from .events import EventLogInboundEventStore
+from .events import EventLogInboundEventStore, SemanticEventStore
 from .idempotency import IngressIdempotencyStore
 from .interactions import (
     InteractionResolutionError,
@@ -78,6 +86,7 @@ class IntegrationIngressCoordinator:
         resource_ingress: ResourceIngress,
         interaction_resolver: InteractionResolver,
         inbound_events: EventLogInboundEventStore,
+        semantic_events: SemanticEventStore,
         resume_router,
         root_dispatcher: RootTurnDispatcher,
     ) -> None:
@@ -116,6 +125,7 @@ class IntegrationIngressCoordinator:
             resource_ingress: Shared attachment validation/materialization service.
             interaction_resolver: Exact open-interaction resolver.
             inbound_events: Canonical shared EventLog ingress writer.
+            semantic_events: Canonical endpoint/provider delivery event store.
             resume_router: AG continuation resume router.
             root_dispatcher: Exact route-selected AG root dispatcher.
 
@@ -132,6 +142,7 @@ class IntegrationIngressCoordinator:
         self.resource_ingress = resource_ingress
         self.interaction_resolver = interaction_resolver
         self.inbound_events = inbound_events
+        self.semantic_events = semantic_events
         self.resume_router = resume_router
         self.root_dispatcher = root_dispatcher
 
@@ -239,6 +250,35 @@ class IntegrationIngressCoordinator:
             binding=binding,
             envelope=envelope,
             resources=resources,
+        )
+        await self.semantic_events.append(
+            SemanticEvent(
+                event_id=f"semantic-{inbound.event_id}",
+                deployment_id=self.manifest.deployment_id,
+                session_id=binding.ag_session_id,
+                turn_id=inbound.event_id,
+                sequence=0,
+                producer=f"integration.{route.integration_kind.value}",
+                timestamp=envelope.received_at,
+                kind=SemanticEventKind.INPUT_ACCEPTED,
+                payload=InputAcceptedPayload(
+                    input_id=envelope.idempotency_key,
+                    text=envelope.text,
+                    artifacts=tuple(
+                        ArtifactAvailablePayload(
+                            artifact_id=resource.artifact_id,
+                            filename=resource.name or resource.artifact_id,
+                            content_type=resource.mime or "application/octet-stream",
+                            size_bytes=resource.size or 0,
+                        )
+                        for resource in resources
+                        if resource.artifact_id is not None
+                    ),
+                    interaction_id=envelope.choice.interaction_id if envelope.choice else None,
+                    option_ids=envelope.choice.option_ids if envelope.choice else (),
+                ),
+                extensions={"aethergraph.route_id": route.route_id},
+            )
         )
         if resolved is not None:
             continuation = resolved.continuation

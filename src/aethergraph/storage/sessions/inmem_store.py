@@ -15,6 +15,7 @@ class InMemorySessionStore(SessionStore):
     async def create(
         self,
         *,
+        session_id: str | None = None,
         kind: SessionKind,
         user_id: str | None,
         org_id: str | None,
@@ -23,10 +24,23 @@ class InMemorySessionStore(SessionStore):
         external_ref: str | None = None,
     ) -> Session:
         async with self._lock:
+            if session_id is not None and session_id in self._sessions:
+                existing = self._sessions[session_id]
+                expected = (kind, user_id, org_id, source, external_ref)
+                actual = (
+                    existing.kind,
+                    existing.user_id,
+                    existing.org_id,
+                    existing.source,
+                    existing.external_ref,
+                )
+                if actual != expected:
+                    raise ValueError(f"Session identity collision: {session_id}")
+                return existing
             now = datetime.now(UTC)
-            session_id = f"sess_{uuid.uuid4().hex[:8]}"
+            resolved_session_id = session_id or f"sess_{uuid.uuid4().hex[:8]}"
             sess = Session(
-                session_id=session_id,
+                session_id=resolved_session_id,
                 kind=kind,
                 title=title,
                 title_source="manual" if (title or "").strip() else None,
@@ -37,7 +51,7 @@ class InMemorySessionStore(SessionStore):
                 created_at=now,
                 updated_at=now,
             )
-            self._sessions[session_id] = sess
+            self._sessions[resolved_session_id] = sess
             return sess
 
     async def get(self, session_id: str) -> Session | None:

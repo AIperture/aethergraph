@@ -51,6 +51,7 @@ class IntegrationKind(StrEnum):
 class SemanticEventKind(StrEnum):
     """Semantic events exposed to transport projectors and endpoint clients."""
 
+    INPUT_ACCEPTED = "input.accepted"
     MESSAGE_STARTED = "message.started"
     MESSAGE_DELTA = "message.delta"
     MESSAGE_COMPLETED = "message.completed"
@@ -318,6 +319,16 @@ class OriginBinding(IntegrationContract):
     capability_profile_id: Identifier
 
 
+class InputAcceptedPayload(IntegrationContract):
+    """Semantic payload recording accepted external user input."""
+
+    input_id: Identifier
+    text: BoundedText | None = None
+    artifacts: tuple[ArtifactAvailablePayload, ...] = ()
+    interaction_id: Identifier | None = None
+    option_ids: tuple[Identifier, ...] = ()
+
+
 class MessageStartedPayload(IntegrationContract):
     """Semantic payload opening one streamed or buffered assistant message."""
 
@@ -436,7 +447,8 @@ class TurnFailedPayload(IntegrationContract):
 
 
 SemanticPayload: TypeAlias = (
-    MessageStartedPayload
+    InputAcceptedPayload
+    | MessageStartedPayload
     | MessageDeltaPayload
     | MessageCompletedPayload
     | PhaseChangedPayload
@@ -453,6 +465,7 @@ SemanticPayload: TypeAlias = (
 
 
 _PAYLOAD_BY_KIND: dict[SemanticEventKind, type[IntegrationContract]] = {
+    SemanticEventKind.INPUT_ACCEPTED: InputAcceptedPayload,
     SemanticEventKind.MESSAGE_STARTED: MessageStartedPayload,
     SemanticEventKind.MESSAGE_DELTA: MessageDeltaPayload,
     SemanticEventKind.MESSAGE_COMPLETED: MessageCompletedPayload,

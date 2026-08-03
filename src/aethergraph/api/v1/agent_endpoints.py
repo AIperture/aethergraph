@@ -20,6 +20,7 @@ from aethergraph.contracts.integration import (
     IntegrationKind,
     OriginAddress,
 )
+from aethergraph.core.runtime.run_types import SessionKind
 from aethergraph.services.integration import VerifiedAttachment, VerifiedIntegrationContext
 
 from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
@@ -33,6 +34,7 @@ class _ClosedModel(BaseModel):
 
 class EndpointSessionCreate(_ClosedModel):
     idempotency_key: str = Field(min_length=1, max_length=255)
+    title: str | None = Field(default=None, max_length=512)
 
 
 class EndpointSessionView(_ClosedModel):
@@ -141,7 +143,7 @@ async def create_endpoint_session(
     """Create or replay one authenticated public endpoint session.
 
     The idempotency key deterministically identifies the public conversation;
-    the durable AG session remains an internal Host binding.
+    the same identity is used by the public endpoint and AG session store.
 
     Examples:
         Create a bespoke application session:
@@ -195,14 +197,37 @@ async def create_endpoint_session(
         verified=verified,
         envelope=probe,
     )
-    await container.integration_ingress.binding_store.get_or_create(
+    existing_binding = await container.integration_ingress.binding_store.get(
+        route=resolved,
+        external_identity=external,
+    )
+    if existing_binding is not None and existing_binding.ag_session_id != session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Endpoint session binding conflicts with the canonical session identity.",
+        )
+    await container.session_store.create(
+        session_id=session_id,
+        kind=SessionKind.chat,
+        user_id=user_id,
+        org_id=tenant_id,
+        title=body.title,
+        source=("ag_ui" if route.integration_kind is IntegrationKind.AG_UI else "agent_endpoint"),
+        external_ref=f"agent-endpoint:{endpoint_id}",
+    )
+    binding = await container.integration_ingress.binding_store.get_or_create(
         route=resolved,
         external_identity=external,
         build_id=container.host_manifest.build_id,
         binding_id=f"binding-{digest[:32]}",
-        ag_session_id=f"session-{digest[32:]}",
+        ag_session_id=session_id,
         now=probe.received_at,
     )
+    if binding.binding.ag_session_id != session_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Endpoint session binding conflicts with the canonical session identity.",
+        )
     return EndpointSessionView(session_id=session_id, endpoint_id=endpoint_id)
 
 

@@ -62,6 +62,7 @@ class DocSessionStore(SessionStore):
     async def create(
         self,
         *,
+        session_id: str | None = None,
         kind: SessionKind,
         user_id: str | None,
         org_id: str | None,
@@ -70,9 +71,9 @@ class DocSessionStore(SessionStore):
         external_ref: str | None = None,
     ) -> Session:
         now = datetime.now(UTC)
-        session_id = f"sess_{uuid.uuid4().hex[:8]}"
+        resolved_session_id = session_id or f"sess_{uuid.uuid4().hex[:8]}"
         sess = Session(
-            session_id=session_id,
+            session_id=resolved_session_id,
             kind=kind,
             title=title,
             title_source="manual" if (title or "").strip() else None,
@@ -85,7 +86,21 @@ class DocSessionStore(SessionStore):
         )
 
         async with self._lock:
-            await self._ds.put(self._doc_id(session_id), _session_to_doc(sess))
+            existing_doc = await self._ds.get(self._doc_id(resolved_session_id))
+            if existing_doc is not None:
+                existing = _doc_to_session(existing_doc)
+                expected = (kind, user_id, org_id, source, external_ref)
+                actual = (
+                    existing.kind,
+                    existing.user_id,
+                    existing.org_id,
+                    existing.source,
+                    existing.external_ref,
+                )
+                if actual != expected:
+                    raise ValueError(f"Session identity collision: {resolved_session_id}")
+                return existing
+            await self._ds.put(self._doc_id(resolved_session_id), _session_to_doc(sess))
         return sess
 
     async def get(self, session_id: str) -> Session | None:

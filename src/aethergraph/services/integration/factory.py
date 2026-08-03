@@ -102,6 +102,7 @@ def install_integration_ingress(
         resource_ingress=ResourceIngress(container=container, policy=resource_policy),
         interaction_resolver=InteractionResolver(container.cont_store),
         inbound_events=EventLogInboundEventStore(container.eventlog),
+        semantic_events=semantic_events,
         resume_router=container.resume_router,
         root_dispatcher=AGRootTurnDispatcher(container),
     )

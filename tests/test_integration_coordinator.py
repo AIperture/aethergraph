@@ -25,6 +25,7 @@ from aethergraph.services.continuations.stores.inmem_store import InMemoryContin
 from aethergraph.services.integration import (
     BindingResolution,
     EventLogInboundEventStore,
+    EventLogSemanticEventStore,
     IntegrationIngressCoordinator,
     InteractionResolutionError,
     InteractionResolver,
@@ -173,6 +174,7 @@ def _coordinator(
         resource_ingress=ResourceIngress(container=SimpleNamespace()),
         interaction_resolver=InteractionResolver(continuation_store),
         inbound_events=EventLogInboundEventStore(event_log),
+        semantic_events=EventLogSemanticEventStore(event_log),
         resume_router=resume_router,
         root_dispatcher=root_dispatcher,
     )
@@ -237,6 +239,13 @@ async def test_coordinator_starts_one_root_turn_and_replays_receipt(tmp_path) ->
     assert duplicate == receipt.model_copy(update={"duplicate": True})
     assert len(root.calls) == 1
     assert resume.calls == []
+    semantic = await coordinator.semantic_events.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert len(semantic) == 1
+    assert semantic[0].event.kind is SemanticEventKind.INPUT_ACCEPTED
+    assert semantic[0].event.payload.input_id == "event-1"
     await event_log.close()
 
 

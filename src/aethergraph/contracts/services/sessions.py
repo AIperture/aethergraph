@@ -12,6 +12,7 @@ class SessionStore(Protocol):
     async def create(
         self,
         *,
+        session_id: str | None = None,
         kind: SessionKind,
         user_id: str | None = None,
         org_id: str | None = None,
@@ -20,7 +21,10 @@ class SessionStore(Protocol):
         external_ref: str | None = None,
     ) -> Session:
         """
-        Create a new session and return it.
+        Create a session with an optional caller-owned identity.
+
+        Repeating an exact explicit identity is idempotent. Reusing that
+        identity with different ownership or source metadata must fail.
         """
 
     async def get(self, session_id: str) -> Session | None:
