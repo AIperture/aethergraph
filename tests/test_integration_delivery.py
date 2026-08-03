@@ -6,6 +6,7 @@ from aethergraph.contracts.integration import (
     InteractionRequestedPayload,
     MessageCompletedPayload,
     SemanticEventKind,
+    StructuredOutputPayload,
 )
 from aethergraph.contracts.services.channel import Button, OutEvent
 from aethergraph.services.integration import (
@@ -91,4 +92,35 @@ async def test_semantic_adapter_rejects_missing_turn_identity(tmp_path) -> None:
                 meta={"run_id": "run-1"},
             )
         )
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_persists_named_structured_output(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+
+    await adapter.send(
+        OutEvent(
+            type="structured.output",
+            channel="endpoint:sessions/public-1",
+            rich={
+                "output_name": "workflow.status",
+                "value": {"operation": "clear"},
+            },
+            meta=_meta(),
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert history[0].event.kind == SemanticEventKind.STRUCTURED_OUTPUT
+    assert isinstance(history[0].event.payload, StructuredOutputPayload)
+    assert history[0].event.payload.output_name == "workflow.status"
+    assert history[0].event.payload.value == {"operation": "clear"}
     await event_log.close()

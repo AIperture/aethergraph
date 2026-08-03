@@ -221,6 +221,17 @@ class SemanticEventEmitter:
                     ),
                 ),
             )
+        if event.type == "structured.output":
+            rich = event.rich or {}
+            return (
+                (
+                    SemanticEventKind.STRUCTURED_OUTPUT,
+                    StructuredOutputPayload(
+                        output_name=self._required(rich.get("output_name"), "output_name"),
+                        value=rich.get("value"),
+                    ),
+                ),
+            )
         if event.type in {"file.upload", "link.buttons", "session.waiting"}:
             return (
                 (

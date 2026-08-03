@@ -84,6 +84,25 @@ class SlackChannelAdapter(ChannelAdapter):
     async def send(self, event: OutEvent) -> dict | None:
         channel, thread_ts = await self._ensure_thread(event.channel)
 
+        if event.type == "structured.output":
+            from aethergraph.services.channel.structured_outputs import (
+                project_messaging_text,
+            )
+
+            resp = await self.client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=project_messaging_text(event),
+            )
+            return {
+                "correlator": Correlator(
+                    scheme="slack",
+                    channel=event.channel,
+                    thread=thread_ts,
+                    message=resp.get("ts"),
+                )
+            }
+
         # streaming/upsert: we use chat.update keyed by upsert_key
         if (
             event.type

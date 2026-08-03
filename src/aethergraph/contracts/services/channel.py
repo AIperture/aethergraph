@@ -13,6 +13,7 @@ EventType = Literal[
     "session.need_input",
     "session.need_approval",
     "session.waiting",
+    "structured.output",
     "file.upload",
     "link.buttons",  # link preview with buttons
 ]

@@ -326,21 +326,6 @@ class ChannelSession:
             )
         return raw
 
-    def _extract_ui_session_id(self, channel: str | None = None) -> str:
-        channel_key = self._resolve_key(channel)
-        prefix = "ui:session/"
-        if not channel_key.startswith(prefix):
-            raise RuntimeError(
-                "ChannelSession.work_status() requires a ui:session channel; "
-                f"got {channel_key!r}."
-            )
-        session_id = channel_key[len(prefix) :]
-        if not session_id:
-            raise RuntimeError(
-                "ChannelSession.work_status() requires a resolved ui:session/<session_id> channel."
-            )
-        return session_id
-
     def _ensure_channel(self, event: "OutEvent", channel: str | None = None) -> "OutEvent":
         """
         Ensure event.channel is set to a concrete channel key before publishing.
@@ -400,26 +385,26 @@ class ChannelSession:
             self,
             outer: "ChannelSession",
             *,
-            session_id: str,
             channel_key: str,
             workflow_id: str | None = None,
         ) -> None:
             self._outer = outer
-            self._session_id = session_id
             self._channel_key = channel_key
             self._workflow_id = workflow_id
 
-        def _meta(self) -> dict[str, Any]:
-            return self._outer._inject_context_meta({"channel_key": self._channel_key})
+        async def _emit(self, value: dict[str, Any]) -> dict[str, Any]:
+            await self._outer.send(
+                OutEvent(
+                    type="structured.output",
+                    channel=self._channel_key,
+                    rich={"output_name": "workflow.status", "value": value},
+                    upsert_key="workflow.status",
+                )
+            )
+            return value
 
         async def replace(self, work_status: dict[str, Any]) -> dict[str, Any]:
-            from aethergraph.services.channel.session_work_status import replace_session_work_status
-
-            return await replace_session_work_status(
-                session_id=self._session_id,
-                work_status=work_status,
-                meta=self._meta(),
-            )
+            return await self._emit({"operation": "replace", "work_status": work_status})
 
         async def patch(
             self,
@@ -430,54 +415,48 @@ class ChannelSession:
             active_item_id: str | None = None,
             item_updates: list[dict[str, Any]] | None = None,
         ) -> dict[str, Any]:
-            from aethergraph.services.channel.session_work_status import patch_session_work_status
-
             resolved_workflow_id = workflow_id if workflow_id is not None else self._workflow_id
-            return await patch_session_work_status(
-                session_id=self._session_id,
-                workflow_id=resolved_workflow_id,
-                status=status,
-                summary=summary,
-                active_item_id=active_item_id,
-                item_updates=item_updates,
-                meta=self._meta(),
+            return await self._emit(
+                {
+                    "operation": "patch",
+                    "workflow_id": resolved_workflow_id,
+                    "status": status,
+                    "summary": summary,
+                    "active_item_id": active_item_id,
+                    "item_updates": item_updates or [],
+                }
             )
 
         async def clear(self) -> dict[str, Any]:
-            from aethergraph.services.channel.session_work_status import clear_session_work_status
-
-            return await clear_session_work_status(
-                session_id=self._session_id,
-                meta=self._meta(),
-            )
+            return await self._emit({"operation": "clear"})
 
     class _SessionDashboardStateHandle:
         def __init__(
             self,
             outer: "ChannelSession",
             *,
-            session_id: str,
             channel_key: str,
             dashboard_id: str,
         ) -> None:
             self._outer = outer
-            self._session_id = session_id
             self._channel_key = channel_key
             self._dashboard_id = dashboard_id
 
-        def _meta(self) -> dict[str, Any]:
-            return self._outer._inject_context_meta({"channel_key": self._channel_key})
+        async def _emit(self, value: dict[str, Any]) -> dict[str, Any]:
+            await self._outer.send(
+                OutEvent(
+                    type="structured.output",
+                    channel=self._channel_key,
+                    rich={"output_name": "workflow.dashboard", "value": value},
+                    upsert_key=f"workflow.dashboard:{self._dashboard_id}",
+                )
+            )
+            return value
 
         async def replace(self, state: dict[str, Any]) -> dict[str, Any]:
-            from aethergraph.services.channel.session_dashboard_state import (
-                replace_session_dashboard_state,
-            )
-
-            return await replace_session_dashboard_state(
-                session_id=self._session_id,
-                dashboard_state=state,
-                meta=self._meta(),
-            )
+            if state.get("dashboard_id") != self._dashboard_id:
+                raise ValueError("dashboard state must match the bound dashboard_id")
+            return await self._emit({"operation": "replace", "dashboard": state})
 
         async def patch(
             self,
@@ -486,36 +465,25 @@ class ChannelSession:
             status: str | None = None,
             ops: list[dict[str, Any]] | None = None,
         ) -> dict[str, Any]:
-            from aethergraph.services.channel.session_dashboard_state import (
-                patch_session_dashboard_state,
-            )
-
-            return await patch_session_dashboard_state(
-                session_id=self._session_id,
-                dashboard_id=self._dashboard_id,
-                revision=revision,
-                status=status,
-                ops=ops,
-                meta=self._meta(),
+            return await self._emit(
+                {
+                    "operation": "patch",
+                    "patch": {
+                        "dashboard_id": self._dashboard_id,
+                        "revision": revision,
+                        "status": status,
+                        "ops": ops or [],
+                    },
+                }
             )
 
         async def clear(self) -> dict[str, Any]:
-            from aethergraph.services.channel.session_dashboard_state import (
-                clear_session_dashboard_state,
-            )
-
-            return await clear_session_dashboard_state(
-                session_id=self._session_id,
-                dashboard_id=self._dashboard_id,
-                meta=self._meta(),
-            )
+            return await self._emit({"operation": "clear", "dashboard_id": self._dashboard_id})
 
     def work_status(self, *, workflow_id: str | None = None) -> "_SessionWorkStatusHandle":
         channel_key = self._resolve_key()
-        session_id = self._extract_ui_session_id(channel_key)
         return ChannelSession._SessionWorkStatusHandle(
             self,
-            session_id=session_id,
             channel_key=channel_key,
             workflow_id=workflow_id,
         )
@@ -524,10 +492,8 @@ class ChannelSession:
         if not dashboard_id:
             raise ValueError("dashboard_state requires a non-empty dashboard_id")
         channel_key = self._resolve_key()
-        session_id = self._extract_ui_session_id(channel_key)
         return ChannelSession._SessionDashboardStateHandle(
             self,
-            session_id=session_id,
             channel_key=channel_key,
             dashboard_id=dashboard_id,
         )
