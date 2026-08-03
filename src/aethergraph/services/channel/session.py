@@ -820,7 +820,7 @@ class ChannelSession:
         memory_signal: float | None = None,
     ) -> None:
         """
-        Send a live run-monitor card into a rich-capable UI session.
+        Send a live run-monitor card to the run origin.
 
         The emitted rich payload is declarative. The frontend owns live polling
         from `run_id` and should not expect this helper to stream updates.
@@ -828,12 +828,12 @@ class ChannelSession:
         Examples:
             Send a default live run card:
             ```python
-            await context.channel("ui:session").send_run_card(run_id="run_123")
+            await context.channel().send_run_card(run_id="run_123")
             ```
 
             Send a card with custom title and disabled preview:
             ```python
-            await context.channel("ui:session").send_run_card(
+            await context.channel().send_run_card(
                 run_id="run_123",
                 graph_id="demo.graph",
                 title="Training run",

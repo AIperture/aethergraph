@@ -248,11 +248,6 @@ def create_app(
         finally:
             sys.path.pop(0)
 
-    # Webui router
-    from aethergraph.plugins.channel.routes.webui_routes import router as webui_router
-
-    app.include_router(router=webui_router, prefix="/api/v1")
-
     from aethergraph.api.v1.observability import trace_router
 
     app.include_router(trace_router)

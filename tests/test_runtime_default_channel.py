@@ -9,7 +9,6 @@ import pytest
 from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.channel import ChannelRoutingError
 from aethergraph.core.runtime import graph_runner
-from aethergraph.core.runtime.node_context import NodeContext
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.runner.facade import RunFacade
 
@@ -45,26 +44,26 @@ def _context(channel_key: str) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_concurrent_contexts_resolve_distinct_run_scoped_channels() -> None:
-    first = ChannelSession(_context("ui:session/first"))
-    second = ChannelSession(_context("ui:session/second"))
+    first = ChannelSession(_context("endpoint:sessions/first"))
+    second = ChannelSession(_context("endpoint:sessions/second"))
 
     first_key, second_key = await asyncio.gather(
         asyncio.to_thread(first._resolve_key),
         asyncio.to_thread(second._resolve_key),
     )
 
-    assert first_key == "ui:session/first"
-    assert second_key == "ui:session/second"
+    assert first_key == "endpoint:sessions/first"
+    assert second_key == "endpoint:sessions/second"
 
 
 def test_explicit_channel_overrides_run_scoped_default() -> None:
-    channel = ChannelSession(_context("ui:session/default"))
+    channel = ChannelSession(_context("endpoint:sessions/default"))
 
-    assert channel._resolve_key("ui:session/explicit") == "ui:session/explicit"
+    assert channel._resolve_key("endpoint:sessions/explicit") == "endpoint:sessions/explicit"
 
 
 def test_missing_origin_fails_without_console_or_bus_default() -> None:
-    context = _context("ui:session/default")
+    context = _context("endpoint:sessions/default")
     context.origin_binding = None
 
     with pytest.raises(ChannelRoutingError) as exc_info:
@@ -74,21 +73,9 @@ def test_missing_origin_fails_without_console_or_bus_default() -> None:
     assert exc_info.value.channel_key is None
 
 
-def test_node_context_exposes_no_ui_or_work_status_compatibility_wrappers() -> None:
-    removed = (
-        "ui_session_channel",
-        "ui_run_channel",
-        "replace_work_status",
-        "patch_work_status",
-        "clear_work_status",
-    )
-
-    assert all(not hasattr(NodeContext, name) for name in removed)
-
-
 @pytest.mark.asyncio
 async def test_graph_runner_deserializes_closed_origin_binding(monkeypatch) -> None:
-    binding = _context("ui:session/session-1").origin_binding
+    binding = _context("endpoint:sessions/session-1").origin_binding
     monkeypatch.setattr(graph_runner, "_get_container", lambda: SimpleNamespace())
 
     env, _, _ = await graph_runner._build_env(
@@ -130,7 +117,7 @@ async def test_runner_facade_propagates_origin_binding_to_child_runs() -> None:
         integration_id="integration.ui",
         route_id="route.ui",
         session_id="session-parent",
-        channel_key="ui:session/session-parent",
+        channel_key="endpoint:sessions/session-parent",
         external_conversation_id="session-parent",
         capability_profile_id="ag-ui/v1",
     )

@@ -137,7 +137,7 @@ def test_ingress_envelope_is_closed_and_requires_one_command() -> None:
         received_at=datetime(2026, 8, 3, tzinfo=UTC),
         text="Hello",
         origin_address=OriginAddress(
-            channel_key="ui:session/session_1",
+            channel_key="endpoint:sessions/session_1",
             capability_profile_id="ag_ui_v1",
         ),
     )

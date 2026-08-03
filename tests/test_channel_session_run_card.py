@@ -40,7 +40,7 @@ class _FakeContext:
         self.graph_id = "graph-ctx"
         self.agent_id = "agent-ctx"
         self.app_id = "app-ctx"
-        self.origin_binding = SimpleNamespace(channel_key="ui:session/test-session")
+        self.origin_binding = SimpleNamespace(channel_key="endpoint:sessions/test-session")
         self.services = SimpleNamespace(
             channels=_FakeBus(),
             continuation_store=None,

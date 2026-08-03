@@ -139,6 +139,16 @@ class SemanticEventEmitter:
                 ),
             )
         if event.type in {"agent.stream.end", "agent.message", "agent.message.update"}:
+            if event.rich is not None:
+                return (
+                    (
+                        SemanticEventKind.STRUCTURED_OUTPUT,
+                        StructuredOutputPayload(
+                            output_name="channel.rich",
+                            value={"text": event.text, "rich": event.rich},
+                        ),
+                    ),
+                )
             artifact_ids = self._artifact_ids(event)
             return (
                 (

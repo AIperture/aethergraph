@@ -80,12 +80,12 @@ class RunFacade:
             Build configuration with a run origin:
             ```python
             binding = OriginBinding(
-                integration_id="ui",
-                route_id="route.ui",
+                integration_id="endpoint",
+                route_id="route.endpoint",
                 session_id="s-1",
-                channel_key="ui:session/s-1",
+                channel_key="endpoint:sessions/s-1",
                 external_conversation_id="s-1",
-                capability_profile_id="ag-ui/v1",
+                capability_profile_id="agent-endpoint/v1",
             )
             facade = RunFacade(manager, origin_binding=binding)
             config = facade._child_run_config()

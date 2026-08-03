@@ -112,7 +112,11 @@ class ChannelBus:
         Examples:
             Deliver a text event:
             ```python
-            event = OutEvent(type="agent.message", channel="ui:session/s1", text="Done")
+            event = OutEvent(
+                type="agent.message",
+                channel="endpoint:sessions/s1",
+                text="Done",
+            )
             await bus.publish(event)
             ```
 

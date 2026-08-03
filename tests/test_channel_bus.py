@@ -39,7 +39,7 @@ async def test_publish_delivers_unsupported_event_unchanged() -> None:
 
 @pytest.mark.asyncio
 async def test_publish_reports_structured_missing_adapter() -> None:
-    bus = ChannelBus(adapters={"ui": _CapturingAdapter()})
+    bus = ChannelBus(adapters={"endpoint": _CapturingAdapter()})
     event = OutEvent(type="agent.message", channel="slack:team/T:chan/C", text="Done")
 
     with pytest.raises(ChannelRoutingError) as exc_info:
@@ -47,7 +47,7 @@ async def test_publish_reports_structured_missing_adapter() -> None:
 
     assert exc_info.value.code == "channel.adapter_not_found"
     assert exc_info.value.channel_key == "slack:team/T:chan/C"
-    assert exc_info.value.known_prefixes == ("ui",)
+    assert exc_info.value.known_prefixes == ("endpoint",)
 
 
 @pytest.mark.asyncio

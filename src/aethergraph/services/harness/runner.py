@@ -10,6 +10,7 @@ from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.core.graph.graph_refs import resolve_any
 from aethergraph.core.runtime.graph_runner import run_async
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunStatus, RunVisibility
+from aethergraph.services.channel._origin import _console_origin_binding
 from aethergraph.services.container.default_container import DefaultContainer, get_container
 
 from .export import HarnessExporter
@@ -324,25 +325,6 @@ class HarnessRunner:
             graph_id = backing.get("name") or meta.get("graph_id") or scenario.target.graph_id
             if not graph_id:
                 raise RuntimeError(f"Agent {scenario.target.agent_id!r} has no graph backing")
-            if self.container.eventlog is not None and (scenario.message or scenario.attachments):
-                await self.container.eventlog.append(
-                    {
-                        "id": str(uuid4()),
-                        "ts": datetime.now(UTC).timestamp(),
-                        "scope_id": session_id,
-                        "kind": "session_chat",
-                        "payload": {
-                            "type": "user.message",
-                            "text": scenario.message or "",
-                            "files": [],
-                            "attachments": [
-                                attachment.to_attachment_dict()
-                                for attachment in scenario.attachments
-                            ],
-                            "meta": {"direction": "inbound", "role": "user", **user_meta},
-                        },
-                    }
-                )
             return await rm.submit_run(
                 graph_id=graph_id,
                 inputs={
@@ -362,6 +344,12 @@ class HarnessRunner:
                 importance=RunImportance.ephemeral,
                 agent_id=scenario.target.agent_id,
                 app_id=meta.get("app_id"),
+                run_config={
+                    "origin_binding": _console_origin_binding(
+                        session_id=session_id,
+                        source="harness",
+                    ).model_dump(mode="json")
+                },
             )
 
         inputs = dict(scenario.inputs)
@@ -382,6 +370,12 @@ class HarnessRunner:
             origin=RunOrigin.local,
             visibility=RunVisibility.normal,
             importance=RunImportance.normal,
+            run_config={
+                "origin_binding": _console_origin_binding(
+                    session_id=session_id,
+                    source="harness",
+                ).model_dump(mode="json")
+            },
         )
 
     async def _collect_trace(
@@ -395,12 +389,6 @@ class HarnessRunner:
             snapshot = await self.container.state_store.load_latest_snapshot(run_id)
             if snapshot is not None:
                 bundle.snapshots = [asdict(snapshot)]
-        if self.container.eventlog is not None:
-            bundle.channel_events = await self.container.eventlog.query(
-                scope_id=session_id,
-                kinds=["session_chat"],
-                limit=500,
-            )
         bundle.llm_calls = await self._read_llm_rows(run_id=run_id, session_id=session_id)
         if run_id:
             bundle.memory_events, bundle.memory_summaries = await self._read_memory_rows(

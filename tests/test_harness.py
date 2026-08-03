@@ -61,13 +61,13 @@ async def harness_agent(
 
 @tool(name="harness.ask_text_tool", outputs=["text"])
 async def harness_ask_text_tool(*, context: NodeContext):
-    text = await context.channel("ui:session").ask_text(prompt="Name?")
+    text = await context.channel().ask_text(prompt="Name?")
     return {"text": text}
 
 
 @tool(name="harness.ask_files_tool", outputs=["count"])
 async def harness_ask_files_tool(*, context: NodeContext):
-    result = await context.channel("ui:session").ask_files(prompt="Upload", multiple=True)
+    result = await context.channel().ask_files(prompt="Upload", multiple=True)
     return {"count": len(result.files)}
 
 

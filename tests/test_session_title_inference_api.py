@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 from fastapi import FastAPI
@@ -8,29 +9,17 @@ import pytest
 
 from aethergraph.api.v1 import session as session_api
 from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.contracts.integration import SemanticEventKind
 from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
 
 
 class FakeEventLog:
-    def __init__(self, rows: list[dict[str, Any]] | None = None):
+    def __init__(self, rows: list[Any] | None = None):
         self.rows = list(rows or [])
 
-    async def query(
-        self,
-        *,
-        scope_id: str,
-        kinds: list[str] | None = None,
-        since=None,
-        limit: int = 100,
-        after_id=None,
-        before_id=None,
-        offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        del since, after_id, before_id
-        if kinds and "session_chat" not in kinds:
-            return []
-        rows = [row for row in self.rows if row.get("scope_id") == scope_id]
-        return rows[offset : offset + limit]
+    async def list_session(self, *, deployment_id: str, session_id: str):
+        assert deployment_id == "deployment-1"
+        return [row for row in self.rows if row.event.session_id == session_id]
 
 
 class FakeLLMClient:
@@ -56,6 +45,8 @@ class FakeContainer:
     def __init__(self, *, session_store, eventlog, llm=None):
         self.session_store = session_store
         self.eventlog = eventlog
+        self.semantic_events = eventlog
+        self.host_manifest = SimpleNamespace(deployment_id="deployment-1")
         self.llm = llm
 
 
@@ -93,19 +84,20 @@ def _chat_row(
     ts: float,
     event_type: str,
     text: str | None,
-) -> dict[str, Any]:
-    return {
-        "_row_id": row_id,
-        "id": event_id,
-        "scope_id": session_id,
-        "ts": ts,
-        "payload": {
-            "type": event_type,
-            "text": text,
-            "meta": {},
-            "buttons": [],
-        },
-    }
+):
+    del row_id, event_id, ts
+    kind = (
+        SemanticEventKind.INPUT_ACCEPTED
+        if event_type == "user.message"
+        else SemanticEventKind.MESSAGE_COMPLETED
+    )
+    return SimpleNamespace(
+        event=SimpleNamespace(
+            session_id=session_id,
+            kind=kind,
+            payload=SimpleNamespace(text=text),
+        )
+    )
 
 
 def test_infer_session_title_generates_and_persists(monkeypatch: pytest.MonkeyPatch) -> None:

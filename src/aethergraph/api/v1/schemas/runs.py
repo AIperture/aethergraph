@@ -76,22 +76,6 @@ class RunCreateResponse(BaseModel):
     finished_at: datetime | None = None
 
 
-class RunChannelEvent(BaseModel):
-    id: str
-    run_id: str
-    type: str
-    text: str | None
-    buttons: list[dict[str, Any]] = Field(default_factory=list)
-    file: dict[str, Any] | None
-    meta: dict[str, Any] = Field(default_factory=dict)
-    ts: float
-
-
-class RunChannelEventListResponse(BaseModel):
-    events: list[RunChannelEvent]
-    next_cursor: str | None = None
-
-
 class RunErrorInfo(BaseModel):
     message: str
     detail: str | None = None

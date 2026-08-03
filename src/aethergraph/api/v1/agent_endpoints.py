@@ -450,7 +450,7 @@ async def endpoint_session_stream(
         StreamingResponse: Server-sent semantic event stream.
 
     Notes:
-        The stream polls only the canonical semantic store; no EventHub projection exists.
+        The stream polls only the canonical semantic store; no broadcast side channel exists.
     """
     container, _, binding = await _session_binding(request, endpoint_id, session_id, identity)
 

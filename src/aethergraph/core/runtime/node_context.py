@@ -391,15 +391,14 @@ class NodeContext:
             await context.channel().send_text("Done")
             ```
 
-            Address a deliberate UI extension:
+            Address a deliberate provider channel:
             ```python
-            await context.channel("ui:run").send_phase("planning", "active")
+            await context.channel("slack:team/T:chan/C").send_phase("planning", "active")
             ```
 
         Args:
             channel_key: Optional exact address. If omitted, the immutable run
-                origin channel is used. `ui:session` and `ui:run` deliberately
-                expand to the current session and run identifiers.
+                origin channel is used.
 
         Returns:
             ChannelSession: An instance representing the session for the specified channel.
@@ -412,20 +411,11 @@ class NodeContext:
             | Console              | `console:stdin`                               | Console input/output                  |
             | Slack                | `slack:team/{team_id}:chan/{channel_id}`      | Needs additional configuration        |
             | Telegram             | `tg:chat/{chat_id}`                           | Needs additional configuration        |
-            | UI Session           | `ui:session/{session_id}`                     | Requires AG web UI                    |
-            | UI Session (current) | `ui:session`                                  | Expands to current `session_id`       |
-            | UI Run               | `ui:run/{run_id}`                             | Requires AG web UI                    |
-            | UI Run (current)     | `ui:run`                                      | Expands to current `run_id`           |
+            | Agent Endpoint       | `endpoint:sessions/{session_id}`              | Installed by an AG Host               |
             | Webhook              | `webhook:{unique_identifier}`                 | For Slack, Discord, Zapier, etc.      |
             | File-based channel   | `file:path/to/directory`                      | File system based channels            |
         """
-        resolved_key = channel_key
-        if channel_key == "ui:session":
-            resolved_key = f"ui:session/{self.session_id}"
-        elif channel_key == "ui:run":
-            resolved_key = f"ui:run/{self.run_id}"
-
-        return ChannelSession(self, resolved_key)
+        return ChannelSession(self, channel_key)
 
     # New way: prefer memory_facade directly
     def memory(self) -> MemoryFacade:

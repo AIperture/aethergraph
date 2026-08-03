@@ -1,75 +1,36 @@
-import asyncio
-from contextlib import suppress
-from datetime import UTC, datetime
 import logging
 import re
-from typing import Any
-from urllib.parse import unquote
 
 from fastapi import (  # type: ignore
     APIRouter,
     Depends,
     HTTPException,
     Query,
-    Request,
-    WebSocket,
-    WebSocketDisconnect,
 )
 
 from aethergraph.api.v1.deps import (
     RequestIdentity,
     ensure_identity_matches_owner,
-    get_authn,
     get_identity,
 )
-from aethergraph.api.v1.pagination import (
-    decode_cursor,
-    decode_cursor_v2,
-    encode_cursor,
-    encode_keyset_before_cursor,
-    encode_keyset_cursor,
-)
+from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.api.v1.run_presenters import to_run_summary
 from aethergraph.api.v1.schemas.session import (
     Session,
-    SessionChatEvent,
-    SessionChatEventListResponse,
     SessionCreateRequest,
-    SessionDashboardState,
-    SessionDashboardStateResponse,
     SessionInferTitleRequest,
     SessionInferTitleResponse,
     SessionListResponse,
     SessionRunsResponse,
     SessionUpdateRequest,
-    SessionWorkStatus,
-    SessionWorkStatusResponse,
 )
+from aethergraph.contracts.integration import SemanticEventKind
 from aethergraph.core.runtime.run_types import RunImportance, RunVisibility, SessionKind
 from aethergraph.core.runtime.runtime_services import current_services
-from aethergraph.services.channel.session_dashboard_state import (
-    DASHBOARD_STATE_EVENT_KIND,
-    get_session_dashboard_state,
-    list_session_dashboard_states,
-)
-from aethergraph.services.channel.session_work_status import (
-    WORK_STATUS_EVENT_KIND,
-    get_session_work_status,
-)
 
 router = APIRouter(tags=["sessions"])
 logger = logging.getLogger(__name__)
-DROP_SESSION_HISTORY_TYPES = {"agent.stream.start", "agent.stream.delta"}
-VISIBLE_ASSISTANT_TYPES = {
-    "agent.message",
-    "agent.message.update",
-    "agent.stream.end",
-    "agent.message.error",
-    "session.need_input",
-    "session.need_approval",
-    "session.waiting",
-}
 
 
 def _ensure_session_access(identity: RequestIdentity, sess: Session) -> None:
@@ -224,102 +185,6 @@ async def get_session_runs(
     return SessionRunsResponse(items=summaries, next_cursor=next_cursor)
 
 
-_ARTIFACT_CONTENT_URL_RE = re.compile(r"/api/v1/artifacts/([^/]+)/content/?$")
-
-
-def _artifact_id_from_ref(ref: Any) -> str | None:
-    """Best-effort artifact id for a display-file / attachment dict.
-
-    Prefers an explicit ``artifact_id``, then falls back to parsing the id out of
-    an ``/api/v1/artifacts/{id}/content`` URL/URI.
-    """
-    if not isinstance(ref, dict):
-        return None
-    explicit = ref.get("artifact_id")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-    for key in ("url", "uri"):
-        value = ref.get(key)
-        if isinstance(value, str):
-            match = _ARTIFACT_CONTENT_URL_RE.search(value)
-            if match:
-                return unquote(match.group(1))
-    return None
-
-
-def _dedupe_attachments_against_files(
-    attachments: list[Any] | None,
-    files: list[Any] | None,
-) -> list[Any] | None:
-    """Drop context attachments already shown as inline display files.
-
-    The channel ingress persists each uploaded / context-attached resource twice
-    -- once as a display ``file`` and once as an ``attachment`` -- so the UI would
-    otherwise render the same image both inline and as a duplicate "context" pill.
-    This is display-only: the agent receives its context from the run inputs, not
-    from this presented event, so filtering here never starves the agent.
-    """
-    if not attachments:
-        return None
-    file_ids = {fid for f in (files or []) if (fid := _artifact_id_from_ref(f)) is not None}
-    if not file_ids:
-        return attachments
-    deduped = [att for att in attachments if _artifact_id_from_ref(att) not in file_ids]
-    return deduped or None
-
-
-def _row_to_session_chat_event(row: dict, session_id: str) -> SessionChatEvent:
-    payload = row.get("payload", {}) or {}
-    files = payload.get("files") or None
-    attachments = _dedupe_attachments_against_files(payload.get("attachments"), files)
-
-    # Mirror the dedupe into meta.attachments, which the frontend reads first.
-    meta = payload.get("meta", {}) or {}
-    if isinstance(meta.get("attachments"), list):
-        meta = {
-            **meta,
-            "attachments": _dedupe_attachments_against_files(meta["attachments"], files) or [],
-        }
-
-    return SessionChatEvent(
-        id=row.get("id"),
-        session_id=session_id,
-        ts=row.get("ts"),
-        type=payload.get("type") or "agent.message",
-        text=payload.get("text"),
-        buttons=payload.get("buttons", []),
-        file=payload.get("file"),
-        files=files,
-        attachments=attachments,
-        rich=payload.get("rich") or None,
-        meta=meta,
-        agent_id=payload.get("agent_id"),
-        upsert_key=payload.get("upsert_key"),
-    )
-
-
-def _row_to_session_work_status(row: dict) -> SessionWorkStatus | None:
-    payload = dict(row.get("payload") or {})
-    raw = payload.get("work_status")
-    if not raw:
-        return None
-    return SessionWorkStatus.model_validate(raw)
-
-
-def _row_to_session_dashboard_state(row: dict) -> SessionDashboardState | None:
-    payload = dict(row.get("payload") or {})
-    raw = payload.get("dashboard")
-    if not raw:
-        return None
-    return SessionDashboardState.model_validate(raw)
-
-
-def _row_to_session_dashboard_patch(row: dict) -> dict | None:
-    payload = dict(row.get("payload") or {})
-    patch = payload.get("patch")
-    return dict(patch or {}) if isinstance(patch, dict) else None
-
-
 def _normalize_session_title(raw: str, *, max_len: int = 64) -> str:
     title = re.sub(r"\s+", " ", raw).strip()
     title = re.sub(r"^(title\s*:\s*)", "", title, flags=re.IGNORECASE)
@@ -328,53 +193,31 @@ def _normalize_session_title(raw: str, *, max_len: int = 64) -> str:
     return title[:max_len].rstrip(" .,:;!-")
 
 
-def _is_nonempty_text(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _extract_initial_title_context(events: list[SessionChatEvent]) -> tuple[str | None, str | None]:
-    first_user_text: str | None = None
-    first_assistant_text: str | None = None
-
-    for event in events:
-        event_type = event.type or ""
-        if (
-            first_user_text is None
-            and event_type == "user.message"
-            and _is_nonempty_text(event.text)
-        ):
-            first_user_text = event.text.strip()
-            continue
-
-        if (
-            first_user_text is not None
-            and first_assistant_text is None
-            and event_type in VISIBLE_ASSISTANT_TYPES
-            and _is_nonempty_text(event.text)
-        ):
-            first_assistant_text = event.text.strip()
-            break
-
+def _extract_initial_title_context(
+    messages: list[dict[str, str]],
+) -> tuple[str | None, str | None]:
+    first_user_text = next(
+        (item["content"] for item in messages if item["role"] == "user"),
+        None,
+    )
+    if first_user_text is None:
+        return None, None
+    user_index = next(index for index, item in enumerate(messages) if item["role"] == "user")
+    first_assistant_text = next(
+        (item["content"] for item in messages[user_index + 1 :] if item["role"] == "assistant"),
+        None,
+    )
     return first_user_text, first_assistant_text
 
 
-def _extract_refresh_title_context(events: list[SessionChatEvent]) -> list[dict[str, str]]:
-    meaningful: list[dict[str, str]] = []
-    for event in events:
-        event_type = event.type or ""
-        text = event.text.strip() if _is_nonempty_text(event.text) else None
-        if not text:
-            continue
-        if event_type == "user.message":
-            meaningful.append({"role": "user", "content": text})
-        elif event_type in VISIBLE_ASSISTANT_TYPES:
-            meaningful.append({"role": "assistant", "content": text})
-
-    if len(meaningful) < 2:
+def _extract_refresh_title_context(
+    messages: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    if len(messages) < 2:
         return []
 
-    anchor = meaningful[:2]
-    recent = meaningful[-6:]
+    anchor = messages[:2]
+    recent = messages[-6:]
     merged: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for item in anchor + recent:
@@ -386,28 +229,33 @@ def _extract_refresh_title_context(events: list[SessionChatEvent]) -> list[dict[
     return merged
 
 
-async def _query_session_chat_events(
-    session_id: str, *, limit: int = 100
-) -> list[SessionChatEvent]:
+async def _query_session_title_messages(
+    session_id: str,
+    *,
+    limit: int = 100,
+) -> list[dict[str, str]]:
     container = current_services()
-    event_log = getattr(container, "eventlog", None)
-    if event_log is None:
+    semantic_events = getattr(container, "semantic_events", None)
+    manifest = getattr(container, "host_manifest", None)
+    if semantic_events is None or manifest is None:
         return []
-
-    rows = await event_log.query(
-        scope_id=session_id,
-        kinds=["session_chat"],
-        since=None,
-        limit=limit,
+    records = await semantic_events.list_session(
+        deployment_id=manifest.deployment_id,
+        session_id=session_id,
     )
-    rows = [
-        row
-        for row in rows
-        if ((row.get("payload") or {}).get("type") or "agent.message")
-        not in DROP_SESSION_HISTORY_TYPES
-    ]
-    rows.sort(key=lambda row: row.get("ts") or 0)
-    return [_row_to_session_chat_event(row, session_id) for row in rows]
+    messages: list[dict[str, str]] = []
+    for record in records[-limit:]:
+        event = record.event
+        if event.kind == SemanticEventKind.INPUT_ACCEPTED:
+            role = "user"
+        elif event.kind == SemanticEventKind.MESSAGE_COMPLETED:
+            role = "assistant"
+        else:
+            continue
+        text = getattr(event.payload, "text", None)
+        if isinstance(text, str) and text.strip():
+            messages.append({"role": role, "content": text.strip()})
+    return messages
 
 
 async def _infer_session_title_from_events(
@@ -415,7 +263,7 @@ async def _infer_session_title_from_events(
     *,
     mode: str = "initial",
 ) -> str | None:
-    events = await _query_session_chat_events(session_id, limit=100)
+    title_messages = await _query_session_title_messages(session_id, limit=100)
 
     container = current_services()
     llm_service = getattr(container, "llm", None)
@@ -424,7 +272,7 @@ async def _infer_session_title_from_events(
 
     client = llm_service.get("default")
     if mode == "refresh":
-        context_messages = _extract_refresh_title_context(events)
+        context_messages = _extract_refresh_title_context(title_messages)
         if not context_messages:
             return None
         prompt = (
@@ -440,7 +288,7 @@ async def _infer_session_title_from_events(
             *context_messages,
         ]
     else:
-        user_text, assistant_text = _extract_initial_title_context(events)
+        user_text, assistant_text = _extract_initial_title_context(title_messages)
         if not user_text or not assistant_text:
             return None
         prompt = (
@@ -462,304 +310,6 @@ async def _infer_session_title_from_events(
     )
     title = _normalize_session_title(text)
     return title or None
-
-
-@router.websocket("/ws/sessions/{session_id}/chat")
-async def ws_session_chat(websocket: WebSocket, session_id: str):
-    container = current_services()
-    event_log = container.eventlog
-    hub = getattr(container, "eventhub", None)
-    authn = get_authn()
-
-    if hub is None or event_log is None:
-        await websocket.close(code=1011)
-        return
-
-    roles_header = websocket.headers.get("x-roles")
-    roles = roles_header.split(",") if roles_header else []
-    client_id = websocket.headers.get("x-client-id")
-    resolved = authn.resolve(
-        deploy_mode=getattr(getattr(container, "settings", None), "deploy_mode", "local"),
-        session_id=websocket.cookies.get(authn.cookie_name),
-        client_id=client_id,
-        x_user_id=websocket.headers.get("x-user-id"),
-        x_org_id=websocket.headers.get("x-org-id"),
-        roles=roles,
-        x_mode=websocket.headers.get("x-mode"),
-    )
-    identity = RequestIdentity(
-        user_id=resolved.user_id,
-        org_id=resolved.org_id,
-        roles=resolved.roles,
-        client_id=resolved.client_id,
-        grant_id=resolved.session.grant_id if resolved.session else None,
-        auth_source=resolved.auth_source,
-        catalog_scope={
-            k: v
-            for k, v in {
-                "apps": list(resolved.grant.allowed_apps) if resolved.grant else [],
-                "agents": list(resolved.grant.allowed_agents) if resolved.grant else [],
-            }.items()
-            if v
-        }
-        or None,
-        mode="cloud"
-        if resolved.mode == "cloud_proxy"
-        else "demo"
-        if resolved.mode == "demo_guest"
-        else "local",
-    )
-    try:
-        sess = await _get_session_or_404(session_id)
-        _ensure_session_access(identity, sess)
-    except HTTPException as exc:
-        await websocket.close(code=1008, reason=str(exc.detail)[:120])
-        return
-
-    await websocket.accept()
-
-    async def send_snapshot() -> None:
-        events = await event_log.query(
-            scope_id=session_id,
-            kinds=["session_chat"],
-            since=None,
-            limit=200,
-        )
-        work_status_rows = await event_log.query(
-            scope_id=session_id,
-            kinds=[WORK_STATUS_EVENT_KIND],
-            since=None,
-            limit=200,
-        )
-        dashboard_rows = await event_log.query(
-            scope_id=session_id,
-            kinds=[DASHBOARD_STATE_EVENT_KIND],
-            since=None,
-            limit=500,
-        )
-        filtered = []
-        for ev in events:
-            payload = ev.get("payload") or {}
-            t = payload.get("type") or "agent.message"
-            if t in DROP_SESSION_HISTORY_TYPES:
-                continue
-            filtered.append(ev)
-
-        filtered.sort(key=lambda ev: ev.get("ts") or 0)
-        initial_payload = [
-            _row_to_session_chat_event(ev, session_id).model_dump() for ev in filtered
-        ]
-
-        # Include backward pagination cursor so the frontend can load older messages via REST
-        has_older = len(events) >= 200
-        older_cursor: str | None = None
-        if has_older and filtered:
-            oldest_row_id = filtered[0].get("_row_id")
-            if oldest_row_id is not None:
-                older_cursor = encode_keyset_before_cursor(oldest_row_id)
-
-        snapshot_msg: dict = {"kind": "snapshot", "events": initial_payload}
-        latest_work_status = (
-            _row_to_session_work_status(work_status_rows[-1]) if work_status_rows else None
-        )
-        snapshot_msg["work_status"] = (
-            latest_work_status.model_dump() if latest_work_status else None
-        )
-        latest_dashboards: dict[str, dict] = {}
-        for row in dashboard_rows:
-            dashboard = _row_to_session_dashboard_state(row)
-            if dashboard is None:
-                continue
-            latest_dashboards[dashboard.dashboard_id] = dashboard.model_dump()
-        snapshot_msg["dashboards"] = list(latest_dashboards.values())
-        snapshot_msg["has_older"] = has_older
-        if older_cursor is not None:
-            snapshot_msg["older_cursor"] = older_cursor
-        await websocket.send_json(snapshot_msg)
-
-    async def recv_until_disconnect() -> None:
-        # Blocks until disconnect; does not require the client to send meaningful messages.
-        while True:
-            msg = await websocket.receive()
-            if msg.get("type") == "websocket.disconnect":
-                return
-
-    async def send_live() -> None:
-        async def _send_chat() -> None:
-            async for row in hub.subscribe(scope_id=session_id, kind="session_chat"):
-                ev = _row_to_session_chat_event(row, session_id)
-                await websocket.send_json({"kind": "event", "event": ev.model_dump()})
-
-        async def _send_work_status() -> None:
-            async for row in hub.subscribe(scope_id=session_id, kind=WORK_STATUS_EVENT_KIND):
-                work_status = _row_to_session_work_status(row)
-                await websocket.send_json(
-                    {
-                        "kind": "work_status",
-                        "work_status": work_status.model_dump() if work_status else None,
-                    }
-                )
-
-        async def _send_dashboard_state() -> None:
-            async for row in hub.subscribe(scope_id=session_id, kind=DASHBOARD_STATE_EVENT_KIND):
-                dashboard = _row_to_session_dashboard_state(row)
-                await websocket.send_json(
-                    {
-                        "kind": "dashboard_state",
-                        "dashboard": dashboard.model_dump() if dashboard else None,
-                        "patch": _row_to_session_dashboard_patch(row),
-                    }
-                )
-
-        chat_task = asyncio.create_task(_send_chat())
-        work_status_task = asyncio.create_task(_send_work_status())
-        dashboard_task = asyncio.create_task(_send_dashboard_state())
-        try:
-            done, pending = await asyncio.wait(
-                {chat_task, work_status_task, dashboard_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-            for task in done:
-                exc = task.exception()
-                if exc is not None:
-                    raise exc
-        finally:
-            for task in (chat_task, work_status_task):
-                if not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
-
-    recv_task = send_task = None
-    try:
-        await send_snapshot()
-
-        recv_task = asyncio.create_task(recv_until_disconnect())
-        send_task = asyncio.create_task(send_live())
-
-        done, pending = await asyncio.wait(
-            {recv_task, send_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-
-        # Cancel the other task (this is what prevents idle hangs)
-        for t in pending:
-            t.cancel()
-            with suppress(asyncio.CancelledError):
-                await t
-
-    except WebSocketDisconnect:
-        # can happen from send_json
-        return
-    except asyncio.CancelledError:
-        # critical for uvicorn --reload
-        with suppress(Exception):
-            await websocket.close(code=1001)
-        raise
-    except Exception as e:
-        with suppress(Exception):
-            await websocket.close(code=1011, reason=str(e)[:120])
-    finally:
-        for t in (recv_task, send_task):
-            if t and not t.done():
-                t.cancel()
-                with suppress(asyncio.CancelledError):
-                    await t
-
-
-@router.get("/sessions/{session_id}/chat/events", response_model=SessionChatEventListResponse)
-async def get_session_chat_events(
-    session_id: str,
-    request: Request,
-    since_ts: float | None = Query(None),  # noqa: B008
-    cursor: str | None = Query(None),  # noqa: B008
-    limit: int = Query(100, ge=1, le=500),  # noqa: B008
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> SessionChatEventListResponse:
-    container = current_services()
-    event_log = container.eventlog
-
-    if event_log is None:
-        raise HTTPException(status_code=503, detail="EventLog not available")
-    sess = await _get_session_or_404(session_id)
-    _ensure_session_access(identity, sess)
-
-    since_dt: datetime | None = None
-    if since_ts is not None:
-        since_dt = datetime.fromtimestamp(since_ts, tz=UTC)
-
-    # Decode cursor — supports keyset (after_id), keyset_before (before_id), and legacy offset
-    cursor_info = decode_cursor_v2(cursor)
-    after_id: int | None = None
-    before_id: int | None = None
-    query_offset: int = 0
-    is_backward = False
-    if cursor_info is not None:
-        if cursor_info.kind == "keyset":
-            after_id = cursor_info.value
-        elif cursor_info.kind == "keyset_before":
-            before_id = cursor_info.value
-            is_backward = True
-        else:
-            query_offset = cursor_info.value
-
-    # Fetch limit+1 to detect if there's a next page
-    fetch_limit = limit + 1
-
-    events = await event_log.query(
-        scope_id=session_id,
-        since=since_dt,
-        kinds=["session_chat"],
-        limit=fetch_limit,
-        after_id=after_id,
-        before_id=before_id,
-        offset=query_offset,
-    )
-
-    if since_ts is not None and after_id is None and not is_backward:
-        # make cursor exclusive -- only return events after since_ts to avoid duplicates
-        events = [ev for ev in events if (ev.get("ts") or 0) > since_ts]
-
-    # Filter legacy persisted deltas/start
-    events = [
-        ev
-        for ev in events
-        if (ev.get("payload") or {}).get("type") not in DROP_SESSION_HISTORY_TYPES
-    ]
-
-    # Determine next_cursor before trimming
-    has_more = len(events) > limit
-    if is_backward:  # noqa: SIM108
-        # For backward pagination, the "extra" event is the oldest one (first in list)
-        # Trim from the front to keep the most recent ones
-        events = events[-limit:] if has_more else events
-    else:
-        events = events[:limit]
-
-    next_cursor: str | None = None
-    if has_more and events:
-        if is_backward:
-            # Next page goes further back — cursor points before the oldest returned event
-            first_row_id = events[0].get("_row_id")
-            if first_row_id is not None:
-                next_cursor = encode_keyset_before_cursor(first_row_id)
-        else:
-            last_row_id = events[-1].get("_row_id")
-            if last_row_id is not None:
-                next_cursor = encode_keyset_cursor(last_row_id)
-            else:
-                # Fallback to offset cursor
-                next_cursor = encode_cursor(query_offset + limit)
-
-    # Shared presenter also dedupes context attachments already shown as files.
-    out: list[SessionChatEvent] = [_row_to_session_chat_event(ev, session_id) for ev in events]
-    out.sort(key=lambda e: e.ts)
-
-    return SessionChatEventListResponse(events=out, next_cursor=next_cursor)
 
 
 @router.post("/sessions/{session_id}/infer-title", response_model=SessionInferTitleResponse)
@@ -825,47 +375,6 @@ async def infer_session_title(
         updated=True,
         reason="generated",
     )
-
-
-@router.get("/sessions/{session_id}/work-status", response_model=SessionWorkStatusResponse)
-async def get_session_work_status_api(
-    session_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> SessionWorkStatusResponse:
-    sess = await _get_session_or_404(session_id)
-    _ensure_session_access(identity, sess)
-    work_status = await get_session_work_status(session_id)
-    return SessionWorkStatusResponse(
-        work_status=SessionWorkStatus.model_validate(work_status) if work_status else None
-    )
-
-
-@router.get("/sessions/{session_id}/dashboard-states", response_model=SessionDashboardStateResponse)
-async def get_session_dashboard_states_api(
-    session_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> SessionDashboardStateResponse:
-    sess = await _get_session_or_404(session_id)
-    _ensure_session_access(identity, sess)
-    dashboards = await list_session_dashboard_states(session_id)
-    return SessionDashboardStateResponse(
-        dashboards=[SessionDashboardState.model_validate(item) for item in dashboards]
-    )
-
-
-@router.get(
-    "/sessions/{session_id}/dashboard-states/{dashboard_id}",
-    response_model=SessionDashboardState | None,
-)
-async def get_session_dashboard_state_api(
-    session_id: str,
-    dashboard_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> SessionDashboardState | None:
-    sess = await _get_session_or_404(session_id)
-    _ensure_session_access(identity, sess)
-    dashboard = await get_session_dashboard_state(session_id, dashboard_id)
-    return SessionDashboardState.model_validate(dashboard) if dashboard else None
 
 
 @router.patch("/sessions/{session_id}", response_model=Session)

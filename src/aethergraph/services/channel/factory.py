@@ -5,19 +5,15 @@ import os
 from typing import Any
 
 from aethergraph.config.config import AppSettings
-from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.plugins.channel.adapters.console import ConsoleChannelAdapter
 from aethergraph.plugins.channel.adapters.file import FileChannelAdapter
 from aethergraph.plugins.channel.adapters.slack import SlackChannelAdapter
 from aethergraph.plugins.channel.adapters.telegram import TelegramChannelAdapter
 from aethergraph.plugins.channel.adapters.webhook import WebhookChannelAdapter
 from aethergraph.services.channel.channel_bus import ChannelBus
-from aethergraph.services.channel.event_hub import EventHub
 
 
-def make_channel_adapters_from_env(
-    cfg: AppSettings, event_log: EventLog | None = None, event_hub: EventHub | None = None
-) -> dict[str, Any]:
+def make_channel_adapters_from_env(cfg: AppSettings) -> dict[str, Any]:
     # Always include console adapter
     adapters = {"console": ConsoleChannelAdapter()}
 
@@ -36,12 +32,6 @@ def make_channel_adapters_from_env(
     # include webhook adapter
     adapters["webhook"] = WebhookChannelAdapter()
 
-    # Always include webui adapter
-    from aethergraph.plugins.channel.adapters.webui import WebUIChannelAdapter
-
-    if event_log is None:
-        raise ValueError("event_log must be provided to create WebUIChannelAdapter")
-    adapters["ui"] = WebUIChannelAdapter(event_log=event_log, event_hub=event_hub)
     return adapters
 
 

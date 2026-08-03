@@ -124,3 +124,37 @@ async def test_semantic_adapter_persists_named_structured_output(tmp_path) -> No
     assert history[0].event.payload.output_name == "workflow.status"
     assert history[0].event.payload.value == {"operation": "clear"}
     await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_preserves_rich_message_as_named_output(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+    rich = {
+        "kind": "component",
+        "payload": {"component_type": "ag.ui.run_card.v1", "props": {"run_id": "run-1"}},
+    }
+
+    await adapter.send(
+        OutEvent(
+            type="agent.message",
+            channel="endpoint:sessions/public-1",
+            text="Live run",
+            rich=rich,
+            meta=_meta(),
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    payload = history[0].event.payload
+    assert history[0].event.kind == SemanticEventKind.STRUCTURED_OUTPUT
+    assert isinstance(payload, StructuredOutputPayload)
+    assert payload.output_name == "channel.rich"
+    assert payload.value == {"text": "Live run", "rich": rich}
+    await event_log.close()

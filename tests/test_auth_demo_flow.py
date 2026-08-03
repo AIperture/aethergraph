@@ -98,69 +98,6 @@ def test_public_demo_fallback_uses_browser_client_id(tmp_path) -> None:
         assert body["auth_source"] == "public_demo_client_id"
 
 
-def test_session_chat_history_requires_session_owner(auth_client: TestClient) -> None:
-    authn = auth_client.app.state.container.authn
-    grant_a = DemoGrant(grant_id="grant-a", org_id="org-demo")
-    invite_a = authn.create_invite_code(grant_a)
-
-    with TestClient(auth_client.app) as client_a:
-        client_a.post("/api/v1/auth/invite/redeem", json={"code": invite_a.code})
-        me_a = client_a.get("/api/v1/auth/me").json()
-
-        session_store = auth_client.app.state.container.session_store
-        assert session_store is not None
-        created = __import__("asyncio").run(
-            session_store.create(
-                kind="chat",
-                title="Private",
-                external_ref=None,
-                user_id=me_a["user_id"],
-                org_id=me_a["org_id"],
-                source="test",
-            )
-        )
-
-    grant_b = DemoGrant(grant_id="grant-b", org_id="org-demo")
-    invite_b = authn.create_invite_code(grant_b)
-
-    with TestClient(auth_client.app) as client_b:
-        client_b.post("/api/v1/auth/invite/redeem", json={"code": invite_b.code})
-        resp = client_b.get(f"/api/v1/sessions/{created.session_id}/chat/events")
-        assert resp.status_code == 403
-
-
-def test_session_chat_websocket_rejects_other_guest(auth_client: TestClient) -> None:
-    authn = auth_client.app.state.container.authn
-    grant_a = DemoGrant(grant_id="grant-ws-a", org_id="org-demo")
-    invite_a = authn.create_invite_code(grant_a)
-
-    with TestClient(auth_client.app) as client_a:
-        client_a.post("/api/v1/auth/invite/redeem", json={"code": invite_a.code})
-        me_a = client_a.get("/api/v1/auth/me").json()
-        session_store = auth_client.app.state.container.session_store
-        created = __import__("asyncio").run(
-            session_store.create(
-                kind="chat",
-                title="WS Private",
-                external_ref=None,
-                user_id=me_a["user_id"],
-                org_id=me_a["org_id"],
-                source="test",
-            )
-        )
-
-    grant_b = DemoGrant(grant_id="grant-ws-b", org_id="org-demo")
-    invite_b = authn.create_invite_code(grant_b)
-
-    with TestClient(auth_client.app) as client_b:
-        client_b.post("/api/v1/auth/invite/redeem", json={"code": invite_b.code})
-        with (
-            pytest.raises(Exception),  # noqa: B017
-            client_b.websocket_connect(f"/api/v1/ws/sessions/{created.session_id}/chat"),
-        ):
-            pass
-
-
 def test_catalog_scope_filters_apps(monkeypatch) -> None:
     reg = UnifiedRegistry()
     reg.register(
