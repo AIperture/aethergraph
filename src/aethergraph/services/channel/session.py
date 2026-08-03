@@ -291,8 +291,9 @@ class ChannelSession:
 
     def _resolve_default_key(self) -> str:
         """Unified default resolver (bus default → console)."""
+        origin_binding = getattr(self.ctx, "origin_binding", None)
         return (
-            getattr(self.ctx, "default_channel_key", None)
+            (origin_binding.channel_key if origin_binding is not None else None)
             or self._bus.get_default_channel_key()
             or "console:stdin"
         )

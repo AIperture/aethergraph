@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 import warnings
 
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.execution import (
     CodeExecutionRequest,
     CodeExecutionResult,
@@ -46,7 +47,7 @@ class NodeContext:
     graph_id: str
     node_id: str
     services: NodeServices
-    default_channel_key: str | None = None
+    origin_binding: OriginBinding | None = None
     identity: Any = None
     resume_payload: dict[str, Any] | None = None
     scope: Scope | None = None

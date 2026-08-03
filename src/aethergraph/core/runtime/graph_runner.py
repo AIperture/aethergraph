@@ -14,6 +14,7 @@ from aethergraph.contracts.errors.errors import (
     GraphMaterializationError,
     build_error_hints,
 )
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.graph.node_state import NodeStatus
 from aethergraph.core.graph.task_graph import TaskGraph
@@ -95,11 +96,20 @@ async def _build_env(
         or (getattr(owner, "spec", None) or {}).get("app_id")
     )
 
+    raw_origin_binding = rt_overrides.get("origin_binding")
+    origin_binding = (
+        raw_origin_binding
+        if isinstance(raw_origin_binding, OriginBinding)
+        else OriginBinding.model_validate(raw_origin_binding)
+        if raw_origin_binding is not None
+        else None
+    )
+
     env = RuntimeEnv(
         run_id=run_id,
         graph_id=graph_id,
         session_id=session_id,
-        default_channel_key=rt_overrides.get("default_channel_key"),
+        origin_binding=origin_binding,
         identity=identity,
         graph_inputs=inputs,
         outputs_by_node={},

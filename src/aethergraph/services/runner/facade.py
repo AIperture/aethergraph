@@ -5,6 +5,7 @@ from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.core.runtime.run_cancellation import get_run_cancellation_registry
 from aethergraph.core.runtime.run_types import (
     RunImportance,
@@ -51,8 +52,7 @@ class RunFacade:
         session_id: Optional default session id for child runs.
         agent_id: Optional default agent id for child runs.
         app_id: Optional default app id for child runs.
-        default_channel_key: Optional run-scoped default channel propagated to
-            child runs.
+        origin_binding: Optional immutable run origin propagated to child runs.
 
     Returns:
         RunFacade: Bound facade for child run orchestration APIs.
@@ -68,18 +68,26 @@ class RunFacade:
     agent_id: str | None = None
     app_id: str | None = None
     current_run_id: str | None = None
-    default_channel_key: str | None = None
+    origin_binding: OriginBinding | None = None
 
     def _child_run_config(self) -> dict[str, Any]:
         """Build inherited runtime configuration for a child run.
 
-        The returned mapping carries the run-scoped channel default without
-        mutating the shared container channel service.
+        The returned mapping carries the immutable run origin without mutating
+        shared Channel services.
 
         Examples:
-            Build configuration with a scoped channel:
+            Build configuration with a run origin:
             ```python
-            facade = RunFacade(manager, default_channel_key="ui:session/s-1")
+            binding = OriginBinding(
+                integration_id="ui",
+                route_id="route.ui",
+                session_id="s-1",
+                channel_key="ui:session/s-1",
+                external_conversation_id="s-1",
+                capability_profile_id="ag-ui/v1",
+            )
+            facade = RunFacade(manager, origin_binding=binding)
             config = facade._child_run_config()
             ```
 
@@ -93,15 +101,15 @@ class RunFacade:
             None: This helper takes no arguments.
 
         Returns:
-            dict[str, Any]: A mapping containing `default_channel_key`, or an
-            empty mapping when no run-scoped default is configured.
+            dict[str, Any]: A mapping containing serialized `origin_binding`,
+            or an empty mapping when the parent run has no origin.
 
         Notes:
             The mapping is passed through the existing `run_config` path.
         """
-        if self.default_channel_key is None:
+        if self.origin_binding is None:
             return {}
-        return {"default_channel_key": self.default_channel_key}
+        return {"origin_binding": self.origin_binding.model_dump(mode="json")}
 
     async def spawn_run(
         self,
