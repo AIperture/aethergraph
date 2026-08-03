@@ -46,6 +46,10 @@ class _Transport:
         self.ready.clear()
 
 
+async def _close_delivery() -> None:
+    return None
+
+
 def _manifest(*, kind: IntegrationKind | None = None) -> HostManifest:
     routes = ()
     if kind is not None:
@@ -96,6 +100,7 @@ async def test_integration_manager_starts_and_stops_exact_connection() -> None:
                 integration_kind=IntegrationKind.TELEGRAM,
                 transport=transport,
                 delivery_adapter=object(),
+                close_delivery=_close_delivery,
             ),
         ),
         readiness_timeout_seconds=1,
@@ -132,6 +137,7 @@ async def test_integration_manager_fails_host_startup() -> None:
                 integration_kind=IntegrationKind.SLACK,
                 transport=transport,
                 delivery_adapter=object(),
+                close_delivery=_close_delivery,
             ),
         ),
         readiness_timeout_seconds=1,

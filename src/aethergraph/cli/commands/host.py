@@ -205,6 +205,9 @@ def _load_provider_connections(
             )
             delivery_adapter = SlackChannelAdapter(bot_token=secret.bot_token.get_secret_value())
 
+            async def close_slack_delivery():
+                return None
+
             def slack_transport(container, selected=provider_settings):
                 from aethergraph.plugins.channel.websockets.slack_ws import (
                     SlackSocketModeRunner,
@@ -218,6 +221,7 @@ def _load_provider_connections(
                     integration_kind=IntegrationKind.SLACK,
                     delivery_adapter=delivery_adapter,
                     transport_factory=slack_transport,
+                    close_delivery=close_slack_delivery,
                 )
             )
             continue
@@ -234,6 +238,9 @@ def _load_provider_connections(
         )
         delivery_adapter = TelegramChannelAdapter(bot_token=secret.bot_token.get_secret_value())
 
+        async def close_telegram_delivery(selected=delivery_adapter):
+            await selected.aclose()
+
         def telegram_transport(container, selected=provider_settings):
             from aethergraph.plugins.channel.websockets.telegram_polling import (
                 TelegramPollingRunner,
@@ -247,6 +254,7 @@ def _load_provider_connections(
                 integration_kind=IntegrationKind.TELEGRAM,
                 delivery_adapter=delivery_adapter,
                 transport_factory=telegram_transport,
+                close_delivery=close_telegram_delivery,
             )
         )
     return tuple(connections)

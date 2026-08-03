@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 import importlib
 import json
@@ -50,6 +50,7 @@ class HostProviderConnection:
     integration_kind: IntegrationKind
     delivery_adapter: object
     transport_factory: Callable[[DefaultContainer], IntegrationTransport]
+    close_delivery: Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -199,6 +200,7 @@ def build_host(
             integration_kind=connection.integration_kind,
             transport=connection.transport_factory(container),
             delivery_adapter=connection.delivery_adapter,
+            close_delivery=connection.close_delivery,
         )
         for connection in provider_connections
     )

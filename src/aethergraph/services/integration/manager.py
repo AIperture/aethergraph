@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
@@ -38,6 +38,7 @@ class IntegrationConnection:
     integration_kind: IntegrationKind
     transport: IntegrationTransport
     delivery_adapter: object
+    close_delivery: Callable[[], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,11 @@ class IntegrationManager:
         if self._tasks:
             await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         self._tasks.clear()
+        if self._connections:
+            await asyncio.gather(
+                *(connection.close_delivery() for connection in self._connections.values()),
+                return_exceptions=True,
+            )
         for identifier in self._states:
             self._states[identifier] = IntegrationConnectionState.STOPPED
         self._started = False
