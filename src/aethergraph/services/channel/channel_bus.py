@@ -10,7 +10,7 @@ from aethergraph.services.continuations.continuation import Correlator
 class ChannelBus:
     """
     Transport layer:
-      - publish(event) : send any OutEvent with smart fallbacks
+      - publish(event) : deliver an OutEvent unchanged to its exact adapter
       - notify(cont)   : raise a prompt from a Continuation; inline-resume if adapter can read input
       - peek_correlator(channel_key): ask adapter for a thread hint (optional)
     Optionally aware of:
@@ -93,99 +93,39 @@ class ChannelBus:
             except Exception as e:
                 self._warn(f"Failed to bind correlator: {e}")
 
-    def _smart_fallback(self, adapter: ChannelAdapter, event: OutEvent) -> OutEvent | None:
-        # Determine required capability for the event type
-        need = None
-        if event.type in (
-            "agent.message",
-            "agent.message.update",
-            "session.waiting",
-            "session.need_input",
-        ):
-            need = "text"
-        elif event.type in ("agent.stream.start", "agent.stream.delta", "agent.stream.end"):
-            need = "stream"
-        elif event.type in ("session.need_approval", "link.buttons"):
-            need = "buttons"
-        elif event.type == "file.upload":
-            need = "file"
-
-        caps: set[str] = getattr(adapter, "capabilities", set())
-
-        # Supported as-is
-        if (need is None) or (need in caps):
-            return event
-
-        # buttons → text (numbered list)
-        if need == "buttons" and "text" in caps:
-            opts = []
-            if event.buttons:
-                for b in event.buttons:
-                    lbl = (
-                        getattr(b, "label", None)
-                        or str(getattr(b, "value", "") or "").title()
-                        or "Option"
-                    )
-                    val = getattr(b, "value", None) or str(lbl)
-                    opts.append({"label": str(lbl), "value": str(val)})
-            else:
-                for o in build_choice_options(
-                    (event.meta or {}).get("choices") or (event.meta or {}).get("options", [])
-                ):
-                    opts.append({"label": o.label, "value": o.id})
-            if not opts:
-                opts = [
-                    {"label": "Approve", "value": "Approve"},
-                    {"label": "Reject", "value": "Reject"},
-                ]
-            lines = [f"{i + 1}. {o['label']}" for i, o in enumerate(opts)]
-            hint = "Reply with the number or the label."
-            txt = (event.text or "Choose an option:") + "\n" + "\n".join(lines) + f"\n{hint}"
-            meta = dict(event.meta or {})
-            meta["options"] = [o["label"] for o in opts]
-            meta["options_map"] = {str(i + 1): o["value"] for i, o in enumerate(opts)}
-            meta["choices"] = [{"id": o["value"], "label": o["label"]} for o in opts]
-            meta["options_label_to_value"] = {o["label"].lower(): o["value"] for o in opts}
-            return OutEvent(type="agent.message", channel=event.channel, text=txt, meta=meta)
-
-        # stream → text
-        if need == "stream" and "text" in caps:
-            if event.type == "agent.stream.delta":
-                return OutEvent(
-                    type="agent.message",
-                    channel=event.channel,
-                    text=event.text or "",
-                    meta=event.meta,
-                )
-            return None  # drop start/end
-
-        # file → text link if available
-        if need == "file" and "text" in caps:
-            if event.file and "url" in event.file:
-                return OutEvent(
-                    type="agent.message",
-                    channel=event.channel,
-                    text=f"[file] {event.file.get('filename', 'file')}: {event.file['url']}",
-                    meta=event.meta,
-                )
-            self._warn("Binary file not representable on this adapter.")
-            return None
-
-        self._warn(f"Adapter lacks '{need}', dropping event type={event.type}.")
-        return None
-
     # ---- core send path ----
     async def publish(self, event: OutEvent) -> dict | None:
-        """
-        Send any OutEvent; apply smart fallbacks; bind correlator if adapter returns one.
-        No inline resume here (use notify for interactions).
+        """Deliver one event unchanged to its exact channel adapter.
+
+        Examples:
+            Deliver a text event:
+            ```python
+            event = OutEvent(type="agent.message", channel="ui:session/s1", text="Done")
+            await bus.publish(event)
+            ```
+
+            Inspect an adapter delivery receipt:
+            ```python
+            receipt = await bus.publish(event)
+            delivery_id = (receipt or {}).get("delivery_id")
+            ```
+
+        Args:
+            event: Fully formed event with a concrete channel address.
+
+        Returns:
+            Adapter-defined delivery metadata, or `None` when the adapter does
+            not return metadata.
+
+        Notes:
+            Projection and capability validation belong to the configured
+            adapter boundary. This method never converts or drops an event and
+            never performs inline continuation resume; use `notify` for an
+            interaction prompt.
         """
         adapter = self._pick(event.channel)
-        evt = self._smart_fallback(adapter, event)
-        if evt is None:
-            return None
-        res = await adapter.send(evt)
-        await self._bind_correlator_if_any(evt, res)
+        res = await adapter.send(event)
+        await self._bind_correlator_if_any(event, res)
         return res
 
     # ---- continuation-aware notify (used by ChannelSession.ask_*) ----

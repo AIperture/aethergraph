@@ -14,7 +14,7 @@ class QueueChannelAdapter(ChannelAdapter):
       - /ws/channel   (to stream events to browser/clients)
       - optional /channel/outbox polling endpoint
 
-    Capabilities: full superset to avoid downgrades in ChannelBus._smart_fallback.
+    Capabilities are declared for route validation and adapter projection.
     """
 
     # Slack-level capability set; user code can still choose to ignore some fields.
