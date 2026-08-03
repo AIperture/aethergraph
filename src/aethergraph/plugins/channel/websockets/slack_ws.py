@@ -1,3 +1,5 @@
+import asyncio
+
 from aethergraph.utils.optdeps import require
 
 from ..utils.slack_utils import handle_slack_events_common, handle_slack_interactive_common
@@ -27,6 +29,7 @@ class SlackSocketModeRunner:
 
         self.web_client = AsyncWebClient(token=self.bot_token)
         self.client: SocketModeClient | None = None
+        self._ready = asyncio.Event()
 
     async def _handle_socket_request(self, client: SocketModeClient, req: SocketModeRequest):
         # events from Slack
@@ -54,9 +57,7 @@ class SlackSocketModeRunner:
     async def start(self):
         lg = self.container.logger.for_run()
         if not (self.bot_token and self.app_token):
-            lg.warning(
-                "[Slack SocketMode] bot_token or app_token not configured; skipping Socket Mode startup."
-            )
+            raise RuntimeError("Slack Socket Mode requires an explicit bot token and app token.")
             return
 
         self.client = SocketModeClient(
@@ -69,4 +70,14 @@ class SlackSocketModeRunner:
         lg.info("[Slack SocketMode] connecting to Slack...")
         await self.client.connect()
         # NOTE: this call returns immediately; the internal loop lives with the event loop
+        self._ready.set()
         lg.info("[Slack SocketMode] connected.")
+
+    async def wait_ready(self):
+        await self._ready.wait()
+
+    async def stop(self):
+        if self.client is not None:
+            await self.client.disconnect()
+            self.client = None
+        self._ready.clear()

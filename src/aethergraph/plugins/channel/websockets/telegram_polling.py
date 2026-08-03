@@ -14,9 +14,14 @@ class TelegramPollingRunner:
         self.settings = settings
         self.bot_token: str = settings.telegram.bot_token.get_secret_value() or ""
         self._stop = False
+        self._ready = asyncio.Event()
 
     async def stop(self):
         self._stop = True
+        self._ready.clear()
+
+    async def wait_ready(self):
+        await self._ready.wait()
 
     async def _fetch_updates(self, offset: int | None) -> list[dict[str, Any]]:
         if not self.bot_token:
@@ -89,10 +94,7 @@ class TelegramPollingRunner:
 
     async def start(self):
         if not self.bot_token:
-            self.container.logger.for_run().warning(
-                "[TelegramPolling] not started: missing bot token"
-            )
-            return
+            raise RuntimeError("Telegram polling requires an explicit bot token.")
 
         self.container.logger.for_run().info("[TelegramPolling] starting polling loop...")
 
@@ -107,6 +109,7 @@ class TelegramPollingRunner:
                     offset = last_id + 1
         except Exception as e:
             self.container.logger.for_run().error(f"[TelegramPolling] initial drain failed: {e}")
+        self._ready.set()
 
         while not self._stop:
             try:
@@ -138,3 +141,4 @@ class TelegramPollingRunner:
                 await asyncio.sleep(5)
 
         self.container.logger.for_run().info("[TelegramPolling] stopped.")
+        self._ready.clear()

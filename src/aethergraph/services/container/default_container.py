@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -256,10 +257,40 @@ def build_default_container(
     *,
     root: str | None = None,
     cfg: AppSettings | None = None,
+    channel_adapters: Mapping[str, Any] | None = None,
 ) -> DefaultContainer:
-    """Build the default service container with standard services.
-    if "root" is provided, use it as the base directory for storage; else use from cfg.workspace.
-    if cfg is not provided, load from default AppSettings.
+    """Build one AetherGraph service container with standard services.
+
+    The builder creates operational stores under the selected workspace and
+    accepts an exact Channel adapter mapping for immutable Host composition.
+
+    Examples:
+        Build a development container from application settings:
+            ```python
+            container = build_default_container(root="./workspace", cfg=settings)
+            ```
+
+        Build a provider-neutral deployment container:
+            ```python
+            container = build_default_container(
+                root="./deployment",
+                cfg=settings,
+                channel_adapters={},
+            )
+            ```
+
+    Args:
+        root: Operational workspace root overriding `cfg.workspace`.
+        cfg: Exact application settings or None to load development settings.
+        channel_adapters: Exact adapter mapping. None selects development adapters
+            from `cfg`; an empty mapping installs no transport adapters.
+
+    Returns:
+        DefaultContainer: Fully constructed runtime service container.
+
+    Notes:
+        Production AG Host always supplies `channel_adapters` explicitly. The
+        None behavior remains only for developer-facing container construction.
     """
     if cfg is None:
         from aethergraph.config.context import set_current_settings
@@ -363,9 +394,11 @@ def build_default_container(
     }
 
     # channels
-    channel_adapters = make_channel_adapters_from_env(cfg)
+    selected_channel_adapters = (
+        make_channel_adapters_from_env(cfg) if channel_adapters is None else dict(channel_adapters)
+    )
     channels = build_bus(
-        channel_adapters,
+        selected_channel_adapters,
         logger=logger_factory.for_channel(),
         resume_router=resume_router,
         cont_store=cont_store,

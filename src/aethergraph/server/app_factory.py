@@ -17,25 +17,16 @@ from aethergraph.api.v1.router import router as api_v1_router
 from aethergraph.config.config import AppSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-
-# register all skills in the builtin agent (this is optional but keeps them together for now)
 from aethergraph.core.runtime.runtime_services import (
     install_services,
     register_skills_from_path,
 )
 
-# from aethergraph.plugins.agents.agnet_buider_agent import *  # noqa: F403
-# import built-in agents and plugins to register them
-from aethergraph.plugins.agents.chat_agent.default_chat_agent import *  # noqa: F403
-
-# from aethergraph.plugins.agents.graph_builder.agent import *  # noqa: F403
-# from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
-# from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec, emit_load_errors
 from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.integration import IntegrationManager
 from aethergraph.services.triggers.engine import TriggerEngine
-from aethergraph.utils.optdeps import require
 
 builtin_agent_skills_path = (
     Path(__file__).parent.parent / "plugins" / "agents" / "graph_builder" / "skills"
@@ -50,10 +41,44 @@ def create_app(
     workspace: str = "./aethergraph_workspace",
     cfg: Optional["AppSettings"] = None,
     log_level: str = "info",
+    container=None,
+    integration_manager: IntegrationManager | None = None,
 ) -> FastAPI:
-    """
-    Builds the FastAPI app, registers routers, and installs all services
-    into app.state.container (and globally via install_services()).
+    """Build an AetherGraph FastAPI application around one service container.
+
+    Development callers may let the factory build a mutable sidecar container.
+    Immutable AG Host callers supply their verified container and explicit
+    Integration Manager so provider lifecycle has one owner.
+
+    Examples:
+        Build a development sidecar:
+            ```python
+            app = create_app(workspace="./workspace", cfg=settings)
+            ```
+
+        Build an immutable Host application:
+            ```python
+            app = create_app(
+                workspace=str(host.workspace),
+                cfg=host.container.settings,
+                container=host.container,
+                integration_manager=host.integration_manager,
+            )
+            ```
+
+    Args:
+        workspace: Operational root used only when constructing a container.
+        cfg: Exact application settings or None for development defaults.
+        log_level: Console log level used when settings omit one.
+        container: Prebuilt immutable Host container or None for development.
+        integration_manager: Explicit provider lifecycle owner for this Host.
+
+    Returns:
+        FastAPI: Configured application with services installed and lifespan bound.
+
+    Notes:
+        Mutable source replay and built-in graph registration occur only when the
+        factory constructs the development container itself.
     """
 
     # Resolve settings and container up front so lifespan can capture them
@@ -61,13 +86,19 @@ def create_app(
     if settings.logging.console_level is None:
         settings.logging.console_level = log_level
 
-    container = build_default_container(root=workspace, cfg=settings)
+    development_container = container is None
+    container = container or build_default_container(root=workspace, cfg=settings)
+    if development_container:
+        # Developer sidecars retain the built-in chat agent. Immutable Hosts pass
+        # a prebuilt container and register only their verified compiled package.
+        from aethergraph.plugins.agents.chat_agent import default_chat_agent  # noqa: F401
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # --- Startup: attach settings/container and start external transports ---
+        # --- Startup: attach settings/container and start owned services ---
         app.state.settings = settings
         app.state.container = container
+        app.state.integration_manager = integration_manager
 
         trigger_engine_task = None
         retention_stop = asyncio.Event()
@@ -84,56 +115,34 @@ def create_app(
             app.state.trigger_engine_task = trigger_engine_task
             logger.info("TriggerEngine background task started")
 
-        slack_task = None
-        tg_task = None
+        if integration_manager is not None:
+            await integration_manager.start()
 
-        # Slack Socket Mode
-        slack_cfg = settings.slack
-        if (
-            slack_cfg
-            and slack_cfg.enabled
-            and slack_cfg.socket_mode_enabled
-            and slack_cfg.bot_token
-            and slack_cfg.app_token
-        ):
-            require("slack_sdk", "slack")
-            from ..plugins.channel.websockets.slack_ws import SlackSocketModeRunner
+        if development_container:
+            logger.info(
+                "Registering skills from %s for builtin agent...",
+                builtin_agent_skills_path,
+            )
+            register_skills_from_path(builtin_agent_skills_path, overwrite=True)
 
-            runner = SlackSocketModeRunner(container=container, settings=settings)
-            app.state.slack_socket_runner = runner
-            slack_task = asyncio.create_task(runner.start())
-
-        # Telegram polling
-        tg_cfg = settings.telegram
-        if tg_cfg and tg_cfg.enabled and tg_cfg.polling_enabled and tg_cfg.bot_token:
-            from ..plugins.channel.websockets.telegram_polling import TelegramPollingRunner
-
-            tg_runner = TelegramPollingRunner(container=container, settings=settings)
-            app.state.telegram_polling_runner = tg_runner
-            tg_task = asyncio.create_task(tg_runner.start())
-
-        # Register skills from the builtin path (optional, but keeps them together for now)
-        logger.info(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
-        register_skills_from_path(builtin_agent_skills_path, overwrite=True)
-
-        # Replay persisted source registrations (tenant/global manifests).
-        replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        replay_report = await container.registration_service.replay_registered_sources(
-            strict=replay_strict
-        )
-        logger.info(
-            "Registry replay complete: total=%s loaded=%s failed=%s",
-            replay_report.total,
-            replay_report.loaded,
-            replay_report.failed,
-        )
-        if replay_report.errors:
-            for err in replay_report.errors:
-                logger.warning("Registry replay error: %s", err)
+            # Developer sidecars may replay mutable source registrations.
+            replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            replay_report = await container.registration_service.replay_registered_sources(
+                strict=replay_strict
+            )
+            logger.info(
+                "Registry replay complete: total=%s loaded=%s failed=%s",
+                replay_report.total,
+                replay_report.loaded,
+                replay_report.failed,
+            )
+            if replay_report.errors:
+                for err in replay_report.errors:
+                    logger.warning("Registry replay error: %s", err)
         try:
             # Hand control back to FastAPI / TestClient
             yield
@@ -153,12 +162,9 @@ def create_app(
                     with suppress(asyncio.CancelledError):
                         await trigger_engine_task
 
-            # 2) Stop Slack / Telegram tasks
-            for task in (slack_task, tg_task):
-                if task is not None and not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
+            # 2) Stop explicitly configured provider transports
+            if integration_manager is not None:
+                await integration_manager.stop()
 
             if retention_task is not None:
                 retention_stop.set()

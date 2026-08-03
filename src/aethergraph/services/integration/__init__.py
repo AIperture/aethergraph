@@ -29,6 +29,14 @@ from .interactions import (
     ResolvedInteraction,
     build_interaction_payload,
 )
+from .manager import (
+    IntegrationConnection,
+    IntegrationConnectionState,
+    IntegrationConnectionStatus,
+    IntegrationManager,
+    IntegrationManagerError,
+    IntegrationTransport,
+)
 from .resources import ResourceIngress, ResourceIngressError, ResourceIngressPolicy
 from .routes import IntegrationRouteError, ManifestRouteResolver
 from .session_bindings import (
@@ -52,6 +60,12 @@ __all__ = [
     "IntegrationIngressCoordinator",
     "InteractionResolutionError",
     "InteractionResolver",
+    "IntegrationConnection",
+    "IntegrationConnectionState",
+    "IntegrationConnectionStatus",
+    "IntegrationManager",
+    "IntegrationManagerError",
+    "IntegrationTransport",
     "ManifestRouteResolver",
     "PersistedSemanticEvent",
     "PersistedInboundEvent",
