@@ -104,6 +104,24 @@ class FileRef(TypedDict, total=False):
     ts: str | float  # timestamp of the file upload
 
 
+@dataclass(frozen=True, slots=True)
+class ChoiceResult:
+    """Typed normalized result returned by a Channel choice interaction."""
+
+    choice: str | None
+    choice_label: str | None
+    text: str = ""
+    matched: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class FileInteractionResult:
+    """Typed normalized result returned by a Channel file interaction."""
+
+    text: str = ""
+    files: tuple[FileRef, ...] = ()
+
+
 @dataclass
 class Button:
     label: str

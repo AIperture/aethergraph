@@ -75,7 +75,7 @@ async def test_ask_text_ignores_non_matching_resume_payload():
 
 
 @pytest.mark.asyncio
-async def test_ask_approval_infers_choice_from_text_when_resume_payload_has_no_choice():
+async def test_ask_choices_infers_choice_from_text_when_resume_payload_has_no_choice():
     ctx = _FakeContext(
         resume_payload={
             "_channel_wait_kind": "choice",
@@ -91,12 +91,12 @@ async def test_ask_approval_infers_choice_from_text_when_resume_payload_has_no_c
     )
     chan = ChannelSession(ctx)
 
-    reply = await chan.ask_approval("Approve?", options=["Approve", "Cancel"])
+    reply = await chan.ask_choices("Approve?", options=["Approve", "Cancel"])
 
-    assert reply["approved"] is True
-    assert reply["choice"] == "Approve"
-    assert reply["choice_label"] == "Approve"
-    assert reply["text"] == "Approve"
+    assert reply.choice == "Approve"
+    assert reply.choice_label == "Approve"
+    assert reply.text == "Approve"
+    assert reply.matched is True
     assert getattr(ctx, "_channel_resume_payload_consumed", False) is True
 
 
@@ -125,9 +125,8 @@ async def test_ask_choices_returns_canonical_choice_and_label():
         ],
     )
 
-    assert reply == {
-        "choice": "safe_mode",
-        "choice_label": "Safe Mode",
-        "text": "safe",
-        "matched": True,
-    }
+    assert reply.choice == "safe_mode"
+    assert reply.choice_label == "Safe Mode"
+    assert reply.text == "safe"
+    assert reply.matched is True
+    assert not isinstance(reply, dict)

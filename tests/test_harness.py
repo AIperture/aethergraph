@@ -68,7 +68,7 @@ async def harness_ask_text_tool(*, context: NodeContext):
 @tool(name="harness.ask_files_tool", outputs=["count"])
 async def harness_ask_files_tool(*, context: NodeContext):
     result = await context.channel("ui:session").ask_files(prompt="Upload", multiple=True)
-    return {"count": len((result or {}).get("files", []))}
+    return {"count": len(result.files)}
 
 
 @graphify(name="harness.wait_graph", inputs=[], outputs=["text", "count"])

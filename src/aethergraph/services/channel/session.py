@@ -14,6 +14,8 @@ from aethergraph.contracts.services.channel import (
     Button,
     ChannelRoutingError,
     ChoiceOption,
+    ChoiceResult,
+    FileInteractionResult,
     FileRef,
     OutEvent,
 )
@@ -347,28 +349,6 @@ class ChannelSession:
         if not getattr(event, "channel", None):
             event.channel = self._resolve_key(channel)
         return event
-
-    class _ChannelResult(dict):
-        """
-        Dict-compatible result that also supports tuple-style unpacking.
-
-        This preserves backward compatibility for call sites that expect mapping
-        access while allowing:
-
-        ```python
-        approved, choice, choice_label, text, matched = await context.channel().ask_approval(...)
-        ```
-        """
-
-        __slots__ = ("_iter_keys",)
-
-        def __init__(self, *args, iter_keys: tuple[str, ...], **kwargs):
-            super().__init__(*args, **kwargs)
-            self._iter_keys = iter_keys
-
-        def __iter__(self):
-            for key in self._iter_keys:
-                yield self.get(key)
 
     @property
     def _inbox_kv_key(self) -> str:
@@ -1603,79 +1583,6 @@ class ChannelSession:
             memory_tags=memory_tags,
         )
 
-    async def ask_approval(
-        self,
-        prompt: str,
-        options: Iterable[str] = ("Approve", "Reject"),
-        *,
-        timeout_s: int = 3600,
-        channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
-        memory_tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Deprecated wrapper over `ask_choices()`.
-
-        Prompt for a button-style approval choice and return normalized result.
-
-        Send an `approval` continuation with button labels, wait for the user's
-        selected choice, preserve any typed text, then derive `approved` from
-        whether the first option was selected (case-insensitive).
-
-        Examples:
-            Use default approve/reject options:
-            ```python
-            result = await context.channel().ask_approval("Do you approve this action?")
-            # result: { "approved": True/False, "choice": "Approve"/"Reject", "text": "" }
-            ```
-
-            Use custom options:
-            ```python
-            result = await context.channel().ask_approval(
-                "Proceed with deployment?",
-                options=["Yes", "No", "Defer"],
-                timeout_s=120
-            )
-            ```
-
-        Args:
-            prompt: Prompt text shown to the user.
-            options: Ordered button labels. The first option maps to approved.
-            timeout_s: Continuation deadline in seconds.
-            channel: Optional target channel key.
-            memory_log_prompt: Enable memory logging for the prompt.
-            memory_log_reply: Enable memory logging for a selected choice.
-            memory_tags: Optional tags applied to memory entries.
-
-        Returns:
-            dict[str, Any]: `{"approved": bool, "choice": Any, "text": str}`.
-
-        Notes:
-            If no choice is returned, or `options` is empty, `approved` is `False`.
-        """
-        result = await self.ask_choices(
-            prompt,
-            options=options,
-            timeout_s=timeout_s,
-            channel=channel,
-            memory_log_prompt=memory_log_prompt,
-            memory_log_reply=memory_log_reply,
-            memory_tags=memory_tags,
-        )
-        choice_options = build_choice_options(options)
-        approved = bool(choice_options) and result.get("choice") == choice_options[0].id
-        return ChannelSession._ChannelResult(
-            {
-                "approved": approved,
-                "choice": result.get("choice"),
-                "choice_label": result.get("choice_label"),
-                "text": result.get("text", ""),
-                "matched": result.get("matched", False),
-            },
-            iter_keys=("approved", "choice", "choice_label", "text", "matched"),
-        )
-
     async def ask_choices(
         self,
         prompt: str,
@@ -1686,13 +1593,48 @@ class ChannelSession:
         memory_log_prompt: bool = True,
         memory_log_reply: bool = True,
         memory_tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Prompt for a choice selection and return a normalized response.
+    ) -> ChoiceResult:
+        """Prompt for one normalized choice selection.
 
-        Returns a dict with canonical `choice`, human-facing `choice_label`,
-        the raw freeform `text`, and `matched` indicating whether the reply
-        resolved to one of the configured options.
+        The continuation reply is resolved against the configured identifiers,
+        labels, and aliases and returned as one immutable typed result.
+
+        Examples:
+            Ask with authored choice options:
+            ```python
+            result = await context.channel().ask_choices(
+                "Choose a mode",
+                options=[ChoiceOption(id="safe", label="Safe")],
+            )
+            selected = result.choice
+            ```
+
+            Ask with simple labels and a timeout:
+            ```python
+            result = await context.channel().ask_choices(
+                "Continue?",
+                options=["Yes", "No"],
+                timeout_s=120,
+            )
+            matched = result.matched
+            ```
+
+        Args:
+            prompt: Prompt text shown to the user.
+            options: Ordered choice labels, typed options, or option mappings.
+            timeout_s: Continuation deadline in seconds.
+            channel: Optional exact target channel address.
+            memory_log_prompt: Enable memory logging for the prompt.
+            memory_log_reply: Enable memory logging for the normalized reply.
+            memory_tags: Optional tags applied to memory entries.
+
+        Returns:
+            ChoiceResult: Immutable normalized choice, label, text, and match state.
+
+        Notes:
+            This is the only Channel API for approval and choice interactions;
+            approval semantics are derived by the calling policy from stable
+            option identifiers.
         """
         channel_key = self._resolve_key(channel)
         choice_options = build_choice_options(options)
@@ -1751,17 +1693,19 @@ class ChannelSession:
                     channel=channel,
                 )
 
-            result = ChannelSession._ChannelResult(
-                {
-                    "choice": normalized.get("choice"),
-                    "choice_label": normalized.get("choice_label"),
-                    "text": normalized.get("text", ""),
-                    "matched": bool(normalized.get("matched")),
-                },
-                iter_keys=("choice", "choice_label", "text", "matched"),
+            result = ChoiceResult(
+                choice=normalized.get("choice"),
+                choice_label=normalized.get("choice_label"),
+                text=str(normalized.get("text", "")),
+                matched=bool(normalized.get("matched")),
             )
             await span.finish(
-                response=result,
+                response={
+                    "choice": result.choice,
+                    "choice_label": result.choice_label,
+                    "text": result.text,
+                    "matched": result.matched,
+                },
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
             )
             return result
@@ -1780,12 +1724,11 @@ class ChannelSession:
         memory_log_prompt: bool = True,
         memory_log_reply: bool = True,
         memory_tags: list[str] | None = None,
-    ) -> dict:
-        """
-        Prompt for file upload and return normalized text/files payload.
+    ) -> FileInteractionResult:
+        """Prompt for file upload and return a typed normalized reply.
 
         Send a `user_files` continuation prompt, wait for response, and return
-        a dictionary with text plus a list-valued `files` field.
+        immutable text and file fields.
 
         Examples:
             Ask for one or more files:
@@ -1793,7 +1736,7 @@ class ChannelSession:
             result = await context.channel().ask_files(
                 prompt="Please upload your report."
             )
-            # result: { "text": "...", "files": [FileRef(...), ...] }
+            uploaded = result.files
             ```
 
             Provide type hints for upload UI:
@@ -1816,7 +1759,7 @@ class ChannelSession:
             memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            dict: `{"text": str, "files": list}`.
+            FileInteractionResult: Immutable normalized text and uploaded files.
 
         Notes:
             `accept` is advisory and adapter-dependent, not strict server-side validation.
@@ -1862,14 +1805,13 @@ class ChannelSession:
                     channel=channel,
                 )
 
-            result = {
-                "text": text,
-                "files": payload.get("files", [])
-                if isinstance(payload.get("files", []), list)
-                else [],
-            }
+            raw_files = payload.get("files", [])
+            result = FileInteractionResult(
+                text=text,
+                files=tuple(raw_files) if isinstance(raw_files, list) else (),
+            )
             await span.finish(
-                response={"text": text, "files_count": len(result["files"])},
+                response={"text": text, "files_count": len(result.files)},
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
             )
             return result
@@ -1886,17 +1828,17 @@ class ChannelSession:
         memory_log_prompt: bool = True,
         memory_log_reply: bool = True,
         memory_tags: list[str] | None = None,
-    ) -> dict:
-        """
-        Prompt for either text or files and return normalized payload.
+    ) -> FileInteractionResult:
+        """Prompt for either text or files and return a typed normalized reply.
 
-        Send a `user_input_or_files` continuation request and return both `text`
-        and `files` fields after normalization.
+        Send a `user_input_or_files` continuation request and return immutable
+        text and file fields after normalization.
 
         Examples:
             Prompt for either modality:
             ```python
             result = await context.channel().ask_text_or_files(prompt="Reply or upload files")
+            text = result.text
             ```
 
             Send to a specific channel:
@@ -1916,7 +1858,7 @@ class ChannelSession:
             memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            dict: `{"text": str, "files": list}`.
+            FileInteractionResult: Immutable normalized text and uploaded files.
 
         Notes:
             Prefer `ask_text` + `get_latest_uploads` or `ask_files` when modality is known.
@@ -1956,14 +1898,13 @@ class ChannelSession:
                     channel=channel,
                 )
 
-            result = {
-                "text": text,
-                "files": payload.get("files", [])
-                if isinstance(payload.get("files", []), list)
-                else [],
-            }
+            raw_files = payload.get("files", [])
+            result = FileInteractionResult(
+                text=text,
+                files=tuple(raw_files) if isinstance(raw_files, list) else (),
+            )
             await span.finish(
-                response={"text": text, "files_count": len(result["files"])},
+                response={"text": text, "files_count": len(result.files)},
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
             )
             return result
