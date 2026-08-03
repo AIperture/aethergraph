@@ -55,7 +55,7 @@ async def graph_builder(
 ) -> dict:
     logger = context.logger()
     mem = context.memory()
-    chan = context.ui_session_channel()
+    chan = context.channel()
 
     raw_message = (message or "").strip()
     if not raw_message and not (attachments or []):

@@ -9,6 +9,7 @@ import pytest
 from aethergraph.contracts.integration import OriginBinding
 from aethergraph.contracts.services.channel import ChannelRoutingError
 from aethergraph.core.runtime import graph_runner
+from aethergraph.core.runtime.node_context import NodeContext
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.runner.facade import RunFacade
 
@@ -71,6 +72,18 @@ def test_missing_origin_fails_without_console_or_bus_default() -> None:
 
     assert exc_info.value.code == "channel.origin_required"
     assert exc_info.value.channel_key is None
+
+
+def test_node_context_exposes_no_ui_or_work_status_compatibility_wrappers() -> None:
+    removed = (
+        "ui_session_channel",
+        "ui_run_channel",
+        "replace_work_status",
+        "patch_work_status",
+        "clear_work_status",
+    )
+
+    assert all(not hasattr(NodeContext, name) for name in removed)
 
 
 @pytest.mark.asyncio

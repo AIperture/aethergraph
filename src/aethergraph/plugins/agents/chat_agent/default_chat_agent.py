@@ -145,7 +145,7 @@ async def default_chat_agent(
     """
     logger = context.logger()
     llm = context.llm()
-    chan = context.ui_session_channel()
+    chan = context.channel()
     mem = context.memory()
     indices = context.indices()  # ScopedIndices
 

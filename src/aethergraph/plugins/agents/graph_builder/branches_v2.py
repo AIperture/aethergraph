@@ -303,7 +303,7 @@ async def _handle_plan_v2(
     show_approval_buttons: bool = True,
 ) -> tuple[str, dict[str, Any] | None]:
     llm = context.llm()
-    chan = context.ui_session_channel()
+    chan = context.channel()
     system_prompt = _compile_branch_prompt(context=context, branch=GraphBuilderBranch.PLAN)
     history = await _recent_chat_for_llm(context=context, limit=20)
 
@@ -398,7 +398,7 @@ async def _handle_generate_v2(
     files: list[Any],
     context: NodeContext,
 ) -> tuple[str, dict[str, Any] | None, str | None, str | None]:
-    chan = context.ui_session_channel()
+    chan = context.channel()
     state = await _load_state(context=context, level="user")
     plan = state.pending_plan_json or state.last_plan_json
     phase_prefix = f"graph_builder:{getattr(context, 'run_id', 'run')}"
@@ -778,7 +778,7 @@ async def _handle_register_app_v2(
     4) Fall back to in-memory registration if only generated source exists.
     """
     logger = context.logger()
-    chan = context.ui_session_channel()
+    chan = context.channel()
     registry = context.registry()
 
     state = await _load_state(context=context, level="user")
@@ -999,7 +999,7 @@ async def _handle_chat_v2(*, message: str, context: NodeContext) -> str:
     msg = (message or "").strip().lower()
     intent = _detect_approval_intent(msg)
     state = await _load_state(context=context, level="user")
-    chan = context.ui_session_channel()
+    chan = context.channel()
     has_plan = bool(state.pending_plan_json or state.last_plan_json)
     if intent == "approve" and not has_plan:
         return (

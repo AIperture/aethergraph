@@ -188,7 +188,7 @@ async def _handle_generate(
     context: NodeContext,
 ) -> tuple[str, dict[str, Any] | None]:
     llm: GenericLLMClient = context.llm()
-    chan = context.ui_session_channel()
+    chan = context.channel()
 
     system_prompt = _compile_branch_prompt(context=context, branch=GraphBuilderBranch.GENERATE)
     history = await _recent_chat_for_llm(context=context, limit=16)

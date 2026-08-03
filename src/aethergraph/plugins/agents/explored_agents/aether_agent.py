@@ -130,7 +130,7 @@ async def builtin_agent(
     """
     logger = context.logger()
     mem = context.memory()
-    chan = context.ui_session_channel()
+    chan = context.channel()
 
     raw_message = (message or "").strip()
     logger.debug("builtin_agent received message: %r (session_id=%s)", raw_message, session_id)

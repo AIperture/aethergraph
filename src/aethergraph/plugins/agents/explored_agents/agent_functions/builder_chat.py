@@ -256,7 +256,7 @@ async def builder_chat_handler(
     """
     logger = context.logger()
     llm = context.llm()
-    chan = context.ui_session_channel()
+    chan = context.channel()
 
     msg_text = (message or "").strip()
 
