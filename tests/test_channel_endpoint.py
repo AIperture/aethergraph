@@ -99,6 +99,7 @@ async def test_channel_http_roundtrip():
         kind="user_input",
         channel="ext:chan/user-123",
         prompt="Say something",
+        payload={"_interaction_id": "interaction-endpoint-1"},
     )
     await container.cont_store.save(cont)
 
@@ -147,6 +148,7 @@ async def test_channel_http_accepts_canonical_attachments():
         kind="user_input",
         channel="ext:chan/user-123",
         prompt="Send context",
+        payload={"_interaction_id": "interaction-endpoint-2"},
     )
     await container.cont_store.save(cont)
     await container.channel_bus.notify(cont)
@@ -194,6 +196,7 @@ async def test_channel_prompt_preserves_interaction_rendering_hints():
             "prompt": "Upload evidence",
             "accept": ["image/png", ".pdf"],
             "multiple": False,
+            "_interaction_id": "interaction-endpoint-files",
         },
     )
 

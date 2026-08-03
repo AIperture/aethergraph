@@ -20,7 +20,7 @@ class ChannelBus:
       - peek_correlator(channel_key): ask adapter for a thread hint (optional)
     Optionally aware of:
       - resume_router  : used for inline resume (console/local-web)
-      - store          : used to bind correlator↔token and to mint short resume_key
+      - store          : used to bind transport correlators to internal continuations
     """
 
     def __init__(
@@ -90,14 +90,18 @@ class ChannelBus:
         else:
             warnings.warn(msg, stacklevel=2)
 
-    async def _bind_correlator_if_any(self, event: OutEvent, send_result: dict | None):
-        if not self.store or not send_result:
+    async def _bind_correlator_if_any(
+        self,
+        send_result: dict | None,
+        *,
+        continuation_token: str | None,
+    ):
+        if not self.store or not send_result or not continuation_token:
             return
         corr = send_result.get("correlator")
-        token = (event.meta or {}).get("token")
-        if isinstance(corr, Correlator) and token:
+        if isinstance(corr, Correlator):
             try:
-                await self.store.bind_correlator(token=token, corr=corr)
+                await self.store.bind_correlator(token=continuation_token, corr=corr)
             except Exception as e:
                 self._warn(f"Failed to bind correlator: {e}")
 
@@ -133,7 +137,6 @@ class ChannelBus:
         """
         adapter = self._pick(event.channel)
         res = await adapter.send(event)
-        await self._bind_correlator_if_any(event, res)
         return res
 
     # ---- continuation-aware notify (used by ChannelSession.ask_*) ----
@@ -148,24 +151,19 @@ class ChannelBus:
         kind = continuation.kind
         prompt = continuation.prompt
 
-        # Short token for constrained transports
-        resume_key = None
-        if self.store and hasattr(self.store, "alias_for"):
-            try:
-                resume_key = await self.store.alias_for(continuation.token)
-            except Exception:
-                resume_key = None
-        if not resume_key:
-            resume_key = str(continuation.token)[:24]
+        continuation_payload = getattr(continuation, "payload", None)
+        interaction_id = (
+            continuation_payload.get("_interaction_id")
+            if isinstance(continuation_payload, dict)
+            else None
+        )
+        if not isinstance(interaction_id, str) or not interaction_id:
+            raise ValueError("Continuation is missing its public interaction identity.")
 
         meta = {
-            "run_id": continuation.run_id,
-            "node_id": continuation.node_id,
-            "token": continuation.token,
-            "resume_key": resume_key,
+            "interaction_id": interaction_id,
             "interaction_kind": kind,
         }
-        continuation_payload = getattr(continuation, "payload", None)
         if isinstance(continuation_payload, dict) and kind in (
             "user_files",
             "user_input_or_files",
@@ -243,9 +241,14 @@ class ChannelBus:
 
         else:
             txt = str(prompt) if isinstance(prompt, str) else "Waiting…"
-            return await self.publish(
-                OutEvent(type="session.waiting", channel=ch, text=txt, meta=meta)
+            event = OutEvent(type="session.waiting", channel=ch, text=txt, meta=meta)
+            adapter = self._pick(ch)
+            res = await adapter.send(event)
+            await self._bind_correlator_if_any(
+                res,
+                continuation_token=continuation.token,
             )
+            return res
 
         # Inline vs push-only
         adapter = self._pick(ch)
@@ -257,11 +260,19 @@ class ChannelBus:
         if (needed_cap in caps) and not force_push:
             # Inline path
             res = await adapter.send(event)
-            await self._bind_correlator_if_any(event, res)
+            await self._bind_correlator_if_any(
+                res,
+                continuation_token=continuation.token,
+            )
             return res
 
         # Push-only path
-        return await self.publish(event)
+        res = await adapter.send(event)
+        await self._bind_correlator_if_any(
+            res,
+            continuation_token=continuation.token,
+        )
+        return res
 
     # ---- optional: ask adapter for correlator/“thread” without sending ----
     async def peek_correlator(self, channel_key: str) -> Correlator | None:

@@ -128,29 +128,29 @@ class EmbeddingProfilePayload(BaseModel):
 
 
 class SlackView(BaseModel):
+    integration_id: str | None = None
     enabled: bool = False
     bot_token: str | None = None  # masked
     signing_secret: str | None = None  # masked
-    default_agent_id: str | None = None
 
 
 class SlackPayload(BaseModel):
+    integration_id: str | None = None
     enabled: bool | None = None
     bot_token: str | None = None
     signing_secret: str | None = None
-    default_agent_id: str | None = None
 
 
 class TelegramView(BaseModel):
+    integration_id: str | None = None
     enabled: bool = False
     bot_token: str | None = None  # masked
-    default_agent_id: str | None = None
 
 
 class TelegramPayload(BaseModel):
+    integration_id: str | None = None
     enabled: bool | None = None
     bot_token: str | None = None
-    default_agent_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

@@ -168,16 +168,12 @@ class SlackChannelAdapter(ChannelAdapter):
                 if getattr(b, "url", None):
                     btn["url"] = b.url
                 else:
-                    # pack choice + correlators into value for /slack/interact
+                    # Pack only the public interaction identity and selected option.
                     value_payload = {
                         "choice": getattr(b, "value", None) or b.label,
                         "choice_label": b.label,
+                        "interaction_id": (event.meta or {}).get("interaction_id"),
                     }
-                    # if passing correlators via event.meta
-                    if event.meta:
-                        for k in ("run_id", "node_id", "token"):
-                            if k in event.meta:
-                                value_payload[k] = event.meta[k]
                     import json
 
                     btn["value"] = json.dumps(value_payload)

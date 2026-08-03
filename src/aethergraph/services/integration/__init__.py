@@ -11,6 +11,7 @@ from .events import (
     SemanticEventStore,
     SemanticEventStoreError,
 )
+from .factory import install_integration_ingress
 from .idempotency import (
     IngressClaim,
     IngressIdempotencyError,
@@ -62,4 +63,5 @@ __all__ = [
     "VerifiedIntegrationContext",
     "VerifiedAttachment",
     "build_interaction_payload",
+    "install_integration_ingress",
 ]

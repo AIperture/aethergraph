@@ -7,6 +7,7 @@ from typing import Any
 
 # ---- core services ----
 from aethergraph.config.config import AppSettings
+from aethergraph.contracts.integration import HostManifest
 from aethergraph.contracts.services.execution import ExecutionService
 
 # ---- optional services (not used by default) ----
@@ -249,6 +250,10 @@ class DefaultContainer:
 
     # channel ingress (set after init to avoid circular dependency)
     channel_ingress: ChannelIngress | None = None  # set after init to avoid circular dependency
+
+    # installed only by an explicit immutable AG Host deployment
+    host_manifest: HostManifest | None = None
+    integration_ingress: Any | None = None
 
     # opt-in host runtime output capture; disabled for normal CLI/server hosts
     runtime_output_sink: Any | None = None

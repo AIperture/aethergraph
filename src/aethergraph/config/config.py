@@ -57,6 +57,7 @@ class LoggingSettings(BaseModel):
 
 
 class SlackSettings(BaseModel):
+    integration_id: str | None = None
     # Turn Slack integration on/off globally
     enabled: bool = Field(default=False)
 
@@ -85,18 +86,9 @@ class SlackSettings(BaseModel):
         description="Expose /slack/events & /slack/interact HTTP endpoints for Slack.",
     )
 
-    # Default routing
-    #
-    # For simple setups likely only need default_channel_id (+ maybe default_team_id).
-    # default_channel_key is the more general 'slack:team/T:chan/C' form.
-    # TODO: later we might deprecate the default setting in .env and require explicit channel keys in code.
-    default_team_id: str | None = None  # e.g. 'T...'
-    default_channel_id: str | None = None  # e.g. 'C...'
-    default_channel_key: str | None = None  # e.g. 'slack:team/T...:chan/C...'
-    default_agent_id: str | None = None
-
 
 class TelegramSettings(BaseModel):
+    integration_id: str | None = None
     enabled: bool = Field(default=False)
     bot_token: SecretStr | None = None
 
@@ -106,10 +98,6 @@ class TelegramSettings(BaseModel):
 
     # for local / dev mode
     polling_enabled: bool = True  # use getUpdates loop by default for local
-
-    # default chat key
-    default_chat_id: str | None = None
-    default_agent_id: str | None = None
 
 
 class ContinuationStoreSettings(BaseModel):

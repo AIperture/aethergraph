@@ -6,60 +6,20 @@ from typing import Any
 
 import pytest
 
+from aethergraph.contracts.integration import IntegrationKind
 from aethergraph.contracts.services.channel import Button, OutEvent
 from aethergraph.plugins.channel.adapters.slack import SlackChannelAdapter
 from aethergraph.plugins.channel.adapters.telegram import TelegramChannelAdapter
 from aethergraph.plugins.channel.utils import slack_utils, telegram_utils
-from aethergraph.services.channel.ingress import ChannelIngress
-from aethergraph.services.continuations.continuation import Continuation
 
 
-class _EventLog:
+class _Coordinator:
     def __init__(self) -> None:
-        self.rows: list[dict[str, Any]] = []
-
-    async def append(self, row: dict[str, Any]) -> None:
-        self.rows.append(row)
-
-
-class _ContinuationStore:
-    def __init__(self, continuation: Continuation | None) -> None:
-        self.continuation = continuation
-
-    async def find_by_correlator(self, *, corr) -> Continuation | None:
-        return self.continuation
-
-    async def list_waits(self) -> list[dict[str, Any]]:
-        if self.continuation is None:
-            return []
-        return [self.continuation.to_dict()]
-
-    async def delete(self, run_id: str, node_id: str) -> None:
-        self.continuation = None
-
-
-class _ResumeRouter:
-    def __init__(self, store: _ContinuationStore) -> None:
-        self.store = store
         self.calls: list[dict[str, Any]] = []
 
-    async def resume(
-        self,
-        *,
-        run_id: str,
-        node_id: str,
-        token: str,
-        payload: dict[str, Any],
-    ) -> None:
-        self.calls.append(
-            {
-                "run_id": run_id,
-                "node_id": node_id,
-                "token": token,
-                "payload": payload,
-            }
-        )
-        await self.store.delete(run_id, node_id)
+    async def accept(self, *, verified, envelope):
+        self.calls.append({"verified": verified, "envelope": envelope})
+        return SimpleNamespace(accepted=True)
 
 
 class _Logger:
@@ -69,182 +29,130 @@ class _Logger:
     def debug(self, *args, **kwargs) -> None:
         pass
 
-    def info(self, *args, **kwargs) -> None:
-        pass
-
-    def warning(self, *args, **kwargs) -> None:
-        pass
-
-    def error(self, *args, **kwargs) -> None:
-        pass
-
 
 class _Container:
-    def __init__(self, continuation: Continuation | None, *, default_agent_id: str | None = None):
-        self.cont_store = _ContinuationStore(continuation)
-        self.resume_router = _ResumeRouter(self.cont_store)
-        self.eventlog = _EventLog()
-        self.kv_hot = None
-        self.logger = _Logger()
-        self.wait_registry = None
-        self.sched_registry = None
+    def __init__(self) -> None:
+        self.integration_ingress = _Coordinator()
         self.channels = SimpleNamespace(adapters={})
-        self.settings = SimpleNamespace(telegram=SimpleNamespace(default_agent_id=default_agent_id))
-        self.channel_ingress = ChannelIngress(container=self, logger=self.logger)
+        self.logger = _Logger()
 
 
-def _slack_settings(default_agent_id: str | None = None):
+def _slack_settings():
     return SimpleNamespace(
         slack=SimpleNamespace(
+            integration_id="slack-main",
             bot_token=None,
-            default_agent_id=default_agent_id,
         )
     )
 
 
+def _slack_message_payload(*, event_id: str = "Ev-1") -> dict[str, Any]:
+    return {
+        "event_id": event_id,
+        "team_id": "T1",
+        "event": {
+            "type": "message",
+            "channel": "C1",
+            "user": "U1",
+            "ts": "100.1",
+            "text": "hello from Slack",
+        },
+    }
+
+
+def _telegram_message_payload(*, update_id: int = 123) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": 7,
+            "date": 10,
+            "from": {"id": 42, "is_bot": False},
+            "chat": {"id": 99},
+            "text": "hello from Telegram",
+        },
+    }
+
+
 @pytest.mark.asyncio
-async def test_slack_shared_message_handler_records_once_and_resumes():
-    continuation = Continuation(
-        run_id="run-slack",
-        node_id="node-slack",
-        token="slack-token",
-        kind="user_input",
-        prompt="Reply",
-    )
-    container = _Container(continuation)
+async def test_slack_message_translates_to_canonical_ingress() -> None:
+    container = _Container()
 
     await slack_utils.handle_slack_events_common(
         container,
         _slack_settings(),
-        {
-            "event_id": "Ev-1",
-            "team_id": "T1",
-            "event": {
-                "type": "message",
-                "channel": "C1",
-                "user": "U1",
-                "ts": "100.1",
-                "text": "hello from Slack",
-            },
-        },
+        _slack_message_payload(),
     )
 
-    assert len(container.eventlog.rows) == 1
-    row = container.eventlog.rows[0]
-    assert row["kind"] == "channel_inbound"
-    assert row["payload"]["text"] == "hello from Slack"
-    assert row["payload"]["meta"]["slack"]["event_id"] == "Ev-1"
-    assert len(container.resume_router.calls) == 1
+    call = container.integration_ingress.calls[0]
+    envelope = call["envelope"]
+    assert call["verified"].integration_kind is IntegrationKind.SLACK
+    assert envelope.integration_id == "slack-main"
+    assert envelope.external_identity.tenant_id == "T1"
+    assert envelope.external_identity.conversation_id == "team/T1:chan/C1"
+    assert envelope.external_identity.thread_id == "100.1"
+    assert envelope.external_identity.user_id == "U1"
+    assert envelope.text == "hello from Slack"
+    assert envelope.origin_address.channel_key == "slack:team/T1:chan/C1:thread/100.1"
 
 
 @pytest.mark.asyncio
-async def test_telegram_shared_message_handler_records_once_and_resumes():
-    continuation = Continuation(
-        run_id="run-tg",
-        node_id="node-tg",
-        token="telegram-token",
-        kind="user_input",
-        prompt="Reply",
-    )
-    container = _Container(continuation)
+async def test_telegram_message_translates_to_canonical_ingress() -> None:
+    container = _Container()
 
     await telegram_utils._process_update(
         container,
-        {
-            "update_id": 123,
-            "message": {
-                "message_id": 7,
-                "date": 10,
-                "from": {"id": 42, "is_bot": False},
-                "chat": {"id": 99},
-                "text": "hello from Telegram",
-            },
-        },
+        _telegram_message_payload(),
         token="",
+        integration_id="telegram-main",
     )
 
-    assert len(container.eventlog.rows) == 1
-    row = container.eventlog.rows[0]
-    assert row["kind"] == "channel_inbound"
-    assert row["payload"]["text"] == "hello from Telegram"
-    assert row["payload"]["meta"]["telegram"]["update_id"] == 123
-    assert len(container.resume_router.calls) == 1
+    call = container.integration_ingress.calls[0]
+    envelope = call["envelope"]
+    assert call["verified"].integration_kind is IntegrationKind.TELEGRAM
+    assert envelope.integration_id == "telegram-main"
+    assert envelope.external_identity.tenant_id == "telegram"
+    assert envelope.external_identity.conversation_id == "chat/99"
+    assert envelope.external_identity.user_id == "42"
+    assert envelope.text == "hello from Telegram"
+    assert envelope.origin_address.channel_key == "tg:chat/99"
 
 
 @pytest.mark.asyncio
-async def test_shared_message_handlers_dispatch_only_when_not_resumed(monkeypatch):
-    dispatches: list[dict[str, Any]] = []
+async def test_provider_retries_emit_stable_idempotency_identities() -> None:
+    slack_container = _Container()
+    payload = _slack_message_payload(event_id="Ev-retry")
+    await slack_utils.handle_slack_events_common(slack_container, _slack_settings(), payload)
+    await slack_utils.handle_slack_events_common(slack_container, _slack_settings(), payload)
 
-    async def _dispatch(**kwargs) -> str:
-        dispatches.append(kwargs)
-        return "new-run"
-
-    monkeypatch.setattr(slack_utils, "dispatch_channel_turn_run", _dispatch)
-    monkeypatch.setattr(telegram_utils, "dispatch_channel_turn_run", _dispatch)
-
-    slack_container = _Container(None, default_agent_id="agent-1")
-    await slack_utils.handle_slack_events_common(
-        slack_container,
-        _slack_settings(default_agent_id="agent-1"),
-        {
-            "event_id": "Ev-root",
-            "team_id": "T1",
-            "event": {
-                "type": "message",
-                "channel": "C1",
-                "user": "U1",
-                "ts": "100.2",
-                "text": "start Slack turn",
-            },
-        },
-    )
-
-    telegram_container = _Container(None, default_agent_id="agent-1")
+    telegram_container = _Container()
+    update = _telegram_message_payload(update_id=777)
     await telegram_utils._process_update(
         telegram_container,
-        {
-            "update_id": 124,
-            "message": {
-                "message_id": 8,
-                "from": {"id": 42, "is_bot": False},
-                "chat": {"id": 99},
-                "text": "start Telegram turn",
-            },
-        },
+        update,
         token="",
+        integration_id="telegram-main",
+    )
+    await telegram_utils._process_update(
+        telegram_container,
+        update,
+        token="",
+        integration_id="telegram-main",
     )
 
-    assert len(slack_container.eventlog.rows) == 1
-    assert len(telegram_container.eventlog.rows) == 1
-    assert [call["text"] for call in dispatches] == [
-        "start Slack turn",
-        "start Telegram turn",
+    slack_keys = [
+        call["envelope"].idempotency_key for call in slack_container.integration_ingress.calls
     ]
-    assert dispatches[0]["origin_channel_key"] == "slack:team/T1:chan/C1"
-    assert dispatches[0]["integration_id"] == "slack"
-    assert dispatches[0]["external_thread_id"] == "100.2"
-    assert dispatches[1]["origin_channel_key"] == "tg:chat/99"
-    assert dispatches[1]["integration_id"] == "telegram"
+    telegram_keys = [
+        call["envelope"].idempotency_key for call in telegram_container.integration_ingress.calls
+    ]
+    assert slack_keys == ["Ev-retry", "Ev-retry"]
+    assert telegram_keys == ["update-777", "update-777"]
 
 
 @pytest.mark.asyncio
-async def test_slack_callback_uses_exact_token_and_replay_records_nothing():
-    continuation = Continuation(
-        run_id="run-slack",
-        node_id="node-slack",
-        token="slack-token",
-        kind="choice",
-        prompt={
-            "title": "Choose",
-            "choices": [
-                {"id": "ship", "label": "Ship It"},
-                {"id": "revise", "label": "Revise"},
-            ],
-        },
-    )
-    container = _Container(continuation)
+async def test_slack_callback_submits_exact_public_interaction() -> None:
+    container = _Container()
     payload = {
-        "trigger_id": "trigger-1",
         "team": {"id": "T1"},
         "user": {"id": "U1"},
         "channel": {"id": "C1"},
@@ -253,69 +161,133 @@ async def test_slack_callback_uses_exact_token_and_replay_records_nothing():
             {
                 "action_id": "ag_button_0",
                 "action_ts": "100.4",
-                "value": (
-                    '{"choice":"ship","choice_label":"Ship It",'
-                    '"run_id":"run-slack","node_id":"node-slack",'
-                    '"token":"slack-token"}'
+                "value": json.dumps(
+                    {
+                        "choice": "ship",
+                        "choice_label": "Ship It",
+                        "interaction_id": "interaction-public-1",
+                    }
                 ),
             }
         ],
     }
 
-    await slack_utils.handle_slack_interactive_common(container, payload)
-    await slack_utils.handle_slack_interactive_common(container, payload)
+    await slack_utils.handle_slack_interactive_common(
+        container,
+        payload,
+        integration_id="slack-main",
+    )
 
-    assert len(container.eventlog.rows) == 1
-    assert len(container.resume_router.calls) == 1
-    row = container.eventlog.rows[0]
-    assert row["payload"]["choice"] == "ship"
-    assert row["payload"]["text"] == "Ship It"
-    assert row["payload"]["meta"]["slack"]["action_id"] == "ag_button_0"
+    envelope = container.integration_ingress.calls[0]["envelope"]
+    assert envelope.choice.interaction_id == "interaction-public-1"
+    assert envelope.choice.option_ids == ("ship",)
+    assert "token" not in json.dumps(envelope.model_dump(mode="json"))
 
 
 @pytest.mark.asyncio
-async def test_telegram_callback_resolves_alias_and_replay_records_nothing():
-    token = "123456789012345678901234-rest-of-token"
-    continuation = Continuation(
-        run_id="run-tg",
-        node_id="node-tg",
-        token=token,
-        kind="choice",
-        prompt={
-            "title": "Choose",
-            "choices": [
-                {"id": "ship", "label": "Ship It"},
-                {"id": "revise", "label": "Revise"},
-            ],
-        },
-    )
-    container = _Container(continuation)
+async def test_telegram_callback_submits_exact_public_interaction() -> None:
+    acknowledgments: list[str] = []
+
+    class _TelegramAdapter:
+        async def _api(self, method: str, **kwargs) -> None:
+            acknowledgments.append(method)
+
+    container = _Container()
+    container.channels.adapters["tg"] = _TelegramAdapter()
     payload = {
         "update_id": 125,
         "callback_query": {
             "id": "callback-1",
             "from": {"id": 42},
-            "data": "i=2|k=123456789012345678901234",
-            "message": {
-                "message_id": 9,
-                "chat": {"id": 99},
-            },
+            "data": "i=interaction-public-2|o=2",
+            "message": {"message_id": 9, "chat": {"id": 99}},
         },
     }
 
-    await telegram_utils._process_update(container, payload, token="")
-    await telegram_utils._process_update(container, payload, token="")
+    await telegram_utils._process_update(
+        container,
+        payload,
+        token="",
+        integration_id="telegram-main",
+    )
 
-    assert len(container.eventlog.rows) == 1
-    assert len(container.resume_router.calls) == 1
-    row = container.eventlog.rows[0]
-    assert row["payload"]["choice"] == "revise"
-    assert row["payload"]["text"] == "Revise"
-    assert row["payload"]["meta"]["telegram"]["callback_id"] == "callback-1"
+    envelope = container.integration_ingress.calls[0]["envelope"]
+    assert acknowledgments == ["answerCallbackQuery"]
+    assert envelope.choice.interaction_id == "interaction-public-2"
+    assert envelope.choice.option_ids == ("2",)
 
 
 @pytest.mark.asyncio
-async def test_slack_buttons_carry_choice_label_and_exact_token():
+async def test_slack_file_bytes_are_verified_but_not_staged_by_edge(monkeypatch) -> None:
+    async def _download(url: str, token: str) -> bytes:
+        assert url == "https://files.slack.test/F1"
+        assert token == "xoxb-test"
+        return b"contents"
+
+    monkeypatch.setattr(slack_utils, "_download_slack_file", _download)
+    container = _Container()
+    settings = SimpleNamespace(
+        slack=SimpleNamespace(
+            integration_id="slack-main",
+            bot_token=SimpleNamespace(get_secret_value=lambda: "xoxb-test"),
+        )
+    )
+    payload = _slack_message_payload()
+    payload["event"]["files"] = [
+        {
+            "id": "F1",
+            "name": "brief.txt",
+            "mimetype": "text/plain",
+            "url_private": "https://files.slack.test/F1",
+        }
+    ]
+
+    await slack_utils.handle_slack_events_common(container, settings, payload)
+
+    call = container.integration_ingress.calls[0]
+    assert call["envelope"].attachments[0].source_id == "F1"
+    assert call["envelope"].attachments[0].size_bytes == 8
+    assert call["verified"].attachments[0].data == b"contents"
+
+
+@pytest.mark.asyncio
+async def test_malformed_provider_callbacks_reject_without_guessing() -> None:
+    container = _Container()
+    slack_payload = {
+        "team": {"id": "T1"},
+        "user": {"id": "U1"},
+        "channel": {"id": "C1"},
+        "message": {"ts": "100.3"},
+        "actions": [{"action_id": "a", "action_ts": "1", "value": "approve"}],
+    }
+    telegram_payload = {
+        "update_id": 1,
+        "callback_query": {
+            "id": "callback-1",
+            "from": {"id": 42},
+            "data": "i=1|k=legacy-prefix",
+            "message": {"message_id": 9, "chat": {"id": 99}},
+        },
+    }
+
+    with pytest.raises(ValueError, match="not JSON"):
+        await slack_utils.handle_slack_interactive_common(
+            container,
+            slack_payload,
+            integration_id="slack-main",
+        )
+    with pytest.raises(ValueError, match="Malformed Telegram interaction"):
+        await telegram_utils._process_update(
+            container,
+            telegram_payload,
+            token="",
+            integration_id="telegram-main",
+        )
+    assert container.integration_ingress.calls == []
+
+
+@pytest.mark.asyncio
+async def test_slack_buttons_carry_choice_and_public_interaction_id() -> None:
     posted: list[dict[str, Any]] = []
 
     class _SlackClient:
@@ -332,11 +304,7 @@ async def test_slack_buttons_carry_choice_label_and_exact_token():
             channel="slack:team/T1:chan/C1:thread/100.1",
             text="Choose",
             buttons=[Button(label="Ship It", value="ship")],
-            meta={
-                "run_id": "run-slack",
-                "node_id": "node-slack",
-                "token": "exact-token",
-            },
+            meta={"interaction_id": "interaction-public-1"},
         )
     )
 
@@ -344,14 +312,12 @@ async def test_slack_buttons_carry_choice_label_and_exact_token():
     assert value == {
         "choice": "ship",
         "choice_label": "Ship It",
-        "run_id": "run-slack",
-        "node_id": "node-slack",
-        "token": "exact-token",
+        "interaction_id": "interaction-public-1",
     }
 
 
 @pytest.mark.asyncio
-async def test_telegram_buttons_keep_compact_resume_alias_for_four_choices():
+async def test_telegram_buttons_keep_compact_public_interaction_id() -> None:
     sent: list[dict[str, Any]] = []
 
     async def _api(method: str, **kwargs):
@@ -372,16 +338,16 @@ async def test_telegram_buttons_keep_compact_resume_alias_for_four_choices():
                 Button(label="Three", value="three"),
                 Button(label="Four", value="four"),
             ],
-            meta={"resume_key": "123456789012345678901234"},
+            meta={"interaction_id": "interaction-1234567890abcdef"},
         )
     )
 
     keyboard = sent[0]["reply_markup"]["inline_keyboard"]
     callback_data = [row[0]["callback_data"] for row in keyboard]
     assert callback_data == [
-        "i=1|k=123456789012345678901234",
-        "i=2|k=123456789012345678901234",
-        "i=3|k=123456789012345678901234",
-        "i=4|k=123456789012345678901234",
+        "i=interaction-1234567890abcdef|o=1",
+        "i=interaction-1234567890abcdef|o=2",
+        "i=interaction-1234567890abcdef|o=3",
+        "i=interaction-1234567890abcdef|o=4",
     ]
     assert all(len(value.encode("utf-8")) <= 64 for value in callback_data)

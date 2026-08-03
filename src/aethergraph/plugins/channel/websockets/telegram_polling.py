@@ -71,7 +71,7 @@ class TelegramPollingRunner:
 
                 return result
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self.container.logger.for_run().warning(
                 "[TelegramPolling] asyncio.TimeoutError while fetching updates"
             )
@@ -86,22 +86,6 @@ class TelegramPollingRunner:
             return []
         except aiohttp.ClientConnectionError as e:
             self.container.logger.for_run().warning(f"[TelegramPolling] ClientConnectionError: {e}")
-
-    async def _fetch_updates_(self, offset: int | None) -> list[dict[str, Any]]:
-        if not self.bot_token:
-            return []
-        api = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
-        params: dict[str, Any] = {"timeout": 30}
-        if offset is not None:
-            params["offset"] = offset
-
-        async with _http_session().get(api, params=params) as r:
-            if r.status != 200:
-                return []
-            data = await r.json()
-            if not data.get("ok"):
-                return []
-            return data.get("result") or []
 
     async def start(self):
         if not self.bot_token:
@@ -136,7 +120,12 @@ class TelegramPollingRunner:
                 if updates:
                     # process each, then bump offset past the last one
                     for upd in updates:
-                        await _process_update(self.container, upd, self.bot_token)
+                        await _process_update(
+                            self.container,
+                            upd,
+                            self.bot_token,
+                            self.settings.telegram.integration_id,
+                        )
 
                     last_id = updates[-1].get("update_id")
                     if last_id is not None:

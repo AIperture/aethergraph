@@ -40,7 +40,11 @@ class SlackSocketModeRunner:
         if req.type == "interactive":
             # payload is already parsed JSON dict
             payload = req.payload
-            await handle_slack_interactive_common(self.container, payload)
+            await handle_slack_interactive_common(
+                self.container,
+                payload,
+                integration_id=self.settings.slack.integration_id,
+            )
             await client.send_socket_mode_response({"envelope_id": req.envelope_id})
             return
 

@@ -34,6 +34,7 @@ from aethergraph.services.integration import (
     ResourceIngressPolicy,
     SQLiteIngressIdempotencyStore,
     VerifiedIntegrationContext,
+    install_integration_ingress,
 )
 from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 
@@ -175,6 +176,31 @@ def _coordinator(
         resume_router=resume_router,
         root_dispatcher=root_dispatcher,
     )
+
+
+@pytest.mark.asyncio
+async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    container = SimpleNamespace(
+        root=str(tmp_path),
+        integration_ingress=None,
+        host_manifest=None,
+        cont_store=InMemoryContinuationStore(secret=b"test-secret"),
+        eventlog=event_log,
+        resume_router=_ResumeRouter(),
+        run_manager=SimpleNamespace(),
+    )
+    manifest = _manifest(_route())
+
+    coordinator = install_integration_ingress(container=container, manifest=manifest)
+
+    assert container.integration_ingress is coordinator
+    assert container.host_manifest is manifest
+    assert coordinator.manifest is manifest
+    assert (tmp_path / "integration" / "operations.db").is_file()
+    with pytest.raises(RuntimeError, match="already installed"):
+        install_integration_ingress(container=container, manifest=manifest)
+    await event_log.close()
 
 
 @pytest.mark.asyncio

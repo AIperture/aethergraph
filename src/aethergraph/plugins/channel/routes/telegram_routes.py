@@ -22,5 +22,12 @@ async def telegram_webhook(request: Request):
     except Exception:
         return Response(status_code=400)
 
-    asyncio.create_task(_process_update(c, payload, BOT_TOKEN))
+    asyncio.create_task(
+        _process_update(
+            c,
+            payload,
+            BOT_TOKEN,
+            request.app.state.settings.telegram.integration_id,
+        )
+    )
     return Response(status_code=200)

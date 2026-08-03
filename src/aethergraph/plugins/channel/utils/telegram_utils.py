@@ -1,389 +1,108 @@
+"""Telegram transport extraction for the canonical integration ingress boundary."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
 import hmac
-import inspect
-import json
 from typing import Any
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Request
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.plugins.channel.utils.turn_dispatch import (
-    dispatch_channel_turn_run,
-    resources_from_file_refs,
+from aethergraph.contracts.integration import (
+    ExternalIdentity,
+    IngressAttachment,
+    IngressChoice,
+    IngressEnvelope,
+    IntegrationKind,
+    OriginAddress,
 )
-from aethergraph.services.channel.ingress import (
-    ChannelIngress,
-    ExpectedContinuation,
-    IncomingFile,
-    IncomingMessage,
-    IngressPersistenceScope,
-)
-from aethergraph.services.channel.resources import (
-    ArtifactIngressScope,
-    InputResource,
-    ResourceStager,
+from aethergraph.services.integration import (
+    VerifiedAttachment,
+    VerifiedIntegrationContext,
 )
 
 router = APIRouter()
-
-# Reuse one aiohttp session with timeouts
 _aiohttp_session: aiohttp.ClientSession | None = None
 
 
 def _http_session() -> aiohttp.ClientSession:
     global _aiohttp_session
     if _aiohttp_session is None or _aiohttp_session.closed:
-        timeout = aiohttp.ClientTimeout(
-            total=40,  # > 30
-            connect=5,
-            sock_read=35,  # > 30
-        )
+        timeout = aiohttp.ClientTimeout(total=40, connect=5, sock_read=35)
         connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
         _aiohttp_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _aiohttp_session
 
 
-def _verify_secret(request: Request):
-    TELEGRAM_WEBHOOK_SECRET = (
-        request.app.state.settings.telegram.webhook_secret.get_secret_value() or ""
-    )
-    if not TELEGRAM_WEBHOOK_SECRET:
+def _verify_secret(request: Request) -> None:
+    webhook_secret = request.app.state.settings.telegram.webhook_secret.get_secret_value() or ""
+    if not webhook_secret:
         raise HTTPException(401, "no telegram webhook secret configured")
-    if TELEGRAM_WEBHOOK_SECRET:
-        hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-        if not hmac.compare_digest(hdr or "", TELEGRAM_WEBHOOK_SECRET):
-            raise HTTPException(401, "bad telegram webhook secret")
+    supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+    if not hmac.compare_digest(supplied or "", webhook_secret):
+        raise HTTPException(401, "bad telegram webhook secret")
 
 
-def _channel_key(chat_id: int, topic_id: int | None) -> str:
-    base = f"tg:chat/{int(chat_id)}"
-    return f"{base}:topic/{int(topic_id)}" if topic_id else base
+def _required(value: Any, field: str) -> str:
+    if value is None or value == "":
+        raise ValueError(f"Malformed Telegram ingress: missing {field}.")
+    return str(value)
 
 
-def _tg_scheme_and_channel_id(chat_id: int, topic_id: int | None) -> tuple[str, str]:
-    """
-    Map Telegram chat/topic to (scheme, channel_id) pair for ChannelIngress.
-
-    _channel_key(chat_id, topic_id) builds:
-      "tg:chat/<id>" or "tg:chat/<id>:topic/<topic_id>"
-
-    So we use:
-      scheme    = "tg"
-      channel_id = "chat/<id>" or "chat/<id>:topic/<topic_id>"
-    """
-    base = f"chat/{int(chat_id)}"
-    if topic_id:
-        base = f"{base}:topic/{int(topic_id)}"
-    return "tg", base
+def _channel_key(chat_id: str, topic_id: str | None) -> str:
+    base = f"tg:chat/{chat_id}"
+    return f"{base}:topic/{topic_id}" if topic_id else base
 
 
-async def _resolve_resume_token(store: Any, resume_key: str | None) -> str | None:
-    """Resolve Telegram's compact token prefix to one exact open token."""
-    if not resume_key:
-        return None
-
-    resolver = getattr(store, "token_from_alias", None)
-    if resolver is not None:
-        resolved = resolver(resume_key)
-        resolved = await resolved if inspect.isawaitable(resolved) else resolved
-        if resolved:
-            return str(resolved)
-
-    list_waits = getattr(store, "list_waits", None)
-    if list_waits is None:
-        return None
-    waits = list_waits()
-    waits = await waits if inspect.isawaitable(waits) else waits
-    matches = {
-        str(wait.get("token"))
-        for wait in waits or []
-        if isinstance(wait, dict)
-        and not wait.get("closed")
-        and str(wait.get("token") or "").startswith(resume_key)
-    }
-    return next(iter(matches)) if len(matches) == 1 else None
+def _external_identity(
+    *,
+    chat_id: str,
+    topic_id: str | None,
+    user_id: str,
+) -> ExternalIdentity:
+    return ExternalIdentity(
+        tenant_id="telegram",
+        conversation_id=f"chat/{chat_id}",
+        thread_id=topic_id,
+        user_id=user_id,
+    )
 
 
-# ---- helpers ----
-async def _tg_get_file_path(file_id: str, token: str) -> str | None:
+def _verified_context(
+    *,
+    integration_id: str,
+    user_id: str,
+    attachments: tuple[VerifiedAttachment, ...] = (),
+) -> VerifiedIntegrationContext:
+    return VerifiedIntegrationContext(
+        integration_id=integration_id,
+        integration_kind=IntegrationKind.TELEGRAM,
+        external_tenant_id="telegram",
+        attachments=attachments,
+        request_identity=RequestIdentity(user_id=user_id, org_id="telegram", mode="local"),
+    )
+
+
+async def _tg_get_file_path(file_id: str, token: str) -> str:
     if not token:
-        return None
+        raise ValueError("Telegram file ingress requires an authenticated bot token.")
     api = f"https://api.telegram.org/bot{token}/getFile"
-    async with _http_session().post(api, json={"file_id": file_id}) as r:
-        if r.status != 200:
-            return None
-        data = await r.json()
-        if not data.get("ok"):
-            return None
-        return (data.get("result") or {}).get("file_path")
+    async with _http_session().post(api, json={"file_id": file_id}) as response:
+        response.raise_for_status()
+        data = await response.json()
+    file_path = (data.get("result") or {}).get("file_path") if data.get("ok") else None
+    return _required(file_path, "getFile.result.file_path")
 
 
 async def _tg_download_file(file_path: str, token: str) -> bytes:
     url = f"https://api.telegram.org/file/bot{token}/{file_path}"
-    async with _http_session().get(url) as r:
-        r.raise_for_status()
-        return await r.read()
+    async with _http_session().get(url) as response:
+        response.raise_for_status()
+        return await response.read()
 
 
-async def _process_update(container, payload: dict, token: str):
-    ingress: ChannelIngress = container.channel_ingress
-
-    try:
-        # 1) Callback queries (inline buttons) -------------------------
-        cq = payload.get("callback_query")
-        if cq:
-            msg = cq.get("message") or {}
-            chat = msg.get("chat") or {}
-            chat_id = chat.get("id")
-            topic_id = msg.get("message_thread_id")
-            ch_key = _channel_key(chat_id, topic_id)
-
-            data_raw = cq.get("data") or ""
-            choice = "reject"
-            resume_key = None
-
-            # Accept JSON or compact "c=...|k=..." forms
-            try:
-                data = json.loads(data_raw)
-                choice = str(data.get("choice", "reject"))
-                resume_key = data.get("resume_key") or data.get("k")
-            except Exception:
-                try:
-                    parts = dict(p.split("=", 1) for p in data_raw.split("|") if "=" in p)
-                    choice = parts.get("c", parts.get("i", "reject"))
-                    resume_key = parts.get("k")
-                except Exception:
-                    choice = str(data_raw)
-
-            tok = await _resolve_resume_token(container.cont_store, resume_key)
-
-            # Preferred: resolve alias → token
-            if tok:
-                conversation_id = f"tg:chat/{int(chat_id)}" + (
-                    f":topic/{int(topic_id)}" if topic_id is not None else ""
-                )
-                callback_user_id = (cq.get("from") or {}).get("id")
-                await ingress.accept(
-                    IncomingMessage(
-                        scheme="tg",
-                        channel_id=f"chat/{int(chat_id)}"
-                        + (f":topic/{int(topic_id)}" if topic_id is not None else ""),
-                        thread_id=str(topic_id or ""),
-                        text="",
-                        choice=choice,
-                        conversation_id=conversation_id,
-                        meta={
-                            "telegram": {
-                                "update_id": payload.get("update_id"),
-                                "callback_id": cq.get("id"),
-                                "message_id": msg.get("message_id"),
-                                "chat_id": chat_id,
-                            },
-                        },
-                    ),
-                    persistence_scope=IngressPersistenceScope(
-                        scope_id=conversation_id,
-                        kind="channel_inbound",
-                        user_id=(str(callback_user_id) if callback_user_id is not None else None),
-                    ),
-                    expected_continuation=ExpectedContinuation(token=tok, kind="choice"),
-                )
-            elif container.logger:
-                container.logger.for_run().warning(
-                    "Telegram interaction ignored because its continuation token could not be resolved"
-                )
-
-            # Ack the button press to stop the spinner
-            try:
-                tg_adapter = container.channels.adapters.get("tg")
-                if tg_adapter:
-                    await tg_adapter._api("answerCallbackQuery", callback_query_id=cq.get("id"))
-            except Exception:
-                pass
-            return
-
-        # 2) Regular messages / uploads -------------------------------
-        msg = payload.get("message")
-        if not msg:
-            return
-        if (msg.get("from") or {}).get("is_bot"):
-            return
-
-        chat = msg.get("chat") or {}
-        chat_id = chat.get("id")
-        topic_id = msg.get("message_thread_id")
-        ch_key = _channel_key(chat_id, topic_id)
-        scheme, channel_id = _tg_scheme_and_channel_id(chat_id, topic_id)
-
-        text = (msg.get("text") or msg.get("caption") or "") or ""
-
-        tg_files: list[dict[str, Any]] = []
-
-        # Photos
-        photos = msg.get("photo") or []
-        if photos:
-            ph = photos[-1]
-            file_id = ph.get("file_id")
-            size = ph.get("file_size")
-            name = f"photo_{file_id}.jpg"
-            file_path = await _tg_get_file_path(file_id, token)
-            if file_path:
-                try:
-                    data = await _tg_download_file(file_path, token)
-                    staged_resource = await _stage_telegram_file(
-                        container,
-                        data=data,
-                        file_id=file_id,
-                        name=name,
-                        mimetype="image/jpeg",
-                        ch_key=ch_key,
-                        conversation_id=f"tg:{channel_id}",
-                    )
-                    tg_files.append(
-                        _file_ref(
-                            file_id=file_id,
-                            name=name,
-                            mimetype="image/jpeg",
-                            size=size,
-                            artifact_id=staged_resource.artifact_id,
-                            uri=staged_resource.uri,
-                            url=staged_resource.url,
-                            ch_key=ch_key,
-                            ts=msg.get("date"),
-                        )
-                    )
-                except Exception as e:
-                    container.logger and container.logger.for_run().warning(
-                        f"Telegram photo download failed: {e}"
-                    )
-
-        # Documents
-        doc = msg.get("document")
-        if doc:
-            file_id = doc.get("file_id")
-            size = doc.get("file_size")
-            name = doc.get("file_name") or f"document_{file_id}"
-            mime = _normalize_mime_by_name(name, doc.get("mime_type"))
-            file_path = await _tg_get_file_path(file_id, token)
-            if file_path:
-                try:
-                    data = await _tg_download_file(file_path, token)
-                    staged_resource = await _stage_telegram_file(
-                        container,
-                        data=data,
-                        file_id=file_id,
-                        name=name,
-                        mimetype=mime,
-                        ch_key=ch_key,
-                        conversation_id=f"tg:{channel_id}",
-                    )
-                    tg_files.append(
-                        _file_ref(
-                            file_id=file_id,
-                            name=name,
-                            mimetype=mime,
-                            size=size,
-                            artifact_id=staged_resource.artifact_id,
-                            uri=staged_resource.uri,
-                            url=staged_resource.url,
-                            ch_key=ch_key,
-                            ts=msg.get("date"),
-                        )
-                    )
-                except Exception as e:
-                    container.logger and container.logger.for_run().warning(
-                        f"Telegram document download failed: {e}"
-                    )
-
-        # Turn Telegram file_refs into IncomingFile with pre-saved URIs
-        incoming_files: list[IncomingFile] = []
-        for fr in tg_files:
-            incoming_files.append(
-                IncomingFile(
-                    id=fr["id"],
-                    name=fr["name"],
-                    mimetype=fr.get("mimetype"),
-                    size=fr.get("size"),
-                    artifact_id=fr.get("artifact_id"),
-                    uri=fr.get("uri"),  # already staged as artifact
-                    url=None,  # no re-download
-                    extra={
-                        "platform": "telegram",
-                        "channel_key": fr.get("channel_key"),
-                        "ts": fr.get("ts"),
-                    },
-                )
-            )
-
-        meta = {
-            "raw": payload,
-            "channel_key": ch_key,
-            "telegram": {
-                "update_id": payload.get("update_id"),
-                "message_id": msg.get("message_id"),
-                "chat_id": chat_id,
-            },
-        }
-        conversation_id = f"tg:{channel_id}"
-        sender_id = (msg.get("from") or {}).get("id")
-
-        result = await ingress.accept(
-            IncomingMessage(
-                scheme=scheme,
-                channel_id=channel_id,
-                thread_id=str(topic_id or ""),
-                text=text,
-                files=incoming_files or None,
-                conversation_id=conversation_id,
-                meta=meta,
-            ),
-            persistence_scope=IngressPersistenceScope(
-                scope_id=conversation_id,
-                kind="channel_inbound",
-                user_id=str(sender_id) if sender_id is not None else None,
-            ),
-        )
-        resumed = result.resumed
-
-        if (not resumed) and (text or incoming_files):
-            default_agent_id = getattr(getattr(container, "settings", None), "telegram", None)
-            default_agent_id = getattr(default_agent_id, "default_agent_id", None)
-            if default_agent_id:
-                await dispatch_channel_turn_run(
-                    container=container,
-                    identity=RequestIdentity(user_id="local", org_id="local", mode="local"),
-                    agent_id=default_agent_id,
-                    text=text,
-                    attachments=resources_from_file_refs(tg_files, source="telegram_upload"),
-                    origin_channel_key=ch_key,
-                    integration_id="telegram",
-                    route_id=f"agent:{default_agent_id}",
-                    external_conversation_id=conversation_id,
-                    external_thread_id=str(topic_id) if topic_id else None,
-                    capability_profile_id="telegram-v1",
-                    user_meta={
-                        **meta,
-                        "channel_key": ch_key,
-                        "conversation_id": f"tg:{channel_id}",
-                    },
-                    tags=[
-                        f"channel:{ch_key}",
-                        f"conversation:tg:{channel_id}",
-                        f"agent:{default_agent_id}",
-                    ],
-                )
-
-        container.logger and container.logger.for_run().debug(
-            f"[TG] inbound: text={text!r} files={len(incoming_files)} resumed={resumed}"
-        )
-
-    except Exception as e:
-        container.logger and container.logger.for_run().error(
-            f"Telegram inbound processing error: {e}", exc_info=True
-        )
-
-
-# ---- file helpers ----
 def _normalize_mime_by_name(name: str | None, hint: str | None) -> str:
     extmap = {
         "png": "image/png",
@@ -409,63 +128,164 @@ def _normalize_mime_by_name(name: str | None, hint: str | None) -> str:
         "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "mph": "application/octet-stream",
     }
     if hint:
         return hint.lower()
     if name and "." in name:
-        ext = name.lower().rsplit(".", 1)[-1]
-        return extmap.get(ext, "application/octet-stream")
+        return extmap.get(name.lower().rsplit(".", 1)[-1], "application/octet-stream")
     return "application/octet-stream"
 
 
-async def _stage_telegram_file(
+async def _download_message_files(
+    message: dict[str, Any],
+    *,
+    token: str,
+) -> tuple[tuple[IngressAttachment, ...], tuple[VerifiedAttachment, ...]]:
+    candidates: list[tuple[str, str, str, int | None]] = []
+    photos = message.get("photo") or []
+    if photos:
+        photo = photos[-1]
+        file_id = _required(photo.get("file_id"), "photo.file_id")
+        candidates.append((file_id, f"photo_{file_id}.jpg", "image/jpeg", photo.get("file_size")))
+    document = message.get("document")
+    if document:
+        file_id = _required(document.get("file_id"), "document.file_id")
+        filename = str(document.get("file_name") or f"document_{file_id}")
+        candidates.append(
+            (
+                file_id,
+                filename,
+                _normalize_mime_by_name(filename, document.get("mime_type")),
+                document.get("file_size"),
+            )
+        )
+
+    declared: list[IngressAttachment] = []
+    verified: list[VerifiedAttachment] = []
+    for file_id, filename, content_type, _declared_size in candidates:
+        file_path = await _tg_get_file_path(file_id, token)
+        data = await _tg_download_file(file_path, token)
+        attachment_id = f"telegram-file-{file_id}"
+        declared.append(
+            IngressAttachment(
+                attachment_id=attachment_id,
+                source_kind="provider_file",
+                source_id=file_id,
+                filename=filename,
+                content_type=content_type,
+                size_bytes=len(data),
+            )
+        )
+        verified.append(VerifiedAttachment(attachment_id=attachment_id, data=data))
+    return tuple(declared), tuple(verified)
+
+
+def _parse_callback(data: str) -> tuple[str, str]:
+    parts = data.split("|")
+    if len(parts) != 2 or not parts[0].startswith("i=") or not parts[1].startswith("o="):
+        raise ValueError("Malformed Telegram interaction callback.")
+    interaction_id = _required(parts[0][2:], "callback interaction_id")
+    option_id = _required(parts[1][2:], "callback option_id")
+    return interaction_id, option_id
+
+
+async def _process_update(
     container,
-    *,
-    data: bytes,
-    file_id: str,
-    name: str,
-    mimetype: str | None,
-    ch_key: str,
-    conversation_id: str,
-) -> InputResource:
-    return await ResourceStager(container=container).stage_bytes(
-        data,
-        name=name,
-        mime=mimetype,
-        file_id=file_id,
-        scope=ArtifactIngressScope(
-            source="telegram",
-            channel_key=ch_key,
-            conversation_id=conversation_id,
-            tool_name="telegram.upload",
-            tool_version="1.0.0",
-        ),
-        labels={"telegram_file_id": file_id},
+    payload: dict,
+    token: str,
+    integration_id: str,
+) -> None:
+    """Translate one authenticated Telegram update into canonical ingress."""
+    integration_id = _required(integration_id, "integration_id")
+    update_id = _required(payload.get("update_id"), "update_id")
+    callback = payload.get("callback_query")
+    if callback:
+        message = callback.get("message") or {}
+        chat_id = _required((message.get("chat") or {}).get("id"), "message.chat.id")
+        topic_id = (
+            str(message["message_thread_id"])
+            if message.get("message_thread_id") is not None
+            else None
+        )
+        user_id = _required((callback.get("from") or {}).get("id"), "callback_query.from.id")
+        interaction_id, option_id = _parse_callback(
+            _required(callback.get("data"), "callback_query.data")
+        )
+        callback_id = _required(callback.get("id"), "callback_query.id")
+
+        adapter = container.channels.adapters.get("tg")
+        if adapter is not None:
+            await adapter._api("answerCallbackQuery", callback_query_id=callback_id)
+
+        envelope = IngressEnvelope(
+            integration_id=integration_id,
+            external_identity=_external_identity(
+                chat_id=chat_id,
+                topic_id=topic_id,
+                user_id=user_id,
+            ),
+            external_event_id=f"update-{update_id}",
+            idempotency_key=f"update-{update_id}",
+            received_at=datetime.now(UTC),
+            choice=IngressChoice(interaction_id=interaction_id, option_ids=(option_id,)),
+            transport_metadata={
+                "provider": "telegram",
+                "update_id": update_id,
+                "callback_id": callback_id,
+                "message_id": str(message.get("message_id") or ""),
+            },
+            origin_address=OriginAddress(
+                channel_key=_channel_key(chat_id, topic_id),
+                capability_profile_id="telegram-v1",
+            ),
+        )
+        await container.integration_ingress.accept(
+            verified=_verified_context(
+                integration_id=integration_id,
+                user_id=user_id,
+            ),
+            envelope=envelope,
+        )
+        return
+
+    message = payload.get("message")
+    if not message or (message.get("from") or {}).get("is_bot"):
+        return
+    chat_id = _required((message.get("chat") or {}).get("id"), "message.chat.id")
+    topic_id = (
+        str(message["message_thread_id"]) if message.get("message_thread_id") is not None else None
     )
-
-
-def _file_ref(
-    *,
-    file_id: str,
-    name: str,
-    mimetype: str,
-    size: int | None,
-    artifact_id: str | None,
-    uri: str | None,
-    url: str | None,
-    ch_key: str,
-    ts: Any,
-):
-    return {
-        "id": file_id,
-        "name": name,
-        "mimetype": mimetype or "",
-        "size": size,
-        "artifact_id": artifact_id,
-        "uri": uri,
-        "url": url,
-        "platform": "telegram",
-        "channel_key": ch_key,
-        "ts": ts,
-    }
+    user_id = _required((message.get("from") or {}).get("id"), "message.from.id")
+    message_id = _required(message.get("message_id"), "message.message_id")
+    attachments, verified_attachments = await _download_message_files(message, token=token)
+    text = str(message.get("text") or message.get("caption") or "")
+    envelope = IngressEnvelope(
+        integration_id=integration_id,
+        external_identity=_external_identity(
+            chat_id=chat_id,
+            topic_id=topic_id,
+            user_id=user_id,
+        ),
+        external_event_id=f"update-{update_id}",
+        idempotency_key=f"update-{update_id}",
+        received_at=datetime.now(UTC),
+        text=text if text else None,
+        attachments=attachments,
+        transport_metadata={
+            "provider": "telegram",
+            "update_id": update_id,
+            "message_id": message_id,
+        },
+        origin_address=OriginAddress(
+            channel_key=_channel_key(chat_id, topic_id),
+            capability_profile_id="telegram-v1",
+        ),
+    )
+    await container.integration_ingress.accept(
+        verified=_verified_context(
+            integration_id=integration_id,
+            user_id=user_id,
+            attachments=verified_attachments,
+        ),
+        envelope=envelope,
+    )

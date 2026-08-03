@@ -38,6 +38,7 @@ async def slack_events(request: Request):
 async def slack_interact(request: Request):
     """Handle interactive components (buttons) from Slack via HTTP."""
     container = request.app.state.container
+    settings = request.app.state.settings
 
     body = await request.body()
     _verify_sig(request, body)  # HTTP-only
@@ -45,5 +46,9 @@ async def slack_interact(request: Request):
     form = await request.form()
     payload = json.loads(form["payload"])
 
-    await handle_slack_interactive_common(container, payload)
+    await handle_slack_interactive_common(
+        container,
+        payload,
+        integration_id=settings.slack.integration_id,
+    )
     return JSONResponse({})  # ack

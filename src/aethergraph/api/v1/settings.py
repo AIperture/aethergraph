@@ -167,15 +167,15 @@ async def get_settings(
         llm=llm_profiles,
         embedding=embed_profiles,
         slack=SlackView(
+            integration_id=cfg.slack.integration_id,
             enabled=cfg.slack.enabled,
             bot_token=_mask_secret(_secret_str_value(cfg.slack.bot_token)),
             signing_secret=_mask_secret(_secret_str_value(cfg.slack.signing_secret)),
-            default_agent_id=cfg.slack.default_agent_id,
         ),
         telegram=TelegramView(
+            integration_id=cfg.telegram.integration_id,
             enabled=cfg.telegram.enabled,
             bot_token=_mask_secret(_secret_str_value(cfg.telegram.bot_token)),
-            default_agent_id=cfg.telegram.default_agent_id,
         ),
     )
 
@@ -206,25 +206,25 @@ def _collect_embed_env(
 
 def _collect_slack_env(payload: SlackPayload) -> dict[str, str]:
     env: dict[str, str] = {}
+    if payload.integration_id is not None:
+        env[aethergraph_env_key("SLACK", "INTEGRATION_ID")] = payload.integration_id
     if payload.enabled is not None:
         env[aethergraph_env_key("SLACK", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
         env[aethergraph_env_key("SLACK", "BOT_TOKEN")] = payload.bot_token
     if payload.signing_secret is not None and not _is_masked(payload.signing_secret):
         env[aethergraph_env_key("SLACK", "SIGNING_SECRET")] = payload.signing_secret
-    if payload.default_agent_id is not None:
-        env[aethergraph_env_key("SLACK", "DEFAULT_AGENT_ID")] = payload.default_agent_id
     return env
 
 
 def _collect_telegram_env(payload: TelegramPayload) -> dict[str, str]:
     env: dict[str, str] = {}
+    if payload.integration_id is not None:
+        env[aethergraph_env_key("TELEGRAM", "INTEGRATION_ID")] = payload.integration_id
     if payload.enabled is not None:
         env[aethergraph_env_key("TELEGRAM", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
         env[aethergraph_env_key("TELEGRAM", "BOT_TOKEN")] = payload.bot_token
-    if payload.default_agent_id is not None:
-        env[aethergraph_env_key("TELEGRAM", "DEFAULT_AGENT_ID")] = payload.default_agent_id
     return env
 
 
@@ -309,6 +309,8 @@ def _hot_reload_embedding(profiles: dict[str, EmbeddingProfilePayload]) -> None:
 def _hot_reload_slack(payload: SlackPayload) -> None:
     """Update Slack settings in-memory (adapter reconnect requires restart)."""
     cfg = _get_settings()
+    if payload.integration_id is not None:
+        cfg.slack.integration_id = payload.integration_id
     if payload.enabled is not None:
         cfg.slack.enabled = payload.enabled
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
@@ -319,21 +321,19 @@ def _hot_reload_slack(payload: SlackPayload) -> None:
         from pydantic import SecretStr
 
         cfg.slack.signing_secret = SecretStr(payload.signing_secret)
-    if payload.default_agent_id is not None:
-        cfg.slack.default_agent_id = payload.default_agent_id
 
 
 def _hot_reload_telegram(payload: TelegramPayload) -> None:
     """Update Telegram settings in-memory (adapter reconnect requires restart)."""
     cfg = _get_settings()
+    if payload.integration_id is not None:
+        cfg.telegram.integration_id = payload.integration_id
     if payload.enabled is not None:
         cfg.telegram.enabled = payload.enabled
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
         from pydantic import SecretStr
 
         cfg.telegram.bot_token = SecretStr(payload.bot_token)
-    if payload.default_agent_id is not None:
-        cfg.telegram.default_agent_id = payload.default_agent_id
 
 
 @router.put("", response_model=SettingsGetResponse)

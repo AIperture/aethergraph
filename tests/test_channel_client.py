@@ -97,6 +97,7 @@ async def test_channel_http_roundtrip_with_client():
         kind="user_input",
         channel="ext:chan/user-123",
         prompt="Say something",
+        payload={"_interaction_id": "interaction-client-1"},
     )
     await container.cont_store.save(cont)
 
