@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from aethergraph.api.v1.deployment_router import router as deployment_api_v1_router
 from aethergraph.api.v1.router import router as api_v1_router
 
 # include apis
@@ -43,6 +44,7 @@ def create_app(
     log_level: str = "info",
     container=None,
     integration_manager: IntegrationManager | None = None,
+    deployment_mode: bool = False,
 ) -> FastAPI:
     """Build an AetherGraph FastAPI application around one service container.
 
@@ -72,6 +74,7 @@ def create_app(
         log_level: Console log level used when settings omit one.
         container: Prebuilt immutable Host container or None for development.
         integration_manager: Explicit provider lifecycle owner for this Host.
+        deployment_mode: True to expose only the closed immutable Host API.
 
     Returns:
         FastAPI: Configured application with services installed and lifespan bound.
@@ -233,13 +236,16 @@ def create_app(
     )
 
     # Routers
-    app.include_router(router=api_v1_router, prefix="/api/v1")
+    app.include_router(
+        router=deployment_api_v1_router if deployment_mode else api_v1_router,
+        prefix="/api/v1",
+    )
 
     # Conditionally load demo admin routes (not part of OSS core)
     _demo_svc_dir = (
         str(Path(settings.demo_service_dir).resolve()) if settings.demo_service_dir else None
     )
-    if _demo_svc_dir and Path(_demo_svc_dir).is_dir():
+    if not deployment_mode and _demo_svc_dir and Path(_demo_svc_dir).is_dir():
         sys.path.insert(0, _demo_svc_dir)
         try:
             from admin_routes import router as demo_admin_router  # type: ignore[import-not-found]
@@ -254,10 +260,11 @@ def create_app(
         finally:
             sys.path.pop(0)
 
-    from aethergraph.api.v1.observability import trace_router
+    if not deployment_mode:
+        from aethergraph.api.v1.observability import trace_router
 
-    app.include_router(trace_router)
-    logger.info("AetherGraph observability router mounted at /api/trace")
+        app.include_router(trace_router)
+        logger.info("AetherGraph observability router mounted at /api/trace")
 
     # Install services globally so run()/tools see the same container
     install_services(container)

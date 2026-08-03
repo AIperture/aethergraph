@@ -64,7 +64,7 @@ class AGHost:
     container: DefaultContainer
     integration_manager: IntegrationManager
 
-    def create_app(self):
+    def create_app(self, *, control_token: str):
         """Create the HTTP application around this prebuilt Host.
 
         The application reuses this exact container and delegates provider
@@ -73,17 +73,17 @@ class AGHost:
         Examples:
             Create an application for Uvicorn:
                 ```python
-                app = host.create_app()
+                app = host.create_app(control_token=launch_token)
                 ```
 
             Inspect the bound container:
                 ```python
-                app = host.create_app()
+                app = host.create_app(control_token=launch_token)
                 assert app.state.container is host.container
                 ```
 
         Args:
-            None.
+            control_token: High-entropy per-launch supervisor token.
 
         Returns:
             FastAPI: Application bound to the verified immutable Host runtime.
@@ -95,12 +95,21 @@ class AGHost:
 
         from aethergraph.server.app_factory import create_app
 
-        return create_app(
+        app = create_app(
             workspace=str(self.workspace),
             cfg=self.container.settings,
             container=self.container,
             integration_manager=self.integration_manager,
+            deployment_mode=True,
         )
+        from .control import install_host_control_routes
+
+        install_host_control_routes(
+            app=app,
+            host=self,
+            control_token=control_token,
+        )
+        return app
 
 
 def build_host(
