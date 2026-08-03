@@ -44,9 +44,40 @@ class FSEventLog(EventLog):
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._log_path = self.root / "events.jsonl"
+        self._next_row_id = self._existing_row_count() + 1
 
-    async def append(self, evt: dict) -> None:
-        def _write():
+    def _existing_row_count(self) -> int:
+        if not self._log_path.is_file():
+            return 0
+        with self._log_path.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+
+    async def append(self, evt: dict) -> int:
+        """Append one JSONL event and return its persistent line cursor.
+
+        Examples:
+            Append a development event:
+            ```python
+            cursor = await event_log.append(event)
+            ```
+
+            Retain a cursor for a later query:
+            ```python
+            after_cursor = await event_log.append(scoped_event)
+            ```
+
+        Args:
+            evt: Event mapping to normalize and append.
+
+        Returns:
+            int: Monotonic JSONL row cursor for this event-log instance.
+
+        Notes:
+            The filesystem backend is for local low-volume use; SQLite is the
+            durable concurrent Host backend.
+        """
+
+        def _write() -> int:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             row = evt.copy()
             partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
@@ -59,9 +90,13 @@ class FSEventLog(EventLog):
             row["scope_id"] = partition_scope_id
 
             with self._lock, self._log_path.open("a", encoding="utf-8") as f:
+                row_id = self._next_row_id
+                self._next_row_id += 1
+                row["_row_id"] = row_id
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                return row_id
 
-        await asyncio.to_thread(_write)
+        return await asyncio.to_thread(_write)
 
     async def query(
         self,
@@ -110,6 +145,12 @@ class FSEventLog(EventLog):
                     if not line.strip():
                         continue
                     row = json.loads(line)
+                    row_id = int(row.get("_row_id") or (seq + 1))
+
+                    if after_id is not None and row_id <= after_id:
+                        continue
+                    if before_id is not None and row_id >= before_id:
+                        continue
 
                     ts_val = _to_ts_float(row.get("ts"))
                     sort_ts = ts_val if ts_val is not None else 0.0
@@ -147,7 +188,10 @@ class FSEventLog(EventLog):
                     if tool is not None and row.get("tool") != tool:
                         continue
 
-                    out.append((sort_ts, seq, row))
+                    sort_value = (
+                        float(row_id) if after_id is not None or before_id is not None else sort_ts
+                    )
+                    out.append((sort_value, seq, row))
 
             out.sort(key=lambda item: (item[0], item[1]), reverse=direction == "desc")
             rows = [row for _, _, row in out]

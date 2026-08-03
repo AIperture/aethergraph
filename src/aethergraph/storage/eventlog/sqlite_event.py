@@ -18,8 +18,30 @@ class SqliteEventLog(EventLog):
     def __init__(self, path: str, *, read_only: bool = False):
         self._sync = SQLiteEventLogSync(path, read_only=read_only)
 
-    async def append(self, evt: dict) -> None:
-        await asyncio.to_thread(self._sync.append, evt)
+    async def append(self, evt: dict) -> int:
+        """Append one event through SQLite and return its row cursor.
+
+        Examples:
+            Append a runtime event:
+            ```python
+            cursor = await event_log.append(event)
+            ```
+
+            Retain a reconnect cursor:
+            ```python
+            last_cursor = await event_log.append(scoped_event)
+            ```
+
+        Args:
+            evt: Event mapping persisted as one canonical SQLite row.
+
+        Returns:
+            int: SQLite event row identifier used as the durable cursor.
+
+        Notes:
+            The synchronous database operation runs in a worker thread.
+        """
+        return await asyncio.to_thread(self._sync.append, evt)
 
     async def close(self) -> None:
         await asyncio.to_thread(self._sync.close)

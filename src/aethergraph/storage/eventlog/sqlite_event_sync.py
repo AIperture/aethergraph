@@ -79,6 +79,10 @@ class SQLiteEventLogSync:
             ("tool", "TEXT"),
             ("severity", "INTEGER"),
             ("signal", "REAL"),
+            ("deployment_id", "TEXT"),
+            ("semantic_event_id", "TEXT"),
+            ("semantic_turn_id", "TEXT"),
+            ("semantic_sequence", "INTEGER"),
         ):
             if name not in cols:
                 self._db.execute(f"ALTER TABLE events ADD COLUMN {name} {type_sql}")
@@ -104,8 +108,44 @@ class SQLiteEventLogSync:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_event_tags_tag_row ON event_tags(tag, event_row_id)"
         )
+        self._db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_semantic_event_id
+            ON events(semantic_event_id)
+            WHERE semantic_event_id IS NOT NULL
+            """
+        )
+        self._db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_events_semantic_turn_sequence
+            ON events(deployment_id, session_id, semantic_turn_id, semantic_sequence)
+            WHERE semantic_event_id IS NOT NULL
+            """
+        )
 
-    def append(self, evt: dict) -> None:
+    def append(self, evt: dict) -> int:
+        """Append one event in the current SQLite connection.
+
+        Examples:
+            Append an event:
+            ```python
+            cursor = event_log.append(event)
+            ```
+
+            Persist a semantic event row:
+            ```python
+            cursor = event_log.append({"semantic_event_id": "event-1", **row})
+            ```
+
+        Args:
+            evt: Event mapping to normalize and persist.
+
+        Returns:
+            int: Assigned SQLite row identifier.
+
+        Notes:
+            Semantic identity and turn-sequence indexes fail conflicting writes.
+        """
         if self._read_only:
             raise RuntimeError("Cannot append through a read-only event log")
         row = dict(evt)
@@ -135,8 +175,9 @@ class SQLiteEventLogSync:
                 INSERT INTO events (
                     ts, scope_id, kind, tags_json, payload,
                     user_id, org_id, run_id, session_id, client_id,
-                    agent_id, graph_id, node_id, topic, tool, severity, signal
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    agent_id, graph_id, node_id, topic, tool, severity, signal,
+                    deployment_id, semantic_event_id, semantic_turn_id, semantic_sequence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     ts,
@@ -156,6 +197,10 @@ class SQLiteEventLogSync:
                     row.get("tool"),
                     row.get("severity"),
                     row.get("signal"),
+                    row.get("deployment_id"),
+                    row.get("semantic_event_id"),
+                    row.get("semantic_turn_id"),
+                    row.get("semantic_sequence"),
                 ),
             )
             row_id = self._db.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -164,6 +209,7 @@ class SQLiteEventLogSync:
                     "INSERT OR IGNORE INTO event_tags (event_row_id, tag) VALUES (?, ?)",
                     [(row_id, tag) for tag in tags],
                 )
+            return int(row_id)
 
     def close(self) -> None:
         with self._lock:

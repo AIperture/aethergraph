@@ -1,5 +1,11 @@
 """Provider-neutral services for unified integration ingress."""
 
+from .events import (
+    EventLogSemanticEventStore,
+    PersistedSemanticEvent,
+    SemanticEventStore,
+    SemanticEventStoreError,
+)
 from .idempotency import (
     IngressClaim,
     IngressIdempotencyError,
@@ -21,13 +27,17 @@ from .session_bindings import (
 __all__ = [
     "BindingResolution",
     "ExternalSessionBindingStore",
+    "EventLogSemanticEventStore",
     "IngressClaim",
     "IngressIdempotencyError",
     "IngressIdempotencyStore",
     "IntegrationRouteError",
     "ManifestRouteResolver",
+    "PersistedSemanticEvent",
     "SQLiteExternalSessionBindingStore",
     "SQLiteIngressIdempotencyStore",
     "SessionBindingError",
+    "SemanticEventStore",
+    "SemanticEventStoreError",
     "VerifiedIntegrationContext",
 ]

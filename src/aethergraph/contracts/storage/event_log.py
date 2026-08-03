@@ -16,7 +16,30 @@ It is used in various parts of the system for logging events with metadata.
 
 
 class EventLog(Protocol):
-    async def append(self, evt: dict) -> None: ...
+    async def append(self, evt: dict) -> int:
+        """Append one event and return its durable cursor.
+
+        Examples:
+            Append a runtime event:
+            ```python
+            cursor = await event_log.append(event)
+            ```
+
+            Persist a scoped event:
+            ```python
+            cursor = await event_log.append({"scope_id": "session-1", "kind": "message"})
+            ```
+
+        Args:
+            evt: Event mapping accepted by the configured persistence backend.
+
+        Returns:
+            int: Durable monotonically increasing event-log cursor.
+
+        Notes:
+            Cursor ordering is the history and reconnect ordering contract.
+        """
+        ...
 
     async def query(
         self,
