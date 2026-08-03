@@ -314,6 +314,12 @@ async def session_chat_incoming(
             text=text,
             attachments=list(resources.resources),
             session_id=session_id,
+            origin_channel_key=f"ui:session/{session_id}",
+            integration_id="ag-ui",
+            route_id=f"agent:{agent_id}",
+            external_conversation_id=session_id,
+            external_thread_id=None,
+            capability_profile_id="ag-ui-v1",
             user_meta={
                 **(meta or {}),
                 "attachments": attachment_payloads,

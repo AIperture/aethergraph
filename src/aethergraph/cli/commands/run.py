@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import time
 from urllib.error import HTTPError, URLError
+from uuid import uuid4
 
 from aethergraph.cli import common, http, load, output
 from aethergraph.server.loading import GraphLoader
@@ -113,9 +114,18 @@ def _register_load_paths(base: str, load_paths: list[str], graph_id: str | None)
 
 
 def _submit_api_run(base: str, graph_id: str, inputs: dict) -> dict:
+    from aethergraph.services.channel._origin import _console_origin_binding
+
+    session_id = f"cli-{uuid4().hex[:12]}"
+    origin_binding = _console_origin_binding(session_id=session_id, source="cli")
     return http.post_json(
         f"{base.rstrip('/')}/api/v1/graphs/{graph_id}/runs",
-        {"inputs": inputs, "origin": "cli"},
+        {
+            "inputs": inputs,
+            "origin": "cli",
+            "session_id": session_id,
+            "run_config": {"origin_binding": origin_binding.model_dump(mode="json")},
+        },
         timeout=30,
     )
 
@@ -140,6 +150,7 @@ async def _run_local_async(*, graph_id: str, inputs: dict, workspace: str) -> di
     from aethergraph.config.loader import load_settings
     from aethergraph.core.runtime.run_types import RunOrigin
     from aethergraph.core.runtime.runtime_services import install_services
+    from aethergraph.services.channel._origin import _console_origin_binding
     from aethergraph.services.container.default_container import build_default_container
 
     cfg = load_settings()
@@ -148,11 +159,15 @@ async def _run_local_async(*, graph_id: str, inputs: dict, workspace: str) -> di
     rm = container.run_manager
 
     identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+    session_id = f"cli-{uuid4().hex[:12]}"
+    origin_binding = _console_origin_binding(session_id=session_id, source="cli")
     record, outputs, has_waits, continuations = await rm.run_and_wait(
         graph_id,
         inputs=inputs,
+        session_id=session_id,
         identity=identity,
         origin=RunOrigin.cli,
+        run_config={"origin_binding": origin_binding.model_dump(mode="json")},
     )
     return {
         "run_id": record.run_id,

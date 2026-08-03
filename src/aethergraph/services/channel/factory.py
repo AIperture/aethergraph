@@ -47,11 +47,37 @@ def make_channel_adapters_from_env(
 
 def build_bus(
     adapters: dict[str, Any],
-    default: str = "console:stdin",
     logger=None,
     resume_router=None,
     cont_store=None,
 ) -> ChannelBus:
-    bus = ChannelBus(adapters, logger=logger, resume_router=resume_router, store=cont_store)
-    bus.set_default_channel_key(default)
-    return bus
+    """Build a Channel bus from explicit host-owned services.
+
+    Examples:
+        Build a bus with one adapter:
+        ```python
+        bus = build_bus({"console": console_adapter})
+        ```
+
+        Bind continuation infrastructure:
+        ```python
+        bus = build_bus(
+            adapters,
+            resume_router=resume_router,
+            cont_store=continuation_store,
+        )
+        ```
+
+    Args:
+        adapters: Exact adapter mapping keyed by channel prefix.
+        logger: Optional Channel logger.
+        resume_router: Optional continuation resume router.
+        cont_store: Optional continuation store.
+
+    Returns:
+        Channel bus with no mutable process-global default or aliases.
+
+    Notes:
+        Run origins and host logical routes are supplied outside the bus.
+    """
+    return ChannelBus(adapters, logger=logger, resume_router=resume_router, store=cont_store)

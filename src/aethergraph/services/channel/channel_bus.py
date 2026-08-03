@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import warnings
 
-from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
+from aethergraph.contracts.services.channel import (
+    Button,
+    ChannelAdapter,
+    ChannelRoutingError,
+    OutEvent,
+)
 from aethergraph.services.channel.choices import build_choice_options, prompt_choices_from_prompt
 from aethergraph.services.continuations.continuation import Correlator
 
@@ -22,57 +27,60 @@ class ChannelBus:
         self,
         adapters: dict[str, ChannelAdapter],
         *,
-        default_channel: str = "console:stdin",
-        channel_aliases: dict[str, str] | None = None,
         logger=None,
         resume_router=None,
         store=None,
     ):
+        """Create an exact-delivery Channel bus.
+
+        Examples:
+            Register adapters at construction:
+            ```python
+            bus = ChannelBus({"ui": ui_adapter, "console": console_adapter})
+            ```
+
+            Attach continuation services:
+            ```python
+            bus = ChannelBus(adapters, resume_router=router, store=store)
+            ```
+
+        Args:
+            adapters: Adapter mapping keyed by exact channel prefix.
+            logger: Optional Channel logger.
+            resume_router: Optional continuation resume router.
+            store: Optional continuation store.
+
+        Returns:
+            None.
+
+        Notes:
+            The bus owns neither a default address nor an alias registry.
+        """
         self.adapters = dict(adapters)
-        self.default_channel = default_channel
         self.logger = logger
         self.resume_router = resume_router
         self.store = store
-        self.channel_aliases: dict[str, str] = dict(channel_aliases or {})
 
     # ---- admin ----
     def register_adapter(self, prefix: str, adapter: ChannelAdapter) -> None:
         self.adapters[prefix] = adapter
-
-    def set_default_channel_key(self, channel_key: str) -> None:
-        self.default_channel = channel_key
-
-    def get_default_channel_key(self) -> str:
-        return self.default_channel
-
-    def register_alias(self, alias: str, target: str) -> None:
-        """Register or overwrite a human-friendly alias -> canonical key."""
-        if self._prefix(target) not in self.adapters:
-            raise RuntimeError(
-                f"Cannot alias to unknown channel prefix: {self._prefix(target)}. Please check if you have enabled the required channel service in .env and registered the adapter."
-            )
-
-        self.channel_aliases[alias] = target
-
-    def resolve_channel_key(self, key: str) -> str:
-        """
-        Resolve a channel key via the alias map.
-        If `key` matches an alias exactly, return the mapped canonical key;
-        otherwise return `key` as-is.
-        """
-        return self.channel_aliases.get(key, key)
 
     # ---- internals ----
     def _prefix(self, channel_key: str) -> str:
         return channel_key.split(":", 1)[0]
 
     def _pick(self, channel_key: str) -> ChannelAdapter:
-        # IMPORTANT: resolve aliases *before* looking up adapter
-        resolved_key = self.resolve_channel_key(channel_key)
-        prefix = self._prefix(resolved_key)
+        prefix = self._prefix(channel_key)
         if prefix not in self.adapters:
-            raise RuntimeError(
-                f"No adapter for prefix={prefix}; known: {list(self.adapters.keys())}; Check if you have enabled the required channel service in .env and registered the adapter."
+            known_prefixes = tuple(sorted(self.adapters))
+            raise ChannelRoutingError(
+                code="channel.adapter_not_found",
+                channel_key=channel_key,
+                known_prefixes=known_prefixes,
+                message=(
+                    f"No channel adapter is registered for prefix {prefix!r}; "
+                    f"known prefixes: {list(known_prefixes)}."
+                ),
             )
         return self.adapters[prefix]
 

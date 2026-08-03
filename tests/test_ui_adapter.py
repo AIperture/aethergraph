@@ -96,8 +96,6 @@ async def test_web_ui_adapter_binds_correlator_via_channel_bus():
 
     bus = ChannelBus(
         adapters={"ui": adapter},
-        default_channel="ui:run/run-456",
-        channel_aliases=None,
         store=store,
     )
 

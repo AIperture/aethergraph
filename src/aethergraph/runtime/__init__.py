@@ -16,7 +16,6 @@ from aethergraph.core.runtime.runtime_services import (
     ensure_services_installed,
     # channel service helpers
     get_channel_service,
-    get_default_channel,
     get_ext_context_service,
     # llm service helpers
     get_llm_service,
@@ -36,8 +35,6 @@ from aethergraph.core.runtime.runtime_services import (
     register_skill_file,
     register_skill_inline,
     register_skills_from_path,
-    set_channel_alias,
-    set_default_channel,
     # mcp service helpers
     set_mcp_service,
 )
@@ -49,9 +46,6 @@ __all__ = [
     "current_services",
     # channel service helpers
     "get_channel_service",
-    "set_default_channel",
-    "get_default_channel",
-    "set_channel_alias",
     "register_channel_adapter",
     # llm service helpers
     "get_llm_service",

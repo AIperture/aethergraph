@@ -355,6 +355,12 @@ async def _process_update(container, payload: dict, token: str):
                     agent_id=default_agent_id,
                     text=text,
                     attachments=resources_from_file_refs(tg_files, source="telegram_upload"),
+                    origin_channel_key=ch_key,
+                    integration_id="telegram",
+                    route_id=f"agent:{default_agent_id}",
+                    external_conversation_id=conversation_id,
+                    external_thread_id=str(topic_id) if topic_id else None,
+                    capability_profile_id="telegram-v1",
                     user_meta={
                         **meta,
                         "channel_key": ch_key,

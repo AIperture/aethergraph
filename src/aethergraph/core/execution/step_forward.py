@@ -334,7 +334,7 @@ def normalize_wait_spec(spec: dict[str, Any], *, node_ctx: "NodeContext") -> dic
         - kind: str (default "external")
         - prompt: str | dict | None
         - resume_schema: dict | None
-        - channel: str (default from node_ctx or "console:stdin")
+        - channel: str (explicit or from the immutable run origin)
         - deadline: datetime | None
         - poll: dict | None
 
@@ -353,7 +353,7 @@ def normalize_wait_spec(spec: dict[str, Any], *, node_ctx: "NodeContext") -> dic
     if isinstance(ch, dict):
         ch = None
     if not ch:
-        ch = node_ctx.channel()._resolve_default_key() or "console:stdin"
+        ch = node_ctx.channel()._resolve_default_key()
     out["channel"] = ch
 
     # Deadline

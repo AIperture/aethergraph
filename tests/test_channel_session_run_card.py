@@ -11,12 +11,6 @@ class _FakeBus:
     def __init__(self) -> None:
         self.published = []
 
-    def get_default_channel_key(self) -> str:
-        return "ui:session/test-session"
-
-    def resolve_channel_key(self, key: str) -> str:
-        return key
-
     async def publish(self, event):
         self.published.append(event)
 
@@ -46,6 +40,7 @@ class _FakeContext:
         self.graph_id = "graph-ctx"
         self.agent_id = "agent-ctx"
         self.app_id = "app-ctx"
+        self.origin_binding = SimpleNamespace(channel_key="ui:session/test-session")
         self.services = SimpleNamespace(
             channels=_FakeBus(),
             continuation_store=None,

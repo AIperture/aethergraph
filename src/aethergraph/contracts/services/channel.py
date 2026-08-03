@@ -18,6 +18,57 @@ EventType = Literal[
 ]
 
 
+class ChannelRoutingError(RuntimeError):
+    """Structured failure raised when an exact channel route cannot be resolved."""
+
+    def __init__(
+        self,
+        *,
+        code: Literal["channel.origin_required", "channel.adapter_not_found"],
+        message: str,
+        channel_key: str | None = None,
+        known_prefixes: tuple[str, ...] = (),
+    ) -> None:
+        """Create a stable channel-routing failure.
+
+        Examples:
+            Report a missing run origin:
+            ```python
+            ChannelRoutingError(
+                code="channel.origin_required",
+                message="A run origin is required.",
+            )
+            ```
+
+            Report an unavailable adapter:
+            ```python
+            ChannelRoutingError(
+                code="channel.adapter_not_found",
+                message="No adapter is registered for 'slack'.",
+                channel_key="slack:team/T:chan/C",
+                known_prefixes=("console", "ui"),
+            )
+            ```
+
+        Args:
+            code: Stable machine-readable failure code.
+            message: Human-readable failure explanation.
+            channel_key: Exact channel address involved, when available.
+            known_prefixes: Sorted adapter prefixes available to the bus.
+
+        Returns:
+            None.
+
+        Notes:
+            The structured fields are intended for host and endpoint error
+            projection. The exception message is retained for logs and tests.
+        """
+        self.code = code
+        self.channel_key = channel_key
+        self.known_prefixes = known_prefixes
+        super().__init__(message)
+
+
 class PhaseRich(TypedDict, total=False):
     kind: Literal["phase"]
     phase: str  # "routing", "planning", "reasoning", "tools", "reply"

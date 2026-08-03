@@ -10,7 +10,13 @@ from typing import Any, Literal
 import uuid
 
 from aethergraph.contracts.services.artifacts import Artifact
-from aethergraph.contracts.services.channel import Button, ChoiceOption, FileRef, OutEvent
+from aethergraph.contracts.services.channel import (
+    Button,
+    ChannelRoutingError,
+    ChoiceOption,
+    FileRef,
+    OutEvent,
+)
 from aethergraph.services.channel.choices import (
     build_choice_options,
     choice_prompt_payload,
@@ -290,25 +296,33 @@ class ChannelSession:
             await record_chat(role, text, **payload)
 
     def _resolve_default_key(self) -> str:
-        """Unified default resolver (bus default → console)."""
+        """Resolve the immutable run origin channel."""
         origin_binding = getattr(self.ctx, "origin_binding", None)
-        return (
-            (origin_binding.channel_key if origin_binding is not None else None)
-            or self._bus.get_default_channel_key()
-            or "console:stdin"
-        )
+        channel_key = origin_binding.channel_key if origin_binding is not None else None
+        if not channel_key:
+            raise ChannelRoutingError(
+                code="channel.origin_required",
+                message=(
+                    "ChannelSession requires an explicit channel address or an immutable "
+                    "run OriginBinding."
+                ),
+            )
+        return channel_key
 
     def _resolve_key(self, channel: str | None = None) -> str:
         """
-        Priority: explicit arg → bound override → resolved default,
-        then run through ChannelBus alias resolver for canonical form.
+        Priority: explicit arg → bound override → immutable run origin.
         """
         raw = channel or self._override_key or self._resolve_default_key()
         if not raw:
-            # Should never happen given the fallback, but fail fast if misconfigured
-            raise RuntimeError("ChannelSession: unable to resolve a channel key")
-        # NEW: alias → canonical resolution
-        return self._bus.resolve_channel_key(raw)
+            raise ChannelRoutingError(
+                code="channel.origin_required",
+                message=(
+                    "ChannelSession requires an explicit channel address or an immutable "
+                    "run OriginBinding."
+                ),
+            )
+        return raw
 
     def _extract_ui_session_id(self, channel: str | None = None) -> str:
         channel_key = self._resolve_key(channel)

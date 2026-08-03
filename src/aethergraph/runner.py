@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from uuid import uuid4
 
 
 def run(
@@ -70,6 +71,7 @@ async def _run_async(
     from aethergraph.api.v1.deps import RequestIdentity
     from aethergraph.core.runtime.run_types import RunOrigin
     from aethergraph.core.runtime.runtime_services import current_services
+    from aethergraph.services.channel._origin import _console_origin_binding
 
     # Resolve graph_id from target
     if isinstance(target, str):
@@ -97,6 +99,8 @@ async def _run_async(
 
     rm = container.run_manager
     identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+    session_id = f"local-{uuid4().hex[:12]}"
+    origin_binding = _console_origin_binding(session_id=session_id, source="local")
 
     try:
         run_origin = RunOrigin(origin)
@@ -106,8 +110,10 @@ async def _run_async(
     record, outputs, has_waits, continuations = await rm.run_and_wait(
         graph_id,
         inputs=inputs or {},
+        session_id=session_id,
         identity=identity,
         origin=run_origin,
+        run_config={"origin_binding": origin_binding.model_dump(mode="json")},
     )
 
     if record.status.value == "failed":

@@ -125,8 +125,7 @@ class MemorySettings(BaseModel):
 
 
 class ChannelSettings(BaseModel):
-    # room for Telegram / Console etc.
-    default: str = "console:stdin"
+    """Reserved host-level Channel configuration namespace."""
 
 
 class RAGSettings(BaseModel):

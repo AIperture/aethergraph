@@ -8,30 +8,20 @@ from aethergraph.services.channel.session import ChannelSession
 
 
 class _FakeBus:
-    def __init__(self, default_channel_key: str = "ui:session/test-session") -> None:
-        self.default_channel_key = default_channel_key
-
-    def get_default_channel_key(self) -> str:
-        return self.default_channel_key
-
-    def resolve_channel_key(self, key: str) -> str:
-        if key == "ui:session":
-            return "ui:session/test-session"
-        if key == "ui:run":
-            return "ui:run/test-run"
-        return key
+    pass
 
 
 class _FakeContext:
-    def __init__(self, *, default_channel_key: str = "ui:session/test-session") -> None:
+    def __init__(self, *, origin_channel_key: str = "ui:session/test-session") -> None:
         self.run_id = "run-1"
         self.node_id = "node-1"
         self.session_id = "session-1"
         self.graph_id = "graph-1"
         self.agent_id = "agent-1"
         self.app_id = "app-1"
+        self.origin_binding = SimpleNamespace(channel_key=origin_channel_key)
         self.services = SimpleNamespace(
-            channels=_FakeBus(default_channel_key=default_channel_key),
+            channels=_FakeBus(),
             continuation_store=None,
             memory_facade=None,
         )
@@ -75,7 +65,7 @@ async def test_work_status_replace_uses_default_ui_session_channel(monkeypatch) 
 @pytest.mark.asyncio
 async def test_work_status_patch_uses_bound_workflow_id(monkeypatch) -> None:
     ctx = _FakeContext()
-    chan = ChannelSession(ctx, "ui:session")
+    chan = ChannelSession(ctx, "ui:session/test-session")
     captured = {}
 
     async def fake_patch_session_work_status(
@@ -164,7 +154,7 @@ async def test_work_status_clear_uses_explicit_ui_session_channel(monkeypatch) -
 
 
 @pytest.mark.parametrize(
-    ("default_channel_key", "channel_key"),
+    ("origin_channel_key", "channel_key"),
     [
         ("ui:run/test-run", None),
         ("slack:team/T:chan/C", None),
@@ -177,10 +167,10 @@ async def test_work_status_clear_uses_explicit_ui_session_channel(monkeypatch) -
     ],
 )
 def test_work_status_rejects_non_ui_session_channels(
-    default_channel_key: str,
+    origin_channel_key: str,
     channel_key: str | None,
 ) -> None:
-    ctx = _FakeContext(default_channel_key=default_channel_key)
+    ctx = _FakeContext(origin_channel_key=origin_channel_key)
     chan = ChannelSession(ctx, channel_key)
 
     with pytest.raises(RuntimeError, match="requires a ui:session channel"):

@@ -371,7 +371,6 @@ def build_default_container(
     channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog, event_hub=event_hub)
     channels = build_bus(
         channel_adapters,
-        default="console:stdin",
         logger=logger_factory.for_channel(),
         resume_router=resume_router,
         cont_store=cont_store,

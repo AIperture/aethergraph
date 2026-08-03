@@ -9,11 +9,7 @@ from aethergraph.services.channel.session import ChannelSession
 
 
 class _FakeBus:
-    def get_default_channel_key(self) -> str:
-        return "ui:session/test-session"
-
-    def resolve_channel_key(self, key: str) -> str:
-        return key
+    pass
 
 
 class _FakeContext:
@@ -24,6 +20,7 @@ class _FakeContext:
         self.graph_id = "graph-1"
         self.agent_id = None
         self.app_id = None
+        self.origin_binding = SimpleNamespace(channel_key="ui:session/test-session")
         self.resume_payload = resume_payload
         self.services = SimpleNamespace(
             channels=_FakeBus(),

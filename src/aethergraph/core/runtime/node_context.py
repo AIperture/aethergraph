@@ -463,12 +463,21 @@ class NodeContext:
         """
         Set up a new ChannelSession for the current node context.
 
+        Examples:
+            Use the immutable run origin:
+            ```python
+            await context.channel().send_text("Done")
+            ```
+
+            Address a deliberate UI extension:
+            ```python
+            await context.channel("ui:run").send_phase("planning", "active")
+            ```
+
         Args:
-            channel_key (str | None): An optional key to specify a particular channel.
-            If not provided, the default channel will be used.
-            Special shorthand values are supported:
-            - `ui:session` -> `ui:session/<current_session_id>`
-            - `ui:run` -> `ui:run/<current_run_id>`
+            channel_key: Optional exact address. If omitted, the immutable run
+                origin channel is used. `ui:session` and `ui:run` deliberately
+                expand to the current session and run identifiers.
 
         Returns:
             ChannelSession: An instance representing the session for the specified channel.

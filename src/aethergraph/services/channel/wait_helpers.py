@@ -18,7 +18,7 @@ async def create_and_notify_continuation(
     bus = context.services.channels  # ChannelBus
     store = context.services.continuation_store  # ContinuationStore
 
-    ch_key = channel or bus.get_default_channel_key() or "console:stdin"
+    ch_key = context.channel(channel)._resolve_key()
 
     cont = await context.create_continuation(
         channel=ch_key, kind=kind, payload=payload, deadline_s=timeout_s

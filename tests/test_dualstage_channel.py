@@ -12,6 +12,7 @@ from aethergraph.core.runtime.graph_runner import _build_env, _resolve_graph_out
 from aethergraph.core.tools.waitable import DualStageTool, WaitSpec
 from aethergraph.server.clients.channel_client import ChannelClient
 from aethergraph.server.http.channel_http_routes import router as channel_router
+from aethergraph.services.channel._origin import _console_origin_binding
 
 
 def now_ms() -> str:
@@ -88,7 +89,14 @@ async def _setup_wait_demo_run(x: int = 7):
     task_graph = wait_demo.build()
 
     # 2) Build env + schedulers
-    env, retry_policy, max_conc = await _build_env(task_graph, inputs={"x": x})
+    session_id = "test-dualstage-session"
+    origin_binding = _console_origin_binding(session_id=session_id, source="local")
+    env, retry_policy, max_conc = await _build_env(
+        task_graph,
+        inputs={"x": x},
+        session_id=session_id,
+        origin_binding=origin_binding,
+    )
 
     # This is the correct way to get the global scheduler, but not used for pytest
     # scheds = getattr(env, "schedulers", None) or getattr(

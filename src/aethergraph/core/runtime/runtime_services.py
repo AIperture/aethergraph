@@ -131,23 +131,6 @@ def get_channel_service() -> Any:
     return svc.channels  # ChannelBus
 
 
-def set_default_channel(key: str) -> None:
-    def _op(svc: Any) -> None:
-        svc.channels.set_default_channel_key(key)
-
-    return _try_apply_or_defer(key, _op)
-
-
-def get_default_channel() -> str:
-    svc = current_services()
-    return svc.channels.default_channel_key
-
-
-def set_channel_alias(alias: str, channel_key: str) -> None:
-    svc = current_services()
-    svc.channels.register_alias(alias, channel_key)
-
-
 def register_channel_adapter(name: str, adapter: Any) -> None:
     svc = current_services()
     svc.channels.register_adapter(name, adapter)

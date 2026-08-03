@@ -220,6 +220,11 @@ async def test_shared_message_handlers_dispatch_only_when_not_resumed(monkeypatc
         "start Slack turn",
         "start Telegram turn",
     ]
+    assert dispatches[0]["origin_channel_key"] == "slack:team/T1:chan/C1"
+    assert dispatches[0]["integration_id"] == "slack"
+    assert dispatches[0]["external_thread_id"] == "100.2"
+    assert dispatches[1]["origin_channel_key"] == "tg:chat/99"
+    assert dispatches[1]["integration_id"] == "telegram"
 
 
 @pytest.mark.asyncio

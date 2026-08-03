@@ -64,7 +64,6 @@ class ChannelTestContainer:
         # channel bus + adapter
         self.channel_bus = ChannelBus(
             adapters={},
-            default_channel="ext:chan/test",
             resume_router=self.resume_router,
             store=self.cont_store,
             logger=self.logger,

@@ -7,17 +7,14 @@ from pydantic import ValidationError
 import pytest
 
 from aethergraph.contracts.integration import OriginBinding
+from aethergraph.contracts.services.channel import ChannelRoutingError
 from aethergraph.core.runtime import graph_runner
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.runner.facade import RunFacade
 
 
 class _SharedBus:
-    def get_default_channel_key(self) -> str:
-        return "console:stdin"
-
-    def resolve_channel_key(self, key: str) -> str:
-        return key
+    pass
 
 
 def _context(channel_key: str) -> SimpleNamespace:
@@ -63,6 +60,17 @@ def test_explicit_channel_overrides_run_scoped_default() -> None:
     channel = ChannelSession(_context("ui:session/default"))
 
     assert channel._resolve_key("ui:session/explicit") == "ui:session/explicit"
+
+
+def test_missing_origin_fails_without_console_or_bus_default() -> None:
+    context = _context("ui:session/default")
+    context.origin_binding = None
+
+    with pytest.raises(ChannelRoutingError) as exc_info:
+        ChannelSession(context)._resolve_key()
+
+    assert exc_info.value.code == "channel.origin_required"
+    assert exc_info.value.channel_key is None
 
 
 @pytest.mark.asyncio
