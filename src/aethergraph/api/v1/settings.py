@@ -146,6 +146,28 @@ def _embed_profile_view(profile) -> EmbeddingProfileView:
 async def get_settings(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> SettingsGetResponse:
+    """Return the local host configuration with secrets masked.
+
+    Examples:
+        Read settings through the API:
+        ```python
+        response = client.get("/api/v1/settings")
+        ```
+
+        Inspect configured provider delivery:
+        ```python
+        slack_enabled = response.json()["slack"]["enabled"]
+        ```
+
+    Args:
+        identity: Authenticated request identity for the local host.
+
+    Returns:
+        Current local settings with sensitive values masked.
+
+    Notes:
+        This endpoint is unavailable outside local deployment mode.
+    """
     _require_local(identity)
     cfg = _get_settings()
 
@@ -170,7 +192,6 @@ async def get_settings(
             integration_id=cfg.slack.integration_id,
             enabled=cfg.slack.enabled,
             bot_token=_mask_secret(_secret_str_value(cfg.slack.bot_token)),
-            signing_secret=_mask_secret(_secret_str_value(cfg.slack.signing_secret)),
         ),
         telegram=TelegramView(
             integration_id=cfg.telegram.integration_id,
@@ -205,6 +226,28 @@ def _collect_embed_env(
 
 
 def _collect_slack_env(payload: SlackPayload) -> dict[str, str]:
+    """Encode supported Slack Socket Mode settings for persistence.
+
+    Examples:
+        Encode an enabled connection:
+        ```python
+        env = _collect_slack_env(SlackPayload(enabled=True))
+        ```
+
+        Preserve a masked token:
+        ```python
+        env = _collect_slack_env(SlackPayload(bot_token="********"))
+        ```
+
+    Args:
+        payload: Partial Slack settings update from the local settings API.
+
+    Returns:
+        Environment variables containing unmasked fields supplied by the caller.
+
+    Notes:
+        Slack HTTP webhook verification is not a supported transport path.
+    """
     env: dict[str, str] = {}
     if payload.integration_id is not None:
         env[aethergraph_env_key("SLACK", "INTEGRATION_ID")] = payload.integration_id
@@ -212,8 +255,6 @@ def _collect_slack_env(payload: SlackPayload) -> dict[str, str]:
         env[aethergraph_env_key("SLACK", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
         env[aethergraph_env_key("SLACK", "BOT_TOKEN")] = payload.bot_token
-    if payload.signing_secret is not None and not _is_masked(payload.signing_secret):
-        env[aethergraph_env_key("SLACK", "SIGNING_SECRET")] = payload.signing_secret
     return env
 
 
@@ -307,7 +348,29 @@ def _hot_reload_embedding(profiles: dict[str, EmbeddingProfilePayload]) -> None:
 
 
 def _hot_reload_slack(payload: SlackPayload) -> None:
-    """Update Slack settings in-memory (adapter reconnect requires restart)."""
+    """Update supported Slack settings in memory.
+
+    Examples:
+        Enable an existing Slack connection:
+        ```python
+        _hot_reload_slack(SlackPayload(enabled=True))
+        ```
+
+        Replace its bot token:
+        ```python
+        _hot_reload_slack(SlackPayload(bot_token="xoxb-new"))
+        ```
+
+    Args:
+        payload: Partial Slack settings update from the local settings API.
+
+    Returns:
+        None.
+
+    Notes:
+        Reconnecting the Socket Mode transport or delivery adapter requires a
+        host restart.
+    """
     cfg = _get_settings()
     if payload.integration_id is not None:
         cfg.slack.integration_id = payload.integration_id
@@ -317,10 +380,6 @@ def _hot_reload_slack(payload: SlackPayload) -> None:
         from pydantic import SecretStr
 
         cfg.slack.bot_token = SecretStr(payload.bot_token)
-    if payload.signing_secret is not None and not _is_masked(payload.signing_secret):
-        from pydantic import SecretStr
-
-        cfg.slack.signing_secret = SecretStr(payload.signing_secret)
 
 
 def _hot_reload_telegram(payload: TelegramPayload) -> None:

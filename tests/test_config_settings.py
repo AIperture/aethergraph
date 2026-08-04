@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import SecretStr
 import pytest
 
+from aethergraph.api.v1.schemas.settings import SlackPayload, SlackView
+from aethergraph.config.config import AppSettings, SlackSettings, TelegramSettings
 from aethergraph.config.dotenv_writer import read_dotenv, replace_dotenv
 from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profiles_env
 from aethergraph.config.loader import load_settings
+from aethergraph.services.channel import factory as channel_factory
 
 
 def test_explicit_settings_file_does_not_use_discovered_files(
@@ -66,3 +70,50 @@ def test_encode_llm_profiles_env_is_deterministic_and_complete() -> None:
     assert (
         rows["AETHERGRAPH_LLM__PROFILES__SUMMARIZER__VISION_ACCEPTED_MIME_TYPES"] == '["image/png"]'
     )
+
+
+def test_provider_settings_expose_only_supported_transport_configuration() -> None:
+    assert set(SlackSettings.model_fields) == {
+        "integration_id",
+        "enabled",
+        "bot_token",
+        "app_token",
+    }
+    assert set(TelegramSettings.model_fields) == {
+        "integration_id",
+        "enabled",
+        "bot_token",
+    }
+    assert set(SlackView.model_fields) == {
+        "integration_id",
+        "enabled",
+        "bot_token",
+    }
+    assert set(SlackPayload.model_fields) == {
+        "integration_id",
+        "enabled",
+        "bot_token",
+    }
+
+
+def test_slack_delivery_adapter_does_not_require_webhook_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = object()
+    observed: dict[str, str] = {}
+
+    def fake_slack_adapter(*, bot_token: str):
+        observed["bot_token"] = bot_token
+        return adapter
+
+    monkeypatch.setattr(channel_factory, "SlackChannelAdapter", fake_slack_adapter)
+    settings = AppSettings(
+        workspace=str(tmp_path),
+        slack=SlackSettings(enabled=True, bot_token=SecretStr("xoxb-test")),
+    )
+
+    adapters = channel_factory.make_channel_adapters_from_env(settings)
+
+    assert adapters["slack"] is adapter
+    assert observed == {"bot_token": "xoxb-test"}

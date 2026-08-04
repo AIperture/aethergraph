@@ -212,8 +212,6 @@ def _load_provider_connections(
                 enabled=True,
                 bot_token=secret.bot_token,
                 app_token=secret.app_token,
-                socket_mode_enabled=True,
-                webhook_enabled=False,
             )
             delivery_adapter = SlackChannelAdapter(bot_token=secret.bot_token.get_secret_value())
 
@@ -245,8 +243,6 @@ def _load_provider_connections(
             integration_id=secret.integration_id,
             enabled=True,
             bot_token=secret.bot_token,
-            webhook_enabled=False,
-            polling_enabled=True,
         )
         delivery_adapter = TelegramChannelAdapter(bot_token=secret.bot_token.get_secret_value())
 

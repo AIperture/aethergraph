@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-import hashlib
-import hmac
 import json
-import time
 from typing import Any
 
 import aiohttp
-from fastapi import HTTPException, Request
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.integration import (
@@ -34,31 +30,6 @@ async def _download_slack_file(url: str, token: str) -> bytes:
     ):
         response.raise_for_status()
         return await response.read()
-
-
-def _verify_sig(request: Request, body: bytes) -> None:
-    signing_secret = (
-        request.app.state.settings.slack.signing_secret.get_secret_value()
-        if request.app.state.settings.slack.signing_secret
-        else ""
-    )
-    if not signing_secret:
-        raise HTTPException(401, "no slack signing secret configured")
-    timestamp = request.headers.get("X-Slack-Request-Timestamp")
-    signature = request.headers.get("X-Slack-Signature")
-    if not timestamp or not signature or abs(time.time() - int(timestamp)) > 300:
-        raise HTTPException(400, "stale or missing signature")
-    signature_base = f"v0:{timestamp}:{body.decode()}"
-    expected = (
-        "v0="
-        + hmac.new(
-            signing_secret.encode(),
-            signature_base.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-    )
-    if not hmac.compare_digest(expected, signature):
-        raise HTTPException(401, "bad signature")
 
 
 def _channel_key(team_id: str, channel_id: str, thread_ts: str | None) -> str:

@@ -131,14 +131,12 @@ class SlackView(BaseModel):
     integration_id: str | None = None
     enabled: bool = False
     bot_token: str | None = None  # masked
-    signing_secret: str | None = None  # masked
 
 
 class SlackPayload(BaseModel):
     integration_id: str | None = None
     enabled: bool | None = None
     bot_token: str | None = None
-    signing_secret: str | None = None
 
 
 class TelegramView(BaseModel):

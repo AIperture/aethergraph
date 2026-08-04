@@ -14,11 +14,37 @@ from aethergraph.services.channel.channel_bus import ChannelBus
 
 
 def make_channel_adapters_from_env(cfg: AppSettings) -> dict[str, Any]:
+    """Build delivery adapters from the active host settings.
+
+    Examples:
+        Build the default local adapters:
+        ```python
+        adapters = make_channel_adapters_from_env(AppSettings())
+        ```
+
+        Enable Telegram delivery:
+        ```python
+        settings = AppSettings()
+        settings.telegram.enabled = True
+        settings.telegram.bot_token = SecretStr("token")
+        adapters = make_channel_adapters_from_env(settings)
+        ```
+
+    Args:
+        cfg: Active host settings used to select and configure adapters.
+
+    Returns:
+        Delivery adapters keyed by canonical channel prefix.
+
+    Notes:
+        Provider transports receive messages separately. These adapters only
+        deliver outbound channel messages.
+    """
     # Always include console adapter
     adapters = {"console": ConsoleChannelAdapter()}
 
     # include Slack adapter if enabled
-    if cfg.slack.enabled and cfg.slack.bot_token and cfg.slack.signing_secret:
+    if cfg.slack.enabled and cfg.slack.bot_token:
         adapters["slack"] = SlackChannelAdapter(bot_token=cfg.slack.bot_token.get_secret_value())
 
     # include Telegram adapter if enabled

@@ -58,46 +58,15 @@ class LoggingSettings(BaseModel):
 
 class SlackSettings(BaseModel):
     integration_id: str | None = None
-    # Turn Slack integration on/off globally
     enabled: bool = Field(default=False)
-
-    # Tokens
     bot_token: SecretStr | None = None  # xoxb-...
     app_token: SecretStr | None = None  # xapp-... (Socket Mode)
-    signing_secret: SecretStr | None = None  # only needed for HTTP/webhook
-
-    # Transport mode flags
-    #
-    # Local / individual default:
-    #   enabled = true
-    #   socket_mode_enabled = true
-    #   webhook_enabled = false
-    #
-    # Production / webhook default:
-    #   enabled = true
-    #   socket_mode_enabled = false (optional)
-    #   webhook_enabled = true
-
-    socket_mode_enabled: bool = Field(
-        default=True, description="Use Slack Socket Mode (WS outbound) when app_token is set."
-    )
-    webhook_enabled: bool = Field(
-        default=False,
-        description="Expose /slack/events & /slack/interact HTTP endpoints for Slack.",
-    )
 
 
 class TelegramSettings(BaseModel):
     integration_id: str | None = None
     enabled: bool = Field(default=False)
     bot_token: SecretStr | None = None
-
-    # for webhook mode
-    webhook_enabled: bool = False
-    webhook_secret: SecretStr | None = None  # used ONLY for HTTP webhook verification
-
-    # for local / dev mode
-    polling_enabled: bool = True  # use getUpdates loop by default for local
 
 
 class ContinuationStoreSettings(BaseModel):

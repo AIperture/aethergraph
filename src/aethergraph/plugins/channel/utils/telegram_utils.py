@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-import hmac
 from typing import Any
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Request
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.integration import (
@@ -23,7 +21,6 @@ from aethergraph.services.integration import (
     VerifiedIntegrationContext,
 )
 
-router = APIRouter()
 _aiohttp_session: aiohttp.ClientSession | None = None
 
 
@@ -34,15 +31,6 @@ def _http_session() -> aiohttp.ClientSession:
         connector = aiohttp.TCPConnector(limit=50, ttl_dns_cache=300)
         _aiohttp_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     return _aiohttp_session
-
-
-def _verify_secret(request: Request) -> None:
-    webhook_secret = request.app.state.settings.telegram.webhook_secret.get_secret_value() or ""
-    if not webhook_secret:
-        raise HTTPException(401, "no telegram webhook secret configured")
-    supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-    if not hmac.compare_digest(supplied or "", webhook_secret):
-        raise HTTPException(401, "bad telegram webhook secret")
 
 
 def _required(value: Any, field: str) -> str:
