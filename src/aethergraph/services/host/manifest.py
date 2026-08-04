@@ -17,6 +17,10 @@ class HostManifestError(RuntimeError):
     """Report a closed, deterministic Host manifest validation failure."""
 
 
+class HostCompatibilityError(HostManifestError):
+    """Report that a release cannot run in the selected Host environment."""
+
+
 def compute_host_manifest_digest(manifest: HostManifest) -> str:
     """Compute the canonical digest for one immutable Host manifest.
 
@@ -185,6 +189,10 @@ def validate_compiled_build(manifest: HostManifest):
 
     compiled = inspection.manifest
     resolved = inspection.resolved_definition
+    compatibility = manifest.release_compatibility
+    compiled_manifest_sha256 = sha256((build_root / "manifest.json").read_bytes()).hexdigest()
+    if compiled_manifest_sha256 != compatibility.compiled_manifest_sha256:
+        raise HostManifestError("Compiled manifest checksum does not match the release.")
     identities: Mapping[str, tuple[str, str]] = {
         "build_id": (compiled.build_id, manifest.build_id),
         "source_digest": (compiled.source_digest, manifest.source_digest),
@@ -192,12 +200,28 @@ def validate_compiled_build(manifest: HostManifest):
         "entrypoint_symbol": (compiled.entrypoint_symbol, manifest.entrypoint_symbol),
         "graph_id": (resolved.surface.graph_fn_name, manifest.graph_id),
         "entry_agent_id": (resolved.system_id, manifest.entry_agent_id),
+        "engine_version": (compiled.engine_version, compatibility.engine_version),
+        "semantic_event_protocol_version": (
+            compiled.semantic_event_protocol_version,
+            compatibility.semantic_event_protocol_version,
+        ),
     }
     mismatched = [name for name, values in identities.items() if values[0] != values[1]]
     if mismatched:
         raise HostManifestError("Compiled build identity mismatch: " + ", ".join(mismatched))
     if not any(agent.resource_ref == resolved.entry_agent_ref for agent in resolved.agents):
         raise HostManifestError("Compiled build entry_agent_ref is unresolved.")
+    if compiled.logical_output_requirements != compatibility.logical_output_requirements:
+        raise HostManifestError("Compiled build logical outputs do not match the release.")
+    expected_provenance = {
+        "build_id": compiled.build_id,
+        "source_digest": compiled.source_digest,
+        "engine_version": compiled.engine_version,
+        "compiler_version": compiled.compiler_version,
+        "catalog_digest": compiled.catalog_digest,
+    }
+    if compatibility.provenance != expected_provenance:
+        raise HostManifestError("Compiled build provenance does not match the release.")
     invalid_routes = sorted(
         route.route_id
         for route in manifest.integration_routes

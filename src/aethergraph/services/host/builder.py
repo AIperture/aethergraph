@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
 import importlib
+import importlib.metadata
 import json
 from pathlib import Path
+import platform
 import sys
 from typing import Any
 
 from aethergraph.config.config import AppSettings
-from aethergraph.contracts.integration import HostManifest, IntegrationKind
+from aethergraph.contracts.integration import HostManifest, IntegrationKind, ReleaseDependency
 from aethergraph.core.runtime.runtime_registry import set_current_registry
 from aethergraph.core.runtime.runtime_services import install_services, use_services
 from aethergraph.services.container.default_container import (
@@ -26,7 +29,14 @@ from aethergraph.services.integration import (
 )
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
+from .compatibility import (
+    ENTRYPOINT_INPUT_SCHEMA,
+    ENTRYPOINT_OUTPUT_SCHEMA,
+    HOST_CAPABILITIES,
+    HOST_SERVICES,
+)
 from .manifest import (
+    HostCompatibilityError,
     HostManifestError,
     compute_host_manifest_digest,
     validate_compiled_build,
@@ -40,6 +50,12 @@ class HostRuntimeIdentity:
     environment_snapshot_digest: str
     runtime_profile_digest: str
     application_settings_digest: str
+    aethergraph_version: str
+    engine_version: str
+    python_abi: str
+    platform: str
+    architecture: str
+    dependency_lock_digest: str
 
 
 @dataclass(frozen=True)
@@ -169,6 +185,7 @@ def build_host(
     if manifest.manifest_digest != expected_digest:
         raise HostManifestError("Host manifest digest does not match its canonical content.")
     _validate_runtime_identity(manifest, runtime_identity)
+    _validate_release_compatibility(manifest, runtime_identity)
     inspection = validate_compiled_build(manifest)
     workspace_path = _prepare_workspace(Path(workspace), manifest)
 
@@ -237,6 +254,122 @@ def _validate_runtime_identity(
     mismatched = sorted(name for name in expected if expected[name] != actual[name])
     if mismatched:
         raise HostManifestError("Runtime identity mismatch: " + ", ".join(mismatched))
+
+
+def _validate_release_compatibility(
+    manifest: HostManifest,
+    runtime_identity: HostRuntimeIdentity,
+) -> None:
+    compatibility = manifest.release_compatibility
+    try:
+        installed_engine = importlib.metadata.version("aethergraph-engine")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise HostCompatibilityError(
+            "Release requires aethergraph-engine but it is not installed; "
+            "select the pinned interpreter or rebuild the release."
+        ) from exc
+    from aethergraph import __version__ as installed_ag
+
+    installed_lock = tuple(
+        _installed_dependency(name) for name in ("aethergraph", "aethergraph-engine")
+    )
+    installed_lock_digest = sha256(
+        json.dumps(
+            [item.model_dump(mode="json") for item in installed_lock],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if compatibility.dependency_lock != installed_lock:
+        raise HostCompatibilityError(
+            "Release dependency lock does not match installed Host distributions; "
+            "select the pinned interpreter or rebuild the release."
+        )
+    expected = {
+        "aethergraph_version": compatibility.aethergraph_version,
+        "engine_version": compatibility.engine_version,
+        "python_abi": compatibility.python_abi,
+        "platform": compatibility.platform,
+        "architecture": compatibility.architecture,
+        "dependency_lock_digest": compatibility.dependency_lock_digest,
+    }
+    actual = {
+        "aethergraph_version": installed_ag,
+        "engine_version": installed_engine,
+        "python_abi": sys.implementation.cache_tag or "unknown",
+        "platform": sys.platform,
+        "architecture": platform.machine() or platform.architecture()[0],
+        "dependency_lock_digest": installed_lock_digest,
+    }
+    runtime = {
+        "aethergraph_version": runtime_identity.aethergraph_version,
+        "engine_version": runtime_identity.engine_version,
+        "python_abi": runtime_identity.python_abi,
+        "platform": runtime_identity.platform,
+        "architecture": runtime_identity.architecture,
+        "dependency_lock_digest": runtime_identity.dependency_lock_digest,
+    }
+    mismatched = sorted(
+        name
+        for name in expected
+        if expected[name] != actual[name] or expected[name] != runtime[name]
+    )
+    if mismatched:
+        detail = ", ".join(
+            f"{name} requires {expected[name]!r} but Host has {actual[name]!r}"
+            for name in mismatched
+        )
+        raise HostCompatibilityError(
+            "Release compatibility mismatch: "
+            + detail
+            + "; select the pinned interpreter or rebuild the release."
+        )
+    missing_capabilities = sorted(
+        set(compatibility.host_capability_requirements) - HOST_CAPABILITIES
+    )
+    if missing_capabilities:
+        raise HostCompatibilityError(
+            "Host lacks required capabilities: "
+            + ", ".join(missing_capabilities)
+            + "; upgrade the Host or rebuild the release."
+        )
+    missing_services = sorted(set(compatibility.service_requirements) - HOST_SERVICES)
+    if missing_services:
+        raise HostCompatibilityError(
+            "Host lacks required services: "
+            + ", ".join(missing_services)
+            + "; upgrade the Host or rebuild the release."
+        )
+    if compatibility.ingress_protocol_version != manifest.ingress_protocol_version:
+        raise HostCompatibilityError("Release ingress protocol does not match Host manifest.")
+    if compatibility.semantic_event_protocol_version != manifest.semantic_event_protocol_version:
+        raise HostCompatibilityError("Release semantic protocol does not match Host manifest.")
+    if compatibility.logical_output_requirements != ("origin",):
+        raise HostCompatibilityError("Release requires unsupported logical outputs.")
+    if compatibility.entrypoint_input_schema != ENTRYPOINT_INPUT_SCHEMA:
+        raise HostCompatibilityError("Release entrypoint input schema is unsupported.")
+    if compatibility.entrypoint_output_schema != ENTRYPOINT_OUTPUT_SCHEMA:
+        raise HostCompatibilityError("Release entrypoint output schema is unsupported.")
+
+
+def _installed_dependency(name: str) -> ReleaseDependency:
+    try:
+        distribution = importlib.metadata.distribution(name)
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise HostCompatibilityError(
+            f"Release dependency is not installed: {name}; "
+            "select the pinned interpreter or rebuild the release."
+        ) from exc
+    record = distribution.read_text("RECORD")
+    if not record:
+        raise HostCompatibilityError(
+            f"Release dependency has no immutable RECORD: {name}; rebuild the environment."
+        )
+    return ReleaseDependency(
+        name=name,
+        version=distribution.version,
+        content_sha256=sha256(record.encode("utf-8")).hexdigest(),
+    )
 
 
 def _prepare_workspace(path: Path, manifest: HostManifest) -> Path:

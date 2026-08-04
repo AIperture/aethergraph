@@ -111,6 +111,54 @@ class IntegrationSessionPolicy(IntegrationContract):
     ]
 
 
+class ReleaseDependency(IntegrationContract):
+    """One exact installed Host distribution and its immutable RECORD digest."""
+
+    name: Identifier
+    version: Identifier
+    content_sha256: Digest
+
+
+class ReleaseCompatibility(IntegrationContract):
+    """Exact release and Host runtime contract verified before code import."""
+
+    schema_version: Literal["aethergraph.release-compatibility/v1"] = (
+        "aethergraph.release-compatibility/v1"
+    )
+    aethergraph_version: Identifier
+    engine_version: Identifier
+    python_abi: Identifier
+    platform: Identifier
+    architecture: Identifier
+    dependency_lock: tuple[ReleaseDependency, ...]
+    dependency_lock_digest: Digest
+    host_capability_requirements: tuple[Identifier, ...]
+    service_requirements: tuple[Identifier, ...]
+    ingress_protocol_version: Literal["aethergraph.ingress/v1"] = INGRESS_PROTOCOL_VERSION
+    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v1"] = (
+        SEMANTIC_EVENT_PROTOCOL_VERSION
+    )
+    logical_output_requirements: tuple[Literal["origin"], ...]
+    entrypoint_input_schema: dict[str, JsonValue]
+    entrypoint_output_schema: dict[str, JsonValue]
+    compiled_manifest_sha256: Digest
+    provenance: dict[Identifier, MetadataScalar]
+
+    @model_validator(mode="after")
+    def _validate_requirements(self) -> ReleaseCompatibility:
+        dependency_names = [item.name.casefold() for item in self.dependency_lock]
+        if not dependency_names or len(dependency_names) != len(set(dependency_names)):
+            raise ValueError("dependency_lock must contain unique distributions")
+        for name, values in (
+            ("host_capability_requirements", self.host_capability_requirements),
+            ("service_requirements", self.service_requirements),
+            ("logical_output_requirements", self.logical_output_requirements),
+        ):
+            if not values or len(values) != len(set(values)):
+                raise ValueError(f"{name} must contain unique required values")
+        return self
+
+
 class IntegrationRoute(IntegrationContract):
     """Immutable route from one authenticated integration to one entry agent."""
 
@@ -156,6 +204,7 @@ class HostManifest(IntegrationContract):
         SEMANTIC_EVENT_PROTOCOL_VERSION
     )
     ingress_protocol_version: Literal["aethergraph.ingress/v1"] = INGRESS_PROTOCOL_VERSION
+    release_compatibility: ReleaseCompatibility
     integration_routes: tuple[IntegrationRoute, ...]
     logical_output_bindings: dict[Identifier, Identifier] = Field(default_factory=dict)
     workspace_identity: Identifier

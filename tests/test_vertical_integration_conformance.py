@@ -51,6 +51,7 @@ from aethergraph.services.integration import (
     VerifiedIntegrationContext,
 )
 from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
+from tests._integration_fixtures import contract_compatibility
 
 _NOW = datetime(2026, 8, 3, tzinfo=UTC)
 _DIGEST = "d" * 64
@@ -141,6 +142,7 @@ def _manifest() -> HostManifest:
         environment_snapshot_digest=_DIGEST,
         runtime_profile_digest=_DIGEST,
         application_settings_digest=_DIGEST,
+        release_compatibility=contract_compatibility(),
         integration_routes=tuple(_route(case) for case in _CASES),
         workspace_identity="workspace-vertical-v1",
         manifest_digest=_DIGEST,

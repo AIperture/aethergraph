@@ -22,6 +22,7 @@ from aethergraph.contracts.integration import (
     SemanticEventKind,
 )
 from aethergraph.services.host import seal_host_manifest
+from tests._integration_fixtures import runtime_compatibility, runtime_identity_payload
 
 _FIXTURE = (
     Path(__file__).parents[2] / "ag-engine" / "tests" / "fixtures" / "authoring" / "plain_react_v1"
@@ -33,6 +34,7 @@ _TOKEN = "host-process-control-token-with-32-characters"
 def test_host_command_launches_verified_build_and_authenticated_health(tmp_path) -> None:
     compiled = compile_system_project(_FIXTURE, output_root=tmp_path / "builds")
     resolved = compiled.resolved_definition
+    compatibility = runtime_compatibility(compiled.output_root)
     route = IntegrationRoute(
         route_id="route-ui",
         endpoint_id="endpoint-ui",
@@ -69,6 +71,7 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
             environment_snapshot_digest=_DIGEST,
             runtime_profile_digest=_DIGEST,
             application_settings_digest=settings_digest,
+            release_compatibility=compatibility,
             integration_routes=(route,),
             workspace_identity="workspace-process-test",
             manifest_digest="0" * 64,
@@ -83,6 +86,7 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
                 "environment_snapshot_digest": _DIGEST,
                 "runtime_profile_digest": _DIGEST,
                 "application_settings_digest": settings_digest,
+                **runtime_identity_payload(compatibility),
             }
         ),
         encoding="utf-8",
@@ -123,16 +127,16 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
         handshake = json.loads(line)
         assert handshake["schema_version"] == "aethergraph.host-ready/v1"
         response = httpx.get(
-            f'{handshake["base_url"]}/_host/ready',
+            f"{handshake['base_url']}/_host/ready",
             headers={"X-AG-Host-Control": _TOKEN},
             timeout=10,
         )
         assert response.status_code == 200
         assert response.json()["build_id"] == compiled.build_id
-        assert httpx.get(f'{handshake["base_url"]}/api/v1/agents', timeout=10).status_code == 200
+        assert httpx.get(f"{handshake['base_url']}/api/v1/agents", timeout=10).status_code == 200
         assert (
             httpx.post(
-                f'{handshake["base_url"]}/api/v1/runs',
+                f"{handshake['base_url']}/api/v1/runs",
                 json={},
                 timeout=10,
             ).status_code
@@ -140,14 +144,14 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
         )
         assert (
             httpx.post(
-                f'{handshake["base_url"]}/api/v1/registry/register',
+                f"{handshake['base_url']}/api/v1/registry/register",
                 json={},
                 timeout=10,
             ).status_code
             == 404
         )
         shutdown = httpx.post(
-            f'{handshake["base_url"]}/_host/shutdown',
+            f"{handshake['base_url']}/_host/shutdown",
             headers={"X-AG-Host-Control": _TOKEN},
             timeout=10,
         )

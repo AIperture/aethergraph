@@ -19,6 +19,7 @@ from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
 from aethergraph.contracts.integration import IntegrationKind
 from aethergraph.services.host import (
+    HostCompatibilityError,
     HostManifestError,
     HostProviderConnection,
     HostRuntimeIdentity,
@@ -35,6 +36,12 @@ class _RuntimeIdentityRecord(_LaunchModel):
     environment_snapshot_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     runtime_profile_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     application_settings_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    aethergraph_version: str = Field(min_length=1, max_length=255)
+    engine_version: str = Field(min_length=1, max_length=255)
+    python_abi: str = Field(min_length=1, max_length=255)
+    platform: str = Field(min_length=1, max_length=255)
+    architecture: str = Field(min_length=1, max_length=255)
+    dependency_lock_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class _SlackProviderSecret(_LaunchModel):
@@ -101,14 +108,17 @@ def handle(args: argparse.Namespace) -> int:
         return asyncio.run(_run_host(args))
     except KeyboardInterrupt:
         return 0
-    except (HostManifestError, FileNotFoundError, ValidationError, ValueError):
-        _emit_failure("host.invalid_launch")
+    except HostCompatibilityError as exc:
+        _emit_failure("host.release_incompatible", str(exc))
         return 2
-    except ImportError:
-        _emit_failure("host.missing_dependency")
+    except (HostManifestError, FileNotFoundError, ValidationError, ValueError) as exc:
+        _emit_failure("host.invalid_launch", str(exc))
+        return 2
+    except ImportError as exc:
+        _emit_failure("host.missing_dependency", str(exc))
         return 3
-    except Exception:
-        _emit_failure("host.start_failed")
+    except Exception as exc:
+        _emit_failure("host.start_failed", str(exc))
         return 1
 
 
@@ -292,13 +302,15 @@ async def _wait_for_server_start(
             await asyncio.sleep(0.02)
 
 
-def _emit_failure(code: str) -> None:
+def _emit_failure(code: str, detail: str) -> None:
+    safe_detail = " ".join(detail.split())[:1000]
     print(
         json.dumps(
             {
                 "schema_version": "aethergraph.host-diagnostic/v1",
                 "kind": "host.failed",
                 "code": code,
+                "detail": safe_detail,
             },
             sort_keys=True,
             separators=(",", ":"),

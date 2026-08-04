@@ -19,6 +19,7 @@ from aethergraph.services.integration import (
     IntegrationManager,
     IntegrationManagerError,
 )
+from tests._integration_fixtures import contract_compatibility
 
 _DIGEST = "a" * 64
 
@@ -83,6 +84,7 @@ def _manifest(*, kind: IntegrationKind | None = None) -> HostManifest:
         environment_snapshot_digest=_DIGEST,
         runtime_profile_digest=_DIGEST,
         application_settings_digest=_DIGEST,
+        release_compatibility=contract_compatibility(),
         integration_routes=routes,
         workspace_identity="workspace-1",
         manifest_digest=_DIGEST,

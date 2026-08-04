@@ -1,6 +1,7 @@
 """Authoritative AG Host composition services."""
 
 from .builder import AGHost, HostProviderConnection, HostRuntimeIdentity, build_host
+from .compatibility import build_release_compatibility
 from .control import (
     HostDiagnostics,
     HostHealth,
@@ -8,6 +9,7 @@ from .control import (
     install_host_control_routes,
 )
 from .manifest import (
+    HostCompatibilityError,
     HostManifestError,
     compute_host_manifest_digest,
     load_host_manifest,
@@ -18,12 +20,14 @@ from .manifest import (
 __all__ = [
     "AGHost",
     "HostProviderConnection",
+    "HostCompatibilityError",
     "HostManifestError",
     "HostDiagnostics",
     "HostHealth",
     "HostReadiness",
     "HostRuntimeIdentity",
     "build_host",
+    "build_release_compatibility",
     "compute_host_manifest_digest",
     "install_host_control_routes",
     "load_host_manifest",

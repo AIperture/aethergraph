@@ -27,6 +27,7 @@ from aethergraph.services.integration import (
     SQLiteIngressIdempotencyStore,
     VerifiedIntegrationContext,
 )
+from tests._integration_fixtures import contract_compatibility
 
 _DIGEST = "a" * 64
 _NOW = datetime(2026, 8, 3, tzinfo=UTC)
@@ -74,6 +75,7 @@ def _manifest(*routes: IntegrationRoute) -> HostManifest:
         environment_snapshot_digest=_DIGEST,
         runtime_profile_digest=_DIGEST,
         application_settings_digest=_DIGEST,
+        release_compatibility=contract_compatibility(),
         integration_routes=routes,
         logical_output_bindings={"primary": "origin"},
         workspace_identity="workspace-1",
