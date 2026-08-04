@@ -18,6 +18,7 @@ from aethergraph.contracts.integration import (
     IntegrationSessionPolicy,
     SemanticEventKind,
 )
+from aethergraph.services.host.endpoint_credentials import EndpointCredentialRegistry
 from aethergraph.services.integration import BindingResolution, ManifestRouteResolver
 from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
 from tests._integration_fixtures import contract_compatibility
@@ -137,6 +138,7 @@ def _app() -> tuple[FastAPI, SimpleNamespace]:
     )
     app = FastAPI()
     app.state.container = container
+    app.state.endpoint_credentials = EndpointCredentialRegistry.from_manifest(manifest)
     app.include_router(router, prefix="/api/v1")
     app.dependency_overrides[get_identity] = lambda: RequestIdentity(
         user_id="user-1",
@@ -146,11 +148,23 @@ def _app() -> tuple[FastAPI, SimpleNamespace]:
     return app, container
 
 
+async def _authenticate(client: httpx.AsyncClient, app: FastAPI) -> None:
+    credentials = app.state.endpoint_credentials.take_launch_credentials()
+    token = credentials["support"]
+    assert app.state.endpoint_credentials.take_launch_credentials() == {}
+    response = await client.post(
+        "/api/v1/agent-endpoints/support/authenticate",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+
+
 @pytest.mark.anyio
 async def test_endpoint_session_and_ingress_use_manifest_route() -> None:
     app, container = _app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
         created = await client.post(
             "/api/v1/agent-endpoints/support/sessions",
             json={"idempotency_key": "browser-1"},
@@ -185,6 +199,7 @@ async def test_endpoint_ingress_rejects_agent_selection_fields() -> None:
     app, _ = _app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
         created = await client.post(
             "/api/v1/agent-endpoints/support/sessions",
             json={"idempotency_key": "browser-1"},
@@ -208,6 +223,7 @@ async def test_endpoint_cancel_requires_turn_owned_by_bound_session() -> None:
     app, container = _app()
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
         created = await client.post(
             "/api/v1/agent-endpoints/support/sessions",
             json={"idempotency_key": "browser-cancel"},
@@ -232,3 +248,17 @@ async def test_endpoint_cancel_requires_turn_owned_by_bound_session() -> None:
     }
     assert rejected.status_code == 404
     assert container.run_manager.canceled == ["run-owned"]
+
+
+@pytest.mark.anyio
+async def test_endpoint_rejects_local_identity_without_scoped_credential() -> None:
+    app, _ = _app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-unauthenticated"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["code"] == "endpoint.authentication_required"

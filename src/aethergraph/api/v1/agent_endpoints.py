@@ -8,7 +8,7 @@ from hashlib import sha256
 import json
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,6 +21,7 @@ from aethergraph.contracts.integration import (
     OriginAddress,
 )
 from aethergraph.core.runtime.run_types import SessionKind
+from aethergraph.services.host.endpoint_credentials import ENDPOINT_COOKIE_NAME
 from aethergraph.services.integration import VerifiedAttachment, VerifiedIntegrationContext
 
 from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
@@ -65,6 +66,96 @@ class EndpointIngressBody(_ClosedModel):
 
 class EndpointCancelBody(_ClosedModel):
     turn_id: str = Field(min_length=1, max_length=255)
+
+
+def _credential_registry(request: Request):
+    registry = getattr(request.app.state, "endpoint_credentials", None)
+    if registry is None:
+        raise HTTPException(status_code=503, detail="Endpoint credentials are unavailable.")
+    return registry
+
+
+def require_endpoint_credential(endpoint_id: str, request: Request) -> None:
+    """Require the bounded cookie issued for one exact Agent Endpoint.
+
+    Examples:
+        Protect a route with the shared dependency:
+        ```python
+        credential: Annotated[None, Depends(require_endpoint_credential)]
+        ```
+
+    Args:
+        endpoint_id: Exact endpoint identity from the public request path.
+        request: FastAPI request carrying the Host credential registry.
+
+    Returns:
+        None: Returns only after endpoint-scoped credential validation.
+
+    Notes:
+        Generic AG local identity is not an authentication fallback for Host endpoints.
+    """
+
+    registry = _credential_registry(request)
+    if not registry.validate(endpoint_id, request.cookies.get(ENDPOINT_COOKIE_NAME)):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "endpoint.authentication_required",
+                "message": "A valid endpoint-scoped browser credential is required.",
+            },
+        )
+
+
+@router.post("/{endpoint_id}/authenticate")
+async def authenticate_endpoint(
+    endpoint_id: str,
+    request: Request,
+    response: Response,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+) -> dict[str, str | int]:
+    """Exchange the private launch bearer for a bounded HttpOnly cookie.
+
+    Examples:
+        Establish browser authority without putting a token in request URLs:
+        ```python
+        POST /api/v1/agent-endpoints/studio-ui/authenticate
+        Authorization: Bearer <launch credential>
+        ```
+
+    Args:
+        endpoint_id: Exact endpoint identity selected by the Host manifest.
+        request: FastAPI request carrying the Host credential registry.
+        response: Response that receives the endpoint-scoped HttpOnly cookie.
+        authorization: Launch bearer transferred to the browser in the URL fragment.
+
+    Returns:
+        dict[str, str | int]: Authenticated endpoint identity and remaining lifetime.
+
+    Notes:
+        The bearer is never accepted by execution routes and no query-token path exists.
+    """
+
+    registry = _credential_registry(request)
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    if not registry.validate(endpoint_id, token):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "endpoint.authentication_failed",
+                "message": "The endpoint launch credential is invalid or expired.",
+            },
+        )
+    ttl_seconds = registry.ttl_seconds(endpoint_id)
+    response.set_cookie(
+        key=ENDPOINT_COOKIE_NAME,
+        value=token,
+        max_age=ttl_seconds,
+        httponly=True,
+        secure=False,
+        samesite="strict",
+        path=f"/api/v1/agent-endpoints/{endpoint_id}",
+    )
+    return {"status": "authenticated", "endpoint_id": endpoint_id, "expires_in": ttl_seconds}
 
 
 def _host(request: Request):
@@ -139,6 +230,7 @@ async def create_endpoint_session(
     body: EndpointSessionCreate,
     request: Request,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
 ) -> EndpointSessionView:
     """Create or replay one authenticated public endpoint session.
 
@@ -262,6 +354,7 @@ async def endpoint_ingress(
     endpoint_id: str,
     request: Request,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
 ):
     """Accept JSON or multipart input through the canonical coordinator.
 
@@ -373,6 +466,7 @@ async def endpoint_session_events(
     session_id: str,
     request: Request,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
     after_cursor: int | None = Query(default=None, ge=0),  # noqa: B008
     limit: int = Query(default=100, ge=1, le=500),  # noqa: B008
 ) -> dict[str, Any]:
@@ -424,6 +518,7 @@ async def endpoint_session_stream(
     session_id: str,
     request: Request,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
     after_cursor: int | None = Query(default=None, ge=0),  # noqa: B008
 ) -> StreamingResponse:
     """Stream semantic events from the same reconnect cursor used by history.
@@ -484,6 +579,7 @@ async def cancel_endpoint_turn(
     body: EndpointCancelBody,
     request: Request,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
 ) -> dict[str, str]:
     """Cancel one exact turn after validating endpoint-session ownership.
 
@@ -527,6 +623,7 @@ async def endpoint_artifact(
     artifact_id: str,
     request: Request,
     identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
 ) -> Response:
     """Download one endpoint-scoped artifact after identity validation.
 

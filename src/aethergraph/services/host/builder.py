@@ -112,6 +112,10 @@ class AGHost:
 
         from aethergraph.server.app_factory import create_app
 
+        from .endpoint_credentials import EndpointCredentialRegistry
+
+        endpoint_credentials = EndpointCredentialRegistry.from_manifest(self.manifest)
+
         app = create_app(
             workspace=str(self.workspace),
             cfg=self.container.settings,
@@ -119,6 +123,7 @@ class AGHost:
             integration_manager=self.integration_manager,
             deployment_mode=True,
         )
+        app.state.endpoint_credentials = endpoint_credentials
         from .control import install_host_control_routes
 
         install_host_control_routes(

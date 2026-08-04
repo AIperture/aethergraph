@@ -72,6 +72,7 @@ A deployment route of kind `agent_endpoint` or `ag_ui` supplies an immutable
 The public route family is:
 
 ```text
+POST /api/v1/agent-endpoints/{endpoint_id}/authenticate
 POST /api/v1/agent-endpoints/{endpoint_id}/sessions
 POST /api/v1/agent-endpoints/{endpoint_id}/ingress
 GET  /api/v1/agent-endpoints/{endpoint_id}/sessions/{session_id}/events
@@ -79,6 +80,14 @@ GET  /api/v1/agent-endpoints/{endpoint_id}/sessions/{session_id}/stream
 POST /api/v1/agent-endpoints/{endpoint_id}/sessions/{session_id}/cancel
 GET  /api/v1/agent-endpoints/{endpoint_id}/artifacts/{artifact_id}
 ```
+
+Host creates one random, eight-hour credential for each enabled AG UI or Agent Endpoint
+route and transfers it only in the private readiness handshake. A browser launch carries
+that bounded credential in the URL fragment, removes the fragment before rendering, and
+exchanges it through `authenticate` for an HttpOnly, SameSite-strict cookie scoped to the
+exact endpoint path. Host restart issues new credentials. Execution routes never accept a
+query token or generic local identity, and a credential for one endpoint cannot authorize
+another endpoint.
 
 Create a session with a client-stable idempotency key:
 

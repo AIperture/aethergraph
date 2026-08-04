@@ -171,6 +171,7 @@ async def _run_host(args: argparse.Namespace) -> int:
                     "build_id": manifest.build_id,
                     "manifest_digest": manifest.manifest_digest,
                     "base_url": f"http://127.0.0.1:{port}",
+                    "endpoint_credentials": app.state.endpoint_credentials.take_launch_credentials(),
                 },
                 sort_keys=True,
                 separators=(",", ":"),

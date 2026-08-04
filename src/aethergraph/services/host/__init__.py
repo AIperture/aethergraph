@@ -8,6 +8,7 @@ from .control import (
     HostReadiness,
     install_host_control_routes,
 )
+from .endpoint_credentials import EndpointCredentialRegistry
 from .manifest import (
     HostCompatibilityError,
     HostManifestError,
@@ -26,6 +27,7 @@ __all__ = [
     "HostHealth",
     "HostReadiness",
     "HostRuntimeIdentity",
+    "EndpointCredentialRegistry",
     "build_host",
     "build_release_compatibility",
     "compute_host_manifest_digest",

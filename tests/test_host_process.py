@@ -126,6 +126,7 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
             raise AssertionError(f"Host exited before handshake: {stderr}")
         handshake = json.loads(line)
         assert handshake["schema_version"] == "aethergraph.host-ready/v1"
+        endpoint_credential = handshake["endpoint_credentials"]["endpoint-ui"]
         response = httpx.get(
             f"{handshake['base_url']}/_host/ready",
             headers={"X-AG-Host-Control": _TOKEN},
@@ -133,6 +134,23 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
         )
         assert response.status_code == 200
         assert response.json()["build_id"] == compiled.build_id
+        unauthenticated = httpx.post(
+            f"{handshake['base_url']}/api/v1/agent-endpoints/endpoint-ui/sessions",
+            json={"idempotency_key": "host-browser"},
+            timeout=10,
+        )
+        assert unauthenticated.status_code == 401
+        with httpx.Client(timeout=10) as browser:
+            authenticated = browser.post(
+                f"{handshake['base_url']}/api/v1/agent-endpoints/endpoint-ui/authenticate",
+                headers={"Authorization": f"Bearer {endpoint_credential}"},
+            )
+            assert authenticated.status_code == 200
+            created_session = browser.post(
+                f"{handshake['base_url']}/api/v1/agent-endpoints/endpoint-ui/sessions",
+                json={"idempotency_key": "host-browser"},
+            )
+            assert created_session.status_code == 200
         assert httpx.get(f"{handshake['base_url']}/api/v1/agents", timeout=10).status_code == 200
         assert (
             httpx.post(
