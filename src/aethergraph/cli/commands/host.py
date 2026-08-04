@@ -17,7 +17,7 @@ import uvicorn
 from aethergraph.config.config import SlackSettings, TelegramSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-from aethergraph.contracts.integration import IntegrationKind
+from aethergraph.contracts.integration import HOST_READY_PROTOCOL_VERSION, IntegrationKind
 from aethergraph.services.host import (
     HostCompatibilityError,
     HostManifestError,
@@ -166,7 +166,7 @@ async def _run_host(args: argparse.Namespace) -> int:
         print(
             json.dumps(
                 {
-                    "schema_version": "aethergraph.host-ready/v1",
+                    "schema_version": HOST_READY_PROTOCOL_VERSION,
                     "deployment_id": manifest.deployment_id,
                     "build_id": manifest.build_id,
                     "manifest_digest": manifest.manifest_digest,

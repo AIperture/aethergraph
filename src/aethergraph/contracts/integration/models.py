@@ -187,7 +187,7 @@ class IntegrationRoute(IntegrationContract):
 class HostManifest(IntegrationContract):
     """Immutable launch contract consumed by exactly one AG Host deployment."""
 
-    schema_version: Literal["aethergraph.host-manifest/v1"] = HOST_MANIFEST_SCHEMA_VERSION
+    schema_version: Literal["aethergraph.host-manifest/v2"] = HOST_MANIFEST_SCHEMA_VERSION
     deployment_id: Identifier
     build_id: Identifier
     source_digest: Digest

@@ -35,13 +35,20 @@ from .models import (
     TurnFailedPayload,
     WarningRaisedPayload,
 )
-from .versions import INGRESS_PROTOCOL_VERSION, SEMANTIC_EVENT_PROTOCOL_VERSION
+from .versions import (
+    HOST_MANIFEST_SCHEMA_VERSION,
+    HOST_READY_PROTOCOL_VERSION,
+    INGRESS_PROTOCOL_VERSION,
+    SEMANTIC_EVENT_PROTOCOL_VERSION,
+)
 
 __all__ = [
     "ArtifactAvailablePayload",
     "ExternalIdentity",
     "ExternalSessionBinding",
     "HostManifest",
+    "HOST_MANIFEST_SCHEMA_VERSION",
+    "HOST_READY_PROTOCOL_VERSION",
     "INGRESS_PROTOCOL_VERSION",
     "IngressAttachment",
     "IngressChoice",

@@ -125,7 +125,7 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
             stderr = process.stderr.read()
             raise AssertionError(f"Host exited before handshake: {stderr}")
         handshake = json.loads(line)
-        assert handshake["schema_version"] == "aethergraph.host-ready/v1"
+        assert handshake["schema_version"] == "aethergraph.host-ready/v2"
         endpoint_credential = handshake["endpoint_credentials"]["endpoint-ui"]
         response = httpx.get(
             f"{handshake['base_url']}/_host/ready",

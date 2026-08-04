@@ -87,7 +87,7 @@ def test_host_manifest_is_closed_and_round_trips_across_json_boundary() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("schema_version", "aethergraph.host-manifest/v2"),
+        ("schema_version", "aethergraph.host-manifest/v1"),
         ("ingress_protocol_version", "aethergraph.ingress/v2"),
         ("semantic_event_protocol_version", "aethergraph.semantic-event/v2"),
     ],
