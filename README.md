@@ -19,7 +19,7 @@ Use AetherGraph to prototype interactive assistants, simulation/optimization loo
 * Python **3.10+**
 * macOS, Linux, or Windows
 * *(Suggested)* LLM API keys (OpenAI, Anthropic, Google, etc.)
-* *(Optional)* `slack` or `telegram` token. See [Channel Setup](https://aiperture.github.io/aethergraph-docs/channel-setup/introduction/)
+* *(Optional hosting)* Slack Socket Mode or Telegram polling credentials configured by AG Studio
 * *(Optional UI)* A modern browser to use the built-in AetherGraph web UI
 
 ---
@@ -92,7 +92,9 @@ open_ai_client = register_llm_client(
 )
 ```
 
-See the docs for setup of **external channel** methods (Slack, Telegram, etc.) for real-time interaction.
+For hosted agents, bespoke applications, Slack, and Telegram, see
+[AG Host, Agent Endpoint, and integrations](docs/integrations_and_host.md). Provider
+credentials and routes belong to the Host deployment, not an agent `.env` file.
 
 > **Where should `.env` live?**
 > In your **project root** (the directory where you run your Python entry point).
@@ -257,7 +259,7 @@ A growing gallery of standalone examples and recipes lives under:
 * **`ModuleNotFoundError`**: ensure you installed into the active venv and that your shell is using it.
 * **LLM/API errors**: confirm provider/model/key configuration (env vars or your local secrets file).
 * **Windows path quirks**: clear any local cache folders (e.g., `.rag/`) and re-run; verify write permissions.
-* **Slack extra**: install with `pip install "aethergraph[slack]"` if you need Slack channel integration.
+* **Slack Host dependency**: the selected Host interpreter must contain the Slack extra before a Socket Mode route can become ready.
 * **UI shows no apps/agents**:
 
   * Make sure your module (e.g. `demos`) is importable under `--project-root`.
