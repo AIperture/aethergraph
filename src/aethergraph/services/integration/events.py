@@ -381,7 +381,7 @@ class EventLogSemanticEventStore:
         """
         rows = await self.event_log.query(
             scope_id=_scope_id(deployment_id, session_id),
-            after_id=after_cursor,
+            after_id=after_cursor if after_cursor is not None else 0,
             limit=limit,
             order_dir="asc",
         )

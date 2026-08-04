@@ -106,6 +106,22 @@ class _Ingress:
         }
 
 
+class _RunStore:
+    def __init__(self) -> None:
+        self.records = {}
+
+    async def get(self, run_id):
+        return self.records.get(run_id)
+
+
+class _RunManager:
+    def __init__(self) -> None:
+        self.canceled = []
+
+    async def cancel_run(self, run_id):
+        self.canceled.append(run_id)
+
+
 def _app() -> tuple[FastAPI, SimpleNamespace]:
     manifest = _manifest()
     ingress = _Ingress(manifest)
@@ -114,6 +130,8 @@ def _app() -> tuple[FastAPI, SimpleNamespace]:
         host_manifest=manifest,
         semantic_events=SimpleNamespace(),
         session_store=InMemorySessionStore(),
+        run_store=_RunStore(),
+        run_manager=_RunManager(),
     )
     app = FastAPI()
     app.state.container = container
@@ -181,3 +199,34 @@ async def test_endpoint_ingress_rejects_agent_selection_fields() -> None:
 
     assert response.status_code == 400
     assert "agent.other" not in str(response.json())
+
+
+@pytest.mark.anyio
+async def test_endpoint_cancel_requires_turn_owned_by_bound_session() -> None:
+    app, container = _app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-cancel"},
+        )
+        session_id = created.json()["session_id"]
+        container.run_store.records["run-owned"] = SimpleNamespace(session_id=session_id)
+        container.run_store.records["run-other"] = SimpleNamespace(session_id="another-session")
+
+        canceled = await client.post(
+            f"/api/v1/agent-endpoints/support/sessions/{session_id}/cancel",
+            json={"turn_id": "run-owned"},
+        )
+        rejected = await client.post(
+            f"/api/v1/agent-endpoints/support/sessions/{session_id}/cancel",
+            json={"turn_id": "run-other"},
+        )
+
+    assert canceled.status_code == 200
+    assert canceled.json() == {
+        "turn_id": "run-owned",
+        "status": "cancellation_requested",
+    }
+    assert rejected.status_code == 404
+    assert container.run_manager.canceled == ["run-owned"]
