@@ -146,6 +146,13 @@ def test_host_command_launches_verified_build_and_authenticated_health(tmp_path)
             ).status_code
             == 404
         )
+        shutdown = httpx.post(
+            f'{handshake["base_url"]}/_host/shutdown',
+            headers={"X-AG-Host-Control": _TOKEN},
+            timeout=10,
+        )
+        assert shutdown.status_code == 202
+        process.wait(timeout=15)
     finally:
         if process.poll() is None:
             if sys.platform == "win32":

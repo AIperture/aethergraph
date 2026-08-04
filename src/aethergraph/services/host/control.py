@@ -130,6 +130,17 @@ def install_host_control_routes(*, app, host, control_token: str) -> None:
             providers=providers,
         )
 
+    @router.post("/shutdown", status_code=status.HTTP_202_ACCEPTED)
+    async def shutdown(
+        supplied: Annotated[str | None, Header(alias="X-AG-Host-Control")] = None,
+    ) -> dict[str, str]:
+        authorize(supplied)
+        request_shutdown = getattr(app.state, "host_shutdown", None)
+        if request_shutdown is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        request_shutdown()
+        return {"status": "stopping"}
+
     app.include_router(router)
 
 

@@ -149,6 +149,7 @@ async def _run_host(args: argparse.Namespace) -> int:
             access_log=False,
         )
     )
+    app.state.host_shutdown = lambda: setattr(server, "should_exit", True)
     task = asyncio.create_task(server.serve(sockets=[listener]))
     try:
         await _wait_for_server_start(server, task)

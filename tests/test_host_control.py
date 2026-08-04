@@ -86,3 +86,18 @@ def test_host_control_returns_redacted_failed_diagnostics() -> None:
     ]
     assert "build_root" not in response.text
     assert "C:/build" not in response.text
+
+
+def test_host_control_shutdown_requires_token_and_callback() -> None:
+    app = _app(ready=True)
+    requested: list[bool] = []
+    app.state.host_shutdown = lambda: requested.append(True)
+    with TestClient(app) as client:
+        assert client.post("/_host/shutdown").status_code == 401
+        response = client.post(
+            "/_host/shutdown",
+            headers={"X-AG-Host-Control": _TOKEN},
+        )
+
+    assert response.status_code == 202
+    assert requested == [True]
