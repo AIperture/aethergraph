@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from aethergraph.contracts.integration import (
@@ -7,13 +9,18 @@ from aethergraph.contracts.integration import (
     MessageCompletedPayload,
     SemanticEventKind,
     StructuredOutputPayload,
+    ToolActivityPayload,
+    TurnCompletedPayload,
+    TurnFailedPayload,
 )
 from aethergraph.contracts.services.channel import Button, OutEvent
+from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.services.integration import (
     EventLogSemanticEventStore,
     SemanticDeliveryError,
     SemanticEventChannelAdapter,
     SemanticEventEmitter,
+    SemanticTurnMonitor,
 )
 from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 
@@ -96,6 +103,27 @@ async def test_semantic_adapter_rejects_missing_turn_identity(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_semantic_adapter_rejects_unsupported_channel_event(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(
+            deployment_id="deployment-1",
+            store=EventLogSemanticEventStore(event_log),
+        )
+    )
+
+    with pytest.raises(SemanticDeliveryError, match="Unsupported Channel event type"):
+        await adapter.send(
+            OutEvent(
+                type="not.a.semantic.event",  # type: ignore[arg-type]
+                channel="endpoint:sessions/public-1",
+                meta=_meta(),
+            )
+        )
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_semantic_adapter_persists_named_structured_output(tmp_path) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
     store = EventLogSemanticEventStore(event_log)
@@ -123,6 +151,159 @@ async def test_semantic_adapter_persists_named_structured_output(tmp_path) -> No
     assert isinstance(history[0].event.payload, StructuredOutputPayload)
     assert history[0].event.payload.output_name == "workflow.status"
     assert history[0].event.payload.value == {"operation": "clear"}
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_preserves_structured_output_upsert_identity(
+    tmp_path,
+) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+
+    await adapter.send(
+        OutEvent(
+            type="structured.output",
+            channel="endpoint:sessions/public-1",
+            rich={
+                "output_name": "agstudio.workbench.suggestion",
+                "value": {"suggestion_id": "sug-1", "revision": 2},
+            },
+            meta=_meta(),
+            upsert_key="suggestion:sug-1",
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert history[0].event.extensions["aethergraph.upsert_key"] == ("suggestion:sug-1")
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
+    tmp_path,
+) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+
+    await adapter.send(
+        OutEvent(
+            type="agent.tool.activity",
+            channel="endpoint:sessions/public-1",
+            text="Project inspected.",
+            rich={
+                "tool_call_id": "call-1",
+                "tool_name": "inspect_project",
+                "status": "completed",
+                "message": "Project inspected.",
+            },
+            meta=_meta(),
+            upsert_key="tool:call-1",
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    event = history[0].event
+    assert event.kind == SemanticEventKind.TOOL_ACTIVITY
+    assert isinstance(event.payload, ToolActivityPayload)
+    assert event.payload.tool_call_id == "call-1"
+    assert event.payload.status == "completed"
+    assert event.extensions["aethergraph.upsert_key"] == "tool:call-1"
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    emitter = SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    await emitter.emit(
+        OutEvent(
+            type="agent.message",
+            channel="endpoint:sessions/public-1",
+            text="Done",
+            meta=_meta(),
+        )
+    )
+
+    class _RunManager:
+        async def wait_run(self, run_id):
+            assert run_id == "run-1"
+            return SimpleNamespace(
+                status=RunStatus.succeeded,
+                result_available=True,
+                error=None,
+            )
+
+    monitor = SemanticTurnMonitor(run_manager=_RunManager(), emitter=emitter)
+    await monitor._observe(
+        run_id="run-1",
+        session_id="session-1",
+        route_id="studio-assistant",
+        integration_id="agstudio",
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert [item.event.sequence for item in history] == [0, 1]
+    assert history[1].event.kind == SemanticEventKind.TURN_COMPLETED
+    assert isinstance(history[1].event.payload, TurnCompletedPayload)
+    assert history[1].event.payload.result_available is True
+    assert history[1].event.extensions == {
+        "aethergraph.integration_id": "agstudio",
+        "aethergraph.route_id": "studio-assistant",
+    }
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_turn_monitor_projects_cancellation_as_terminal_failure(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+
+    class _RunManager:
+        async def wait_run(self, run_id):
+            return SimpleNamespace(
+                status=RunStatus.canceled,
+                result_available=False,
+                error="Run cancelled by user",
+            )
+
+    monitor = SemanticTurnMonitor(
+        run_manager=_RunManager(),
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store),
+    )
+    await monitor._observe(
+        run_id="run-canceled",
+        session_id="session-1",
+        route_id="studio-assistant",
+        integration_id="agstudio",
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    event = history[0].event
+    assert event.kind == SemanticEventKind.TURN_FAILED
+    assert isinstance(event.payload, TurnFailedPayload)
+    assert event.payload.code == "run_canceled"
+    assert event.payload.message == "Run cancelled by user"
+    assert event.payload.retryable is False
     await event_log.close()
 
 

@@ -548,9 +548,13 @@ async def endpoint_session_stream(
         The stream polls only the canonical semantic store; no broadcast side channel exists.
     """
     container, _, binding = await _session_binding(request, endpoint_id, session_id, identity)
+    cursor_start = _stream_cursor(
+        after_cursor=after_cursor,
+        last_event_id=request.headers.get("last-event-id"),
+    )
 
     async def generate():
-        cursor = after_cursor
+        cursor = cursor_start
         while not await request.is_disconnected():
             rows = await container.semantic_events.list_session(
                 deployment_id=container.host_manifest.deployment_id,
@@ -570,6 +574,51 @@ async def endpoint_session_stream(
                 await asyncio.sleep(1)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+def _stream_cursor(*, after_cursor: int | None, last_event_id: str | None) -> int | None:
+    """Resolve the exclusive semantic cursor for one SSE connection.
+
+    The explicit query cursor establishes the initial subscription position.
+    On browser reconnect, a valid WHATWG `Last-Event-ID` can only advance that
+    position, so already delivered durable Events are not replayed.
+
+    Examples:
+        Resolve a fresh stream:
+        ```python
+        assert _stream_cursor(after_cursor=None, last_event_id=None) is None
+        ```
+
+        Advance a reconnecting stream:
+        ```python
+        assert _stream_cursor(after_cursor=4, last_event_id="9") == 9
+        ```
+
+    Args:
+        after_cursor: Optional exclusive cursor supplied in the request query.
+        last_event_id: Optional SSE Event ID supplied by the user agent.
+
+    Returns:
+        int | None: The greatest valid supplied cursor, or `None` for initial history.
+
+    Notes:
+        Malformed or negative `Last-Event-ID` values fail closed with HTTP 400.
+    """
+    if last_event_id is None or not last_event_id.strip():
+        return after_cursor
+    raw = last_event_id.strip()
+    if not raw.isdecimal():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "endpoint.last_event_id_invalid",
+                "message": "Last-Event-ID must be a non-negative integer cursor.",
+            },
+        )
+    reconnect_cursor = int(raw)
+    if after_cursor is None:
+        return reconnect_cursor
+    return max(after_cursor, reconnect_cursor)
 
 
 @router.post("/{endpoint_id}/sessions/{session_id}/cancel")

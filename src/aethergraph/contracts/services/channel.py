@@ -10,6 +10,7 @@ EventType = Literal[
     "agent.progress.start",
     "agent.progress.update",
     "agent.progress.end",  # progress bar
+    "agent.tool.activity",
     "session.need_input",
     "session.need_approval",
     "session.waiting",

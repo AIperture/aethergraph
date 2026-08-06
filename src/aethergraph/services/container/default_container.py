@@ -248,6 +248,7 @@ class DefaultContainer:
     host_manifest: HostManifest | None = None
     integration_ingress: Any | None = None
     semantic_events: Any | None = None
+    semantic_turn_monitor: Any | None = None
 
     # opt-in host runtime output capture; disabled for normal CLI/server hosts
     runtime_output_sink: Any | None = None

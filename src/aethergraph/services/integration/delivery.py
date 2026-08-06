@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -18,8 +19,12 @@ from aethergraph.contracts.integration import (
     SemanticEvent,
     SemanticEventKind,
     StructuredOutputPayload,
+    ToolActivityPayload,
+    TurnCompletedPayload,
+    TurnFailedPayload,
 )
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+from aethergraph.core.runtime.run_types import RunStatus
 
 from .events import EventLogSemanticEventStore, PersistedSemanticEvent
 
@@ -106,13 +111,104 @@ class SemanticEventEmitter:
                         timestamp=datetime.now(UTC),
                         kind=kind,
                         payload=payload,
-                        extensions={"aethergraph.channel": event.channel},
+                        extensions={
+                            "aethergraph.channel": event.channel,
+                            **(
+                                {"aethergraph.upsert_key": event.upsert_key}
+                                if event.upsert_key
+                                else {}
+                            ),
+                        },
                     )
                 )
                 persisted.append(record)
                 sequence += 1
             self._sequences[key] = sequence
         return tuple(persisted)
+
+    async def emit_semantic(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        producer: str,
+        kind: SemanticEventKind,
+        payload: Any,
+        extensions: dict[str, Any] | None = None,
+    ) -> PersistedSemanticEvent:
+        """Persist one Host-authored semantic event in canonical turn order.
+
+        This boundary is for lifecycle facts that do not originate as Channel
+        presentation events, such as the terminal state of a submitted run.
+
+        Examples:
+            Record successful completion:
+            ```python
+            await emitter.emit_semantic(
+                session_id="session-1",
+                turn_id="run-1",
+                producer="aethergraph.run_manager",
+                kind=SemanticEventKind.TURN_COMPLETED,
+                payload=TurnCompletedPayload(result_available=True),
+            )
+            ```
+
+            Record terminal failure:
+            ```python
+            await emitter.emit_semantic(
+                session_id="session-1",
+                turn_id="run-1",
+                producer="aethergraph.run_manager",
+                kind=SemanticEventKind.TURN_FAILED,
+                payload=TurnFailedPayload(
+                    code="run_failed",
+                    message="Execution failed.",
+                    retryable=False,
+                ),
+            )
+            ```
+
+        Args:
+            session_id: Exact AG session identity.
+            turn_id: Exact submitted root run identity.
+            producer: Stable producer identity for the lifecycle fact.
+            kind: Canonical semantic event kind.
+            payload: Payload matching the selected semantic event kind.
+            extensions: Optional namespaced host metadata.
+
+        Returns:
+            PersistedSemanticEvent: Durable record with its allocated cursor.
+
+        Notes:
+            Sequence allocation shares the same per-turn lock and durable history as
+            Channel-originated semantic events.
+        """
+        normalized_session_id = self._required(session_id, "session_id")
+        normalized_turn_id = self._required(turn_id, "turn_id")
+        normalized_producer = self._required(producer, "producer")
+        key = (normalized_session_id, normalized_turn_id)
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            sequence = await self._next_sequence(
+                session_id=normalized_session_id,
+                turn_id=normalized_turn_id,
+            )
+            record = await self.store.append(
+                SemanticEvent(
+                    event_id=f"semantic-{uuid4().hex}",
+                    deployment_id=self.deployment_id,
+                    session_id=normalized_session_id,
+                    turn_id=normalized_turn_id,
+                    sequence=sequence,
+                    producer=normalized_producer,
+                    timestamp=datetime.now(UTC),
+                    kind=kind,
+                    payload=payload,
+                    extensions=dict(extensions or {}),
+                )
+            )
+            self._sequences[key] = sequence + 1
+        return record
 
     async def _next_sequence(self, *, session_id: str, turn_id: str) -> int:
         key = (session_id, turn_id)
@@ -242,6 +338,21 @@ class SemanticEventEmitter:
                     ),
                 ),
             )
+        if event.type == "agent.tool.activity":
+            rich = event.rich or {}
+            return (
+                (
+                    SemanticEventKind.TOOL_ACTIVITY,
+                    ToolActivityPayload(
+                        tool_call_id=self._required(rich.get("tool_call_id"), "tool_call_id"),
+                        tool_name=self._required(rich.get("tool_name"), "tool_name"),
+                        status=self._required(rich.get("status"), "status"),
+                        message=(
+                            str(rich.get("message")) if rich.get("message") is not None else None
+                        ),
+                    ),
+                ),
+            )
         if event.type in {"file.upload", "link.buttons", "session.waiting"}:
             return (
                 (
@@ -351,3 +462,136 @@ class SemanticEventChannelAdapter:
         if self.downstream is not None:
             return await self.downstream.send(event)
         return {"event_cursor": persisted[-1].cursor if persisted else None}
+
+
+class SemanticTurnMonitor:
+    """Publish terminal semantic state for submitted integration turns."""
+
+    def __init__(self, *, run_manager: Any, emitter: SemanticEventEmitter) -> None:
+        """Bind terminal observation to one RunManager and semantic emitter.
+
+        Examples:
+            Create the Host monitor:
+            ```python
+            monitor = SemanticTurnMonitor(run_manager=manager, emitter=emitter)
+            ```
+
+            Pass it to the root dispatcher:
+            ```python
+            dispatcher = AGRootTurnDispatcher(container, turn_monitor=monitor)
+            ```
+
+        Args:
+            run_manager: Host RunManager providing durable terminal records.
+            emitter: Canonical deployment-bound semantic event emitter.
+
+        Returns:
+            None.
+
+        Notes:
+            Observation tasks are retained until completion so they are not lost to
+            garbage collection while a run is active or waiting for continuation.
+        """
+        self.run_manager = run_manager
+        self.emitter = emitter
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def observe(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        route_id: str,
+        integration_id: str,
+    ) -> None:
+        """Begin terminal observation for one submitted root turn.
+
+        Examples:
+            Observe an endpoint turn:
+            ```python
+            monitor.observe(
+                run_id="run-1",
+                session_id="session-1",
+                route_id="studio-assistant",
+                integration_id="agstudio",
+            )
+            ```
+
+            Observe a provider turn:
+            ```python
+            monitor.observe(
+                run_id="run-2",
+                session_id="session-2",
+                route_id="support",
+                integration_id="slack-main",
+            )
+            ```
+
+        Args:
+            run_id: Exact submitted root run identity.
+            session_id: Bound AG session identity.
+            route_id: Immutable manifest route identity.
+            integration_id: Immutable integration identity.
+
+        Returns:
+            None: Observation has been scheduled on the active event loop.
+
+        Notes:
+            A waiting run remains observed until it succeeds, fails, or is canceled.
+        """
+        task = asyncio.create_task(
+            self._observe(
+                run_id=run_id,
+                session_id=session_id,
+                route_id=route_id,
+                integration_id=integration_id,
+            ),
+            name=f"semantic-turn:{run_id}",
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._finish_task)
+
+    def _finish_task(self, task: asyncio.Task[None]) -> None:
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logging.getLogger("aethergraph.integration.semantic_turn").exception(
+                "Terminal semantic event emission failed",
+                exc_info=error,
+            )
+
+    async def _observe(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        route_id: str,
+        integration_id: str,
+    ) -> None:
+        record = await self.run_manager.wait_run(run_id)
+        extensions = {
+            "aethergraph.integration_id": integration_id,
+            "aethergraph.route_id": route_id,
+        }
+        if record.status == RunStatus.succeeded:
+            await self.emitter.emit_semantic(
+                session_id=session_id,
+                turn_id=run_id,
+                producer="aethergraph.run_manager",
+                kind=SemanticEventKind.TURN_COMPLETED,
+                payload=TurnCompletedPayload(result_available=bool(record.result_available)),
+                extensions=extensions,
+            )
+            return
+        code = "run_canceled" if record.status == RunStatus.canceled else "run_failed"
+        message = str(record.error or code.replace("_", " ").capitalize())[:4_000]
+        await self.emitter.emit_semantic(
+            session_id=session_id,
+            turn_id=run_id,
+            producer="aethergraph.run_manager",
+            kind=SemanticEventKind.TURN_FAILED,
+            payload=TurnFailedPayload(code=code, message=message, retryable=False),
+            extensions=extensions,
+        )

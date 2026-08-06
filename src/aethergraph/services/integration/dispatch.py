@@ -16,6 +16,7 @@ from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisi
 from aethergraph.services.channel.resources import InputResource
 
 from .context import VerifiedIntegrationContext
+from .delivery import SemanticTurnMonitor
 
 
 class RootTurnDispatcher(Protocol):
@@ -74,7 +75,7 @@ class RootTurnDispatcher(Protocol):
 class AGRootTurnDispatcher:
     """Submit canonical integration turns through the AG RunManager."""
 
-    def __init__(self, container) -> None:
+    def __init__(self, container, *, turn_monitor: SemanticTurnMonitor) -> None:
         """Bind root dispatch to one AG Host container.
 
         Agent selection remains entirely in the resolved `IntegrationRoute`.
@@ -82,19 +83,23 @@ class AGRootTurnDispatcher:
         Examples:
             Create a dispatcher:
             ```python
-            dispatcher = AGRootTurnDispatcher(container)
+            dispatcher = AGRootTurnDispatcher(container, turn_monitor=monitor)
             ```
 
             Install it in the coordinator:
             ```python
             coordinator = IntegrationIngressCoordinator(
-                root_dispatcher=AGRootTurnDispatcher(container),
+                root_dispatcher=AGRootTurnDispatcher(
+                    container,
+                    turn_monitor=monitor,
+                ),
                 **dependencies,
             )
             ```
 
         Args:
             container: AG Host container owning registry and RunManager services.
+            turn_monitor: Canonical observer for terminal semantic state.
 
         Returns:
             None.
@@ -103,6 +108,7 @@ class AGRootTurnDispatcher:
             The dispatcher does not read provider configuration or default agents.
         """
         self.container = container
+        self.turn_monitor = turn_monitor
 
     async def start(
         self,
@@ -201,5 +207,11 @@ class AGRootTurnDispatcher:
             app_id=agent_meta.get("app_id"),
             tags=[f"agent:{route.entry_agent_id}", f"route:{route.route_id}"],
             run_config={"origin_binding": origin_binding.model_dump(mode="json")},
+        )
+        self.turn_monitor.observe(
+            run_id=record.run_id,
+            session_id=binding.ag_session_id,
+            route_id=route.route_id,
+            integration_id=envelope.integration_id,
         )
         return record.run_id

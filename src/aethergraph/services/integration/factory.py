@@ -7,7 +7,7 @@ from pathlib import Path
 from aethergraph.contracts.integration import HostManifest, IntegrationKind
 
 from .coordinator import IntegrationIngressCoordinator
-from .delivery import SemanticEventChannelAdapter, SemanticEventEmitter
+from .delivery import SemanticEventChannelAdapter, SemanticEventEmitter, SemanticTurnMonitor
 from .dispatch import AGRootTurnDispatcher
 from .events import EventLogInboundEventStore, EventLogSemanticEventStore
 from .idempotency import SQLiteIngressIdempotencyStore
@@ -72,6 +72,10 @@ def install_integration_ingress(
         deployment_id=manifest.deployment_id,
         store=semantic_events,
     )
+    turn_monitor = SemanticTurnMonitor(
+        run_manager=container.run_manager,
+        emitter=emitter,
+    )
     container.channels.register_adapter(
         "endpoint",
         SemanticEventChannelAdapter(emitter=emitter),
@@ -104,9 +108,13 @@ def install_integration_ingress(
         inbound_events=EventLogInboundEventStore(container.eventlog),
         semantic_events=semantic_events,
         resume_router=container.resume_router,
-        root_dispatcher=AGRootTurnDispatcher(container),
+        root_dispatcher=AGRootTurnDispatcher(
+            container,
+            turn_monitor=turn_monitor,
+        ),
     )
     container.host_manifest = manifest
     container.semantic_events = semantic_events
+    container.semantic_turn_monitor = turn_monitor
     container.integration_ingress = coordinator
     return coordinator

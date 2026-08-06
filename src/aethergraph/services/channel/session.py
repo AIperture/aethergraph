@@ -380,6 +380,133 @@ class ChannelSession:
         event.meta = self._inject_context_meta(event.meta)
         await self._bus.publish(event)
 
+    async def send_structured_output(
+        self,
+        *,
+        output_name: str,
+        value: Any,
+        upsert_key: str | None = None,
+        channel: str | None = None,
+    ) -> None:
+        """Send one named transport-neutral structured output.
+
+        The method constructs the canonical Channel `structured.output` Event,
+        injects the active run metadata through `send`, and publishes it to the
+        exact run origin or explicit Channel address.
+
+        Examples:
+            Publish a complete domain snapshot:
+            ```python
+            await context.channel().send_structured_output(
+                output_name="workflow.result",
+                value={"status": "ready"},
+            )
+            ```
+
+            Publish a revision with stable upsert identity:
+            ```python
+            await context.channel().send_structured_output(
+                output_name="agstudio.workbench.suggestion",
+                value={"suggestion_id": "sug-1", "revision": 2},
+                upsert_key="suggestion:sug-1",
+            )
+            ```
+
+        Args:
+            output_name: Non-empty semantic output discriminator.
+            value: JSON-compatible authored output value.
+            upsert_key: Optional stable identity for successive revisions.
+            channel: Optional exact Channel address overriding the session origin.
+
+        Returns:
+            None: Complete after the Channel bus accepts the Event.
+
+        Notes:
+            Rendering belongs to the selected Channel adapter. This method does
+            not name UI components, mutate application state, or provide a
+            transport fallback.
+        """
+        normalized_name = str(output_name or "").strip()
+        if not normalized_name:
+            raise ValueError("send_structured_output requires a non-empty output_name")
+        await self.send(
+            OutEvent(
+                type="structured.output",
+                channel=self._resolve_key(channel),
+                rich={"output_name": normalized_name, "value": value},
+                upsert_key=upsert_key,
+            )
+        )
+
+    async def send_tool_activity(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        status: Literal["started", "running", "waiting", "completed", "failed", "canceled"],
+        message: str | None = None,
+        channel: str | None = None,
+    ) -> None:
+        """Send one transport-neutral Tool lifecycle update.
+
+        The lifecycle identity and status remain structured while a concise text
+        projection keeps non-UI Channel adapters useful.
+
+        Examples:
+            Mark a Tool call as started:
+            ```python
+            await context.channel().send_tool_activity(
+                tool_call_id="call-1",
+                tool_name="inspect_project",
+                status="started",
+            )
+            ```
+
+            Mark the same Tool call as completed:
+            ```python
+            await context.channel().send_tool_activity(
+                tool_call_id="call-1",
+                tool_name="inspect_project",
+                status="completed",
+                message="Project inspected.",
+            )
+            ```
+
+        Args:
+            tool_call_id: Non-empty stable identity of the Tool invocation.
+            tool_name: Non-empty registered Tool name.
+            status: Exact lifecycle state for the invocation.
+            message: Optional bounded human-readable activity detail.
+            channel: Optional exact Channel address overriding the session origin.
+
+        Returns:
+            None: Complete after the Channel bus accepts the Event.
+
+        Notes:
+            This method reports execution activity only. Tool results remain in the
+            Engine Ledger and authored user messages retain their existing path.
+        """
+        normalized_call_id = str(tool_call_id or "").strip()
+        normalized_tool_name = str(tool_name or "").strip()
+        if not normalized_call_id:
+            raise ValueError("send_tool_activity requires a non-empty tool_call_id")
+        if not normalized_tool_name:
+            raise ValueError("send_tool_activity requires a non-empty tool_name")
+        await self.send(
+            OutEvent(
+                type="agent.tool.activity",
+                channel=self._resolve_key(channel),
+                text=message or f"{normalized_tool_name}: {status}",
+                rich={
+                    "tool_call_id": normalized_call_id,
+                    "tool_name": normalized_tool_name,
+                    "status": status,
+                    "message": message,
+                },
+                upsert_key=f"tool:{normalized_call_id}",
+            )
+        )
+
     class _SessionWorkStatusHandle:
         def __init__(
             self,

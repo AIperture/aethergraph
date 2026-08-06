@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import httpx
 import pytest
 
-from aethergraph.api.v1.agent_endpoints import router
+from aethergraph.api.v1.agent_endpoints import _stream_cursor, router
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.contracts.integration import (
     ExternalSessionBinding,
@@ -262,3 +262,19 @@ async def test_endpoint_rejects_local_identity_without_scoped_credential() -> No
 
     assert response.status_code == 401
     assert response.json()["detail"]["code"] == "endpoint.authentication_required"
+
+
+def test_stream_cursor_advances_from_last_event_id() -> None:
+    assert _stream_cursor(after_cursor=None, last_event_id=None) is None
+    assert _stream_cursor(after_cursor=4, last_event_id=None) == 4
+    assert _stream_cursor(after_cursor=None, last_event_id="7") == 7
+    assert _stream_cursor(after_cursor=4, last_event_id="9") == 9
+    assert _stream_cursor(after_cursor=9, last_event_id="4") == 9
+
+
+def test_stream_cursor_rejects_invalid_last_event_id() -> None:
+    with pytest.raises(HTTPException) as exc_info:
+        _stream_cursor(after_cursor=0, last_event_id="not-a-cursor")
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert exc_info.value.detail["code"] == "endpoint.last_event_id_invalid"

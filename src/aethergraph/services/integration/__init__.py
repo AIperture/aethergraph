@@ -6,6 +6,7 @@ from .delivery import (
     SemanticDeliveryError,
     SemanticEventChannelAdapter,
     SemanticEventEmitter,
+    SemanticTurnMonitor,
 )
 from .dispatch import AGRootTurnDispatcher, RootTurnDispatcher
 from .events import (
@@ -82,6 +83,7 @@ __all__ = [
     "SemanticDeliveryError",
     "SemanticEventChannelAdapter",
     "SemanticEventEmitter",
+    "SemanticTurnMonitor",
     "VerifiedIntegrationContext",
     "VerifiedAttachment",
     "build_interaction_payload",

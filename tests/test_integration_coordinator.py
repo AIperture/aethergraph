@@ -210,6 +210,7 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
     assert container.host_manifest is manifest
     assert coordinator.manifest is manifest
     assert container.semantic_events is not None
+    assert container.semantic_turn_monitor is not None
     assert "endpoint" in container.channels.adapters
     assert (tmp_path / "integration" / "operations.db").is_file()
     with pytest.raises(RuntimeError, match="already installed"):
