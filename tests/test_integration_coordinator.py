@@ -20,6 +20,7 @@ from aethergraph.contracts.integration import (
     OriginAddress,
     SemanticEventKind,
 )
+from aethergraph.services.channel.resources import InputResource
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.integration import (
@@ -34,6 +35,7 @@ from aethergraph.services.integration import (
     ResourceIngressError,
     ResourceIngressPolicy,
     SQLiteIngressIdempotencyStore,
+    VerifiedAttachment,
     VerifiedIntegrationContext,
     install_integration_ingress,
 )
@@ -342,7 +344,9 @@ async def test_coordinator_persists_disabled_route_rejection(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resource_ingress_validates_existing_artifact_reference() -> None:
+async def test_resource_ingress_validates_existing_artifact_reference(
+    monkeypatch,
+) -> None:
     artifact = SimpleNamespace(
         artifact_id="artifact-1",
         name="report.pdf",
@@ -356,6 +360,14 @@ async def test_resource_ingress_validates_existing_artifact_reference() -> None:
         async def get(self, artifact_id):
             return artifact if artifact_id == "artifact-1" else None
 
+    class _UnexpectedStager:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("existing artifact references must not be copied")
+
+    monkeypatch.setattr(
+        "aethergraph.services.integration.resources.ResourceStager",
+        _UnexpectedStager,
+    )
     ingress = ResourceIngress(
         container=SimpleNamespace(artifact_index=_ArtifactIndex()),
         policy=ResourceIngressPolicy(allowed_content_types=("application/pdf",)),
@@ -383,6 +395,112 @@ async def test_resource_ingress_validates_existing_artifact_reference() -> None:
 
     assert len(resources) == 1
     assert resources[0].artifact_id == "artifact-1"
+
+
+@pytest.mark.asyncio
+async def test_resource_ingress_materializes_verified_provider_bytes_once(
+    monkeypatch,
+) -> None:
+    payload = b"exact current buffer\n"
+    staged: list[bytes] = []
+    artifact = SimpleNamespace(
+        artifact_id="artifact-buffer",
+        name="weather.py",
+        mime="text/x-python",
+        bytes=len(payload),
+        uri="artifact://artifact-buffer",
+        labels={"attachment_id": "buffer-1"},
+    )
+
+    class _ArtifactIndex:
+        async def get(self, artifact_id):
+            return artifact if artifact_id == "artifact-buffer" else None
+
+    class _Stager:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def stage_bytes(self, data, **_kwargs):
+            staged.append(bytes(data))
+            return InputResource(
+                kind="upload",
+                source="studio",
+                status="materialized",
+                id="buffer-1",
+                name="weather.py",
+                mime="text/x-python",
+                size=len(data),
+                artifact_id="artifact-buffer",
+            )
+
+    monkeypatch.setattr(
+        "aethergraph.services.integration.resources.ResourceStager",
+        _Stager,
+    )
+    ingress = ResourceIngress(container=SimpleNamespace(artifact_index=_ArtifactIndex()))
+    envelope = _envelope(
+        text=None,
+        attachments=(
+            IngressAttachment(
+                attachment_id="buffer-1",
+                source_kind="provider_file",
+                source_id="buffer-1",
+                filename="weather.py",
+                content_type="text/x-python",
+                size_bytes=len(payload),
+            ),
+        ),
+    )
+    verified = VerifiedIntegrationContext(
+        integration_id="slack-main",
+        integration_kind=IntegrationKind.SLACK,
+        external_tenant_id="team-T1",
+        attachments=(VerifiedAttachment("buffer-1", payload),),
+    )
+
+    resources = await ingress.materialize(
+        verified=verified,
+        route=_route(),
+        binding=_binding(),
+        envelope=envelope,
+    )
+
+    assert staged == [payload]
+    assert resources[0].artifact_id == "artifact-buffer"
+
+
+@pytest.mark.asyncio
+async def test_resource_ingress_rejects_mismatched_provider_bytes() -> None:
+    ingress = ResourceIngress(container=SimpleNamespace())
+    envelope = _envelope(
+        text=None,
+        attachments=(
+            IngressAttachment(
+                attachment_id="buffer-1",
+                source_kind="provider_file",
+                source_id="buffer-1",
+                filename="weather.py",
+                content_type="text/x-python",
+                size_bytes=4,
+            ),
+        ),
+    )
+    verified = VerifiedIntegrationContext(
+        integration_id="slack-main",
+        integration_kind=IntegrationKind.SLACK,
+        external_tenant_id="team-T1",
+        attachments=(VerifiedAttachment("other-buffer", b"data"),),
+    )
+
+    with pytest.raises(ResourceIngressError) as exc_info:
+        await ingress.materialize(
+            verified=verified,
+            route=_route(),
+            binding=_binding(),
+            envelope=envelope,
+        )
+
+    assert exc_info.value.code == "integration.attachment_bytes_missing"
 
 
 @pytest.mark.asyncio
