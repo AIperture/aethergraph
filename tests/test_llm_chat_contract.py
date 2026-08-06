@@ -88,6 +88,15 @@ def _native_tool_request(*, max_calls: int = 2) -> ToolCallRequest:
     )
 
 
+def test_native_tool_definition_rejects_provider_unsafe_name() -> None:
+    with pytest.raises(ValueError, match="letters, numbers, underscores, or hyphens"):
+        ToolDefinition(
+            name="workspace.read_text",
+            description="Read one file.",
+            input_schema={"type": "object", "properties": {}},
+        )
+
+
 @pytest.mark.asyncio
 async def test_openai_native_tool_items_preserve_multiple_call_boundaries() -> None:
     payload = {

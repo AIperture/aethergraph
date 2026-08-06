@@ -6,11 +6,13 @@ import copy
 from dataclasses import dataclass, field
 import hashlib
 import json
+import re
 from typing import Any, Literal
 
 from .types import LLMError
 
 ToolChoice = Literal["auto", "required", "none"]
+_MODEL_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 class LLMToolCallError(LLMError):
@@ -155,29 +157,34 @@ class ToolDefinition:
                 assert tool.name == "lookup"
                 ```
 
-            Reject an empty name:
+            Reject a provider-unsafe name:
                 ```python
                 try:
-                    ToolDefinition("", "Missing name.", {"type": "object"})
+                    ToolDefinition("workspace.read", "Read.", {"type": "object"})
                 except ValueError:
                     pass
                 ```
 
         Args:
-            self: Newly initialized Tool definition.
+            self: Newly initialized Tool definition with a provider-safe name.
 
         Returns:
             None: Validates and normalizes the frozen value.
 
         Notes:
-            Result schemas are intentionally excluded because the provider
-            selects calls; the Engine owns Tool execution and results.
+            Names use the common provider wire subset of letters, numbers,
+            underscores, and hyphens. Result schemas are intentionally excluded
+            because the provider selects calls; the Engine owns execution.
         """
 
         name = str(self.name or "").strip()
         description = str(self.description or "").strip()
         if not name:
             raise ValueError("Tool definition name must not be empty")
+        if _MODEL_TOOL_NAME_PATTERN.fullmatch(name) is None:
+            raise ValueError(
+                "Tool definition name must contain only letters, numbers, underscores, or hyphens"
+            )
         if not isinstance(self.input_schema, dict):
             raise TypeError("Tool definition input_schema must be an object")
         schema = copy.deepcopy(self.input_schema)
