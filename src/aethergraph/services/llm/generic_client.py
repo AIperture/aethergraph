@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 import contextlib
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -58,6 +59,7 @@ from aethergraph.services.llm.tool_calling import (
 from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryCapabilities,
     ToolDiscoveryModeCapability,
+    ToolTransportCheckpoint,
 )
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
@@ -248,7 +250,190 @@ class GenericLLMClient(
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
         self._tool_discovery_capabilities: ToolDiscoveryCapabilities | None = None
+        self._tool_transport_checkpoints: dict[str, ToolTransportCheckpoint] = {}
+        self._latest_tool_checkpoint_refs: dict[tuple[str, str, str], str] = {}
         self._logger = logging.getLogger("aethergraph.services.llm")
+
+    def pin_tool_transport_checkpoint(
+        self,
+        checkpoint: ToolTransportCheckpoint,
+    ) -> str:
+        """Pin the latest cumulative provider checkpoint for one semantic turn.
+
+        The client validates the exact provider/model binding, replaces an older
+        revision for the same semantic turn, and returns an opaque reference that
+        Engine may retain without copying provider payloads into Agent state.
+
+        Examples:
+            Pin an inline checkpoint:
+                ```python
+                reference = client.pin_tool_transport_checkpoint(checkpoint)
+                assert reference.startswith("tool-checkpoint:")
+                ```
+
+            Reuse an idempotent checkpoint:
+                ```python
+                first = client.pin_tool_transport_checkpoint(checkpoint)
+                second = client.pin_tool_transport_checkpoint(checkpoint)
+                assert first == second
+                ```
+
+        Args:
+            checkpoint: Validated cumulative checkpoint returned by the provider.
+
+        Returns:
+            str: Opaque bounded reference to the sole latest checkpoint.
+
+        Notes:
+            A checkpoint with `durable_ref` uses that reference directly. Inline
+            checkpoints remain process-local until a provider adapter supplies a
+            durable reference in a later integration layer.
+        """
+
+        self._validate_tool_transport_checkpoint(
+            checkpoint,
+            model=checkpoint.model,
+        )
+        identity = (checkpoint.provider, checkpoint.model, checkpoint.turn_id)
+        prior_ref = self._latest_tool_checkpoint_refs.get(identity)
+        if prior_ref is not None:
+            prior = self._tool_transport_checkpoints.get(prior_ref)
+            if prior == checkpoint:
+                return prior_ref
+            if prior is not None and checkpoint.revision <= prior.revision:
+                raise ValueError("Tool transport checkpoint revision must advance monotonically")
+        reference = checkpoint.durable_ref or self._inline_checkpoint_reference(checkpoint)
+        if prior_ref is not None and prior_ref != reference:
+            self._tool_transport_checkpoints.pop(prior_ref, None)
+        self._tool_transport_checkpoints[reference] = checkpoint
+        self._latest_tool_checkpoint_refs[identity] = reference
+        return reference
+
+    def resolve_tool_transport_checkpoint(
+        self,
+        reference: str,
+        *,
+        turn_id: str,
+    ) -> ToolTransportCheckpoint:
+        """Resolve one exact same-turn checkpoint reference for provider replay.
+
+        Resolution validates that the reference is still the latest authority for
+        this client's provider, model, and semantic turn before returning private
+        checkpoint data to the provider adapter.
+
+        Examples:
+            Resolve the current checkpoint:
+                ```python
+                reference = client.pin_tool_transport_checkpoint(checkpoint)
+                restored = client.resolve_tool_transport_checkpoint(
+                    reference,
+                    turn_id=checkpoint.turn_id,
+                )
+                assert restored == checkpoint
+                ```
+
+            Reject a prior-turn replay:
+                ```python
+                client.resolve_tool_transport_checkpoint(
+                    reference,
+                    turn_id="different-turn",
+                )
+                ```
+
+        Args:
+            reference: Opaque reference returned by checkpoint pinning.
+            turn_id: Exact current Engine semantic turn identity.
+
+        Returns:
+            ToolTransportCheckpoint: Latest validated private replay checkpoint.
+
+        Notes:
+            Missing or superseded references fail closed. No fallback checkpoint is
+            selected from another turn, provider, or model.
+        """
+
+        normalized_ref = str(reference or "").strip()
+        normalized_turn = str(turn_id or "").strip()
+        if not normalized_ref or not normalized_turn:
+            raise ValueError("Checkpoint reference and turn_id must be non-empty")
+        checkpoint = self._tool_transport_checkpoints.get(normalized_ref)
+        if checkpoint is None:
+            raise KeyError(f"Tool transport checkpoint is not pinned: {normalized_ref}")
+        self._validate_tool_transport_checkpoint(checkpoint, model=self.model)
+        if checkpoint.turn_id != normalized_turn:
+            raise ValueError("Tool transport checkpoint belongs to a different turn")
+        identity = (checkpoint.provider, checkpoint.model, checkpoint.turn_id)
+        if self._latest_tool_checkpoint_refs.get(identity) != normalized_ref:
+            raise ValueError("Tool transport checkpoint reference is superseded")
+        return checkpoint
+
+    def release_tool_transport_checkpoint(self, reference: str) -> None:
+        """Release one pinned checkpoint at the semantic-turn boundary.
+
+        The operation removes both the opaque reference and its latest-turn index.
+        Releasing an already absent reference is idempotent.
+
+        Examples:
+            Release a current checkpoint:
+                ```python
+                reference = client.pin_tool_transport_checkpoint(checkpoint)
+                client.release_tool_transport_checkpoint(reference)
+                ```
+
+            Repeat a release safely:
+                ```python
+                client.release_tool_transport_checkpoint(reference)
+                client.release_tool_transport_checkpoint(reference)
+                ```
+
+        Args:
+            reference: Opaque checkpoint reference to release.
+
+        Returns:
+            None: Completes after removing any matching in-memory pin.
+
+        Notes:
+            Durable provider storage cleanup is adapter-owned. This method only
+            releases AetherGraph's active replay authority.
+        """
+
+        normalized_ref = str(reference or "").strip()
+        if not normalized_ref:
+            return
+        checkpoint = self._tool_transport_checkpoints.pop(normalized_ref, None)
+        if checkpoint is None:
+            return
+        identity = (checkpoint.provider, checkpoint.model, checkpoint.turn_id)
+        if self._latest_tool_checkpoint_refs.get(identity) == normalized_ref:
+            self._latest_tool_checkpoint_refs.pop(identity, None)
+
+    def _validate_tool_transport_checkpoint(
+        self,
+        checkpoint: ToolTransportCheckpoint,
+        *,
+        model: str,
+    ) -> None:
+        if not isinstance(checkpoint, ToolTransportCheckpoint):
+            raise TypeError("checkpoint must be ToolTransportCheckpoint")
+        actual = (checkpoint.provider, checkpoint.model)
+        expected = (self.provider, str(model))
+        if actual != expected:
+            raise ValueError("Tool transport checkpoint binding does not match this LLM client")
+
+    @staticmethod
+    def _inline_checkpoint_reference(checkpoint: ToolTransportCheckpoint) -> str:
+        identity = "|".join(
+            (
+                checkpoint.provider,
+                checkpoint.model,
+                checkpoint.turn_id,
+                checkpoint.checkpoint_id,
+                str(checkpoint.revision),
+                checkpoint.integrity_digest,
+            )
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return f"tool-checkpoint:{digest}"
 
     def bind_tool_discovery_capabilities(
         self,
@@ -1459,6 +1644,13 @@ class GenericLLMClient(
                 model=model,
                 request=tool_request,
             )
+            if tool_request.transport_checkpoint is not None:
+                if tool_request.discovery is None:
+                    raise ValueError("transport_checkpoint requires an exact discovery request")
+                self._validate_tool_transport_checkpoint(
+                    tool_request.transport_checkpoint,
+                    model=model,
+                )
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
         reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
@@ -2314,7 +2506,7 @@ class GenericLLMClient(
             raise LLMStructuredOutputParseError(
                 code="invalid_json",
                 summary=(
-                    "Model output was not valid JSON " f"(line {exc.lineno}, column {exc.colno})."
+                    f"Model output was not valid JSON (line {exc.lineno}, column {exc.colno})."
                 ),
                 path="$",
                 validator="json",

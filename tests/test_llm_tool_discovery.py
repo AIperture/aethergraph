@@ -84,16 +84,22 @@ def _openai_capabilities(
     )
 
 
-def _checkpoint() -> ToolTransportCheckpoint:
+def _checkpoint(
+    *,
+    revision: int = 1,
+    turn_id: str = "turn_1",
+    durable_ref: str | None = None,
+) -> ToolTransportCheckpoint:
     return ToolTransportCheckpoint(
-        checkpoint_id="checkpoint_1",
-        revision=1,
+        checkpoint_id=f"checkpoint_{revision}",
+        revision=revision,
         provider="openai",
         model="example-model",
         contract_version="responses/v1",
-        turn_id="turn_1",
+        turn_id=turn_id,
         integrity_digest="0" * 64,
         opaque_payload={"output": [{"type": "tool_search_call"}]},
+        durable_ref=durable_ref,
     )
 
 
@@ -381,3 +387,71 @@ def test_checkpoint_requires_positive_revision_and_semantic_turn_expiry() -> Non
             expires_at="end_of_session",  # type: ignore[arg-type]
             opaque_payload={"output": []},
         )
+
+
+def test_client_checkpoint_pin_replaces_only_with_a_newer_same_turn_revision() -> None:
+    client = GenericLLMClient(provider="openai", model="example-model", api_key="test")
+    first = _checkpoint(revision=1)
+    second = _checkpoint(revision=2)
+
+    first_ref = client.pin_tool_transport_checkpoint(first)
+    second_ref = client.pin_tool_transport_checkpoint(second)
+
+    assert first_ref != second_ref
+    assert client.resolve_tool_transport_checkpoint(second_ref, turn_id="turn_1") == second
+    with pytest.raises(KeyError, match="not pinned"):
+        client.resolve_tool_transport_checkpoint(first_ref, turn_id="turn_1")
+    with pytest.raises(ValueError, match="advance monotonically"):
+        client.pin_tool_transport_checkpoint(first)
+
+
+def test_client_checkpoint_resolve_is_same_turn_and_release_is_idempotent() -> None:
+    client = GenericLLMClient(provider="openai", model="example-model", api_key="test")
+    checkpoint = _checkpoint(durable_ref="artifact:checkpoint_1")
+    reference = client.pin_tool_transport_checkpoint(checkpoint)
+
+    assert reference == "artifact:checkpoint_1"
+    with pytest.raises(ValueError, match="different turn"):
+        client.resolve_tool_transport_checkpoint(reference, turn_id="turn_2")
+
+    client.release_tool_transport_checkpoint(reference)
+    client.release_tool_transport_checkpoint(reference)
+    with pytest.raises(KeyError, match="not pinned"):
+        client.resolve_tool_transport_checkpoint(reference, turn_id="turn_1")
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_request_binding_rejects_before_provider_traffic() -> None:
+    client = GenericLLMClient(provider="openai", model="example-model", api_key="test")
+    client.bind_tool_discovery_capabilities(
+        _openai_capabilities(
+            ToolDiscoveryModeCapability(mode="engine_projected", max_results=8),
+        )
+    )
+    fake_http = _CountingHttpClient()
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    wrong_turn_model = ToolTransportCheckpoint(
+        checkpoint_id="checkpoint_1",
+        revision=1,
+        provider="openai",
+        model="different-model",
+        contract_version="responses/v1",
+        turn_id="turn_1",
+        integrity_digest="0" * 64,
+        opaque_payload={"output": []},
+    )
+    request = _discovery_request(max_results=8)
+    request = ToolCallRequest(
+        tools=request.tools,
+        discovery=request.discovery,
+        transport_checkpoint=wrong_turn_model,
+    )
+
+    with pytest.raises(ValueError, match="binding does not match"):
+        await client.chat(
+            [{"role": "user", "content": "finish"}],
+            tool_request=request,
+        )
+
+    assert fake_http.calls == 0
