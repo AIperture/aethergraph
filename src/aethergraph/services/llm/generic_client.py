@@ -564,6 +564,7 @@ class GenericLLMClient(
                 request = ToolCallRequest(
                     tools=(ToolDefinition("finish", "Finish.", {"type": "object"}),),
                     discovery=ToolDiscoveryRequest("engine_projected"),
+                    turn_id="turn-1",
                 )
                 try:
                     client._validate_tool_discovery_binding(

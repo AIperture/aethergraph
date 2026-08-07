@@ -225,6 +225,7 @@ class ToolCallRequest:
     choice: ToolChoice = "required"
     max_calls: int = 1
     discovery: ToolDiscoveryRequest | None = None
+    turn_id: str | None = None
     transport_checkpoint: ToolTransportCheckpoint | None = None
 
     def __post_init__(self) -> None:
@@ -249,8 +250,11 @@ class ToolCallRequest:
                 request = ToolCallRequest(
                     tools=(ToolDefinition("read", "Read.", {"type": "object"}),),
                     max_calls=4,
+                    discovery=ToolDiscoveryRequest("native_client"),
+                    turn_id="turn-1",
                 )
                 assert request.max_calls == 4
+                assert request.turn_id == "turn-1"
                 ```
 
         Args:
@@ -261,7 +265,8 @@ class ToolCallRequest:
 
         Notes:
             `max_calls` bounds model output cardinality. It does not represent
-            Engine concurrency or `max_in_flight`.
+            Engine concurrency or `max_in_flight`. `turn_id` is intentionally
+            excluded from the provider-visible Tool-contract fingerprint.
         """
 
         tools = tuple(self.tools)
@@ -278,14 +283,23 @@ class ToolCallRequest:
             raise ValueError("Tool-call request max_calls must be between 1 and 4")
         if self.discovery is not None and not isinstance(self.discovery, ToolDiscoveryRequest):
             raise TypeError("Tool-call request discovery must be ToolDiscoveryRequest")
+        turn_id = None if self.turn_id is None else str(self.turn_id).strip()
+        if self.discovery is not None and not turn_id:
+            raise ValueError("Tool discovery requests require a semantic turn_id")
         if self.transport_checkpoint is not None and not isinstance(
             self.transport_checkpoint, ToolTransportCheckpoint
         ):
             raise TypeError(
                 "Tool-call request transport_checkpoint must be ToolTransportCheckpoint"
             )
+        if self.transport_checkpoint is not None:
+            if not turn_id:
+                raise ValueError("Tool transport checkpoints require a semantic turn_id")
+            if self.transport_checkpoint.turn_id != turn_id:
+                raise ValueError("Tool transport checkpoint turn_id must match the request")
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "max_calls", int(self.max_calls))
+        object.__setattr__(self, "turn_id", turn_id or None)
 
 
 def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:

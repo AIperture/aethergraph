@@ -70,6 +70,7 @@ def _discovery_request(
             ),
         ),
         discovery=ToolDiscoveryRequest(mode, max_results),
+        turn_id="turn_1",
     )
 
 
@@ -115,13 +116,48 @@ def test_tool_call_contract_carries_deferred_discovery_and_opaque_checkpoint() -
             ),
         ),
         discovery=ToolDiscoveryRequest("native_client", max_results=7),
+        turn_id="turn_1",
         transport_checkpoint=_checkpoint(),
     )
 
     assert request.tools[0].exposure == "deferred"
     assert request.discovery is not None
+    assert request.turn_id == "turn_1"
     assert request.transport_checkpoint is not None
     assert len(tool_call_request_fingerprint(request)) == 64
+
+
+def test_discovery_turn_identity_is_required_but_does_not_rotate_cache_contract() -> None:
+    tool = ToolDefinition("finish", "Finish.", {"type": "object"})
+
+    with pytest.raises(ValueError, match="semantic turn_id"):
+        ToolCallRequest(
+            tools=(tool,),
+            discovery=ToolDiscoveryRequest("native_client"),
+        )
+
+    first = ToolCallRequest(
+        tools=(tool,),
+        discovery=ToolDiscoveryRequest("native_client"),
+        turn_id="turn_1",
+    )
+    second = ToolCallRequest(
+        tools=(tool,),
+        discovery=ToolDiscoveryRequest("native_client"),
+        turn_id="turn_2",
+    )
+
+    assert tool_call_request_fingerprint(first) == tool_call_request_fingerprint(second)
+
+
+def test_transport_checkpoint_must_match_request_turn() -> None:
+    with pytest.raises(ValueError, match="must match"):
+        ToolCallRequest(
+            tools=(ToolDefinition("finish", "Finish.", {"type": "object"}),),
+            discovery=ToolDiscoveryRequest("native_client"),
+            turn_id="turn_2",
+            transport_checkpoint=_checkpoint(turn_id="turn_1"),
+        )
 
 
 def test_response_observation_normalizes_events_without_exposing_checkpoint() -> None:
@@ -445,6 +481,7 @@ async def test_checkpoint_request_binding_rejects_before_provider_traffic() -> N
     request = ToolCallRequest(
         tools=request.tools,
         discovery=request.discovery,
+        turn_id="turn_1",
         transport_checkpoint=wrong_turn_model,
     )
 
