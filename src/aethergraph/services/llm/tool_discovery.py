@@ -778,6 +778,32 @@ def resolve_tool_discovery_capabilities(
                 ),
             ),
         )
+    if binding == (
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        "messages",
+    ):
+        return ToolDiscoveryCapabilities(
+            provider="anthropic",
+            model="claude-sonnet-4-5-20250929",
+            endpoint_family="messages",
+            supported_modes=(
+                ToolDiscoveryModeCapability(
+                    mode="native_hosted",
+                    replay_requirement="full_history",
+                    result_limit_behavior="provider_fixed",
+                    max_results=5,
+                    protocol_version="tool_search_tool_bm25_20251119",
+                ),
+                ToolDiscoveryModeCapability(
+                    mode="native_client",
+                    replay_requirement="full_history",
+                    result_limit_behavior="request_bound",
+                    max_results=50,
+                    protocol_version="messages.tool_reference",
+                ),
+            ),
+        )
     return None
 
 

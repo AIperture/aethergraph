@@ -190,7 +190,7 @@
         "endpoint_family": "messages",
         "endpoint_path": "/v1/messages"
       },
-      "adapter_status": "native_encoding_pending",
+      "adapter_status": "native_hosted_and_client_implemented",
       "required_headers": {"anthropic-version": "2023-06-01"},
       "modes": [
         {

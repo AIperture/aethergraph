@@ -45,6 +45,7 @@ class _CountingHttpClient:
         self.payload = payload or {}
         self.calls = 0
         self.last_json: dict[str, Any] | None = None
+        self.last_headers: dict[str, str] | None = None
 
     async def post(
         self,
@@ -55,6 +56,7 @@ class _CountingHttpClient:
     ) -> _FakeResponse:
         self.calls += 1
         self.last_json = json
+        self.last_headers = headers
         return _FakeResponse(self.payload)
 
 
@@ -171,7 +173,7 @@ def test_native_client_deferred_activation_preserves_cache_contract() -> None:
         exposure="deferred",
     )
     initial = ToolCallRequest(
-        tools=(immediate,),
+        tools=(immediate, deferred),
         discovery=ToolDiscoveryRequest("native_client"),
         turn_id="turn_1",
     )
@@ -192,6 +194,16 @@ def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None
     assert [mode.mode for mode in openai.supported_modes] == ["native_client"]
     assert resolve_tool_discovery_capabilities("openai", "gpt-5.5", "responses") is None
     assert resolve_tool_discovery_capabilities("azure", "gpt-5.5", "chat.completions") is None
+    anthropic = resolve_tool_discovery_capabilities(
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        "messages",
+    )
+    assert anthropic is not None
+    assert [mode.mode for mode in anthropic.supported_modes] == [
+        "native_hosted",
+        "native_client",
+    ]
 
 
 def test_response_observation_normalizes_events_without_exposing_checkpoint() -> None:
@@ -535,6 +547,186 @@ async def test_openai_consumed_checkpoint_does_not_replay_search_output() -> Non
         tool for tool in fake_http.last_json["tools"] if tool.get("name") == "read_document"
     )
     assert "defer_loading" not in deferred_body
+
+
+@pytest.mark.asyncio
+async def test_anthropic_hosted_search_normalizes_references_before_call() -> None:
+    client = GenericLLMClient(
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        api_key="test",
+        base_url="https://api.anthropic.test",
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "msg_hosted_1",
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_1",
+                    "name": "tool_search_tool_bm25",
+                    "input": {"query": "open document"},
+                },
+                {
+                    "type": "tool_search_tool_result",
+                    "tool_use_id": "srvtoolu_1",
+                    "content": {
+                        "type": "tool_search_tool_search_result",
+                        "tool_references": [
+                            {
+                                "type": "tool_reference",
+                                "tool_name": "read_document",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_read_1",
+                    "name": "read_document",
+                    "input": {"path": "a.md"},
+                },
+            ],
+            "usage": {"input_tokens": 10, "cache_read_input_tokens": 8},
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    request = ToolCallRequest(
+        tools=(
+            ToolDefinition("finish", "Finish.", {"type": "object"}),
+            ToolDefinition(
+                "read_document",
+                "Read one document.",
+                {"type": "object", "properties": {"path": {"type": "string"}}},
+                exposure="deferred",
+            ),
+        ),
+        discovery=ToolDiscoveryRequest("native_hosted", max_results=5),
+        turn_id="turn_1",
+    )
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=request,
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert [type(item).__name__ for item in response.items] == [
+        "ToolDiscoveryEvent",
+        "ToolCall",
+    ]
+    assert response.discovery_events[0].tool_refs == ("read_document",)
+    assert response.calls[0].call_id == "toolu_read_1"
+    assert fake_http.last_headers is not None
+    assert fake_http.last_headers["anthropic-version"] == "2023-06-01"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["tools"][0] == {
+        "type": "tool_search_tool_bm25_20251119",
+        "name": "tool_search_tool_bm25",
+    }
+    deferred_body = next(
+        tool for tool in fake_http.last_json["tools"] if tool.get("name") == "read_document"
+    )
+    assert deferred_body["defer_loading"] is True
+    assert "cache_control" not in deferred_body
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_search_replays_unchanged_history_and_references() -> None:
+    client = GenericLLMClient(
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        api_key="test",
+        base_url="https://api.anthropic.test",
+    )
+    first_content = [
+        {"type": "text", "text": "I will find the document Tool."},
+        {
+            "type": "tool_use",
+            "id": "toolu_search_1",
+            "name": "tool_search",
+            "input": {"query": "open document"},
+        },
+    ]
+    fake_http = _CountingHttpClient(
+        {
+            "id": "msg_search_1",
+            "stop_reason": "tool_use",
+            "content": first_content,
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    immediate = ToolDefinition("finish", "Finish.", {"type": "object"})
+    deferred = ToolDefinition(
+        "read_document",
+        "Read one document.",
+        {"type": "object", "properties": {"path": {"type": "string"}}},
+        exposure="deferred",
+    )
+    initial_request = ToolCallRequest(
+        tools=(immediate, deferred),
+        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        turn_id="turn_1",
+    )
+
+    first, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=initial_request,
+    )
+
+    assert isinstance(first, ToolCallResponse)
+    assert first.calls == ()
+    assert first.discovery_events[0].query == "open document"
+    assert first.transport_checkpoint is not None
+    first_tools = list(fake_http.last_json["tools"])
+    fake_http.payload = {
+        "id": "msg_read_1",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_read_1",
+                "name": "read_document",
+                "input": {"path": "a.md"},
+            }
+        ],
+    }
+    continuation_request = ToolCallRequest(
+        tools=(immediate, deferred),
+        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        turn_id="turn_1",
+        active_tool_names=("read_document",),
+        transport_checkpoint=first.transport_checkpoint,
+    )
+
+    second, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=continuation_request,
+    )
+
+    assert isinstance(second, ToolCallResponse)
+    assert second.calls[0].name == "read_document"
+    assert second.transport_checkpoint is not None
+    assert second.transport_checkpoint.revision == 2
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["tools"] == first_tools
+    assert fake_http.last_json["messages"][-2] == {
+        "role": "assistant",
+        "content": first_content,
+    }
+    assert fake_http.last_json["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_search_1",
+                "content": [{"type": "tool_reference", "tool_name": "read_document"}],
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
