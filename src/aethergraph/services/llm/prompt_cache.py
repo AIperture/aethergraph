@@ -9,7 +9,11 @@ import json
 import re
 from typing import Any, Literal
 
-from .tool_calling import ToolCallRequest, tool_call_request_fingerprint
+from .tool_calling import (
+    ToolCallRequest,
+    tool_call_request_fingerprint,
+    tool_call_surface_fingerprint,
+)
 from .types import PromptCacheRequest
 
 PromptCacheMode = Literal["explicit", "implicit", "unavailable"]
@@ -117,6 +121,7 @@ def prepare_prompt_cache(
     translated_messages = copy.deepcopy(messages)
     provider_fields: dict[str, Any] = {}
     tool_contract_fingerprint = tool_call_request_fingerprint(tool_request)
+    tool_surface_fingerprint = tool_call_surface_fingerprint(tool_request)
     key = _derive_cache_key(
         provider=normalized_provider,
         model=normalized_model,
@@ -145,6 +150,13 @@ def prepare_prompt_cache(
         "capability_source": capability.capability_source,
         "key_fingerprint": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
         "tool_contract_fingerprint": tool_contract_fingerprint[:16],
+        "tool_catalog_fingerprint": tool_contract_fingerprint[:16],
+        "tool_surface_fingerprint": tool_surface_fingerprint[:16],
+        "tool_discovery_mode": (
+            tool_request.discovery.mode
+            if tool_request is not None and tool_request.discovery is not None
+            else ""
+        ),
     }
     if capability.max_new_writes_per_request is not None:
         observation["max_new_writes_per_request"] = capability.max_new_writes_per_request

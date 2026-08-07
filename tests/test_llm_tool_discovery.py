@@ -24,7 +24,10 @@ from aethergraph.services.llm import (
 )
 from aethergraph.services.llm._openai_mixin import _openai_checkpoint
 from aethergraph.services.llm.generic_client import GenericLLMClient
-from aethergraph.services.llm.tool_calling import tool_call_request_fingerprint
+from aethergraph.services.llm.tool_calling import (
+    tool_call_request_fingerprint,
+    tool_call_surface_fingerprint,
+)
 
 
 class _FakeResponse:
@@ -58,6 +61,14 @@ class _CountingHttpClient:
         self.last_json = json
         self.last_headers = headers
         return _FakeResponse(self.payload)
+
+
+class _ObservationSink:
+    def __init__(self) -> None:
+        self.records = []
+
+    async def emit(self, record, *, capture_mode) -> None:
+        self.records.append(record)
 
 
 def _discovery_request(
@@ -185,6 +196,7 @@ def test_native_client_deferred_activation_preserves_cache_contract() -> None:
     )
 
     assert tool_call_request_fingerprint(initial) == tool_call_request_fingerprint(activated)
+    assert tool_call_surface_fingerprint(initial) != tool_call_surface_fingerprint(activated)
 
 
 def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None:
@@ -348,11 +360,13 @@ async def test_unbound_discovery_request_fails_before_provider_traffic() -> None
 
 @pytest.mark.asyncio
 async def test_openai_native_client_search_round_trips_private_checkpoint() -> None:
+    sink = _ObservationSink()
     client = GenericLLMClient(
         "openai",
         "gpt-5.6",
         api_key="test",
         base_url="https://api.openai.test/v1",
+        observation_sink=sink,
     )
     client.bind_tool_discovery_capabilities(
         ToolDiscoveryCapabilities(
@@ -454,6 +468,11 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert search_output["type"] == "tool_search_output"
     assert search_output["call_id"] == "search_call_1"
     assert [tool["name"] for tool in search_output["tools"]] == ["read_document"]
+    observed = sink.records[-1].request_args["native_tool_calling"]
+    assert observed["active_tool_names"] == ["read_document"]
+    assert observed["active_tool_count"] == 1
+    assert observed["tool_catalog_fingerprint"]
+    assert observed["tool_surface_fingerprint"]
 
 
 @pytest.mark.asyncio

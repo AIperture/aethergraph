@@ -55,6 +55,8 @@ from aethergraph.services.llm.tool_calling import (
     LLMToolCallCapabilityError,
     ToolCallRequest,
     ToolCallResponse,
+    tool_call_request_fingerprint,
+    tool_call_surface_fingerprint,
 )
 from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryCapabilities,
@@ -1813,6 +1815,10 @@ class GenericLLMClient(
                 "max_calls": tool_request.max_calls,
                 "tool_names": [tool.name for tool in tool_request.tools],
                 "tool_count": len(tool_request.tools),
+                "active_tool_names": list(tool_request.active_tool_names),
+                "active_tool_count": len(tool_request.active_tool_names),
+                "tool_catalog_fingerprint": tool_call_request_fingerprint(tool_request)[:16],
+                "tool_surface_fingerprint": tool_call_surface_fingerprint(tool_request)[:16],
             }
             if tool_request.discovery is not None and discovery_capability is not None:
                 tool_request_summary["discovery"] = {

@@ -356,6 +356,50 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def tool_call_surface_fingerprint(request: ToolCallRequest | None) -> str:
+    """Return a deterministic fingerprint of current Tool activation.
+
+    The surface identity is separate from the stable catalog contract so native
+    discovery can observe activation without rotating its prompt-prefix key.
+
+    Examples:
+        Fingerprint an empty surface:
+            ```python
+            assert tool_call_surface_fingerprint(None) == ""
+            ```
+
+        Distinguish active Tool sets:
+            ```python
+            first = tool_call_surface_fingerprint(first_request)
+            second = tool_call_surface_fingerprint(second_request)
+            assert first != second
+            ```
+
+    Args:
+        request: Optional provider-neutral Tool-call request.
+
+    Returns:
+        str: Lowercase SHA-256 fingerprint, or an empty string without a request.
+
+    Notes:
+        The digest includes only discovery mode and exact active Tool names.
+    """
+
+    if request is None:
+        return ""
+    payload = {
+        "active_tool_names": list(request.active_tool_names),
+        "discovery_mode": (request.discovery.mode if request.discovery is not None else None),
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """Represent one provider-framed native Tool call."""
@@ -693,4 +737,5 @@ __all__ = [
     "ToolChoice",
     "ToolDefinition",
     "tool_call_request_fingerprint",
+    "tool_call_surface_fingerprint",
 ]

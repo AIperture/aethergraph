@@ -86,6 +86,9 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
         "capability_source": "openai_explicit_model_family",
         "key_fingerprint": first.observation["key_fingerprint"],
         "tool_contract_fingerprint": "",
+        "tool_catalog_fingerprint": "",
+        "tool_surface_fingerprint": "",
+        "tool_discovery_mode": "",
         "max_new_writes_per_request": 4,
     }
     assert first.messages[0]["content"] == [
@@ -248,6 +251,8 @@ def test_tool_contract_changes_rotate_cache_identity() -> None:
         first.observation["tool_contract_fingerprint"]
         != second.observation["tool_contract_fingerprint"]
     )
+    assert first.observation["tool_catalog_fingerprint"]
+    assert first.observation["tool_surface_fingerprint"]
 
 
 @pytest.mark.asyncio
