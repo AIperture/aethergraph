@@ -1,3 +1,13 @@
-from .facade import AgentStateBackend, AgentStateFacade, AgentStateHandle
+from .facade import (
+    AgentStateBackend,
+    AgentStateConflictError,
+    AgentStateFacade,
+    AgentStateHandle,
+)
 
-__all__ = ["AgentStateBackend", "AgentStateFacade", "AgentStateHandle"]
+__all__ = [
+    "AgentStateBackend",
+    "AgentStateConflictError",
+    "AgentStateFacade",
+    "AgentStateHandle",
+]

@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aethergraph.contracts.integration import HostManifest, IntegrationKind
+from aethergraph.contracts.integration import (
+    SEMANTIC_EVENT_PROTOCOL_V2,
+    SEMANTIC_EVENT_PROTOCOL_VERSION,
+    HostManifest,
+    IntegrationKind,
+)
 
 from .coordinator import IntegrationIngressCoordinator
 from .delivery import SemanticEventChannelAdapter, SemanticEventEmitter, SemanticTurnMonitor
@@ -62,6 +67,15 @@ def install_integration_ingress(
     """
     if getattr(container, "integration_ingress", None) is not None:
         raise RuntimeError("Integration ingress is already installed on this Host.")
+    if manifest.semantic_event_protocol_version not in {
+        SEMANTIC_EVENT_PROTOCOL_VERSION,
+        SEMANTIC_EVENT_PROTOCOL_V2,
+    }:
+        raise RuntimeError(
+            "Semantic event protocol "
+            f"{manifest.semantic_event_protocol_version!r} is negotiated but its "
+            "delivery projector is not enabled."
+        )
     path = (
         Path(database_path)
         if database_path is not None
@@ -71,6 +85,7 @@ def install_integration_ingress(
     emitter = SemanticEventEmitter(
         deployment_id=manifest.deployment_id,
         store=semantic_events,
+        semantic_event_protocol_version=manifest.semantic_event_protocol_version,
     )
     turn_monitor = SemanticTurnMonitor(
         run_manager=container.run_manager,
@@ -106,7 +121,7 @@ def install_integration_ingress(
         resource_ingress=ResourceIngress(container=container, policy=resource_policy),
         interaction_resolver=InteractionResolver(container.cont_store),
         inbound_events=EventLogInboundEventStore(container.eventlog),
-        semantic_events=semantic_events,
+        semantic_emitter=emitter,
         resume_router=container.resume_router,
         root_dispatcher=AGRootTurnDispatcher(
             container,

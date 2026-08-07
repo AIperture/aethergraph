@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+import json
 from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
@@ -24,6 +25,8 @@ from .versions import (
     INTEGRATION_CAPABILITIES_SCHEMA_VERSION,
     INTEGRATION_ROUTE_SCHEMA_VERSION,
     ORIGIN_BINDING_SCHEMA_VERSION,
+    RELEASE_COMPATIBILITY_SCHEMA_VERSION,
+    SEMANTIC_EVENT_PROTOCOL_V2,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
 )
 
@@ -31,6 +34,10 @@ Identifier = Annotated[str, Field(min_length=1, max_length=255)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 BoundedText = Annotated[str, Field(max_length=1_000_000)]
 MetadataScalar: TypeAlias = str | int | float | bool | None
+SemanticEventProtocolVersion: TypeAlias = Literal[
+    "aethergraph.semantic-event/v1",
+    "aethergraph.semantic-event/v2",
+]
 
 
 class IntegrationContract(BaseModel):
@@ -67,16 +74,32 @@ class SemanticEventKind(StrEnum):
     TURN_FAILED = "turn.failed"
 
 
+class SemanticEventKindV2(StrEnum):
+    """Semantic events available only under the v2 event envelope."""
+
+    INPUT_ACCEPTED = "input.accepted"
+    MESSAGE_STARTED = "message.started"
+    MESSAGE_DELTA = "message.delta"
+    MESSAGE_COMPLETED = "message.completed"
+    PHASE_CHANGED = "phase.changed"
+    PROGRESS_CHANGED = "progress.changed"
+    INTERACTION_REQUESTED = "interaction.requested"
+    INTERACTION_RESOLVED = "interaction.resolved"
+    TOOL_ACTIVITY = "tool.activity"
+    ARTIFACT_AVAILABLE = "artifact.available"
+    STRUCTURED_OUTPUT = "structured.output"
+    WARNING_RAISED = "warning.raised"
+    TURN_OUTCOME = "turn.outcome"
+
+
 class IntegrationCapabilities(IntegrationContract):
     """Exact capabilities required by a route or offered by an adapter."""
 
-    schema_version: Literal["aethergraph.integration-capabilities/v1"] = (
+    schema_version: Literal["aethergraph.integration-capabilities/v2"] = (
         INTEGRATION_CAPABILITIES_SCHEMA_VERSION
     )
-    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v1"] = (
-        SEMANTIC_EVENT_PROTOCOL_VERSION
-    )
-    event_kinds: tuple[SemanticEventKind, ...]
+    semantic_event_protocol_version: SemanticEventProtocolVersion = SEMANTIC_EVENT_PROTOCOL_VERSION
+    event_kinds: tuple[SemanticEventKind | SemanticEventKindV2, ...]
     streaming: bool
     interactions: bool
     attachments: bool
@@ -85,11 +108,74 @@ class IntegrationCapabilities(IntegrationContract):
     @field_validator("event_kinds")
     @classmethod
     def _unique_event_kinds(
-        cls, value: tuple[SemanticEventKind, ...]
-    ) -> tuple[SemanticEventKind, ...]:
-        if len(value) != len(set(value)):
+        cls,
+        value: tuple[SemanticEventKind | SemanticEventKindV2, ...],
+    ) -> tuple[SemanticEventKind | SemanticEventKindV2, ...]:
+        values = tuple(item.value for item in value)
+        if len(values) != len(set(values)):
             raise ValueError("event_kinds must not contain duplicates")
         return value
+
+    @model_validator(mode="after")
+    def _validate_event_protocol(self) -> IntegrationCapabilities:
+        """
+        Require event kinds from the explicitly selected semantic protocol.
+
+        Shared v1/v2 event names remain valid in either protocol, while each
+        protocol's terminal kinds stay closed to that exact selection.
+
+        Examples:
+            Validate v1 completion:
+                ```python
+                capabilities = IntegrationCapabilities(
+                    event_kinds=(SemanticEventKind.TURN_COMPLETED,),
+                    streaming=False,
+                    interactions=False,
+                    attachments=False,
+                    cancellation=False,
+                )
+                ```
+
+            Validate a v2 outcome:
+                ```python
+                capabilities = IntegrationCapabilities(
+                    semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
+                    event_kinds=(SemanticEventKindV2.TURN_OUTCOME,),
+                    streaming=False,
+                    interactions=False,
+                    attachments=False,
+                    cancellation=False,
+                )
+                ```
+
+        Args:
+            self: Fully parsed integration capability record.
+
+        Returns:
+            IntegrationCapabilities: The unchanged protocol-consistent record.
+
+        Notes:
+            The validator never substitutes a terminal kind or protocol.
+        """
+
+        kind_type = (
+            SemanticEventKind
+            if self.semantic_event_protocol_version == SEMANTIC_EVENT_PROTOCOL_VERSION
+            else SemanticEventKindV2
+        )
+        allowed = {item.value for item in kind_type}
+        unsupported = sorted({item.value for item in self.event_kinds} - allowed)
+        if unsupported:
+            raise ValueError(
+                "event_kinds are incompatible with semantic_event_protocol_version: "
+                + ", ".join(unsupported)
+            )
+        object.__setattr__(
+            self,
+            "event_kinds",
+            tuple(kind_type(item.value) for item in self.event_kinds),
+        )
+        return self
 
 
 class IntegrationMatchPolicy(IntegrationContract):
@@ -122,8 +208,8 @@ class ReleaseDependency(IntegrationContract):
 class ReleaseCompatibility(IntegrationContract):
     """Exact release and Host runtime contract verified before code import."""
 
-    schema_version: Literal["aethergraph.release-compatibility/v1"] = (
-        "aethergraph.release-compatibility/v1"
+    schema_version: Literal["aethergraph.release-compatibility/v2"] = (
+        RELEASE_COMPATIBILITY_SCHEMA_VERSION
     )
     aethergraph_version: Identifier
     engine_version: Identifier
@@ -135,9 +221,7 @@ class ReleaseCompatibility(IntegrationContract):
     host_capability_requirements: tuple[Identifier, ...]
     service_requirements: tuple[Identifier, ...]
     ingress_protocol_version: Literal["aethergraph.ingress/v1"] = INGRESS_PROTOCOL_VERSION
-    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v1"] = (
-        SEMANTIC_EVENT_PROTOCOL_VERSION
-    )
+    semantic_event_protocol_version: SemanticEventProtocolVersion = SEMANTIC_EVENT_PROTOCOL_VERSION
     logical_output_requirements: tuple[Literal["origin"], ...]
     entrypoint_input_schema: dict[str, JsonValue]
     entrypoint_output_schema: dict[str, JsonValue]
@@ -162,7 +246,7 @@ class ReleaseCompatibility(IntegrationContract):
 class IntegrationRoute(IntegrationContract):
     """Immutable route from one authenticated integration to one entry agent."""
 
-    schema_version: Literal["aethergraph.integration-route/v1"] = INTEGRATION_ROUTE_SCHEMA_VERSION
+    schema_version: Literal["aethergraph.integration-route/v2"] = INTEGRATION_ROUTE_SCHEMA_VERSION
     route_id: Identifier
     endpoint_id: Identifier | None = None
     integration_id: Identifier
@@ -187,7 +271,7 @@ class IntegrationRoute(IntegrationContract):
 class HostManifest(IntegrationContract):
     """Immutable launch contract consumed by exactly one AG Host deployment."""
 
-    schema_version: Literal["aethergraph.host-manifest/v2"] = HOST_MANIFEST_SCHEMA_VERSION
+    schema_version: Literal["aethergraph.host-manifest/v3"] = HOST_MANIFEST_SCHEMA_VERSION
     deployment_id: Identifier
     build_id: Identifier
     source_digest: Digest
@@ -200,9 +284,7 @@ class HostManifest(IntegrationContract):
     environment_snapshot_digest: Digest
     runtime_profile_digest: Digest
     application_settings_digest: Digest
-    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v1"] = (
-        SEMANTIC_EVENT_PROTOCOL_VERSION
-    )
+    semantic_event_protocol_version: SemanticEventProtocolVersion = SEMANTIC_EVENT_PROTOCOL_VERSION
     ingress_protocol_version: Literal["aethergraph.ingress/v1"] = INGRESS_PROTOCOL_VERSION
     release_compatibility: ReleaseCompatibility
     integration_routes: tuple[IntegrationRoute, ...]
@@ -212,6 +294,41 @@ class HostManifest(IntegrationContract):
 
     @model_validator(mode="after")
     def _validate_source_and_routes(self) -> HostManifest:
+        """
+        Validate source identity, route uniqueness, and protocol agreement.
+
+        The Host manifest is the negotiation authority. Its release and every
+        route capability record must select the same semantic event protocol.
+
+        Examples:
+            Validate a local build manifest:
+                ```python
+                validated = HostManifest.model_validate(manifest.model_dump())
+                ```
+
+            Reject a mixed protocol manifest:
+                ```python
+                payload = manifest.model_dump(mode="json")
+                payload["semantic_event_protocol_version"] = (
+                    "aethergraph.semantic-event/v2"
+                )
+                try:
+                    HostManifest.model_validate(payload)
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            self: Fully parsed immutable Host manifest.
+
+        Returns:
+            HostManifest: The unchanged coordinated manifest.
+
+        Notes:
+            Validation occurs before release import, route installation, or
+            provider delivery setup.
+        """
+
         if (self.build_root is None) == (self.release_uri is None):
             raise ValueError("exactly one of build_root or release_uri is required")
         route_ids = [route.route_id for route in self.integration_routes]
@@ -222,6 +339,24 @@ class HostManifest(IntegrationContract):
         ]
         if len(endpoint_ids) != len(set(endpoint_ids)):
             raise ValueError("integration endpoint_id values must be unique")
+        if (
+            self.release_compatibility.semantic_event_protocol_version
+            != self.semantic_event_protocol_version
+        ):
+            raise ValueError(
+                "release compatibility semantic event protocol must match the Host manifest"
+            )
+        mismatched_routes = sorted(
+            route.route_id
+            for route in self.integration_routes
+            if route.required_capabilities.semantic_event_protocol_version
+            != self.semantic_event_protocol_version
+        )
+        if mismatched_routes:
+            raise ValueError(
+                "integration route semantic event protocol must match the Host manifest: "
+                + ", ".join(mismatched_routes)
+            )
         return self
 
 
@@ -457,6 +592,59 @@ class ToolActivityPayload(IntegrationContract):
     message: Annotated[str, Field(max_length=4_000)] | None = None
 
 
+class ToolErrorPayload(IntegrationContract):
+    """Bounded prompt-safe Tool failure projected by semantic event v2."""
+
+    kind: Literal["rejected", "runtime", "internal", "integrity"]
+    code: Annotated[
+        str,
+        Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9_]*$"),
+    ]
+    summary: Annotated[str, Field(min_length=1, max_length=1_000)]
+    retryable: bool = False
+    details: dict[str, JsonValue] = Field(default_factory=dict)
+    repair_hints: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=500)], ...],
+        Field(max_length=16),
+    ] = ()
+    allowed_actions: Annotated[tuple[Identifier, ...], Field(max_length=16)] = ()
+    reference: Annotated[str, Field(min_length=1, max_length=256)] | None = None
+
+    @field_validator("details")
+    @classmethod
+    def _bound_details(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > 8_192:
+            raise ValueError("Tool error details cannot exceed 8192 UTF-8 bytes")
+        return value
+
+    @field_validator("repair_hints", "allowed_actions")
+    @classmethod
+    def _unique_guidance(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("Tool error guidance values must be unique")
+        return value
+
+
+class ToolActivityPayloadV2(ToolActivityPayload):
+    """Semantic v2 Tool activity carrying an optional structured failure."""
+
+    error: ToolErrorPayload | None = None
+
+    @model_validator(mode="after")
+    def _validate_error_status(self) -> ToolActivityPayloadV2:
+        if self.status == "failed" and self.error is None:
+            raise ValueError("Failed v2 Tool activity requires a structured error")
+        if self.status != "failed" and self.error is not None:
+            raise ValueError("Only failed v2 Tool activity may carry an error")
+        return self
+
+
 class ArtifactAvailablePayload(IntegrationContract):
     """Semantic payload exposing one downloadable runtime artifact."""
 
@@ -493,6 +681,16 @@ class TurnFailedPayload(IntegrationContract):
     code: Identifier
     message: Annotated[str, Field(min_length=1, max_length=4_000)]
     retryable: bool
+
+
+class TurnOutcomePayload(IntegrationContract):
+    """Semantic v2 terminal outcome independent of infrastructure completion."""
+
+    outcome: Literal["completed", "failed", "budget_exhausted", "paused", "cancelled"]
+    code: Identifier
+    summary: Annotated[str, Field(min_length=1, max_length=4_000)]
+    resumable: bool
+    engine_turn_id: Identifier
 
 
 SemanticPayload: TypeAlias = (
@@ -566,6 +764,83 @@ class SemanticEvent(IntegrationContract):
     @model_validator(mode="after")
     def _validate_payload_kind(self) -> SemanticEvent:
         expected_type = _PAYLOAD_BY_KIND[self.kind]
+        if type(self.payload) is not expected_type:
+            raise ValueError(f"payload for {self.kind.value} must be {expected_type.__name__}")
+        for key in self.extensions:
+            if "." not in key:
+                raise ValueError("semantic extension keys must be namespaced")
+        return self
+
+
+SemanticPayloadV2: TypeAlias = (
+    InputAcceptedPayload
+    | MessageStartedPayload
+    | MessageDeltaPayload
+    | MessageCompletedPayload
+    | PhaseChangedPayload
+    | ProgressChangedPayload
+    | InteractionRequestedPayload
+    | InteractionResolvedPayload
+    | ToolActivityPayloadV2
+    | ArtifactAvailablePayload
+    | StructuredOutputPayload
+    | WarningRaisedPayload
+    | TurnOutcomePayload
+)
+
+
+_PAYLOAD_BY_KIND_V2: dict[SemanticEventKindV2, type[IntegrationContract]] = {
+    SemanticEventKindV2.INPUT_ACCEPTED: InputAcceptedPayload,
+    SemanticEventKindV2.MESSAGE_STARTED: MessageStartedPayload,
+    SemanticEventKindV2.MESSAGE_DELTA: MessageDeltaPayload,
+    SemanticEventKindV2.MESSAGE_COMPLETED: MessageCompletedPayload,
+    SemanticEventKindV2.PHASE_CHANGED: PhaseChangedPayload,
+    SemanticEventKindV2.PROGRESS_CHANGED: ProgressChangedPayload,
+    SemanticEventKindV2.INTERACTION_REQUESTED: InteractionRequestedPayload,
+    SemanticEventKindV2.INTERACTION_RESOLVED: InteractionResolvedPayload,
+    SemanticEventKindV2.TOOL_ACTIVITY: ToolActivityPayloadV2,
+    SemanticEventKindV2.ARTIFACT_AVAILABLE: ArtifactAvailablePayload,
+    SemanticEventKindV2.STRUCTURED_OUTPUT: StructuredOutputPayload,
+    SemanticEventKindV2.WARNING_RAISED: WarningRaisedPayload,
+    SemanticEventKindV2.TURN_OUTCOME: TurnOutcomePayload,
+}
+
+
+class SemanticEventV2(IntegrationContract):
+    """Ordered v2 semantic event with structured Tool errors and one outcome."""
+
+    schema_version: Literal["aethergraph.semantic-event/v2"] = SEMANTIC_EVENT_PROTOCOL_V2
+    event_id: Identifier
+    deployment_id: Identifier
+    session_id: Identifier
+    turn_id: Identifier
+    sequence: Annotated[int, Field(ge=0)]
+    producer: Identifier
+    timestamp: datetime
+    kind: SemanticEventKindV2
+    payload: SemanticPayloadV2
+    extensions: dict[Identifier, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_payload_for_kind(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        raw_kind = value.get("kind")
+        try:
+            kind = SemanticEventKindV2(raw_kind)
+        except (TypeError, ValueError):
+            return value
+        raw_payload = value.get("payload")
+        if isinstance(raw_payload, dict):
+            parsed = dict(value)
+            parsed["payload"] = _PAYLOAD_BY_KIND_V2[kind].model_validate(raw_payload)
+            return parsed
+        return value
+
+    @model_validator(mode="after")
+    def _validate_payload_kind(self) -> SemanticEventV2:
+        expected_type = _PAYLOAD_BY_KIND_V2[self.kind]
         if type(self.payload) is not expected_type:
             raise ValueError(f"payload for {self.kind.value} must be {expected_type.__name__}")
         for key in self.extensions:

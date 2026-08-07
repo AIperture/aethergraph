@@ -300,6 +300,61 @@ class ReadMixin:
         Returns:
             Any | None: The stored value, or ``None`` if no snapshot exists.
         """
+        record = await self.get_latest_state_record(
+            key,
+            tags=tags,
+            level=level,
+            use_persistence=use_persistence,
+            kind=kind,
+        )
+        return None if record is None else record["value"]
+
+    async def get_latest_state_record(
+        self: MemoryFacadeProtocol,
+        key: str,
+        *,
+        tags=None,
+        level=None,
+        use_persistence: bool = False,
+        kind: str = "state.snapshot",
+    ) -> dict[str, Any] | None:
+        """Return the latest state value with its enclosing snapshot revision.
+
+        The record exposes only the stored value, numeric revision metadata,
+        and Event identity needed by the canonical Agent-state handle. It does
+        not create another state authority or reinterpret the state payload.
+
+        Examples:
+            Read a revisioned state record:
+                ```python
+                record = await memory.get_latest_state_record("agent:writer")
+                revision = 0 if record is None else record["revision"]
+                ```
+
+            Read durable persistence explicitly:
+                ```python
+                record = await memory.get_latest_state_record(
+                    "agent:writer",
+                    use_persistence=True,
+                )
+                ```
+
+        Args:
+            key: Logical state key to look up.
+            tags: Extra tags required in addition to the state tags.
+            level: Scope level used to filter state snapshots.
+            use_persistence: Read durable persistence instead of the hot log.
+            kind: State Event kind, normally `state.snapshot`.
+
+        Returns:
+            dict[str, Any] | None: Latest value, revision, metadata, and Event
+            identity, or `None` when no snapshot exists.
+
+        Notes:
+            Legacy snapshots without numeric revision metadata are reported at
+            revision zero and acquire revision one on their next commit.
+        """
+
         events = await self.query_events(
             kinds=[kind],
             tags=["state", f"state:{key}", *(list(tags or []))],
@@ -310,7 +365,20 @@ class ReadMixin:
         )
         if not events:
             return None
-        return (events[0].data or {}).get("value")
+        event = events[0]
+        data = dict(event.data or {})
+        meta = dict(data.get("meta") or {})
+        raw_revision = meta.get("revision", 0)
+        try:
+            revision = int(raw_revision)
+        except (TypeError, ValueError):
+            revision = 0
+        return {
+            "value": data.get("value"),
+            "revision": max(0, revision),
+            "meta": meta,
+            "event_id": str(event.event_id or ""),
+        }
 
     async def list_state_history(
         self: MemoryFacadeProtocol,

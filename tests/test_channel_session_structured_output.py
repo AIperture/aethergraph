@@ -88,3 +88,26 @@ async def test_send_tool_activity_preserves_structured_identity() -> None:
     }
     assert event.meta["run_id"] == "run-1"
     assert event.meta["session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_send_tool_activity_carries_safe_failure_envelope() -> None:
+    ctx = _FakeContext()
+    error = {
+        "kind": "rejected",
+        "code": "stale_project",
+        "summary": "Refresh the project before retrying.",
+        "retryable": True,
+    }
+
+    await ChannelSession(ctx).send_tool_activity(
+        tool_call_id="call-2",
+        tool_name="apply_patch",
+        status="failed",
+        message="Refresh the project before retrying.",
+        error=error,
+    )
+
+    event = ctx.services.channels.events[0]
+    assert event.rich["error"] == error
+    assert event.upsert_key == "tool:call-2"

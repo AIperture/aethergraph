@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 import dataclasses
 from typing import Any, Generic, Literal, TypeVar, cast
@@ -12,11 +13,24 @@ AgentStateBackend = Literal["hybrid", "memory", "local"]
 T = TypeVar("T")
 
 
+class AgentStateConflictError(RuntimeError):
+    """Report a stale enclosing Agent-state revision before snapshot commit."""
+
+    def __init__(self, *, key: str, expected_revision: int, actual_revision: int) -> None:
+        self.key = str(key)
+        self.expected_revision = int(expected_revision)
+        self.actual_revision = int(actual_revision)
+        super().__init__(
+            f"Agent state {self.key!r} revision changed: expected "
+            f"{self.expected_revision}, actual {self.actual_revision}"
+        )
+
+
 def _to_serializable(value: Any) -> Any:
-    if dataclasses.is_dataclass(value):
-        return dataclasses.asdict(value)
     if hasattr(value, "to_dict"):
         return value.to_dict()
+    if dataclasses.is_dataclass(value):
+        return dataclasses.asdict(value)
     if hasattr(value, "model_dump"):
         return value.model_dump()
     return value
@@ -59,6 +73,39 @@ class AgentStateHandle(Generic[T]):
         self.kind = kind
         self._cached: T | None = None
         self._revision = 0
+        self._lock = asyncio.Lock()
+
+    @property
+    def revision(self) -> int:
+        """Return the loaded or most recently committed snapshot revision.
+
+        The revision belongs to the enclosing Agent-state snapshot and is the
+        equality token accepted by `commit(expected_revision=...)`.
+
+        Examples:
+            Read a new handle revision:
+                ```python
+                assert handle.revision == 0
+                ```
+
+            Capture a compare-and-swap token:
+                ```python
+                state = await handle.load()
+                expected = handle.revision
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            int: Non-negative enclosing snapshot revision.
+
+        Notes:
+            The token is local to one logical state key and is not a content
+            hash or Tool activation lease revision.
+        """
+
+        return self._revision
 
     def _default(self) -> T:
         if self.default_factory is not None:
@@ -80,6 +127,46 @@ class AgentStateHandle(Generic[T]):
         return cast(T, raw)
 
     async def load(self, *, force: bool = False, user_persistence: bool = True) -> T:
+        """Load the current state value and hydrate its snapshot revision.
+
+        Hybrid handles reuse the cached value unless `force` is true. Durable
+        and memory handles read the latest revisioned snapshot record when the
+        bound Memory facade exposes it, with a legacy value-only fallback.
+
+        Examples:
+            Load a cached hybrid state:
+                ```python
+                state = await handle.load()
+                ```
+
+            Force a durable refresh:
+                ```python
+                state = await handle.load(force=True, user_persistence=True)
+                ```
+
+        Args:
+            force: Bypass a hybrid cached value and refresh the snapshot.
+            user_persistence: Read user-scoped durable persistence when true.
+
+        Returns:
+            T: Hydrated state model or the configured default value.
+
+        Notes:
+            Legacy value-only Memory implementations hydrate revision zero.
+        """
+
+        async with self._lock:
+            return await self._load_unlocked(
+                force=force,
+                user_persistence=user_persistence,
+            )
+
+    async def _load_unlocked(
+        self,
+        *,
+        force: bool = False,
+        user_persistence: bool = True,
+    ) -> T:
         if self.backend == "local" and self._cached is not None:
             return self._cached
         if self.backend == "hybrid" and self._cached is not None and not force:
@@ -87,15 +174,31 @@ class AgentStateHandle(Generic[T]):
         if self.backend == "local":
             self._cached = self._default()
             return self._cached
-        raw = await _call_memory_method(
-            self.memory,
-            "get_latest_state",
-            "latest_state",
-            self.key,
-            level=self.level,
-            use_persistence=user_persistence,
-            kind=self.kind,
-        )
+        record_method = getattr(self.memory, "get_latest_state_record", None)
+        if callable(record_method):
+            record = await record_method(
+                self.key,
+                level=self.level,
+                use_persistence=user_persistence,
+                kind=self.kind,
+            )
+            if record is None:
+                raw = None
+                self._revision = 0
+            else:
+                raw = record.get("value")
+                self._revision = max(0, int(record.get("revision") or 0))
+        else:
+            raw = await _call_memory_method(
+                self.memory,
+                "get_latest_state",
+                "latest_state",
+                self.key,
+                level=self.level,
+                use_persistence=user_persistence,
+                kind=self.kind,
+            )
+            self._revision = 0
         self._cached = self._hydrate(raw)
         return self._cached
 
@@ -109,21 +212,97 @@ class AgentStateHandle(Generic[T]):
         meta: dict[str, Any] | None = None,
         severity: int = 1,
         signal: float | None = None,
+        expected_revision: int | None = None,
     ) -> Any | None:
-        self._revision += 1
-        self._cached = state
+        """Commit one snapshot, optionally comparing its enclosing revision.
+
+        All commits on the canonical handle are serialized. When
+        `expected_revision` is supplied, a stale value raises before snapshot
+        metadata, cache state, or Memory events are changed.
+
+        Examples:
+            Commit without a comparison:
+                ```python
+                await handle.commit(state, reason="turn_completed")
+                ```
+
+            Commit with compare-and-swap protection:
+                ```python
+                expected = handle.revision
+                await handle.commit(
+                    state,
+                    reason="tool_activation",
+                    expected_revision=expected,
+                )
+                ```
+
+        Args:
+            state: Complete state value to persist.
+            reason: Optional compact commit reason stored in metadata.
+            stage_id: Optional current execution stage identity.
+            tags: Additional snapshot tags.
+            meta: Additional snapshot metadata.
+            severity: Memory Event importance level.
+            signal: Optional relevance signal.
+            expected_revision: Optional exact enclosing snapshot revision.
+
+        Returns:
+            Any | None: Persisted snapshot Event, or `None` for local state.
+
+        Notes:
+            This compare-and-swap is atomic for writers sharing the canonical
+            handle. Persistence backends do not yet expose cross-process
+            conditional append.
+        """
+
+        async with self._lock:
+            return await self._commit_unlocked(
+                state,
+                reason=reason,
+                stage_id=stage_id,
+                tags=tags,
+                meta=meta,
+                severity=severity,
+                signal=signal,
+                expected_revision=expected_revision,
+            )
+
+    async def _commit_unlocked(
+        self,
+        state: T,
+        *,
+        reason: str = "",
+        stage_id: str | None = None,
+        tags: Sequence[str] | None = None,
+        meta: dict[str, Any] | None = None,
+        severity: int = 1,
+        signal: float | None = None,
+        expected_revision: int | None = None,
+    ) -> Any | None:
+        if expected_revision is not None:
+            if isinstance(expected_revision, bool) or int(expected_revision) < 0:
+                raise ValueError("expected_revision must be a non-negative integer")
+            if int(expected_revision) != self._revision:
+                raise AgentStateConflictError(
+                    key=self.key,
+                    expected_revision=int(expected_revision),
+                    actual_revision=self._revision,
+                )
+        next_revision = self._revision + 1
         if self.backend == "local":
+            self._revision = next_revision
+            self._cached = state
             return None
         merged_meta = {
             **self.meta,
             **dict(meta or {}),
-            "revision": self._revision,
+            "revision": next_revision,
         }
         if reason:
             merged_meta["reason"] = reason
         if stage_id:
             merged_meta["stage_id"] = stage_id
-        return await _call_memory_method(
+        result = await _call_memory_method(
             self.memory,
             "append_state_snapshot",
             "record_state",
@@ -136,6 +315,9 @@ class AgentStateHandle(Generic[T]):
             kind=self.kind,
             stage=stage_id,
         )
+        self._revision = next_revision
+        self._cached = state
+        return result
 
     async def update(
         self,
@@ -148,20 +330,23 @@ class AgentStateHandle(Generic[T]):
         severity: int = 1,
         signal: float | None = None,
     ) -> T:
-        state = await self.load()
-        result = fn(state)
-        if result is not None:
-            state = cast(T, result)
-        await self.commit(
-            state,
-            reason=reason,
-            stage_id=stage_id,
-            tags=tags,
-            meta=meta,
-            severity=severity,
-            signal=signal,
-        )
-        return state
+        async with self._lock:
+            state = await self._load_unlocked()
+            expected_revision = self._revision
+            result = fn(state)
+            if result is not None:
+                state = cast(T, result)
+            await self._commit_unlocked(
+                state,
+                reason=reason,
+                stage_id=stage_id,
+                tags=tags,
+                meta=meta,
+                severity=severity,
+                signal=signal,
+                expected_revision=expected_revision,
+            )
+            return state
 
     async def emit_change(
         self,

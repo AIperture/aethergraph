@@ -5,13 +5,19 @@ from types import SimpleNamespace
 import pytest
 
 from aethergraph.contracts.integration import (
+    SEMANTIC_EVENT_PROTOCOL_V2,
     InteractionRequestedPayload,
     MessageCompletedPayload,
     SemanticEventKind,
+    SemanticEventKindV2,
+    SemanticEventV2,
     StructuredOutputPayload,
     ToolActivityPayload,
+    ToolActivityPayloadV2,
     TurnCompletedPayload,
     TurnFailedPayload,
+    TurnOutcomePayload,
+    WarningRaisedPayload,
 )
 from aethergraph.contracts.services.channel import Button, OutEvent
 from aethergraph.core.runtime.run_types import RunStatus
@@ -225,6 +231,99 @@ async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
 
 
 @pytest.mark.asyncio
+async def test_v2_tool_failure_preserves_structured_error_in_one_activity_path(
+    tmp_path,
+) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(
+            deployment_id="deployment-1",
+            store=store,
+            semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
+        )
+    )
+
+    await adapter.send(
+        OutEvent(
+            type="agent.tool.activity",
+            channel="endpoint:sessions/public-1",
+            text="Apply the design before retrying.",
+            rich={
+                "tool_call_id": "call-1",
+                "tool_name": "run_design",
+                "status": "failed",
+                "message": "Apply the design before retrying.",
+                "error": {
+                    "kind": "rejected",
+                    "code": "design_not_applied",
+                    "summary": "Apply the design before retrying.",
+                    "retryable": True,
+                    "details": {"design_id": "design-1"},
+                    "repair_hints": ["Apply the current design."],
+                    "allowed_actions": ["apply_design"],
+                    "reference": "tool-error-1",
+                },
+            },
+            meta=_meta(),
+            upsert_key="tool:call-1",
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    event = history[0].event
+    assert isinstance(event, SemanticEventV2)
+    assert event.kind == SemanticEventKindV2.TOOL_ACTIVITY
+    assert isinstance(event.payload, ToolActivityPayloadV2)
+    assert event.payload.error is not None
+    assert event.payload.error.code == "design_not_applied"
+    assert event.payload.error.allowed_actions == ("apply_design",)
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_tool_failure_remains_closed_when_channel_carries_v2_error(
+    tmp_path,
+) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    emitter = SemanticEventEmitter(deployment_id="deployment-1", store=store)
+
+    await emitter.emit(
+        OutEvent(
+            type="agent.tool.activity",
+            channel="endpoint:sessions/public-1",
+            rich={
+                "tool_call_id": "call-1",
+                "tool_name": "run_design",
+                "status": "failed",
+                "message": "Failed.",
+                "error": {
+                    "kind": "internal",
+                    "code": "tool_internal_error",
+                    "summary": "The Tool failed internally.",
+                },
+            },
+            meta=_meta(),
+        )
+    )
+
+    event = (
+        await store.list_session(
+            deployment_id="deployment-1",
+            session_id="session-1",
+        )
+    )[0].event
+    assert isinstance(event.payload, ToolActivityPayload)
+    assert type(event.payload) is ToolActivityPayload
+    assert "error" not in event.payload.model_dump()
+    await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_path) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
     store = EventLogSemanticEventStore(event_log)
@@ -304,6 +403,108 @@ async def test_turn_monitor_projects_cancellation_as_terminal_failure(tmp_path) 
     assert event.payload.code == "run_canceled"
     assert event.payload.message == "Run cancelled by user"
     assert event.payload.retryable is False
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_turn_monitor_uses_engine_outcome_after_infrastructure_success(
+    tmp_path,
+) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    emitter = SemanticEventEmitter(
+        deployment_id="deployment-1",
+        store=store,
+        semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
+    )
+    await emitter.emit_semantic(
+        session_id="session-1",
+        turn_id="run-1",
+        producer="aethergraph.engine",
+        kind=SemanticEventKindV2.WARNING_RAISED,
+        payload=WarningRaisedPayload(
+            code="partial_context",
+            message="One optional source was unavailable.",
+        ),
+    )
+
+    class _RunManager:
+        async def wait_run(self, run_id, *, return_outputs=False):
+            assert run_id == "run-1"
+            assert return_outputs is True
+            return (
+                SimpleNamespace(status=RunStatus.succeeded),
+                {
+                    "agent_outcome": {
+                        "outcome": "failed",
+                        "code": "composition_error",
+                        "summary": "The response could not be composed.",
+                        "resumable": False,
+                        "engine_turn_id": "engine-turn-7",
+                        "runtime_error": True,
+                        "diagnostics": {"phase": "composition"},
+                    }
+                },
+            )
+
+    monitor = SemanticTurnMonitor(run_manager=_RunManager(), emitter=emitter)
+    await monitor._observe(
+        run_id="run-1",
+        session_id="session-1",
+        route_id="studio-assistant",
+        integration_id="agstudio",
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert [item.event.kind for item in history] == [
+        SemanticEventKindV2.WARNING_RAISED,
+        SemanticEventKindV2.TURN_OUTCOME,
+    ]
+    payload = history[1].event.payload
+    assert isinstance(payload, TurnOutcomePayload)
+    assert payload.outcome == "failed"
+    assert payload.engine_turn_id == "engine-turn-7"
+    assert "runtime_error" not in payload.model_dump()
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_turn_monitor_does_not_invent_outcome_for_infrastructure_failure(
+    tmp_path,
+) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+
+    class _RunManager:
+        async def wait_run(self, run_id, *, return_outputs=False):
+            assert return_outputs is True
+            return SimpleNamespace(status=RunStatus.failed), None
+
+    monitor = SemanticTurnMonitor(
+        run_manager=_RunManager(),
+        emitter=SemanticEventEmitter(
+            deployment_id="deployment-1",
+            store=store,
+            semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
+        ),
+    )
+    await monitor._observe(
+        run_id="run-1",
+        session_id="session-1",
+        route_id="studio-assistant",
+        integration_id="agstudio",
+    )
+
+    assert (
+        await store.list_session(
+            deployment_id="deployment-1",
+            session_id="session-1",
+        )
+        == ()
+    )
     await event_log.close()
 
 

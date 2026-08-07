@@ -445,12 +445,14 @@ class ChannelSession:
         tool_name: str,
         status: Literal["started", "running", "waiting", "completed", "failed", "canceled"],
         message: str | None = None,
+        error: dict[str, Any] | None = None,
         channel: str | None = None,
     ) -> None:
         """Send one transport-neutral Tool lifecycle update.
 
-        The lifecycle identity and status remain structured while a concise text
-        projection keeps non-UI Channel adapters useful.
+        Intro:
+            The lifecycle identity and status remain structured while a concise text
+            projection keeps non-UI Channel adapters useful.
 
         Examples:
             Mark a Tool call as started:
@@ -477,6 +479,7 @@ class ChannelSession:
             tool_name: Non-empty registered Tool name.
             status: Exact lifecycle state for the invocation.
             message: Optional bounded human-readable activity detail.
+            error: Optional canonical prompt-safe Tool error for a failed activity.
             channel: Optional exact Channel address overriding the session origin.
 
         Returns:
@@ -502,6 +505,7 @@ class ChannelSession:
                     "tool_name": normalized_tool_name,
                     "status": status,
                     "message": message,
+                    **({"error": dict(error)} if error is not None else {}),
                 },
                 upsert_key=f"tool:{normalized_call_id}",
             )

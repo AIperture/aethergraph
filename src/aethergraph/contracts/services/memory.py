@@ -527,6 +527,16 @@ class MemoryFacadeProtocol(Protocol):
         kind: str = "state.snapshot",
     ) -> Any | None: ...
 
+    async def get_latest_state_record(
+        self,
+        key: str,
+        *,
+        tags=None,
+        level: str | None = None,
+        use_persistence: bool = False,
+        kind: str = "state.snapshot",
+    ) -> dict[str, Any] | None: ...
+
     async def list_state_history(
         self,
         key: str,

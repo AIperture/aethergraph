@@ -46,6 +46,7 @@ from aethergraph.services.integration import (
     IntegrationIngressCoordinator,
     InteractionResolver,
     ManifestRouteResolver,
+    SemanticEventEmitter,
     SQLiteExternalSessionBindingStore,
     SQLiteIngressIdempotencyStore,
     VerifiedIntegrationContext,
@@ -259,7 +260,11 @@ class _Harness:
             resource_ingress=_ResourceIngress(),
             interaction_resolver=InteractionResolver(continuations),
             inbound_events=EventLogInboundEventStore(event_log),
-            semantic_events=EventLogSemanticEventStore(event_log),
+            semantic_emitter=SemanticEventEmitter(
+                deployment_id=manifest.deployment_id,
+                store=EventLogSemanticEventStore(event_log),
+                semantic_event_protocol_version=manifest.semantic_event_protocol_version,
+            ),
             resume_router=resumes,
             root_dispatcher=dispatcher,
         )

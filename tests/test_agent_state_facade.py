@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import pytest
 
 from aethergraph.core.runtime.node_context import NodeContext
 from aethergraph.core.runtime.node_services import NodeServices
-from aethergraph.services.agent_state import AgentStateFacade
+from aethergraph.services.agent_state import AgentStateConflictError, AgentStateFacade
 
 
 @dataclass
@@ -22,11 +23,20 @@ class DemoState:
         return cls(count=int((data or {}).get("count") or 0))
 
 
+@dataclass
+class CanonicalState:
+    pairs: tuple[tuple[str, str], ...] = ()
+
+    def to_dict(self) -> dict[str, dict[str, str]]:
+        return {"pairs": dict(self.pairs)}
+
+
 class FakeMemory:
     def __init__(self) -> None:
         self.memory_scope_id = "session-1"
         self.session_id = "session-1"
         self.latest = None
+        self.latest_meta = {}
         self.record_state_calls = []
         self.record_calls = []
         self.history_calls = []
@@ -36,9 +46,20 @@ class FakeMemory:
     async def latest_state(self, key, **kwargs):
         return self.latest
 
+    async def get_latest_state_record(self, key, **kwargs):
+        if self.latest is None:
+            return None
+        return {
+            "value": self.latest,
+            "revision": int(self.latest_meta.get("revision") or 0),
+            "meta": dict(self.latest_meta),
+            "event_id": f"state-{len(self.record_state_calls)}",
+        }
+
     async def record_state(self, **kwargs):
         self.record_state_calls.append(kwargs)
         self.latest = kwargs["value"]
+        self.latest_meta = dict(kwargs.get("meta") or {})
         return SimpleNamespace(event_id=f"state-{len(self.record_state_calls)}")
 
     async def record(self, **kwargs):
@@ -95,6 +116,16 @@ async def test_agent_state_dataclass_round_trip_uses_from_dict() -> None:
     state = await store.load()
 
     assert state == DemoState(count=7)
+
+
+@pytest.mark.asyncio
+async def test_agent_state_prefers_canonical_to_dict_over_dataclass_internals() -> None:
+    memory = FakeMemory()
+    store = AgentStateFacade(memory=memory).bind(key="canonical")
+
+    await store.commit(CanonicalState(pairs=(("docs_read", "digest-1"),)))
+
+    assert memory.record_state_calls[0]["value"] == {"pairs": {"docs_read": "digest-1"}}
 
 
 @pytest.mark.asyncio
@@ -161,6 +192,56 @@ async def test_agent_state_force_load_refreshes_cached_hybrid_state() -> None:
 
     refreshed = await store.load(force=True)
     assert refreshed == DemoState(count=2)
+
+
+@pytest.mark.asyncio
+async def test_agent_state_commit_rejects_stale_expected_revision_before_write() -> None:
+    memory = FakeMemory()
+    store = AgentStateFacade(memory=memory).bind(key="demo", model=DemoState)
+    state = await store.load()
+
+    state.count = 1
+    await store.commit(state, expected_revision=0)
+
+    with pytest.raises(AgentStateConflictError) as conflict:
+        await store.commit(DemoState(count=2), expected_revision=0)
+
+    assert conflict.value.expected_revision == 0
+    assert conflict.value.actual_revision == 1
+    assert store.revision == 1
+    assert len(memory.record_state_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_state_concurrent_cas_allows_only_one_shared_handle_writer() -> None:
+    memory = FakeMemory()
+    store = AgentStateFacade(memory=memory).bind(key="demo", model=DemoState)
+    await store.load()
+
+    results = await asyncio.gather(
+        store.commit(DemoState(count=1), expected_revision=0),
+        store.commit(DemoState(count=2), expected_revision=0),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(item, AgentStateConflictError) for item in results) == 1
+    assert len(memory.record_state_calls) == 1
+    assert store.revision == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_state_new_handle_hydrates_persisted_snapshot_revision() -> None:
+    memory = FakeMemory()
+    first = AgentStateFacade(memory=memory).bind(key="demo", model=DemoState)
+    await first.commit(DemoState(count=1), expected_revision=0)
+
+    second = AgentStateFacade(memory=memory).bind(key="demo", model=DemoState)
+    loaded = await second.load()
+    await second.commit(DemoState(count=2), expected_revision=second.revision)
+
+    assert loaded == DemoState(count=1)
+    assert second.revision == 2
+    assert memory.latest_meta["revision"] == 2
 
 
 @pytest.mark.asyncio

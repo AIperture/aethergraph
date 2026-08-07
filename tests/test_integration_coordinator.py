@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from aethergraph.contracts.integration import (
+    SEMANTIC_EVENT_PROTOCOL_V2,
     ExternalIdentity,
     ExternalSessionBinding,
     HostManifest,
@@ -34,6 +35,7 @@ from aethergraph.services.integration import (
     ResourceIngress,
     ResourceIngressError,
     ResourceIngressPolicy,
+    SemanticEventEmitter,
     SQLiteIngressIdempotencyStore,
     VerifiedAttachment,
     VerifiedIntegrationContext,
@@ -178,7 +180,11 @@ def _coordinator(
         resource_ingress=ResourceIngress(container=SimpleNamespace()),
         interaction_resolver=InteractionResolver(continuation_store),
         inbound_events=EventLogInboundEventStore(event_log),
-        semantic_events=EventLogSemanticEventStore(event_log),
+        semantic_emitter=SemanticEventEmitter(
+            deployment_id=manifest.deployment_id,
+            store=EventLogSemanticEventStore(event_log),
+            semantic_event_protocol_version=manifest.semantic_event_protocol_version,
+        ),
         resume_router=resume_router,
         root_dispatcher=root_dispatcher,
     )
@@ -217,6 +223,45 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
     assert (tmp_path / "integration" / "operations.db").is_file()
     with pytest.raises(RuntimeError, match="already installed"):
         install_integration_ingress(container=container, manifest=manifest)
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_host_installer_enables_negotiated_v2_projector(tmp_path) -> None:
+    class _Channels:
+        def __init__(self) -> None:
+            self.adapters = {"slack": SimpleNamespace(capabilities=set(), send=None)}
+
+        def register_adapter(self, prefix, adapter) -> None:
+            self.adapters[prefix] = adapter
+
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    container = SimpleNamespace(
+        root=str(tmp_path),
+        integration_ingress=None,
+        host_manifest=None,
+        cont_store=InMemoryContinuationStore(secret=b"test-secret"),
+        eventlog=event_log,
+        resume_router=_ResumeRouter(),
+        run_manager=SimpleNamespace(),
+        channels=_Channels(),
+    )
+    payload = _manifest(_route()).model_dump(mode="json")
+    payload["semantic_event_protocol_version"] = SEMANTIC_EVENT_PROTOCOL_V2
+    payload["release_compatibility"]["semantic_event_protocol_version"] = SEMANTIC_EVENT_PROTOCOL_V2
+    payload["integration_routes"][0]["required_capabilities"]["semantic_event_protocol_version"] = (
+        SEMANTIC_EVENT_PROTOCOL_V2
+    )
+    manifest = HostManifest.model_validate(payload)
+
+    coordinator = install_integration_ingress(container=container, manifest=manifest)
+
+    assert coordinator.semantic_emitter.semantic_event_protocol_version == (
+        SEMANTIC_EVENT_PROTOCOL_V2
+    )
+    assert container.integration_ingress is coordinator
+    assert container.host_manifest is manifest
+    assert (tmp_path / "integration" / "operations.db").is_file()
     await event_log.close()
 
 

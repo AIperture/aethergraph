@@ -1,0 +1,151 @@
+{
+  "host_manifest": {
+    "schema_version": "aethergraph.host-manifest/v3",
+    "deployment_id": "deployment_fixture_v2",
+    "build_id": "build_fixture_v2",
+    "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "build_root": "C:/workspace/build_fixture_v2",
+    "release_uri": null,
+    "entrypoint_module": "compiled_fixture.runtime",
+    "entrypoint_symbol": "register",
+    "graph_id": "graph.fixture",
+    "entry_agent_id": "agent.fixture",
+    "environment_snapshot_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "runtime_profile_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "application_settings_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
+    "ingress_protocol_version": "aethergraph.ingress/v1",
+    "release_compatibility": {
+      "schema_version": "aethergraph.release-compatibility/v2",
+      "aethergraph_version": "0.1.0a1",
+      "engine_version": "0.1.0a1",
+      "python_abi": "cp311",
+      "platform": "win32",
+      "architecture": "AMD64",
+      "dependency_lock": [
+        {
+          "name": "aethergraph",
+          "version": "0.1.0a1",
+          "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "dependency_lock_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_capability_requirements": [
+        "canonical_ingress",
+        "origin_delivery",
+        "semantic_event_log"
+      ],
+      "service_requirements": ["channels", "runs", "sessions"],
+      "ingress_protocol_version": "aethergraph.ingress/v1",
+      "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
+      "logical_output_requirements": ["origin"],
+      "entrypoint_input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["message", "session_id"]
+      },
+      "entrypoint_output_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agent_outcome"]
+      },
+      "compiled_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provenance": {"fixture": "semantic_event_v2"}
+    },
+    "integration_routes": [
+      {
+        "schema_version": "aethergraph.integration-route/v2",
+        "route_id": "route_fixture_v2",
+        "endpoint_id": "fixture_ui",
+        "integration_id": "integration_fixture_v2",
+        "integration_kind": "ag_ui",
+        "entry_agent_id": "agent.fixture",
+        "enabled": true,
+        "match_policy": {
+          "external_tenant_ids": [],
+          "external_conversation_ids": [],
+          "external_user_ids": []
+        },
+        "session_policy": {"scope": "conversation"},
+        "required_capabilities": {
+          "schema_version": "aethergraph.integration-capabilities/v2",
+          "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
+          "event_kinds": ["tool.activity", "warning.raised", "turn.outcome"],
+          "streaming": true,
+          "interactions": false,
+          "attachments": false,
+          "cancellation": true
+        }
+      }
+    ],
+    "logical_output_bindings": {"primary": "origin"},
+    "workspace_identity": "workspace_fixture",
+    "manifest_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "events": [
+    {
+      "schema_version": "aethergraph.semantic-event/v2",
+      "event_id": "event_tool_failed",
+      "deployment_id": "deployment_fixture_v2",
+      "session_id": "session_fixture",
+      "turn_id": "run_fixture",
+      "sequence": 3,
+      "producer": "agent.fixture",
+      "timestamp": "2026-08-07T12:00:00Z",
+      "kind": "tool.activity",
+      "payload": {
+        "tool_call_id": "tool_call_fixture",
+        "tool_name": "change_agent",
+        "status": "failed",
+        "message": "The Agent changed since it was read.",
+        "error": {
+          "kind": "rejected",
+          "code": "stale_revision",
+          "summary": "The Agent changed since it was read.",
+          "retryable": true,
+          "details": {"expected_revision": 4, "actual_revision": 5},
+          "repair_hints": ["Read the current Agent and retry."],
+          "allowed_actions": ["get_agent"],
+          "reference": "tool_error_fixture"
+        }
+      },
+      "extensions": {}
+    },
+    {
+      "schema_version": "aethergraph.semantic-event/v2",
+      "event_id": "event_warning",
+      "deployment_id": "deployment_fixture_v2",
+      "session_id": "session_fixture",
+      "turn_id": "run_fixture",
+      "sequence": 4,
+      "producer": "agent.fixture",
+      "timestamp": "2026-08-07T12:00:01Z",
+      "kind": "warning.raised",
+      "payload": {
+        "code": "partial_observation",
+        "message": "One optional observation was unavailable.",
+        "details": {}
+      },
+      "extensions": {}
+    },
+    {
+      "schema_version": "aethergraph.semantic-event/v2",
+      "event_id": "event_outcome",
+      "deployment_id": "deployment_fixture_v2",
+      "session_id": "session_fixture",
+      "turn_id": "run_fixture",
+      "sequence": 5,
+      "producer": "agent.fixture",
+      "timestamp": "2026-08-07T12:00:02Z",
+      "kind": "turn.outcome",
+      "payload": {
+        "outcome": "budget_exhausted",
+        "code": "step_budget_exhausted",
+        "summary": "The Agent exhausted its step budget.",
+        "resumable": false,
+        "engine_turn_id": "engine_turn_fixture"
+      },
+      "extensions": {}
+    }
+  ]
+}
