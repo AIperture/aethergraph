@@ -9,7 +9,7 @@
         "endpoint_family": "responses",
         "endpoint_path": "/v1/responses"
       },
-      "adapter_status": "native_encoding_pending",
+      "adapter_status": "native_client_implemented",
       "modes": [
         {
           "mode": "native_client",

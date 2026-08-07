@@ -60,6 +60,7 @@ from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryCapabilities,
     ToolDiscoveryModeCapability,
     ToolTransportCheckpoint,
+    resolve_tool_discovery_capabilities,
 )
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
@@ -249,7 +250,12 @@ class GenericLLMClient(
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
-        self._tool_discovery_capabilities: ToolDiscoveryCapabilities | None = None
+        endpoint_family = _TOOL_CALL_ENDPOINT_FAMILIES.get(self.provider, "")
+        self._tool_discovery_capabilities = resolve_tool_discovery_capabilities(
+            self.provider,
+            self.model,
+            endpoint_family,
+        )
         self._tool_transport_checkpoints: dict[str, ToolTransportCheckpoint] = {}
         self._latest_tool_checkpoint_refs: dict[tuple[str, str, str], str] = {}
         self._logger = logging.getLogger("aethergraph.services.llm")

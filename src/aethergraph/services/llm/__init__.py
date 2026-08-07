@@ -42,6 +42,7 @@ from .tool_discovery import (
     ToolReplayRequirement,
     ToolResultLimitBehavior,
     ToolTransportCheckpoint,
+    resolve_tool_discovery_capabilities,
 )
 from .types import (
     LLMContextWindowExceededError,
@@ -108,4 +109,5 @@ __all__ = [
     "ToolTransportCheckpoint",
     "prepare_structured_output",
     "resolve_structured_output_capabilities",
+    "resolve_tool_discovery_capabilities",
 ]

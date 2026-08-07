@@ -704,6 +704,83 @@ class ToolDiscoveryCapabilities:
         return any(mode.supports(request) for mode in self.supported_modes)
 
 
+def resolve_tool_discovery_capabilities(
+    provider: str,
+    model: str,
+    endpoint_family: str,
+) -> ToolDiscoveryCapabilities | None:
+    """Resolve one exact built-in provider discovery capability record.
+
+    The registry contains only implemented and evidence-frozen bindings; it
+    never expands support from a provider name or model family prefix.
+
+    Examples:
+        Resolve the implemented OpenAI client mode:
+            ```python
+            record = resolve_tool_discovery_capabilities(
+                "openai", "gpt-5.6", "responses"
+            )
+            assert record is not None
+            ```
+
+        Reject an unregistered model:
+            ```python
+            record = resolve_tool_discovery_capabilities(
+                "openai", "gpt-5.5", "responses"
+            )
+            assert record is None
+            ```
+
+    Args:
+        provider: Exact normalized provider identifier.
+        model: Exact model or deployment identifier.
+        endpoint_family: Exact active transport endpoint family.
+
+    Returns:
+        ToolDiscoveryCapabilities | None: Exact implemented record, if present.
+
+    Notes:
+        Absent modes fail closed and are never substituted by an adapter.
+    """
+
+    binding = (
+        str(provider or "").strip().lower(),
+        str(model or "").strip(),
+        str(endpoint_family or "").strip(),
+    )
+    if binding == ("openai", "gpt-5.6", "responses"):
+        return ToolDiscoveryCapabilities(
+            provider="openai",
+            model="gpt-5.6",
+            endpoint_family="responses",
+            supported_modes=(
+                ToolDiscoveryModeCapability(
+                    mode="native_client",
+                    replay_requirement="previous_response",
+                    result_limit_behavior="request_bound",
+                    max_results=50,
+                    protocol_version="responses.tool_search",
+                ),
+            ),
+        )
+    if binding == ("google", "gemini-2.5-pro", "generateContent"):
+        return ToolDiscoveryCapabilities(
+            provider="google",
+            model="gemini-2.5-pro",
+            endpoint_family="generateContent",
+            supported_modes=(
+                ToolDiscoveryModeCapability(
+                    mode="engine_projected",
+                    replay_requirement="full_history",
+                    result_limit_behavior="request_bound",
+                    max_results=50,
+                    protocol_version="generateContent.v1",
+                ),
+            ),
+        )
+    return None
+
+
 __all__ = [
     "JSONScalar",
     "JSONValue",
@@ -720,4 +797,5 @@ __all__ = [
     "ToolReplayRequirement",
     "ToolResultLimitBehavior",
     "ToolTransportCheckpoint",
+    "resolve_tool_discovery_capabilities",
 ]

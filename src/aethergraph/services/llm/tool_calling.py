@@ -307,6 +307,9 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
 
     if request is None:
         return ""
+    fingerprint_tools = request.tools
+    if request.discovery is not None and request.discovery.mode == "native_client":
+        fingerprint_tools = tuple(tool for tool in request.tools if tool.exposure != "deferred")
     payload = {
         "choice": request.choice,
         "max_calls": request.max_calls,
@@ -325,7 +328,7 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
                     }
                 ),
             }
-            for tool in request.tools
+            for tool in fingerprint_tools
         ],
         "discovery": (
             None

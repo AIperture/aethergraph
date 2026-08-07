@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import hashlib
 import json
 from typing import Any
 
@@ -15,6 +16,11 @@ from aethergraph.services.llm.tool_calling import (
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
+    ToolDefinition,
+)
+from aethergraph.services.llm.tool_discovery import (
+    ToolDiscoveryEvent,
+    ToolTransportCheckpoint,
 )
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
@@ -33,20 +39,358 @@ DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 
 
-def _openai_tool_call_response(data: dict[str, Any]) -> ToolCallResponse:
-    """Normalize OpenAI response items without flattening Tool calls into text."""
+def _openai_function_tool(
+    tool: ToolDefinition,
+    *,
+    defer_loading: bool | None = None,
+) -> dict[str, Any]:
+    """Encode one provider-neutral Tool as an OpenAI function Tool.
 
-    calls: list[ToolCall] = []
+    The encoding preserves the canonical schema and adds deferred loading only
+    when the caller explicitly requests it.
+
+    Examples:
+        Encode an immediate function:
+            ```python
+            value = _openai_function_tool(tool)
+            assert value["type"] == "function"
+            ```
+
+        Encode a deferred function:
+            ```python
+            value = _openai_function_tool(tool, defer_loading=True)
+            assert value["defer_loading"] is True
+            ```
+
+    Args:
+        tool: Validated provider-neutral Tool definition.
+        defer_loading: Optional exact OpenAI deferred-loading flag.
+
+    Returns:
+        dict[str, Any]: Detached Responses API function Tool object.
+
+    Notes:
+        Provider-only fields never enter the shared Tool definition contract.
+    """
+
+    value: dict[str, Any] = {
+        "type": "function",
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": tool.input_schema,
+        "strict": False,
+    }
+    if defer_loading is not None:
+        value["defer_loading"] = bool(defer_loading)
+    return value
+
+
+def _openai_request_tools(
+    request: ToolCallRequest,
+    *,
+    activated_deferred: bool = False,
+) -> list[dict[str, Any]]:
+    """Encode one OpenAI Tool array with exact discovery framing.
+
+    Namespaced definitions remain grouped for native discovery, while client
+    search is appended as the final stable Tool declaration.
+
+    Examples:
+        Encode ordinary Tool calling:
+            ```python
+            values = _openai_request_tools(request)
+            assert values[0]["type"] == "function"
+            ```
+
+        Encode native client discovery:
+            ```python
+            values = _openai_request_tools(discovery_request)
+            assert values[-1]["type"] == "tool_search"
+            ```
+
+    Args:
+        request: Validated provider-neutral Tool-call request.
+        activated_deferred: Treat currently projected deferred Tools as callable.
+
+    Returns:
+        list[dict[str, Any]]: Ordered Responses API Tool declarations.
+
+    Notes:
+        Native hosted discovery is not encoded until its result bound is bindable.
+    """
+
+    discovery_mode = request.discovery.mode if request.discovery is not None else None
+    grouped: dict[str, dict[str, Any]] = {}
+    result: list[dict[str, Any]] = []
+    for tool in request.tools:
+        if (
+            discovery_mode == "native_client"
+            and tool.exposure == "deferred"
+            and not activated_deferred
+        ):
+            continue
+        deferred = (
+            discovery_mode == "native_hosted"
+            and tool.exposure == "deferred"
+            and not activated_deferred
+        )
+        encoded = _openai_function_tool(
+            tool,
+            defer_loading=True if deferred else None,
+        )
+        if discovery_mode is None or tool.namespace is None:
+            result.append(encoded)
+            continue
+        namespace = grouped.get(tool.namespace.name)
+        if namespace is None:
+            namespace = {
+                "type": "namespace",
+                "name": tool.namespace.name,
+                "description": tool.namespace.description,
+                "tools": [],
+            }
+            grouped[tool.namespace.name] = namespace
+            result.append(namespace)
+        namespace["tools"].append(encoded)
+    if discovery_mode == "native_client":
+        result.append(
+            {
+                "type": "tool_search",
+                "execution": "client",
+                "description": "Find project tools needed to continue the task.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"goal": {"type": "string"}},
+                    "required": ["goal"],
+                    "additionalProperties": False,
+                },
+            }
+        )
+    elif discovery_mode == "native_hosted":
+        raise LLMToolCallResponseError(
+            code="unsupported_discovery_mode",
+            message="OpenAI hosted Tool search is not bound to an enforceable result limit.",
+        )
+    return result
+
+
+def _openai_checkpoint(
+    *,
+    request: ToolCallRequest,
+    model: str,
+    response_id: str,
+    state: str,
+    call_id: str = "",
+) -> ToolTransportCheckpoint:
+    """Build one integrity-bound OpenAI Tool-search checkpoint.
+
+    Only bounded replay facts are retained; raw response history and Tool
+    schemas remain outside the checkpoint payload.
+
+    Examples:
+        Preserve a pending client search:
+            ```python
+            checkpoint = _openai_checkpoint(
+                request=request,
+                model="gpt-5.6",
+                response_id="resp_1",
+                state="pending_search",
+                call_id="search_1",
+            )
+            assert checkpoint.revision == 1
+            ```
+
+        Advance a consumed checkpoint:
+            ```python
+            checkpoint = _openai_checkpoint(
+                request=continued_request,
+                model="gpt-5.6",
+                response_id="resp_2",
+                state="consumed",
+            )
+            assert checkpoint.revision == 2
+            ```
+
+    Args:
+        request: Exact same-turn discovery request.
+        model: Exact Responses model binding.
+        response_id: Provider response identity for continuation.
+        state: Private replay state, pending_search or consumed.
+        call_id: Pending client Tool-search call identity, when present.
+
+    Returns:
+        ToolTransportCheckpoint: Bounded latest same-turn replay checkpoint.
+
+    Notes:
+        The integrity digest covers the complete canonical opaque payload.
+    """
+
+    previous = request.transport_checkpoint
+    revision = 1 if previous is None else previous.revision + 1
+    payload = {
+        "state": state,
+        "response_id": response_id,
+        "call_id": call_id,
+        "visible_tool_names": [tool.name for tool in request.tools],
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return ToolTransportCheckpoint(
+        checkpoint_id=f"openai_{revision}_{digest[:16]}",
+        revision=revision,
+        provider="openai",
+        model=model,
+        contract_version="responses.tool_search",
+        turn_id=str(request.turn_id or ""),
+        integrity_digest=digest,
+        opaque_payload=payload,
+    )
+
+
+def _openai_checkpoint_payload(
+    checkpoint: ToolTransportCheckpoint,
+) -> dict[str, Any]:
+    """Validate and return one private OpenAI checkpoint payload.
+
+    Adapter replay fails closed when provider, contract, payload, or digest
+    identity differs from the exact Responses Tool-search contract.
+
+    Examples:
+        Restore a valid payload:
+            ```python
+            payload = _openai_checkpoint_payload(checkpoint)
+            assert payload["state"] == "pending_search"
+            ```
+
+        Reject a foreign contract:
+            ```python
+            try:
+                _openai_checkpoint_payload(foreign_checkpoint)
+            except ValueError:
+                pass
+            ```
+
+    Args:
+        checkpoint: Candidate same-turn provider replay checkpoint.
+
+    Returns:
+        dict[str, Any]: Detached validated private replay mapping.
+
+    Notes:
+        Validation never includes private payload contents in an error message.
+    """
+
+    if checkpoint.provider != "openai" or checkpoint.contract_version != "responses.tool_search":
+        raise ValueError("OpenAI Tool checkpoint binding does not match")
+    payload = dict(checkpoint.opaque_payload or {})
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if digest != checkpoint.integrity_digest:
+        raise ValueError("OpenAI Tool checkpoint integrity validation failed")
+    if payload.get("state") not in {"pending_search", "consumed"}:
+        raise ValueError("OpenAI Tool checkpoint state is invalid")
+    if payload["state"] == "pending_search" and (
+        not str(payload.get("response_id") or "").strip()
+        or not str(payload.get("call_id") or "").strip()
+    ):
+        raise ValueError("OpenAI pending Tool checkpoint identity is invalid")
+    visible_names = payload.get("visible_tool_names")
+    if not isinstance(visible_names, list) or not all(
+        isinstance(name, str) and name.strip() for name in visible_names
+    ):
+        raise ValueError("OpenAI Tool checkpoint visibility state is invalid")
+    return payload
+
+
+def _openai_tool_call_response(
+    data: dict[str, Any],
+    *,
+    tool_request: ToolCallRequest,
+    model: str,
+) -> ToolCallResponse:
+    """Normalize ordered OpenAI Tool and discovery response items.
+
+    Client Tool-search calls become provider-neutral discovery events and
+    function calls retain their exact provider order and call identity.
+
+    Examples:
+        Normalize a function call:
+            ```python
+            response = _openai_tool_call_response(data, tool_request=request, model=model)
+            assert response.calls[0].call_id
+            ```
+
+        Normalize a client search:
+            ```python
+            response = _openai_tool_call_response(search_data, tool_request=request, model=model)
+            assert response.discovery_events[0].source == "provider_client"
+            ```
+
+    Args:
+        data: Detached OpenAI Responses payload.
+        tool_request: Exact request used for this provider decision.
+        model: Exact Responses model binding.
+
+    Returns:
+        ToolCallResponse: Ordered provider-neutral items and latest checkpoint.
+
+    Notes:
+        Private replay state is carried only by `transport_checkpoint`.
+    """
+
+    items: list[ToolDiscoveryEvent | ToolCall] = []
     text_parts: list[str] = []
+    search_call_ids: list[str] = []
     for output_index, item in enumerate(list(data.get("output") or [])):
         if not isinstance(item, dict):
+            continue
+        if item.get("type") == "tool_search_call":
+            discovery = tool_request.discovery
+            execution = str(item.get("execution") or "")
+            if discovery is None or discovery.mode != "native_client" or execution != "client":
+                raise LLMToolCallResponseError(
+                    code="discovery_mode_mismatch",
+                    message="OpenAI returned Tool search outside native client mode.",
+                )
+            call_id = str(item.get("call_id") or "").strip()
+            if not call_id:
+                raise LLMToolCallResponseError(
+                    code="discovery_reference_missing",
+                    message="OpenAI client Tool search omitted its call id.",
+                )
+            arguments = _openai_tool_arguments(
+                item.get("arguments"),
+                call_name="tool_search",
+            )
+            query = str(arguments.get("goal") or arguments.get("query") or "").strip()
+            items.append(
+                ToolDiscoveryEvent(
+                    event_id=str(item.get("id") or call_id),
+                    mode="native_client",
+                    source="provider_client",
+                    arguments=arguments,
+                    query=query or None,
+                    provider_reference_ids=(call_id,),
+                )
+            )
+            search_call_ids.append(call_id)
             continue
         if item.get("type") == "function_call":
             arguments = _openai_tool_arguments(
                 item.get("arguments"),
                 call_name=str(item.get("name") or ""),
             )
-            calls.append(
+            items.append(
                 ToolCall(
                     call_id=str(
                         item.get("call_id") or item.get("id") or f"openai-call-{output_index}"
@@ -73,14 +417,44 @@ def _openai_tool_call_response(data: dict[str, Any]) -> ToolCallResponse:
                 )
             if "text" in part:
                 text_parts.append(str(part.get("text") or ""))
+    if len(search_call_ids) > 1:
+        raise LLMToolCallResponseError(
+            code="discovery_cardinality_invalid",
+            message="OpenAI returned more than one pending client Tool search.",
+        )
+    checkpoint: ToolTransportCheckpoint | None = None
+    response_id = str(data.get("id") or "").strip()
+    if search_call_ids:
+        if not response_id:
+            raise LLMToolCallResponseError(
+                code="discovery_reference_missing",
+                message="OpenAI client Tool search omitted its response id.",
+            )
+        checkpoint = _openai_checkpoint(
+            request=tool_request,
+            model=model,
+            response_id=response_id,
+            state="pending_search",
+            call_id=search_call_ids[0],
+        )
+    elif tool_request.transport_checkpoint is not None:
+        prior_payload = _openai_checkpoint_payload(tool_request.transport_checkpoint)
+        if prior_payload["state"] == "pending_search":
+            checkpoint = _openai_checkpoint(
+                request=tool_request,
+                model=model,
+                response_id=response_id,
+                state="consumed",
+            )
     return ToolCallResponse(
-        items=tuple(calls),
+        items=tuple(items),
         text="".join(text_parts),
         finish_reason=str(data.get("status") or ""),
         provider_metadata={
-            "response_id": str(data.get("id") or ""),
+            "response_id": response_id,
             "output_item_count": len(list(data.get("output") or [])),
         },
+        transport_checkpoint=checkpoint,
     )
 
 
@@ -174,20 +548,53 @@ class _OpenAIMixin:
                 }
             }
 
+        checkpoint_payload: dict[str, Any] | None = None
+        if tool_request is not None and tool_request.transport_checkpoint is not None:
+            checkpoint_payload = _openai_checkpoint_payload(tool_request.transport_checkpoint)
+            if checkpoint_payload["state"] == "pending_search":
+                visible_names = {
+                    str(name) for name in list(checkpoint_payload.get("visible_tool_names") or [])
+                }
+                loaded_tools = [
+                    tool
+                    for tool in tool_request.tools
+                    if tool.exposure == "deferred" and tool.name not in visible_names
+                ]
+                if not loaded_tools:
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_missing",
+                        message="OpenAI client Tool search has no newly activated result.",
+                    )
+                assert tool_request.discovery is not None
+                if len(loaded_tools) > tool_request.discovery.max_results:
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_limit_exceeded",
+                        message="OpenAI client Tool-search results exceed the request bound.",
+                    )
+                body["previous_response_id"] = str(checkpoint_payload.get("response_id") or "")
+                body["input"] = [
+                    {
+                        "type": "tool_search_output",
+                        "execution": "client",
+                        "call_id": str(checkpoint_payload.get("call_id") or ""),
+                        "status": "completed",
+                        "tools": [
+                            _openai_function_tool(tool, defer_loading=True) for tool in loaded_tools
+                        ],
+                    }
+                ]
+
         # Tools (Responses API style)
         if tool_request is not None:
-            body["tools"] = [
-                {
-                    "type": "function",
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.input_schema,
-                    "strict": False,
-                }
-                for tool in tool_request.tools
-            ]
-            body["tool_choice"] = tool_request.choice
-            body["parallel_tool_calls"] = tool_request.max_calls > 1
+            if checkpoint_payload is None or checkpoint_payload["state"] != "pending_search":
+                body["tools"] = _openai_request_tools(
+                    tool_request,
+                    activated_deferred=(
+                        checkpoint_payload is not None and checkpoint_payload["state"] == "consumed"
+                    ),
+                )
+                body["tool_choice"] = tool_request.choice
+                body["parallel_tool_calls"] = tool_request.max_calls > 1
         elif tools is not None:
             body["tools"] = tools
         if tool_choice is not None:
@@ -230,7 +637,17 @@ class _OpenAIMixin:
             # Existing parsing logic for message-only flows
             output = data.get("output")
             if tool_request is not None:
-                return ProviderCallResult((_openai_tool_call_response(data), usage), metadata)
+                return ProviderCallResult(
+                    (
+                        _openai_tool_call_response(
+                            data,
+                            tool_request=tool_request,
+                            model=model,
+                        ),
+                        usage,
+                    ),
+                    metadata,
+                )
             txt = ""
 
             if isinstance(output, list) and output:
