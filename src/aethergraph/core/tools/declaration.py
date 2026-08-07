@@ -9,9 +9,135 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from .schema import normalize_tool_args_schema
 
-TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v4"
+TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v5"
 TOOL_APPROVAL_TIERS = frozenset({"none", "expensive", "always"})
 TOOL_AVAILABILITY = frozenset({"normal", "plan_proposal", "plan_lifecycle"})
+TOOL_EXPOSURES = frozenset({"immediate", "deferred"})
+
+
+def _normalized_discovery_strings(
+    values: list[str] | tuple[str, ...],
+    *,
+    field_name: str,
+) -> tuple[str, ...]:
+    normalized = tuple(str(value or "").strip() for value in values)
+    if any(not value for value in normalized):
+        raise ValueError(f"tool discovery {field_name} must not contain empty values")
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"tool discovery {field_name} must not contain duplicates")
+    if any(len(value) > 200 for value in normalized):
+        raise ValueError(f"tool discovery {field_name} values must not exceed 200 characters")
+    return normalized
+
+
+@dataclass(frozen=True)
+class ToolDiscoveryMetadata:
+    """Declare compact provider-neutral discovery metadata for one Tool."""
+
+    namespace: str
+    summary: str = ""
+    aliases: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    effects: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate and normalize compact discovery metadata.
+
+        Metadata is authored, schema-free catalog text. It never grants Tool
+        execution permission or replaces runtime policy checks.
+
+        Examples:
+            Declare a searchable change Tool:
+                ```python
+                metadata = ToolDiscoveryMetadata(
+                    namespace="change",
+                    summary="Replace Agent Tool assignments.",
+                    aliases=("assign tools",),
+                    tags=("agent",),
+                    effects=("project_write_proposal",),
+                )
+                assert metadata.namespace == "change"
+                ```
+
+            Declare namespace-only metadata:
+                ```python
+                metadata = ToolDiscoveryMetadata(namespace="read")
+                assert metadata.summary == ""
+                ```
+
+        Args:
+            self: Newly initialized discovery metadata.
+
+        Returns:
+            None: Validates and normalizes the frozen declaration.
+
+        Notes:
+            Full Tool schemas remain in the executable Tool definition and are
+            intentionally excluded from this value.
+        """
+
+        namespace = str(self.namespace or "").strip()
+        if re.fullmatch(r"[a-z][a-z0-9_.-]{0,99}", namespace) is None:
+            raise ValueError("tool discovery namespace must be a lowercase stable identifier")
+        summary = str(self.summary or "").strip()
+        if len(summary) > 500:
+            raise ValueError("tool discovery summary must not exceed 500 characters")
+        object.__setattr__(self, "namespace", namespace)
+        object.__setattr__(self, "summary", summary)
+        object.__setattr__(
+            self,
+            "aliases",
+            _normalized_discovery_strings(self.aliases, field_name="aliases"),
+        )
+        object.__setattr__(
+            self,
+            "tags",
+            _normalized_discovery_strings(self.tags, field_name="tags"),
+        )
+        object.__setattr__(
+            self,
+            "effects",
+            _normalized_discovery_strings(self.effects, field_name="effects"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the canonical serialized discovery metadata.
+
+        The projection uses ordered lists so contract digests remain stable
+        across process boundaries and JSON encoders.
+
+        Examples:
+            Serialize complete metadata:
+                ```python
+                metadata = ToolDiscoveryMetadata(
+                    namespace="read", aliases=("lookup",)
+                )
+                assert metadata.to_dict()["aliases"] == ["lookup"]
+                ```
+
+            Serialize empty optional fields:
+                ```python
+                metadata = ToolDiscoveryMetadata(namespace="read")
+                assert metadata.to_dict()["effects"] == []
+                ```
+
+        Args:
+            self: Normalized discovery metadata.
+
+        Returns:
+            dict[str, Any]: Detached canonical metadata mapping.
+
+        Notes:
+            The returned mapping contains no executable handler or schema.
+        """
+
+        return {
+            "namespace": self.namespace,
+            "summary": self.summary,
+            "aliases": list(self.aliases),
+            "tags": list(self.tags),
+            "effects": list(self.effects),
+        }
 
 
 def schema_from_annotation(annotation: Any) -> dict[str, Any]:
@@ -99,10 +225,12 @@ class ToolDefinition:
     slot_outputs: tuple[dict[str, Any], ...] = ()
     availability: Literal["normal", "plan_proposal", "plan_lifecycle"] = "normal"
     approval: Literal["none", "expensive", "always"] = "none"
+    exposure: Literal["immediate", "deferred"] = "immediate"
+    discovery: ToolDiscoveryMetadata | None = None
     injections: tuple[tuple[str, str], ...] = ()
     implementation_module: str = ""
     implementation_symbol: str = ""
-    api_version: Literal["aethergraph.tool/v4"] = TOOL_DEFINITION_API_VERSION
+    api_version: Literal["aethergraph.tool/v5"] = TOOL_DEFINITION_API_VERSION
     kind: Literal["tool"] = "tool"
 
     def to_dict(self) -> dict[str, Any]:
@@ -120,6 +248,8 @@ class ToolDefinition:
             "slot_outputs": deepcopy(list(self.slot_outputs)),
             "availability": self.availability,
             "approval": self.approval,
+            "exposure": self.exposure,
+            "discovery": (None if self.discovery is None else self.discovery.to_dict()),
             "injections": [
                 {"parameter": parameter, "kind": kind} for parameter, kind in self.injections
             ],
@@ -142,11 +272,19 @@ def build_tool_definition(
     slot_outputs: list[Any] | tuple[Any, ...] | None,
     availability: str,
     approval: str,
+    exposure: str,
+    discovery: ToolDiscoveryMetadata | None,
 ) -> ToolDefinition:
     if approval not in TOOL_APPROVAL_TIERS:
         raise ValueError("tool approval must be none, expensive, or always")
     if availability not in TOOL_AVAILABILITY:
         raise ValueError("tool availability must be normal, plan_proposal, or plan_lifecycle")
+    if exposure not in TOOL_EXPOSURES:
+        raise ValueError("tool exposure must be immediate or deferred")
+    if discovery is not None and not isinstance(discovery, ToolDiscoveryMetadata):
+        raise TypeError("tool discovery must be ToolDiscoveryMetadata or None")
+    if exposure == "deferred" and discovery is None:
+        raise ValueError("deferred tools require discovery metadata")
     if result_schema is not None and result_schema.get("type") != "object":
         raise ValueError(
             "tool result_schema must be an object schema for the structured " "result data payload"
@@ -214,6 +352,8 @@ def build_tool_definition(
         slot_outputs=normalized_slot_outputs,
         availability=availability,  # type: ignore[arg-type]
         approval=approval,  # type: ignore[arg-type]
+        exposure=exposure,  # type: ignore[arg-type]
+        discovery=discovery,
         injections=tuple(injections),
         implementation_module=str(getattr(impl, "__module__", "") or ""),
         implementation_symbol=str(getattr(impl, "__name__", "") or ""),
@@ -270,6 +410,8 @@ __all__ = [
     "TOOL_APPROVAL_TIERS",
     "TOOL_AVAILABILITY",
     "TOOL_DEFINITION_API_VERSION",
+    "TOOL_EXPOSURES",
+    "ToolDiscoveryMetadata",
     "ToolDefinition",
     "build_tool_definition",
     "injection_kind",

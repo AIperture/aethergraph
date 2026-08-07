@@ -10,7 +10,7 @@ from ..graph.graph_builder import current_builder
 from ..graph.node_handle import NodeHandle
 from ..runtime.injection import resolve_node_context_param
 from ..runtime.runtime_registry import current_registry
-from .declaration import build_tool_definition
+from .declaration import ToolDiscoveryMetadata, build_tool_definition
 from .waitable import DualStageTool, waitable_tool
 
 
@@ -138,6 +138,8 @@ def tool(
     slot_outputs: list[Any] | tuple[Any, ...] | None = None,
     availability: str = "normal",
     approval: str = "none",
+    exposure: str = "immediate",
+    discovery: ToolDiscoveryMetadata | None = None,
 ):
     """Declare a dual-mode Tool for graph and immediate execution.
 
@@ -173,6 +175,9 @@ def tool(
         slot_outputs: Optional semantic slot-output declarations.
         availability: Runtime surface stage for the Tool.
         approval: Approval tier for Tool execution.
+        exposure: Whether the Tool is immediately surfaced or requires an
+            Engine-owned activation lease.
+        discovery: Optional compact provider-neutral discovery metadata.
 
     Returns:
         Callable: Decorator that attaches the canonical Tool definition and
@@ -182,6 +187,7 @@ def tool(
         Slot output declarations contain semantic keys only. The executed Tool
         reports actual resource effects in its result. Tool definitions always
         store one normalized full object schema regardless of authoring form.
+        Deferred Tools require explicit discovery metadata.
     """
 
     def _wrap(obj):
@@ -201,6 +207,8 @@ def tool(
             slot_outputs=slot_outputs,
             availability=availability,
             approval=approval,
+            exposure=exposure,
+            discovery=discovery,
         )
         declared_inputs = list(definition.inputs)
 

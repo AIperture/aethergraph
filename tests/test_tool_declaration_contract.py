@@ -4,7 +4,7 @@ from typing import Literal
 
 import pytest
 
-from aethergraph import tool
+from aethergraph import ToolDiscoveryMetadata, tool
 from aethergraph.core.tools.schema import validate_tool_args
 
 
@@ -22,7 +22,9 @@ def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
 
     definition = search.__aether_tool_definition__
 
-    assert definition.api_version == "aethergraph.tool/v4"
+    assert definition.api_version == "aethergraph.tool/v5"
+    assert definition.exposure == "immediate"
+    assert definition.discovery is None
     assert definition.name == "search"
     assert definition.approval == "expensive"
     assert definition.inputs == ("query", "limit")
@@ -62,6 +64,42 @@ def test_tool_supports_literal_schema_and_explicit_public_name() -> None:
         "enum": ["first", "second"],
         "type": "string",
     }
+
+
+def test_tool_declares_deferred_exposure_and_discovery_metadata() -> None:
+    @tool(
+        description="Read one document.",
+        exposure="deferred",
+        discovery=ToolDiscoveryMetadata(
+            namespace="docs",
+            summary="Read a workspace document.",
+            aliases=("open file",),
+            tags=("read",),
+            effects=("workspace_read",),
+        ),
+    )
+    def read_document(path: str) -> dict[str, str]:
+        return {"path": path}
+
+    definition = read_document.__aether_tool_definition__
+
+    assert definition.exposure == "deferred"
+    assert definition.discovery is not None
+    assert definition.to_dict()["discovery"] == {
+        "namespace": "docs",
+        "summary": "Read a workspace document.",
+        "aliases": ["open file"],
+        "tags": ["read"],
+        "effects": ["workspace_read"],
+    }
+
+
+def test_deferred_tool_requires_discovery_metadata() -> None:
+    with pytest.raises(ValueError, match="require discovery metadata"):
+
+        @tool(exposure="deferred")
+        def hidden_without_metadata() -> None:
+            return None
 
 
 def test_tool_normalizes_compact_argument_schema_to_canonical_object() -> None:
