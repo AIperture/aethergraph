@@ -179,6 +179,7 @@ def test_native_client_deferred_activation_preserves_cache_contract() -> None:
         tools=(immediate, deferred),
         discovery=ToolDiscoveryRequest("native_client"),
         turn_id="turn_1",
+        active_tool_names=("read_document",),
     )
 
     assert tool_call_request_fingerprint(initial) == tool_call_request_fingerprint(activated)
@@ -374,8 +375,19 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
     immediate = ToolDefinition("finish", "Finish.", {"type": "object"})
+    deferred = ToolDefinition(
+        "read_document",
+        "Read one document.",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        exposure="deferred",
+        namespace=ToolNamespace("docs", "Document operations."),
+    )
     initial_request = ToolCallRequest(
-        tools=(immediate,),
+        tools=(immediate, deferred),
         discovery=ToolDiscoveryRequest("native_client", max_results=5),
         turn_id="turn_1",
     )
@@ -393,18 +405,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tools"][-1]["execution"] == "client"
-
-    deferred = ToolDefinition(
-        "read_document",
-        "Read one document.",
-        {
-            "type": "object",
-            "properties": {"path": {"type": "string"}},
-            "required": ["path"],
-        },
-        exposure="deferred",
-        namespace=ToolNamespace("docs", "Document operations."),
-    )
+    assert all(tool.get("name") != "read_document" for tool in fake_http.last_json["tools"])
     fake_http.payload = {
         "id": "resp_call_1",
         "status": "completed",
@@ -421,6 +422,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         tools=(immediate, deferred),
         discovery=ToolDiscoveryRequest("native_client", max_results=5),
         turn_id="turn_1",
+        active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
     )
 
@@ -488,6 +490,7 @@ async def test_openai_consumed_checkpoint_does_not_replay_search_output() -> Non
         tools=(immediate, deferred),
         discovery=ToolDiscoveryRequest("native_client"),
         turn_id="turn_1",
+        active_tool_names=("read_document",),
         transport_checkpoint=pending,
     )
     consumed = _openai_checkpoint(
@@ -516,6 +519,7 @@ async def test_openai_consumed_checkpoint_does_not_replay_search_output() -> Non
         tools=(immediate, deferred),
         discovery=ToolDiscoveryRequest("native_client"),
         turn_id="turn_1",
+        active_tool_names=("read_document",),
         transport_checkpoint=consumed,
     )
 

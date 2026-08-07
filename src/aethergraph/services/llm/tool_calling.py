@@ -226,6 +226,7 @@ class ToolCallRequest:
     max_calls: int = 1
     discovery: ToolDiscoveryRequest | None = None
     turn_id: str | None = None
+    active_tool_names: tuple[str, ...] = ()
     transport_checkpoint: ToolTransportCheckpoint | None = None
 
     def __post_init__(self) -> None:
@@ -252,6 +253,7 @@ class ToolCallRequest:
                     max_calls=4,
                     discovery=ToolDiscoveryRequest("native_client"),
                     turn_id="turn-1",
+                    active_tool_names=("read",),
                 )
                 assert request.max_calls == 4
                 assert request.turn_id == "turn-1"
@@ -283,6 +285,14 @@ class ToolCallRequest:
             raise ValueError("Tool-call request max_calls must be between 1 and 4")
         if self.discovery is not None and not isinstance(self.discovery, ToolDiscoveryRequest):
             raise TypeError("Tool-call request discovery must be ToolDiscoveryRequest")
+        active_tool_names = tuple(str(name or "").strip() for name in self.active_tool_names)
+        if any(not name for name in active_tool_names):
+            raise ValueError("Active Tool names must be non-empty")
+        if len(active_tool_names) != len(set(active_tool_names)):
+            raise ValueError("Active Tool names must be unique")
+        unknown_active_names = set(active_tool_names) - set(names)
+        if unknown_active_names:
+            raise ValueError("Active Tool names must exist in the request catalog")
         turn_id = None if self.turn_id is None else str(self.turn_id).strip()
         if self.discovery is not None and not turn_id:
             raise ValueError("Tool discovery requests require a semantic turn_id")
@@ -300,6 +310,7 @@ class ToolCallRequest:
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "max_calls", int(self.max_calls))
         object.__setattr__(self, "turn_id", turn_id or None)
+        object.__setattr__(self, "active_tool_names", active_tool_names)
 
 
 def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:

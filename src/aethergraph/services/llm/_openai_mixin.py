@@ -87,8 +87,6 @@ def _openai_function_tool(
 
 def _openai_request_tools(
     request: ToolCallRequest,
-    *,
-    activated_deferred: bool = False,
 ) -> list[dict[str, Any]]:
     """Encode one OpenAI Tool array with exact discovery framing.
 
@@ -110,7 +108,6 @@ def _openai_request_tools(
 
     Args:
         request: Validated provider-neutral Tool-call request.
-        activated_deferred: Treat currently projected deferred Tools as callable.
 
     Returns:
         list[dict[str, Any]]: Ordered Responses API Tool declarations.
@@ -120,19 +117,20 @@ def _openai_request_tools(
     """
 
     discovery_mode = request.discovery.mode if request.discovery is not None else None
+    active_names = set(request.active_tool_names)
     grouped: dict[str, dict[str, Any]] = {}
     result: list[dict[str, Any]] = []
     for tool in request.tools:
         if (
             discovery_mode == "native_client"
             and tool.exposure == "deferred"
-            and not activated_deferred
+            and tool.name not in active_names
         ):
             continue
         deferred = (
             discovery_mode == "native_hosted"
             and tool.exposure == "deferred"
-            and not activated_deferred
+            and tool.name not in active_names
         )
         encoded = _openai_function_tool(
             tool,
@@ -231,7 +229,7 @@ def _openai_checkpoint(
         "state": state,
         "response_id": response_id,
         "call_id": call_id,
-        "visible_tool_names": [tool.name for tool in request.tools],
+        "active_tool_names": list(request.active_tool_names),
     }
     canonical = json.dumps(
         payload,
@@ -304,11 +302,11 @@ def _openai_checkpoint_payload(
         or not str(payload.get("call_id") or "").strip()
     ):
         raise ValueError("OpenAI pending Tool checkpoint identity is invalid")
-    visible_names = payload.get("visible_tool_names")
-    if not isinstance(visible_names, list) or not all(
-        isinstance(name, str) and name.strip() for name in visible_names
+    active_names = payload.get("active_tool_names")
+    if not isinstance(active_names, list) or not all(
+        isinstance(name, str) and name.strip() for name in active_names
     ):
-        raise ValueError("OpenAI Tool checkpoint visibility state is invalid")
+        raise ValueError("OpenAI Tool checkpoint activation state is invalid")
     return payload
 
 
@@ -552,13 +550,14 @@ class _OpenAIMixin:
         if tool_request is not None and tool_request.transport_checkpoint is not None:
             checkpoint_payload = _openai_checkpoint_payload(tool_request.transport_checkpoint)
             if checkpoint_payload["state"] == "pending_search":
-                visible_names = {
-                    str(name) for name in list(checkpoint_payload.get("visible_tool_names") or [])
+                prior_active_names = {
+                    str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
                 }
+                newly_active_names = set(tool_request.active_tool_names) - prior_active_names
                 loaded_tools = [
                     tool
                     for tool in tool_request.tools
-                    if tool.exposure == "deferred" and tool.name not in visible_names
+                    if tool.exposure == "deferred" and tool.name in newly_active_names
                 ]
                 if not loaded_tools:
                     raise LLMToolCallResponseError(
@@ -587,12 +586,7 @@ class _OpenAIMixin:
         # Tools (Responses API style)
         if tool_request is not None:
             if checkpoint_payload is None or checkpoint_payload["state"] != "pending_search":
-                body["tools"] = _openai_request_tools(
-                    tool_request,
-                    activated_deferred=(
-                        checkpoint_payload is not None and checkpoint_payload["state"] == "consumed"
-                    ),
-                )
+                body["tools"] = _openai_request_tools(tool_request)
                 body["tool_choice"] = tool_request.choice
                 body["parallel_tool_calls"] = tool_request.max_calls > 1
         elif tools is not None:
