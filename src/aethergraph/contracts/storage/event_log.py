@@ -15,6 +15,19 @@ It is used in various parts of the system for logging events with metadata.
 """
 
 
+class StateSnapshotConflictError(RuntimeError):
+    """Report a failed storage-level state snapshot revision comparison."""
+
+    def __init__(self, *, key: str, expected_revision: int, actual_revision: int) -> None:
+        self.key = str(key)
+        self.expected_revision = int(expected_revision)
+        self.actual_revision = int(actual_revision)
+        super().__init__(
+            f"State snapshot {self.key!r} revision changed: expected "
+            f"{self.expected_revision}, actual {self.actual_revision}"
+        )
+
+
 class EventLog(Protocol):
     async def append(self, evt: dict) -> int:
         """Append one event and return its durable cursor.
@@ -38,6 +51,52 @@ class EventLog(Protocol):
 
         Notes:
             Cursor ordering is the history and reconnect ordering contract.
+        """
+        ...
+
+    async def append_state_snapshot_if_revision(
+        self,
+        evt: dict,
+        *,
+        state_key: str,
+        expected_revision: int,
+    ) -> int:
+        """Append one state snapshot only at the expected durable revision.
+
+        Intro:
+            The revision read and append occur in one backend transaction or
+            cross-process critical section for the snapshot scope, kind, and key.
+
+        Examples:
+            Create the first state revision:
+            ```python
+            cursor = await event_log.append_state_snapshot_if_revision(
+                event,
+                state_key="agent:writer",
+                expected_revision=0,
+            )
+            ```
+
+            Reject a stale writer:
+            ```python
+            with pytest.raises(StateSnapshotConflictError):
+                await event_log.append_state_snapshot_if_revision(
+                    stale_event,
+                    state_key="agent:writer",
+                    expected_revision=0,
+                )
+            ```
+
+        Args:
+            evt: Complete state snapshot Event mapping to append.
+            state_key: Exact logical state key carried by the snapshot.
+            expected_revision: Exact current durable enclosing revision.
+
+        Returns:
+            int: Durable monotonically increasing event-log cursor.
+
+        Notes:
+            The appended payload must carry revision `expected_revision + 1`.
         """
         ...
 

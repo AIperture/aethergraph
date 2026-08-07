@@ -380,6 +380,8 @@ class MemoryFacadeProtocol(Protocol):
         base: dict[str, Any],
         text: str | None = None,
         metrics: dict[str, float] | None = None,
+        state_key: str | None = None,
+        expected_state_revision: int | None = None,
     ) -> Event: ...
 
     async def append_event(
@@ -438,6 +440,7 @@ class MemoryFacadeProtocol(Protocol):
         signal: float | None = None,
         kind: str = "state.snapshot",
         stage: str | None = None,
+        expected_revision: int | None = None,
     ) -> Event: ...
 
     async def record(
@@ -597,6 +600,14 @@ class HotLog(Protocol):
 
 class Persistence(Protocol):
     async def append_event(self, timeline_id: str, evt: Event) -> None: ...
+    async def append_state_snapshot_if_revision(
+        self,
+        timeline_id: str,
+        evt: Event,
+        *,
+        state_key: str,
+        expected_revision: int,
+    ) -> None: ...
     async def save_json(self, uri: str, obj: dict[str, Any]) -> str: ...
     async def load_json(self, uri: str) -> dict[str, Any]: ...
     async def get_events_by_ids(

@@ -8,6 +8,8 @@ import threading
 import time
 from typing import Any, Literal
 
+from aethergraph.contracts.storage.event_log import StateSnapshotConflictError
+
 
 class SQLiteEventLogSync:
     def __init__(self, path: str, *, read_only: bool = False):
@@ -123,6 +125,92 @@ class SQLiteEventLogSync:
             """
         )
 
+    @staticmethod
+    def _prepare_event(evt: dict) -> tuple[dict, str | None, float, list[str], str]:
+        row = dict(evt)
+        partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
+        ts = row.get("ts")
+        if isinstance(ts, datetime):
+            ts = ts.timestamp()
+        elif isinstance(ts, int | float):
+            ts = float(ts)
+        elif isinstance(ts, str):
+            try:
+                value = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
+                parsed = datetime.fromisoformat(value)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=UTC)
+                ts = parsed.timestamp()
+            except Exception:
+                ts = time.time()
+        if ts is None:
+            ts = time.time()
+        row["ts"] = ts
+        tags = [str(tag) for tag in (row.get("tags") or [])]
+        payload = json.dumps(row, ensure_ascii=False)
+        return row, partition_scope_id, float(ts), tags, payload
+
+    def _append_prepared(
+        self,
+        *,
+        row: dict,
+        partition_scope_id: str | None,
+        ts: float,
+        tags: list[str],
+        payload: str,
+    ) -> int:
+        self._db.execute(
+            """
+            INSERT INTO events (
+                ts, scope_id, kind, tags_json, payload,
+                user_id, org_id, run_id, session_id, client_id,
+                agent_id, graph_id, node_id, topic, tool, severity, signal,
+                deployment_id, semantic_event_id, semantic_turn_id, semantic_sequence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts,
+                partition_scope_id,
+                row.get("kind"),
+                json.dumps(tags, ensure_ascii=False),
+                payload,
+                row.get("user_id"),
+                row.get("org_id"),
+                row.get("run_id"),
+                row.get("session_id"),
+                row.get("client_id"),
+                row.get("agent_id"),
+                row.get("graph_id"),
+                row.get("node_id"),
+                row.get("topic"),
+                row.get("tool"),
+                row.get("severity"),
+                row.get("signal"),
+                row.get("deployment_id"),
+                row.get("semantic_event_id"),
+                row.get("semantic_turn_id"),
+                row.get("semantic_sequence"),
+            ),
+        )
+        row_id = int(self._db.execute("SELECT last_insert_rowid()").fetchone()[0])
+        if tags:
+            self._db.executemany(
+                "INSERT OR IGNORE INTO event_tags (event_row_id, tag) VALUES (?, ?)",
+                [(row_id, tag) for tag in tags],
+            )
+        return row_id
+
+    @staticmethod
+    def _state_revision(payload: str | None) -> int:
+        if not payload:
+            return 0
+        try:
+            row = json.loads(payload)
+            revision = ((row.get("data") or {}).get("meta") or {}).get("revision", 0)
+            return max(0, int(revision or 0))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return 0
+
     def append(self, evt: dict) -> int:
         """Append one event in the current SQLite connection.
 
@@ -148,68 +236,105 @@ class SQLiteEventLogSync:
         """
         if self._read_only:
             raise RuntimeError("Cannot append through a read-only event log")
-        row = dict(evt)
-        partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
-        ts = row.get("ts")
-        if isinstance(ts, datetime):
-            ts = ts.timestamp()
-        elif isinstance(ts, int | float):
-            ts = float(ts)
-        elif isinstance(ts, str):
-            try:
-                s = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=UTC)
-                ts = dt.timestamp()
-            except Exception:
-                ts = time.time()
-        if ts is None:
-            ts = time.time()
-        row["ts"] = ts
-        tags = [str(tag) for tag in (row.get("tags") or [])]
-        payload = json.dumps(row, ensure_ascii=False)
+        row, partition_scope_id, ts, tags, payload = self._prepare_event(evt)
         with self._lock:
-            self._db.execute(
-                """
-                INSERT INTO events (
-                    ts, scope_id, kind, tags_json, payload,
-                    user_id, org_id, run_id, session_id, client_id,
-                    agent_id, graph_id, node_id, topic, tool, severity, signal,
-                    deployment_id, semantic_event_id, semantic_turn_id, semantic_sequence
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    ts,
-                    partition_scope_id,
-                    row.get("kind"),
-                    json.dumps(tags, ensure_ascii=False),
-                    payload,
-                    row.get("user_id"),
-                    row.get("org_id"),
-                    row.get("run_id"),
-                    row.get("session_id"),
-                    row.get("client_id"),
-                    row.get("agent_id"),
-                    row.get("graph_id"),
-                    row.get("node_id"),
-                    row.get("topic"),
-                    row.get("tool"),
-                    row.get("severity"),
-                    row.get("signal"),
-                    row.get("deployment_id"),
-                    row.get("semantic_event_id"),
-                    row.get("semantic_turn_id"),
-                    row.get("semantic_sequence"),
-                ),
+            return self._append_prepared(
+                row=row,
+                partition_scope_id=partition_scope_id,
+                ts=ts,
+                tags=tags,
+                payload=payload,
             )
-            row_id = self._db.execute("SELECT last_insert_rowid()").fetchone()[0]
-            if tags:
-                self._db.executemany(
-                    "INSERT OR IGNORE INTO event_tags (event_row_id, tag) VALUES (?, ?)",
-                    [(row_id, tag) for tag in tags],
+
+    def append_state_snapshot_if_revision(
+        self,
+        evt: dict,
+        *,
+        state_key: str,
+        expected_revision: int,
+    ) -> int:
+        """Atomically compare and append one revisioned state snapshot.
+
+        Intro:
+            SQLite acquires an immediate write transaction before reading the
+            latest matching snapshot and retains it through the append.
+
+        Examples:
+            Append revision one:
+            ```python
+            cursor = log.append_state_snapshot_if_revision(
+                event,
+                state_key="agent:writer",
+                expected_revision=0,
+            )
+            ```
+
+            Detect a stale revision:
+            ```python
+            with pytest.raises(StateSnapshotConflictError):
+                log.append_state_snapshot_if_revision(
+                    stale_event,
+                    state_key="agent:writer",
+                    expected_revision=0,
                 )
-            return int(row_id)
+            ```
+
+        Args:
+            evt: Complete state snapshot Event mapping.
+            state_key: Exact logical state key carried by the snapshot.
+            expected_revision: Exact current durable enclosing revision.
+
+        Returns:
+            int: Assigned SQLite row identifier.
+
+        Notes:
+            `BEGIN IMMEDIATE` serializes comparisons across connections and
+            processes sharing the database file.
+        """
+        if self._read_only:
+            raise RuntimeError("Cannot append through a read-only event log")
+        if isinstance(expected_revision, bool) or int(expected_revision) < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        row, partition_scope_id, ts, tags, payload = self._prepare_event(evt)
+        proposed_revision = self._state_revision(payload)
+        if proposed_revision != int(expected_revision) + 1:
+            raise ValueError("state snapshot revision must equal expected_revision + 1")
+        with self._lock:
+            try:
+                self._db.execute("BEGIN IMMEDIATE")
+                latest = self._db.execute(
+                    """
+                    SELECT events.payload
+                    FROM events
+                    JOIN event_tags
+                      ON event_tags.event_row_id = events.id
+                     AND event_tags.tag = ?
+                    WHERE events.scope_id = ? AND events.kind = ?
+                    ORDER BY events.id DESC
+                    LIMIT 1
+                    """,
+                    (f"state:{state_key}", partition_scope_id, row.get("kind")),
+                ).fetchone()
+                actual_revision = self._state_revision(latest[0] if latest else None)
+                if actual_revision != int(expected_revision):
+                    raise StateSnapshotConflictError(
+                        key=state_key,
+                        expected_revision=int(expected_revision),
+                        actual_revision=actual_revision,
+                    )
+                row_id = self._append_prepared(
+                    row=row,
+                    partition_scope_id=partition_scope_id,
+                    ts=ts,
+                    tags=tags,
+                    payload=payload,
+                )
+                self._db.execute("COMMIT")
+                return row_id
+            except Exception:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
 
     def close(self) -> None:
         with self._lock:

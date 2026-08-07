@@ -85,6 +85,64 @@ class EventLogPersistence(Persistence):
         payload.setdefault("kind", "memory")
         await self._log.append(payload)
 
+    async def append_state_snapshot_if_revision(
+        self,
+        timeline_id: str,
+        evt: Event,
+        *,
+        state_key: str,
+        expected_revision: int,
+    ) -> None:
+        """Conditionally append one revisioned snapshot to the event log.
+
+        Intro:
+            The persistence adapter preserves the Memory timeline partition and
+            delegates the atomic comparison to the configured EventLog backend.
+
+        Examples:
+            Create an initial state snapshot:
+            ```python
+            await persistence.append_state_snapshot_if_revision(
+                "session-1",
+                event,
+                state_key="agent:writer",
+                expected_revision=0,
+            )
+            ```
+
+            Commit the next revision:
+            ```python
+            await persistence.append_state_snapshot_if_revision(
+                "session-1",
+                next_event,
+                state_key="agent:writer",
+                expected_revision=1,
+            )
+            ```
+
+        Args:
+            timeline_id: Exact Memory timeline partition.
+            evt: Complete revisioned state snapshot Event.
+            state_key: Exact logical state key carried by the snapshot.
+            expected_revision: Exact current durable enclosing revision.
+
+        Returns:
+            None: The EventLog owns the durable cursor.
+
+        Notes:
+            A stale comparison propagates `StateSnapshotConflictError` without
+            appending the Event.
+        """
+        payload = asdict(evt)
+        payload["_partition_scope_id"] = timeline_id
+        payload["timeline_id"] = timeline_id
+        payload.setdefault("kind", "state.snapshot")
+        await self._log.append_state_snapshot_if_revision(
+            payload,
+            state_key=state_key,
+            expected_revision=expected_revision,
+        )
+
     async def save_json(self, uri: str, obj: dict[str, Any]) -> str:
         doc_id = self._doc_id_from_uri(uri)
         await self._docs.put(doc_id, obj)

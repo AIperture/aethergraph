@@ -25,26 +25,50 @@ class WriteMixin:
         base: dict[str, Any],
         text: str | None = None,
         metrics: dict[str, float] | None = None,
+        state_key: str | None = None,
+        expected_state_revision: int | None = None,
     ) -> Event:
-        """Record a low-level event from an explicit ``base`` payload.
+        """Record a low-level event from an explicit `base` payload.
 
-        This is the primitive that the higher-level ``append_*`` helpers build on.
-        It fills in scope/tenant identity, timestamps, a stable event id, and an
-        importance ``signal``, then appends the event to the hot log and durable
-        persistence and (when an index backend is configured) indexes it for search.
+        Intro:
+            This primitive fills scope identity, timestamps, a stable Event id,
+            and signal metadata before persistence and optional search indexing.
+            State helpers may request a durable conditional append.
 
-        Prefer :meth:`append_event` and the typed ``append_*`` helpers for most use;
-        reach for ``record_raw`` only when you need full control over the raw fields.
+        Examples:
+            Record an ordinary event:
+            ```python
+            event = await memory.record_raw(
+                base={"kind": "checkpoint", "data": {"step": 2}},
+                text="checkpoint two",
+            )
+            ```
+
+            Record a conditional state snapshot:
+            ```python
+            event = await memory.record_raw(
+                base={"kind": "state.snapshot", "data": snapshot_payload},
+                state_key="agent:writer",
+                expected_state_revision=3,
+            )
+            ```
 
         Args:
-            base: Raw event fields (``kind``, ``stage``, ``tags``, ``data``,
-                ``severity``, ``signal``, ``tool``, ``topic``, identity overrides, ...).
+            base: Raw Event fields including kind, tags, data, and identity overrides.
             text: Human-readable content used for previews and search indexing.
             metrics: Optional numeric metrics attached to the event.
+            state_key: Exact state key for a conditional snapshot append.
+            expected_state_revision: Exact current durable snapshot revision.
 
         Returns:
             Event: The persisted event, including its generated ``event_id``.
+
+        Notes:
+            Conditional snapshots reach durable persistence before the hot log,
+            so rejected writers cannot leave a visible hot-only Event.
         """
+        if (state_key is None) != (expected_state_revision is None):
+            raise ValueError("state_key and expected_state_revision must be supplied together")
         span = await self._start_trace(
             operation="record_raw",
             request={"base": base, "text": text, "metrics": metrics},
@@ -112,10 +136,21 @@ class WriteMixin:
                 pii_flags=base.get("pii_flags"),
                 version=2,
             )
-            await self.hotlog.append(
-                self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit
-            )
-            await self.persistence.append_event(self.timeline_id, evt)
+            if expected_state_revision is None:
+                await self.hotlog.append(
+                    self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit
+                )
+                await self.persistence.append_event(self.timeline_id, evt)
+            else:
+                await self.persistence.append_state_snapshot_if_revision(
+                    self.timeline_id,
+                    evt,
+                    state_key=str(state_key),
+                    expected_revision=int(expected_state_revision),
+                )
+                await self.hotlog.append(
+                    self.timeline_id, evt, ttl_s=self.hot_ttl_s, limit=self.hot_limit
+                )
             if self.scoped_indices is not None and self.scoped_indices.backend is not None:
                 try:
                     preview = (text or "")[:500] if text else ""
@@ -430,13 +465,28 @@ class WriteMixin:
         signal: float | None = None,
         kind: str = "state.snapshot",
         stage: str | None = None,
+        expected_revision: int | None = None,
     ) -> Event:
-        """Persist a JSON-serializable state value as a ``state.snapshot`` event.
+        """Persist a JSON-serializable value as a revisioned state Event.
 
-        Dataclasses and pydantic-style objects are converted to plain data before
-        storage. Snapshots are tagged ``state`` and ``state:<key>`` so they can be
-        retrieved with :meth:`get_latest_state` / :meth:`list_state_history` or
-        searched with :meth:`search_state`.
+        Intro:
+            Dataclasses and model objects become plain data. Supplying an
+            expected revision makes the durable comparison and append atomic.
+
+        Examples:
+            Append an ordinary snapshot:
+            ```python
+            event = await memory.append_state_snapshot("agent:writer", state)
+            ```
+
+            Append revision four only after revision three:
+            ```python
+            event = await memory.append_state_snapshot(
+                "agent:writer",
+                state,
+                expected_revision=3,
+            )
+            ```
 
         Args:
             key: Logical state key this snapshot belongs to.
@@ -447,9 +497,14 @@ class WriteMixin:
             signal: Optional relevance signal.
             kind: Event kind to use (defaults to ``"state.snapshot"``).
             stage: Optional phase indicator.
+            expected_revision: Optional exact current durable enclosing revision.
 
         Returns:
             Event: The persisted state event.
+
+        Notes:
+            Conditional snapshots carry revision `expected_revision + 1` and
+            raise `StateSnapshotConflictError` without changing the hot log.
         """
         import dataclasses
 
@@ -469,18 +524,42 @@ class WriteMixin:
                 return [_to_serializable(v) for v in obj]
             return {"__repr__": repr(obj)}
 
-        payload = {"key": key, "value": _to_serializable(value), "meta": meta or {}}
+        snapshot_meta = dict(meta or {})
+        if expected_revision is not None:
+            if isinstance(expected_revision, bool) or int(expected_revision) < 0:
+                raise ValueError("expected_revision must be a non-negative integer")
+            next_revision = int(expected_revision) + 1
+            authored_revision = snapshot_meta.get("revision")
+            if authored_revision is not None and int(authored_revision) != next_revision:
+                raise ValueError("snapshot metadata revision must equal expected_revision + 1")
+            snapshot_meta["revision"] = next_revision
+        payload = {"key": key, "value": _to_serializable(value), "meta": snapshot_meta}
         index_text = f"state:{key} "
         try:
             index_text += json.dumps(payload["value"], ensure_ascii=False, sort_keys=True)
         except Exception:
             index_text += repr(payload["value"])
-        return await self.append_event(
-            kind=kind,
-            data=payload,
-            tags=["state", f"state:{key}", *normalize_tags(tags)],
-            severity=severity,
-            stage=stage,
-            signal=signal,
+        event_tags = ["state", f"state:{key}", *normalize_tags(tags)]
+        if expected_revision is None:
+            return await self.append_event(
+                kind=kind,
+                data=payload,
+                tags=event_tags,
+                severity=severity,
+                stage=stage,
+                signal=signal,
+                text=index_text,
+            )
+        return await self.record_raw(
+            base={
+                "kind": kind,
+                "data": payload,
+                "tags": event_tags,
+                "severity": severity,
+                "stage": stage,
+                "signal": signal,
+            },
             text=index_text,
+            state_key=key,
+            expected_state_revision=int(expected_revision),
         )

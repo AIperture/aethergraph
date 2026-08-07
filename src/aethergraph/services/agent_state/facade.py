@@ -6,6 +6,7 @@ import dataclasses
 from typing import Any, Generic, Literal, TypeVar, cast
 
 from aethergraph.contracts.services.memory import ExternalResourceChangedEvent
+from aethergraph.contracts.storage.event_log import StateSnapshotConflictError
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.scope.scope import ScopeLevel
 
@@ -250,9 +251,9 @@ class AgentStateHandle(Generic[T]):
             Any | None: Persisted snapshot Event, or `None` for local state.
 
         Notes:
-            This compare-and-swap is atomic for writers sharing the canonical
-            handle. Persistence backends do not yet expose cross-process
-            conditional append.
+            The canonical Memory facade forwards comparisons to its durable
+            backend, making them atomic across handles and processes. Legacy
+            value-only Memory implementations retain handle-local comparison.
         """
 
         async with self._lock:
@@ -302,19 +303,40 @@ class AgentStateHandle(Generic[T]):
             merged_meta["reason"] = reason
         if stage_id:
             merged_meta["stage_id"] = stage_id
-        result = await _call_memory_method(
-            self.memory,
-            "append_state_snapshot",
-            "record_state",
-            key=self.key,
-            value=_to_serializable(state),
-            tags=[*self.tags, *list(tags or [])],
-            meta=merged_meta,
-            severity=severity,
-            signal=signal,
-            kind=self.kind,
-            stage=stage_id,
-        )
+        append_method = getattr(self.memory, "append_state_snapshot", None)
+        try:
+            if callable(append_method):
+                result = await append_method(
+                    key=self.key,
+                    value=_to_serializable(state),
+                    tags=[*self.tags, *list(tags or [])],
+                    meta=merged_meta,
+                    severity=severity,
+                    signal=signal,
+                    kind=self.kind,
+                    stage=stage_id,
+                    expected_revision=expected_revision,
+                )
+            else:
+                result = await _call_memory_method(
+                    self.memory,
+                    "append_state_snapshot",
+                    "record_state",
+                    key=self.key,
+                    value=_to_serializable(state),
+                    tags=[*self.tags, *list(tags or [])],
+                    meta=merged_meta,
+                    severity=severity,
+                    signal=signal,
+                    kind=self.kind,
+                    stage=stage_id,
+                )
+        except StateSnapshotConflictError as exc:
+            raise AgentStateConflictError(
+                key=self.key,
+                expected_revision=exc.expected_revision,
+                actual_revision=exc.actual_revision,
+            ) from exc
         self._revision = next_revision
         self._cached = state
         return result

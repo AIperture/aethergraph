@@ -6,7 +6,8 @@ import threading
 import time
 from typing import Literal
 
-from aethergraph.contracts.storage.event_log import EventLog
+from aethergraph.contracts.storage.event_log import EventLog, StateSnapshotConflictError
+from aethergraph.storage.fs_utils import _exclusive_file_lock
 
 
 def _to_ts_float(v) -> float | None:
@@ -44,6 +45,7 @@ class FSEventLog(EventLog):
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._log_path = self.root / "events.jsonl"
+        self._write_lock_path = self.root / ".events.lock"
         self._next_row_id = self._existing_row_count() + 1
 
     def _existing_row_count(self) -> int:
@@ -51,6 +53,43 @@ class FSEventLog(EventLog):
             return 0
         with self._log_path.open("r", encoding="utf-8") as handle:
             return sum(1 for line in handle if line.strip())
+
+    def _prepare_row(self, evt: dict) -> dict:
+        row = evt.copy()
+        partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
+        ts = _to_ts_float(row.get("ts"))
+        row["ts"] = time.time() if ts is None else ts
+        row["scope_id"] = partition_scope_id
+        return row
+
+    def _next_durable_row_id(self) -> int:
+        if not self._log_path.is_file():
+            return 1
+        last_id = 0
+        with self._log_path.open("r", encoding="utf-8") as handle:
+            for seq, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                last_id = max(last_id, int(row.get("_row_id") or seq))
+        return last_id + 1
+
+    @staticmethod
+    def _state_revision(row: dict | None) -> int:
+        try:
+            revision = (((row or {}).get("data") or {}).get("meta") or {}).get("revision", 0)
+            return max(0, int(revision or 0))
+        except (AttributeError, TypeError, ValueError):
+            return 0
+
+    def _append_row(self, row: dict) -> int:
+        row_id = self._next_durable_row_id()
+        row["_row_id"] = row_id
+        data = {key: value for key, value in row.items() if value is not None}
+        with self._log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, ensure_ascii=False) + "\n")
+        self._next_row_id = max(self._next_row_id, row_id + 1)
+        return row_id
 
     async def append(self, evt: dict) -> int:
         """Append one JSONL event and return its persistent line cursor.
@@ -79,22 +118,86 @@ class FSEventLog(EventLog):
 
         def _write() -> int:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
-            row = evt.copy()
-            partition_scope_id = row.pop("_partition_scope_id", row.get("scope_id"))
+            row = self._prepare_row(evt)
+            with self._lock, _exclusive_file_lock(self._write_lock_path):
+                return self._append_row(row)
 
-            # Normalize ts to a float UNIX timestamp
-            ts = _to_ts_float(row.get("ts"))
-            if ts is None:
-                ts = time.time()
-            row["ts"] = ts
-            row["scope_id"] = partition_scope_id
+        return await asyncio.to_thread(_write)
 
-            with self._lock, self._log_path.open("a", encoding="utf-8") as f:
-                row_id = self._next_row_id
-                self._next_row_id += 1
-                row["_row_id"] = row_id
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                return row_id
+    async def append_state_snapshot_if_revision(
+        self,
+        evt: dict,
+        *,
+        state_key: str,
+        expected_revision: int,
+    ) -> int:
+        """Compare and append a revisioned state snapshot under a file lock.
+
+        Intro:
+            One lock file serializes state comparisons and JSONL appends across
+            local processes using the same filesystem event log.
+
+        Examples:
+            Append revision one:
+            ```python
+            cursor = await log.append_state_snapshot_if_revision(
+                event,
+                state_key="agent:writer",
+                expected_revision=0,
+            )
+            ```
+
+            Append revision two:
+            ```python
+            cursor = await log.append_state_snapshot_if_revision(
+                next_event,
+                state_key="agent:writer",
+                expected_revision=1,
+            )
+            ```
+
+        Args:
+            evt: Complete state snapshot Event mapping.
+            state_key: Exact logical state key carried by the snapshot.
+            expected_revision: Exact current durable enclosing revision.
+
+        Returns:
+            int: Monotonic JSONL row cursor.
+
+        Notes:
+            A stale comparison raises `StateSnapshotConflictError` before append.
+        """
+        if isinstance(expected_revision, bool) or int(expected_revision) < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+
+        def _write() -> int:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            row = self._prepare_row(evt)
+            proposed_revision = self._state_revision(row)
+            if proposed_revision != int(expected_revision) + 1:
+                raise ValueError("state snapshot revision must equal expected_revision + 1")
+            with self._lock, _exclusive_file_lock(self._write_lock_path):
+                actual_revision = 0
+                if self._log_path.is_file():
+                    with self._log_path.open("r", encoding="utf-8") as handle:
+                        for line in handle:
+                            if not line.strip():
+                                continue
+                            current = json.loads(line)
+                            if current.get("scope_id") != row.get("scope_id"):
+                                continue
+                            if current.get("kind") != row.get("kind"):
+                                continue
+                            if f"state:{state_key}" not in (current.get("tags") or []):
+                                continue
+                            actual_revision = self._state_revision(current)
+                if actual_revision != int(expected_revision):
+                    raise StateSnapshotConflictError(
+                        key=state_key,
+                        expected_revision=int(expected_revision),
+                        actual_revision=actual_revision,
+                    )
+                return self._append_row(row)
 
         return await asyncio.to_thread(_write)
 

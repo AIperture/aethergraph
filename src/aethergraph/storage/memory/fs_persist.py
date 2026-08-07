@@ -11,11 +11,13 @@ import time
 from typing import Any
 
 from aethergraph.contracts.services.memory import Event, MemoryTenantFilter, Persistence
+from aethergraph.contracts.storage.event_log import StateSnapshotConflictError
 from aethergraph.services.memory.storage_filters import (
     event_matches_filters,
     event_time,
     summary_matches_filters,
 )
+from aethergraph.storage.fs_utils import _exclusive_file_lock
 
 
 class FSPersistence(Persistence):
@@ -42,10 +44,105 @@ class FSPersistence(Persistence):
             raw["timeline_id"] = timeline_id
             data = {k: v for k, v in raw.items() if v is not None}
             line = json.dumps(data, ensure_ascii=False) + "\n"
-            with self._lock, path.open("a", encoding="utf-8") as f:
+            lock_path = self.base_dir / "mem" / timeline_id / ".events.lock"
+            with self._lock, _exclusive_file_lock(lock_path), path.open("a", encoding="utf-8") as f:
                 f.write(line)
 
         await asyncio.to_thread(_write)
+
+    async def append_state_snapshot_if_revision(
+        self,
+        timeline_id: str,
+        evt: Event,
+        *,
+        state_key: str,
+        expected_revision: int,
+    ) -> None:
+        """Conditionally append one filesystem state snapshot revision.
+
+        Intro:
+            The backend scans and appends the timeline while holding the same
+            cross-process lock used by ordinary filesystem Memory writes.
+
+        Examples:
+            Append the first state snapshot:
+            ```python
+            await persistence.append_state_snapshot_if_revision(
+                "session-1",
+                event,
+                state_key="agent:writer",
+                expected_revision=0,
+            )
+            ```
+
+            Append a later state snapshot:
+            ```python
+            await persistence.append_state_snapshot_if_revision(
+                "session-1",
+                next_event,
+                state_key="agent:writer",
+                expected_revision=1,
+            )
+            ```
+
+        Args:
+            timeline_id: Exact Memory timeline directory.
+            evt: Complete revisioned state snapshot Event.
+            state_key: Exact logical state key carried by the snapshot.
+            expected_revision: Exact current durable enclosing revision.
+
+        Returns:
+            None: The snapshot is persisted as one JSONL row.
+
+        Notes:
+            A stale comparison raises `StateSnapshotConflictError` before append.
+        """
+        if isinstance(expected_revision, bool) or int(expected_revision) < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        events_dir = self.base_dir / "mem" / timeline_id / "events"
+        path = events_dir / f"{day}.jsonl"
+        lock_path = self.base_dir / "mem" / timeline_id / ".events.lock"
+
+        def _write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            raw = asdict(evt)
+            raw["timeline_id"] = timeline_id
+            proposed_revision = self._state_revision(raw)
+            if proposed_revision != int(expected_revision) + 1:
+                raise ValueError("state snapshot revision must equal expected_revision + 1")
+            with self._lock, _exclusive_file_lock(lock_path):
+                actual_revision = 0
+                for history_path in sorted(events_dir.glob("*.jsonl")):
+                    with history_path.open("r", encoding="utf-8") as handle:
+                        for line in handle:
+                            if not line.strip():
+                                continue
+                            current = json.loads(line)
+                            if current.get("kind") != raw.get("kind"):
+                                continue
+                            if f"state:{state_key}" not in (current.get("tags") or []):
+                                continue
+                            actual_revision = self._state_revision(current)
+                if actual_revision != int(expected_revision):
+                    raise StateSnapshotConflictError(
+                        key=state_key,
+                        expected_revision=int(expected_revision),
+                        actual_revision=actual_revision,
+                    )
+                data = {key: value for key, value in raw.items() if value is not None}
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(data, ensure_ascii=False) + "\n")
+
+        await asyncio.to_thread(_write)
+
+    @staticmethod
+    def _state_revision(row: dict[str, Any] | None) -> int:
+        try:
+            revision = (((row or {}).get("data") or {}).get("meta") or {}).get("revision", 0)
+            return max(0, int(revision or 0))
+        except (AttributeError, TypeError, ValueError):
+            return 0
 
     def _uri_to_path(self, uri: str) -> Path:
         if not uri.startswith("file://"):

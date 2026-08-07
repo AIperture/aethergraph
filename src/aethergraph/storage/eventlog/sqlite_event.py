@@ -43,6 +43,56 @@ class SqliteEventLog(EventLog):
         """
         return await asyncio.to_thread(self._sync.append, evt)
 
+    async def append_state_snapshot_if_revision(
+        self,
+        evt: dict,
+        *,
+        state_key: str,
+        expected_revision: int,
+    ) -> int:
+        """Atomically append a state snapshot at one durable SQLite revision.
+
+        Intro:
+            The async wrapper delegates the compare-and-append transaction to
+            the synchronous SQLite backend without blocking the event loop.
+
+        Examples:
+            Append the initial snapshot:
+            ```python
+            cursor = await log.append_state_snapshot_if_revision(
+                event,
+                state_key="agent:writer",
+                expected_revision=0,
+            )
+            ```
+
+            Compare a later revision:
+            ```python
+            cursor = await log.append_state_snapshot_if_revision(
+                next_event,
+                state_key="agent:writer",
+                expected_revision=1,
+            )
+            ```
+
+        Args:
+            evt: Complete state snapshot Event mapping.
+            state_key: Exact logical state key carried by the snapshot.
+            expected_revision: Exact current durable enclosing revision.
+
+        Returns:
+            int: SQLite event row identifier used as the durable cursor.
+
+        Notes:
+            Conflicts raise `StateSnapshotConflictError` from the worker thread.
+        """
+        return await asyncio.to_thread(
+            self._sync.append_state_snapshot_if_revision,
+            evt,
+            state_key=state_key,
+            expected_revision=expected_revision,
+        )
+
     async def close(self) -> None:
         await asyncio.to_thread(self._sync.close)
 
