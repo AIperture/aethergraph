@@ -9,6 +9,13 @@ import json
 import re
 from typing import Any, Literal
 
+from .tool_discovery import (
+    ToolDiscoveryEvent,
+    ToolDiscoveryRequest,
+    ToolExposure,
+    ToolNamespace,
+    ToolTransportCheckpoint,
+)
 from .types import LLMError
 
 ToolChoice = Literal["auto", "required", "none"]
@@ -138,6 +145,8 @@ class ToolDefinition:
     name: str
     description: str
     input_schema: dict[str, Any]
+    exposure: ToolExposure = "immediate"
+    namespace: ToolNamespace | None = None
 
     def __post_init__(self) -> None:
         """
@@ -191,6 +200,10 @@ class ToolDefinition:
         if schema.get("type") not in {None, "object"}:
             raise ValueError("Tool definition input_schema must describe an object")
         schema.setdefault("type", "object")
+        if self.exposure not in {"immediate", "deferred"}:
+            raise ValueError("Tool definition exposure must be immediate or deferred")
+        if self.namespace is not None and not isinstance(self.namespace, ToolNamespace):
+            raise TypeError("Tool definition namespace must be ToolNamespace or None")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "input_schema", schema)
@@ -203,6 +216,8 @@ class ToolCallRequest:
     tools: tuple[ToolDefinition, ...]
     choice: ToolChoice = "required"
     max_calls: int = 1
+    discovery: ToolDiscoveryRequest | None = None
+    transport_checkpoint: ToolTransportCheckpoint | None = None
 
     def __post_init__(self) -> None:
         """
@@ -253,6 +268,14 @@ class ToolCallRequest:
             raise ValueError("Tool-call request choice must be auto, required, or none")
         if not 1 <= int(self.max_calls) <= 4:
             raise ValueError("Tool-call request max_calls must be between 1 and 4")
+        if self.discovery is not None and not isinstance(self.discovery, ToolDiscoveryRequest):
+            raise TypeError("Tool-call request discovery must be ToolDiscoveryRequest")
+        if self.transport_checkpoint is not None and not isinstance(
+            self.transport_checkpoint, ToolTransportCheckpoint
+        ):
+            raise TypeError(
+                "Tool-call request transport_checkpoint must be ToolTransportCheckpoint"
+            )
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "max_calls", int(self.max_calls))
 
@@ -270,9 +293,26 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
                 "name": tool.name,
                 "description": tool.description,
                 "input_schema": tool.input_schema,
+                "exposure": tool.exposure,
+                "namespace": (
+                    None
+                    if tool.namespace is None
+                    else {
+                        "name": tool.namespace.name,
+                        "description": tool.namespace.description,
+                    }
+                ),
             }
             for tool in request.tools
         ],
+        "discovery": (
+            None
+            if request.discovery is None
+            else {
+                "mode": request.discovery.mode,
+                "max_results": request.discovery.max_results,
+            }
+        ),
     }
     canonical = json.dumps(
         payload,
@@ -353,6 +393,8 @@ class ToolCallResponse:
     text: str = ""
     finish_reason: str = ""
     provider_metadata: dict[str, Any] = field(default_factory=dict)
+    discovery_events: tuple[ToolDiscoveryEvent, ...] = ()
+    transport_checkpoint: ToolTransportCheckpoint | None = None
 
     def __post_init__(self) -> None:
         """
@@ -393,6 +435,15 @@ class ToolCallResponse:
             raise TypeError("Tool-call response calls must be ToolCall values")
         if not isinstance(self.provider_metadata, dict):
             raise TypeError("Tool-call response provider_metadata must be an object")
+        discovery_events = tuple(self.discovery_events)
+        if not all(isinstance(event, ToolDiscoveryEvent) for event in discovery_events):
+            raise TypeError("Tool-call response discovery_events must be ToolDiscoveryEvent values")
+        if self.transport_checkpoint is not None and not isinstance(
+            self.transport_checkpoint, ToolTransportCheckpoint
+        ):
+            raise TypeError(
+                "Tool-call response transport_checkpoint must be ToolTransportCheckpoint"
+            )
         object.__setattr__(self, "calls", calls)
         object.__setattr__(self, "text", str(self.text or ""))
         object.__setattr__(self, "finish_reason", str(self.finish_reason or ""))
@@ -401,6 +452,7 @@ class ToolCallResponse:
             "provider_metadata",
             copy.deepcopy(self.provider_metadata),
         )
+        object.__setattr__(self, "discovery_events", discovery_events)
 
     def observation_text(self) -> str:
         """
@@ -444,6 +496,29 @@ class ToolCallResponse:
                         "provider_metadata": call.provider_metadata,
                     }
                     for call in self.calls
+                ],
+                "discovery_events": [
+                    {
+                        "event_id": event.event_id,
+                        "mode": event.mode,
+                        "source": event.source,
+                        "arguments": event.arguments,
+                        "query": event.query,
+                        "tool_refs": list(event.tool_refs),
+                        "status": event.status,
+                        "error": (
+                            None
+                            if event.error is None
+                            else {
+                                "code": event.error.code,
+                                "summary": event.error.summary,
+                                "retryable": event.error.retryable,
+                                "details": event.error.details,
+                            }
+                        ),
+                        "provider_reference_ids": list(event.provider_reference_ids),
+                    }
+                    for event in self.discovery_events
                 ],
                 "text": self.text,
                 "finish_reason": self.finish_reason,
