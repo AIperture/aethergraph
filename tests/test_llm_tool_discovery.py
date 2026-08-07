@@ -49,6 +49,7 @@ class _CountingHttpClient:
         self.calls = 0
         self.last_json: dict[str, Any] | None = None
         self.last_headers: dict[str, str] | None = None
+        self.last_url: str | None = None
 
     async def post(
         self,
@@ -60,6 +61,7 @@ class _CountingHttpClient:
         self.calls += 1
         self.last_json = json
         self.last_headers = headers
+        self.last_url = url
         return _FakeResponse(self.payload)
 
 
@@ -216,6 +218,9 @@ def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None
         "native_hosted",
         "native_client",
     ]
+    azure = resolve_tool_discovery_capabilities("azure", "gpt-5.5", "responses")
+    assert azure is not None
+    assert [mode.mode for mode in azure.supported_modes] == ["native_client"]
 
 
 def test_response_observation_normalizes_events_without_exposing_checkpoint() -> None:
@@ -746,6 +751,94 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
             }
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_azure_native_client_uses_responses_route_and_checkpoint_binding() -> None:
+    client = GenericLLMClient(
+        "azure",
+        "gpt-5.5",
+        api_key="azure-test",
+        base_url="https://example.openai.azure.com",
+        azure_deployment="gpt-5.5",
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "resp_azure_search_1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "tool_search_call",
+                    "execution": "client",
+                    "call_id": "azure_search_1",
+                    "arguments": {"goal": "open a document"},
+                }
+            ],
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    request = ToolCallRequest(
+        tools=(
+            ToolDefinition("finish", "Finish.", {"type": "object"}),
+            ToolDefinition(
+                "read_document",
+                "Read.",
+                {"type": "object"},
+                exposure="deferred",
+            ),
+        ),
+        discovery=ToolDiscoveryRequest("native_client"),
+        turn_id="turn_1",
+    )
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=request,
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.transport_checkpoint is not None
+    assert response.transport_checkpoint.provider == "azure"
+    assert fake_http.last_url == ("https://example.openai.azure.com/openai/v1/responses")
+    assert fake_http.last_headers is not None
+    assert fake_http.last_headers["api-key"] == "azure-test"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["model"] == "gpt-5.5"
+    assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
+
+    fake_http.payload = {
+        "id": "resp_azure_call_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "azure_read_1",
+                "name": "read_document",
+                "arguments": "{}",
+            }
+        ],
+    }
+    continuation = ToolCallRequest(
+        tools=request.tools,
+        discovery=request.discovery,
+        turn_id="turn_1",
+        active_tool_names=("read_document",),
+        transport_checkpoint=response.transport_checkpoint,
+    )
+
+    called, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=continuation,
+    )
+
+    assert isinstance(called, ToolCallResponse)
+    assert called.calls[0].call_id == "azure_read_1"
+    assert fake_http.last_json is not None
+    assert "previous_response_id" not in fake_http.last_json
+    assert fake_http.last_json["input"][0]["type"] == "tool_search_call"
+    assert fake_http.last_json["input"][-1]["type"] == "tool_search_output"
+    assert fake_http.last_json["input"][-1]["call_id"] == "azure_search_1"
 
 
 @pytest.mark.asyncio

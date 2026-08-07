@@ -111,7 +111,7 @@
         "endpoint_family": "responses",
         "endpoint_path": "/openai/v1/responses"
       },
-      "adapter_status": "blocked_on_responses_endpoint_migration",
+      "adapter_status": "native_client_implemented",
       "modes": [
         {
           "mode": "native_client",
@@ -119,8 +119,8 @@
           "result_limit_behavior": "request_bound",
           "max_results": 50,
           "protocol_version": "responses.tool_search",
-          "bindable": false,
-          "blocker": "current_adapter_uses_chat_completions"
+          "bindable": true,
+          "limit_source": "aethergraph_request_contract"
         },
         {
           "mode": "native_hosted",

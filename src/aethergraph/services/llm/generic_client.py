@@ -99,6 +99,7 @@ ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 _UNSET = object()
 _TOOL_CALL_ENDPOINT_FAMILIES = {
     "openai": "responses",
+    "azure": "responses",
     "anthropic": "messages",
     "google": "generateContent",
 }
@@ -2446,6 +2447,16 @@ class GenericLLMClient(
             )
 
         if self.provider == "azure":
+            if tool_request is not None:
+                return await self._chat_azure_responses(
+                    messages,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                    tool_request=tool_request,
+                    prompt_cache_fields=prompt_cache_fields,
+                    **kw,
+                )
             return await self._chat_azure_chat_completions(
                 messages,
                 model=model,

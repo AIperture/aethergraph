@@ -179,6 +179,8 @@ def _openai_checkpoint(
     response_id: str,
     state: str,
     call_id: str = "",
+    provider: str = "openai",
+    response_output: list[dict[str, Any]] | None = None,
 ) -> ToolTransportCheckpoint:
     """Build one integrity-bound OpenAI Tool-search checkpoint.
 
@@ -215,6 +217,8 @@ def _openai_checkpoint(
         response_id: Provider response identity for continuation.
         state: Private replay state, pending_search or consumed.
         call_id: Pending client Tool-search call identity, when present.
+        provider: Exact Responses transport provider identifier.
+        response_output: Optional exact output replay required by the provider.
 
     Returns:
         ToolTransportCheckpoint: Bounded latest same-turn replay checkpoint.
@@ -231,6 +235,8 @@ def _openai_checkpoint(
         "call_id": call_id,
         "active_tool_names": list(request.active_tool_names),
     }
+    if response_output is not None:
+        payload["response_output"] = list(response_output)
     canonical = json.dumps(
         payload,
         ensure_ascii=True,
@@ -239,9 +245,9 @@ def _openai_checkpoint(
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return ToolTransportCheckpoint(
-        checkpoint_id=f"openai_{revision}_{digest[:16]}",
+        checkpoint_id=f"{provider}_{revision}_{digest[:16]}",
         revision=revision,
-        provider="openai",
+        provider=provider,
         model=model,
         contract_version="responses.tool_search",
         turn_id=str(request.turn_id or ""),
@@ -252,6 +258,8 @@ def _openai_checkpoint(
 
 def _openai_checkpoint_payload(
     checkpoint: ToolTransportCheckpoint,
+    *,
+    provider: str = "openai",
 ) -> dict[str, Any]:
     """Validate and return one private OpenAI checkpoint payload.
 
@@ -275,6 +283,7 @@ def _openai_checkpoint_payload(
 
     Args:
         checkpoint: Candidate same-turn provider replay checkpoint.
+        provider: Exact Responses transport provider identifier.
 
     Returns:
         dict[str, Any]: Detached validated private replay mapping.
@@ -283,8 +292,8 @@ def _openai_checkpoint_payload(
         Validation never includes private payload contents in an error message.
     """
 
-    if checkpoint.provider != "openai" or checkpoint.contract_version != "responses.tool_search":
-        raise ValueError("OpenAI Tool checkpoint binding does not match")
+    if checkpoint.provider != provider or checkpoint.contract_version != "responses.tool_search":
+        raise ValueError("Responses Tool checkpoint binding does not match")
     payload = dict(checkpoint.opaque_payload or {})
     canonical = json.dumps(
         payload,
@@ -315,6 +324,7 @@ def _openai_tool_call_response(
     *,
     tool_request: ToolCallRequest,
     model: str,
+    provider: str = "openai",
 ) -> ToolCallResponse:
     """Normalize ordered OpenAI Tool and discovery response items.
 
@@ -338,6 +348,7 @@ def _openai_tool_call_response(
         data: Detached OpenAI Responses payload.
         tool_request: Exact request used for this provider decision.
         model: Exact Responses model binding.
+        provider: Exact Responses transport provider identifier.
 
     Returns:
         ToolCallResponse: Ordered provider-neutral items and latest checkpoint.
@@ -434,15 +445,25 @@ def _openai_tool_call_response(
             response_id=response_id,
             state="pending_search",
             call_id=search_call_ids[0],
+            provider=provider,
+            response_output=(
+                [dict(item) for item in list(data.get("output") or []) if isinstance(item, dict)]
+                if provider == "azure"
+                else None
+            ),
         )
     elif tool_request.transport_checkpoint is not None:
-        prior_payload = _openai_checkpoint_payload(tool_request.transport_checkpoint)
+        prior_payload = _openai_checkpoint_payload(
+            tool_request.transport_checkpoint,
+            provider=provider,
+        )
         if prior_payload["state"] == "pending_search":
             checkpoint = _openai_checkpoint(
                 request=tool_request,
                 model=model,
                 response_id=response_id,
                 state="consumed",
+                provider=provider,
             )
     return ToolCallResponse(
         items=tuple(items),

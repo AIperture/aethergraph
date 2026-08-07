@@ -128,8 +128,14 @@ def test_openai_and_azure_client_replay_preserves_order_and_call_identity() -> N
 
     azure = _record("azure")
     assert azure["binding"]["endpoint_family"] == "responses"
-    assert azure["adapter_status"] == "blocked_on_responses_endpoint_migration"
-    assert all(mode["bindable"] is False for mode in azure["modes"])
+    assert azure["adapter_status"] == "native_client_implemented"
+    assert (
+        next(mode for mode in azure["modes"] if mode["mode"] == "native_client")["bindable"] is True
+    )
+    assert (
+        next(mode for mode in azure["modes"] if mode["mode"] == "native_hosted")["bindable"]
+        is False
+    )
 
 
 def test_anthropic_fixture_freezes_reference_limit_replay_and_cache_rules() -> None:

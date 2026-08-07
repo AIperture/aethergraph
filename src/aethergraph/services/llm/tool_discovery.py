@@ -763,6 +763,21 @@ def resolve_tool_discovery_capabilities(
                 ),
             ),
         )
+    if binding == ("azure", "gpt-5.5", "responses"):
+        return ToolDiscoveryCapabilities(
+            provider="azure",
+            model="gpt-5.5",
+            endpoint_family="responses",
+            supported_modes=(
+                ToolDiscoveryModeCapability(
+                    mode="native_client",
+                    replay_requirement="previous_response",
+                    result_limit_behavior="request_bound",
+                    max_results=50,
+                    protocol_version="responses.tool_search",
+                ),
+            ),
+        )
     if binding == ("google", "gemini-2.5-pro", "generateContent"):
         return ToolDiscoveryCapabilities(
             provider="google",
