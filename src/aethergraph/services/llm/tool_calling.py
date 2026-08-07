@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import re
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
 from .tool_discovery import (
     ToolDiscoveryEvent,
@@ -35,6 +35,7 @@ class LLMToolCallCapabilityError(LLMToolCallError):
         provider: str,
         model: str | None,
         feature: str = "native_tool_calling",
+        detail: str | None = None,
     ) -> None:
         """
         Initialize an unsupported native Tool-call capability failure.
@@ -57,14 +58,16 @@ class LLMToolCallCapabilityError(LLMToolCallError):
                 error = LLMToolCallCapabilityError(
                     provider="custom",
                     model=None,
+                    detail="No exact capability record is bound.",
                 )
-                assert error.model is None
+                assert error.detail.startswith("No exact")
                 ```
 
         Args:
             provider: Configured provider name.
             model: Configured model or deployment identifier.
             feature: Exact native Tool capability the request requires.
+            detail: Optional safe explanation of the rejected capability.
 
         Returns:
             None: Initializes the exception.
@@ -77,14 +80,19 @@ class LLMToolCallCapabilityError(LLMToolCallError):
         if not normalized_provider:
             raise ValueError("Tool-call provider must not be empty")
         normalized_feature = str(feature or "native_tool_calling").strip()
-        super().__init__(
+        normalized_detail = str(detail or "").strip() or None
+        message = (
             f"Provider '{normalized_provider}' / model '{model or '?'}' does not "
             f"support required capability '{normalized_feature}'."
         )
+        if normalized_detail is not None:
+            message += f" {normalized_detail}"
+        super().__init__(message)
         self.code = "tool_calling_unsupported"
         self.provider = normalized_provider
         self.model = model
         self.feature = normalized_feature
+        self.detail = normalized_detail
 
 
 class LLMToolCallResponseError(LLMToolCallError):
@@ -385,15 +393,17 @@ class ToolCall:
         )
 
 
+ToolResponseItem: TypeAlias = ToolDiscoveryEvent | ToolCall
+
+
 @dataclass(frozen=True)
 class ToolCallResponse:
-    """Return provider-framed Tool calls without flattening them into text."""
+    """Return one ordered provider discovery and Tool-call item stream."""
 
-    calls: tuple[ToolCall, ...]
+    items: tuple[ToolResponseItem, ...]
     text: str = ""
     finish_reason: str = ""
     provider_metadata: dict[str, Any] = field(default_factory=dict)
-    discovery_events: tuple[ToolDiscoveryEvent, ...] = ()
     transport_checkpoint: ToolTransportCheckpoint | None = None
 
     def __post_init__(self) -> None:
@@ -407,7 +417,7 @@ class ToolCallResponse:
             Return one Tool call:
                 ```python
                 response = ToolCallResponse(
-                    calls=(ToolCall("call_1", "finish", {}),),
+                    items=(ToolCall("call_1", "finish", {}),),
                     finish_reason="tool_calls",
                 )
                 assert response.calls[0].name == "finish"
@@ -415,7 +425,7 @@ class ToolCallResponse:
 
             Represent a provider response with no call:
                 ```python
-                response = ToolCallResponse(calls=(), text="No Tool selected.")
+                response = ToolCallResponse(items=(), text="No Tool selected.")
                 assert not response.calls
                 ```
 
@@ -426,25 +436,24 @@ class ToolCallResponse:
             None: Validates and normalizes the frozen value.
 
         Notes:
-            Call-count policy remains Engine-owned; a provider may return more
-            calls than the request allowed so the Engine can reject them.
+            `items` is the sole serialized ordering authority. `calls` and
+            `discovery_events` are derived read-only views.
         """
 
-        calls = tuple(self.calls)
-        if not all(isinstance(call, ToolCall) for call in calls):
-            raise TypeError("Tool-call response calls must be ToolCall values")
+        items = tuple(self.items)
+        if not all(isinstance(item, (ToolDiscoveryEvent, ToolCall)) for item in items):
+            raise TypeError(
+                "Tool-call response items must be ToolDiscoveryEvent or ToolCall values"
+            )
         if not isinstance(self.provider_metadata, dict):
             raise TypeError("Tool-call response provider_metadata must be an object")
-        discovery_events = tuple(self.discovery_events)
-        if not all(isinstance(event, ToolDiscoveryEvent) for event in discovery_events):
-            raise TypeError("Tool-call response discovery_events must be ToolDiscoveryEvent values")
         if self.transport_checkpoint is not None and not isinstance(
             self.transport_checkpoint, ToolTransportCheckpoint
         ):
             raise TypeError(
                 "Tool-call response transport_checkpoint must be ToolTransportCheckpoint"
             )
-        object.__setattr__(self, "calls", calls)
+        object.__setattr__(self, "items", items)
         object.__setattr__(self, "text", str(self.text or ""))
         object.__setattr__(self, "finish_reason", str(self.finish_reason or ""))
         object.__setattr__(
@@ -452,7 +461,85 @@ class ToolCallResponse:
             "provider_metadata",
             copy.deepcopy(self.provider_metadata),
         )
-        object.__setattr__(self, "discovery_events", discovery_events)
+
+    @property
+    def calls(self) -> tuple[ToolCall, ...]:
+        """
+        Return Tool calls in their original relative response order.
+
+        The view is derived from `items` and cannot become a competing
+        serialization or authorization authority.
+
+        Examples:
+            Read calls around discovery events:
+                ```python
+                response = ToolCallResponse(
+                    items=(
+                        ToolDiscoveryEvent(
+                            event_id="search_1",
+                            mode="engine_projected",
+                            source="engine",
+                            arguments={"query": "finish"},
+                        ),
+                        ToolCall("call_1", "finish", {}),
+                    )
+                )
+                assert response.calls[0].call_id == "call_1"
+                ```
+
+            Read an empty call view:
+                ```python
+                assert ToolCallResponse(items=()).calls == ()
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            tuple[ToolCall, ...]: Calls in the order they occur within `items`.
+
+        Notes:
+            Cross-category ordering is available only through `items`.
+        """
+
+        return tuple(item for item in self.items if isinstance(item, ToolCall))
+
+    @property
+    def discovery_events(self) -> tuple[ToolDiscoveryEvent, ...]:
+        """
+        Return discovery events in their original relative response order.
+
+        The view is derived from `items`; consumers that authorize calls must
+        walk `items` instead of processing this collection independently.
+
+        Examples:
+            Read one discovery event:
+                ```python
+                event = ToolDiscoveryEvent(
+                    event_id="search_1",
+                    mode="engine_projected",
+                    source="engine",
+                    arguments={"query": "finish"},
+                )
+                assert ToolCallResponse(items=(event,)).discovery_events == (event,)
+                ```
+
+            Read an empty discovery view:
+                ```python
+                assert ToolCallResponse(items=()).discovery_events == ()
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            tuple[ToolDiscoveryEvent, ...]: Events in their `items` order.
+
+        Notes:
+            This view is diagnostic convenience, not an ordering authority.
+        """
+
+        return tuple(item for item in self.items if isinstance(item, ToolDiscoveryEvent))
 
     def observation_text(self) -> str:
         """
@@ -465,15 +552,15 @@ class ToolCallResponse:
             Serialize one call:
                 ```python
                 response = ToolCallResponse(
-                    calls=(ToolCall("call_1", "finish", {}),)
+                    items=(ToolCall("call_1", "finish", {}),)
                 )
                 assert '"finish"' in response.observation_text()
                 ```
 
             Serialize an empty response:
                 ```python
-                response = ToolCallResponse(calls=(), text="No call")
-                assert '"calls":[]' in response.observation_text()
+                response = ToolCallResponse(items=(), text="No call")
+                assert '"items":[]' in response.observation_text()
                 ```
 
         Args:
@@ -483,43 +570,13 @@ class ToolCallResponse:
             str: Canonical JSON used only for trace and log persistence.
 
         Notes:
-            Provider item boundaries have already been preserved in `calls`.
+            Provider item boundaries and cross-category order are preserved in
+            `items`. The private transport checkpoint is intentionally omitted.
         """
 
         return json.dumps(
             {
-                "calls": [
-                    {
-                        "call_id": call.call_id,
-                        "name": call.name,
-                        "arguments": call.arguments,
-                        "provider_metadata": call.provider_metadata,
-                    }
-                    for call in self.calls
-                ],
-                "discovery_events": [
-                    {
-                        "event_id": event.event_id,
-                        "mode": event.mode,
-                        "source": event.source,
-                        "arguments": event.arguments,
-                        "query": event.query,
-                        "tool_refs": list(event.tool_refs),
-                        "status": event.status,
-                        "error": (
-                            None
-                            if event.error is None
-                            else {
-                                "code": event.error.code,
-                                "summary": event.error.summary,
-                                "retryable": event.error.retryable,
-                                "details": event.error.details,
-                            }
-                        ),
-                        "provider_reference_ids": list(event.provider_reference_ids),
-                    }
-                    for event in self.discovery_events
-                ],
+                "items": [self._observation_item(item) for item in self.items],
                 "text": self.text,
                 "finish_reason": self.finish_reason,
                 "provider_metadata": self.provider_metadata,
@@ -529,6 +586,76 @@ class ToolCallResponse:
             separators=(",", ":"),
         )
 
+    @staticmethod
+    def _observation_item(item: ToolResponseItem) -> dict[str, Any]:
+        """
+        Project one ordered response item into bounded diagnostic data.
+
+        The projection includes normalized discovery or call fields and never
+        includes the private transport checkpoint.
+
+        Examples:
+            Project a Tool call:
+                ```python
+                row = ToolCallResponse._observation_item(
+                    ToolCall("call_1", "finish", {})
+                )
+                assert row["kind"] == "tool_call"
+                ```
+
+            Project a discovery event:
+                ```python
+                row = ToolCallResponse._observation_item(
+                    ToolDiscoveryEvent(
+                        event_id="search_1",
+                        mode="engine_projected",
+                        source="engine",
+                        arguments={"query": "finish"},
+                    )
+                )
+                assert row["kind"] == "tool_discovery"
+                ```
+
+        Args:
+            item: Normalized discovery event or Tool call.
+
+        Returns:
+            dict[str, Any]: JSON-compatible diagnostic projection.
+
+        Notes:
+            This helper preserves item order only through its caller's list.
+        """
+
+        if isinstance(item, ToolCall):
+            return {
+                "kind": "tool_call",
+                "call_id": item.call_id,
+                "name": item.name,
+                "arguments": item.arguments,
+                "provider_metadata": item.provider_metadata,
+            }
+        return {
+            "kind": "tool_discovery",
+            "event_id": item.event_id,
+            "mode": item.mode,
+            "source": item.source,
+            "arguments": item.arguments,
+            "query": item.query,
+            "tool_refs": list(item.tool_refs),
+            "status": item.status,
+            "error": (
+                None
+                if item.error is None
+                else {
+                    "code": item.error.code,
+                    "summary": item.error.summary,
+                    "retryable": item.error.retryable,
+                    "details": item.error.details,
+                }
+            ),
+            "provider_reference_ids": list(item.provider_reference_ids),
+        }
+
 
 __all__ = [
     "LLMToolCallCapabilityError",
@@ -537,6 +664,7 @@ __all__ = [
     "ToolCall",
     "ToolCallRequest",
     "ToolCallResponse",
+    "ToolResponseItem",
     "ToolChoice",
     "ToolDefinition",
     "tool_call_request_fingerprint",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
+import json
 import re
 from typing import Any, Literal, TypeAlias
 
@@ -14,6 +15,7 @@ ToolDiscoveryMode = Literal["native_hosted", "native_client", "engine_projected"
 ToolDiscoverySource = Literal["engine", "provider_hosted", "provider_client"]
 ToolDiscoveryStatus = Literal["completed", "failed"]
 ToolReplayRequirement = Literal["none", "previous_response", "full_history"]
+ToolResultLimitBehavior = Literal["request_bound", "provider_fixed"]
 
 _REFERENCE_PATTERN = re.compile(r"^[A-Za-z0-9_.:/-]{1,240}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -35,15 +37,53 @@ def _reference(value: str, *, field_name: str) -> str:
     return normalized
 
 
-def _json_mapping(value: dict[str, Any], *, field_name: str) -> dict[str, JSONValue]:
+def _json_mapping(
+    value: dict[str, Any],
+    *,
+    field_name: str,
+    maximum_bytes: int,
+    maximum_depth: int,
+    maximum_items: int,
+    maximum_string: int,
+) -> dict[str, JSONValue]:
     if not isinstance(value, dict):
         raise TypeError(f"{field_name} must be an object")
     try:
-        import json
-
-        json.dumps(value, allow_nan=False)
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise TypeError(f"{field_name} must contain JSON-compatible values") from exc
+    if len(encoded) > maximum_bytes:
+        raise ValueError(f"{field_name} must not exceed {maximum_bytes} UTF-8 bytes")
+
+    item_count = 0
+
+    def visit(item: JSONValue, *, depth: int) -> None:
+        nonlocal item_count
+        if depth > maximum_depth:
+            raise ValueError(f"{field_name} must not exceed depth {maximum_depth}")
+        if isinstance(item, str) and len(item) > maximum_string:
+            raise ValueError(f"{field_name} strings must not exceed {maximum_string} characters")
+        if isinstance(item, dict):
+            item_count += len(item)
+            for key, nested in item.items():
+                if len(str(key)) > maximum_string:
+                    raise ValueError(
+                        f"{field_name} keys must not exceed {maximum_string} characters"
+                    )
+                visit(nested, depth=depth + 1)
+        elif isinstance(item, list):
+            item_count += len(item)
+            for nested in item:
+                visit(nested, depth=depth + 1)
+        if item_count > maximum_items:
+            raise ValueError(f"{field_name} must not exceed {maximum_items} items")
+
+    visit(value, depth=1)
     return copy.deepcopy(value)
 
 
@@ -201,7 +241,14 @@ class ToolDiscoveryError:
         object.__setattr__(
             self,
             "details",
-            _json_mapping(self.details, field_name="error details"),
+            _json_mapping(
+                self.details,
+                field_name="error details",
+                maximum_bytes=16 * 1024,
+                maximum_depth=8,
+                maximum_items=128,
+                maximum_string=4_000,
+            ),
         )
 
 
@@ -277,12 +324,16 @@ class ToolDiscoveryEvent:
             raise ValueError("Completed Tool discovery events cannot carry an error")
         event_id = _reference(self.event_id, field_name="discovery event id")
         tool_refs = tuple(_reference(item, field_name="tool reference") for item in self.tool_refs)
+        if len(tool_refs) > 50:
+            raise ValueError("Tool discovery event must not exceed 50 Tool references")
         if len(tool_refs) != len(set(tool_refs)):
             raise ValueError("Tool discovery event references must be unique")
         provider_refs = tuple(
             _reference(item, field_name="provider reference id")
             for item in self.provider_reference_ids
         )
+        if len(provider_refs) > 50:
+            raise ValueError("Tool discovery event must not exceed 50 provider references")
         if len(provider_refs) != len(set(provider_refs)):
             raise ValueError("Provider reference ids must be unique")
         query = None if self.query is None else str(self.query).strip()
@@ -292,7 +343,14 @@ class ToolDiscoveryEvent:
         object.__setattr__(
             self,
             "arguments",
-            _json_mapping(self.arguments, field_name="discovery arguments"),
+            _json_mapping(
+                self.arguments,
+                field_name="discovery arguments",
+                maximum_bytes=32 * 1024,
+                maximum_depth=8,
+                maximum_items=256,
+                maximum_string=4_000,
+            ),
         )
         object.__setattr__(self, "tool_refs", tool_refs)
         object.__setattr__(self, "query", query or None)
@@ -304,13 +362,13 @@ class ToolTransportCheckpoint:
     """Preserve opaque provider replay state for one semantic turn."""
 
     checkpoint_id: str
+    revision: int
     provider: str
     model: str
     contract_version: str
     turn_id: str
-    discovery_event_id: str
     integrity_digest: str
-    expires_at: str
+    expires_at: Literal["end_of_turn"] = "end_of_turn"
     opaque_payload: dict[str, JSONValue] | None = None
     durable_ref: str | None = None
 
@@ -326,13 +384,12 @@ class ToolTransportCheckpoint:
                 ```python
                 checkpoint = ToolTransportCheckpoint(
                     checkpoint_id="checkpoint_1",
+                    revision=1,
                     provider="openai",
                     model="example-model",
                     contract_version="responses/v1",
                     turn_id="turn_1",
-                    discovery_event_id="search_1",
                     integrity_digest="0" * 64,
-                    expires_at="end_of_turn",
                     opaque_payload={"output": []},
                 )
                 assert checkpoint.opaque_payload == {"output": []}
@@ -342,13 +399,12 @@ class ToolTransportCheckpoint:
                 ```python
                 checkpoint = ToolTransportCheckpoint(
                     checkpoint_id="checkpoint_2",
+                    revision=2,
                     provider="anthropic",
                     model="example-model",
                     contract_version="messages/v1",
                     turn_id="turn_1",
-                    discovery_event_id="search_2",
                     integrity_digest="f" * 64,
-                    expires_at="end_of_turn",
                     durable_ref="artifact:checkpoint_2",
                 )
                 assert checkpoint.durable_ref is not None
@@ -371,20 +427,19 @@ class ToolTransportCheckpoint:
             ("model", "checkpoint model"),
             ("contract_version", "checkpoint contract version"),
             ("turn_id", "checkpoint turn id"),
-            ("discovery_event_id", "checkpoint discovery event id"),
         ):
             object.__setattr__(
                 self,
                 attribute,
                 _reference(getattr(self, attribute), field_name=label),
             )
+        revision = int(self.revision)
+        if revision < 1:
+            raise ValueError("Checkpoint revision must be at least 1")
         if _DIGEST_PATTERN.fullmatch(str(self.integrity_digest or "")) is None:
             raise ValueError("Checkpoint integrity_digest must be lowercase SHA-256")
-        expires_at = _bounded_text(
-            self.expires_at,
-            field_name="checkpoint expiration",
-            maximum=100,
-        )
+        if self.expires_at != "end_of_turn":
+            raise ValueError("Checkpoint expiration must be end_of_turn")
         durable_ref = None
         if self.durable_ref is not None:
             durable_ref = _reference(self.durable_ref, field_name="checkpoint durable ref")
@@ -393,13 +448,132 @@ class ToolTransportCheckpoint:
             payload = _json_mapping(
                 self.opaque_payload,
                 field_name="checkpoint opaque payload",
+                maximum_bytes=256 * 1024,
+                maximum_depth=16,
+                maximum_items=4_096,
+                maximum_string=32_000,
             )
         if payload is None and durable_ref is None:
             raise ValueError("Checkpoint requires opaque_payload or durable_ref")
+        object.__setattr__(self, "revision", revision)
         object.__setattr__(self, "integrity_digest", str(self.integrity_digest))
-        object.__setattr__(self, "expires_at", expires_at)
         object.__setattr__(self, "opaque_payload", payload)
         object.__setattr__(self, "durable_ref", durable_ref)
+
+
+@dataclass(frozen=True)
+class ToolDiscoveryModeCapability:
+    """Declare discovery behavior for one exact mode on a model binding."""
+
+    mode: ToolDiscoveryMode
+    replay_requirement: ToolReplayRequirement = "none"
+    result_limit_behavior: ToolResultLimitBehavior = "request_bound"
+    max_results: int = 5
+    protocol_version: str = ""
+
+    def __post_init__(self) -> None:
+        """
+        Validate one mode-specific provider capability.
+
+        Validation freezes replay semantics, result-limit behavior, and the
+        exact protocol version on the mode that owns them.
+
+        Examples:
+            Validate a request-bound mode:
+                ```python
+                capability = ToolDiscoveryModeCapability(
+                    mode="engine_projected",
+                    max_results=8,
+                )
+                assert capability.max_results == 8
+                ```
+
+            Validate a provider-fixed mode:
+                ```python
+                capability = ToolDiscoveryModeCapability(
+                    mode="native_hosted",
+                    result_limit_behavior="provider_fixed",
+                    max_results=5,
+                )
+                assert capability.result_limit_behavior == "provider_fixed"
+                ```
+
+        Args:
+            self: Newly initialized mode capability.
+
+        Returns:
+            None: Normalizes and validates the frozen capability.
+
+        Notes:
+            Provider-fixed limits describe provider behavior; they do not
+            claim the request can enforce a smaller result count.
+        """
+
+        if self.mode not in {"native_hosted", "native_client", "engine_projected"}:
+            raise ValueError("Capability mode is unsupported")
+        if self.replay_requirement not in {"none", "previous_response", "full_history"}:
+            raise ValueError("Capability replay_requirement is unsupported")
+        if self.result_limit_behavior not in {"request_bound", "provider_fixed"}:
+            raise ValueError("Capability result_limit_behavior is unsupported")
+        max_results = int(self.max_results)
+        if not 1 <= max_results <= 50:
+            raise ValueError("Capability max_results must be between 1 and 50")
+        object.__setattr__(self, "max_results", max_results)
+        object.__setattr__(
+            self,
+            "protocol_version",
+            str(self.protocol_version or "").strip(),
+        )
+
+    def supports(self, request: ToolDiscoveryRequest) -> bool:
+        """
+        Return whether this mode can honor the requested result bound.
+
+        Request-bound modes accept requests at or below their maximum.
+        Provider-fixed modes accept only bounds that are no smaller than the
+        provider's fixed maximum output.
+
+        Examples:
+            Check a request-bound mode:
+                ```python
+                capability = ToolDiscoveryModeCapability(
+                    mode="engine_projected",
+                    max_results=8,
+                )
+                assert capability.supports(
+                    ToolDiscoveryRequest("engine_projected", 5)
+                )
+                ```
+
+            Reject an unenforceable provider-fixed bound:
+                ```python
+                capability = ToolDiscoveryModeCapability(
+                    mode="native_hosted",
+                    result_limit_behavior="provider_fixed",
+                    max_results=5,
+                )
+                assert not capability.supports(
+                    ToolDiscoveryRequest("native_hosted", 4)
+                )
+                ```
+
+        Args:
+            request: Exact discovery mode and requested result bound.
+
+        Returns:
+            bool: True when this mode can satisfy the requested semantics.
+
+        Notes:
+            The method never substitutes another mode or relaxes a bound.
+        """
+
+        if not isinstance(request, ToolDiscoveryRequest):
+            raise TypeError("Discovery capability checks require ToolDiscoveryRequest")
+        if request.mode != self.mode:
+            return False
+        if self.result_limit_behavior == "request_bound":
+            return request.max_results <= self.max_results
+        return request.max_results >= self.max_results
 
 
 @dataclass(frozen=True)
@@ -409,10 +583,7 @@ class ToolDiscoveryCapabilities:
     provider: str
     model: str
     endpoint_family: str
-    supported_modes: tuple[ToolDiscoveryMode, ...]
-    replay_requirement: ToolReplayRequirement = "none"
-    max_results: int = 5
-    protocol_version: str = ""
+    supported_modes: tuple[ToolDiscoveryModeCapability, ...]
 
     def __post_init__(self) -> None:
         """Validate one model-specific discovery capability record.
@@ -427,9 +598,11 @@ class ToolDiscoveryCapabilities:
                     provider="google",
                     model="example-model",
                     endpoint_family="generateContent",
-                    supported_modes=("engine_projected",),
+                    supported_modes=(
+                        ToolDiscoveryModeCapability(mode="engine_projected"),
+                    ),
                 )
-                assert capabilities.supported_modes == ("engine_projected",)
+                assert capabilities.supported_modes[0].mode == "engine_projected"
                 ```
 
             Declare replay requirements:
@@ -438,10 +611,16 @@ class ToolDiscoveryCapabilities:
                     provider="openai",
                     model="example-model",
                     endpoint_family="responses",
-                    supported_modes=("native_client",),
-                    replay_requirement="previous_response",
+                    supported_modes=(
+                        ToolDiscoveryModeCapability(
+                            mode="native_client",
+                            replay_requirement="previous_response",
+                        ),
+                    ),
                 )
-                assert capabilities.replay_requirement == "previous_response"
+                assert capabilities.supported_modes[0].replay_requirement == (
+                    "previous_response"
+                )
                 ```
 
         Args:
@@ -461,21 +640,17 @@ class ToolDiscoveryCapabilities:
             field_name="capability endpoint family",
         )
         modes = tuple(self.supported_modes)
-        allowed_modes = {"native_hosted", "native_client", "engine_projected"}
-        if not modes or any(mode not in allowed_modes for mode in modes):
-            raise ValueError("Capability supported_modes must contain known modes")
-        if len(modes) != len(set(modes)):
+        if not modes or not all(isinstance(mode, ToolDiscoveryModeCapability) for mode in modes):
+            raise TypeError(
+                "Capability supported_modes must contain ToolDiscoveryModeCapability values"
+            )
+        mode_names = tuple(mode.mode for mode in modes)
+        if len(mode_names) != len(set(mode_names)):
             raise ValueError("Capability supported_modes must be unique")
-        if self.replay_requirement not in {"none", "previous_response", "full_history"}:
-            raise ValueError("Capability replay_requirement is unsupported")
-        if not 1 <= int(self.max_results) <= 50:
-            raise ValueError("Capability max_results must be between 1 and 50")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "endpoint_family", endpoint)
         object.__setattr__(self, "supported_modes", modes)
-        object.__setattr__(self, "max_results", int(self.max_results))
-        object.__setattr__(self, "protocol_version", str(self.protocol_version or ""))
 
     def supports(self, request: ToolDiscoveryRequest) -> bool:
         """Return whether this exact binding supports one discovery request.
@@ -490,7 +665,9 @@ class ToolDiscoveryCapabilities:
                     provider="google",
                     model="example-model",
                     endpoint_family="generateContent",
-                    supported_modes=("engine_projected",),
+                    supported_modes=(
+                        ToolDiscoveryModeCapability(mode="engine_projected"),
+                    ),
                 )
                 assert capabilities.supports(
                     ToolDiscoveryRequest("engine_projected")
@@ -503,7 +680,9 @@ class ToolDiscoveryCapabilities:
                     provider="google",
                     model="example-model",
                     endpoint_family="generateContent",
-                    supported_modes=("engine_projected",),
+                    supported_modes=(
+                        ToolDiscoveryModeCapability(mode="engine_projected"),
+                    ),
                 )
                 assert not capabilities.supports(
                     ToolDiscoveryRequest("native_hosted")
@@ -522,7 +701,7 @@ class ToolDiscoveryCapabilities:
 
         if not isinstance(request, ToolDiscoveryRequest):
             raise TypeError("Discovery capability checks require ToolDiscoveryRequest")
-        return request.mode in self.supported_modes and request.max_results <= self.max_results
+        return any(mode.supports(request) for mode in self.supported_modes)
 
 
 __all__ = [
@@ -532,11 +711,13 @@ __all__ = [
     "ToolDiscoveryError",
     "ToolDiscoveryEvent",
     "ToolDiscoveryMode",
+    "ToolDiscoveryModeCapability",
     "ToolDiscoveryRequest",
     "ToolDiscoverySource",
     "ToolDiscoveryStatus",
     "ToolExposure",
     "ToolNamespace",
     "ToolReplayRequirement",
+    "ToolResultLimitBehavior",
     "ToolTransportCheckpoint",
 ]

@@ -55,6 +55,10 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
 )
+from aethergraph.services.llm.tool_discovery import (
+    ToolDiscoveryCapabilities,
+    ToolDiscoveryModeCapability,
+)
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     ImageFormat,
@@ -88,6 +92,11 @@ from aethergraph.services.tracing import resolve_tracer
 DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 _UNSET = object()
+_TOOL_CALL_ENDPOINT_FAMILIES = {
+    "openai": "responses",
+    "anthropic": "messages",
+    "google": "generateContent",
+}
 
 
 def _merge_request_fields(
@@ -238,7 +247,227 @@ class GenericLLMClient(
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
+        self._tool_discovery_capabilities: ToolDiscoveryCapabilities | None = None
         self._logger = logging.getLogger("aethergraph.services.llm")
+
+    def bind_tool_discovery_capabilities(
+        self,
+        capabilities: ToolDiscoveryCapabilities,
+    ) -> None:
+        """
+        Bind one exact discovery capability record to this client.
+
+        Binding validates the client's default provider, model, and concrete
+        Tool-call endpoint family. Per-call model overrides are checked again
+        when a discovery request is made.
+
+        Examples:
+            Bind projected discovery to an OpenAI Responses model:
+                ```python
+                from aethergraph.services.llm import (
+                    ToolDiscoveryCapabilities,
+                    ToolDiscoveryModeCapability,
+                )
+                from aethergraph.services.llm.generic_client import GenericLLMClient
+
+                client = GenericLLMClient("openai", "example-model")
+                client.bind_tool_discovery_capabilities(
+                    ToolDiscoveryCapabilities(
+                        provider="openai",
+                        model="example-model",
+                        endpoint_family="responses",
+                        supported_modes=(
+                            ToolDiscoveryModeCapability("engine_projected"),
+                        ),
+                    )
+                )
+                ```
+
+            Reject a record for a different endpoint family:
+                ```python
+                from aethergraph.services.llm import (
+                    LLMToolCallCapabilityError,
+                    ToolDiscoveryCapabilities,
+                    ToolDiscoveryModeCapability,
+                )
+                from aethergraph.services.llm.generic_client import GenericLLMClient
+
+                client = GenericLLMClient("openai", "example-model")
+                try:
+                    client.bind_tool_discovery_capabilities(
+                        ToolDiscoveryCapabilities(
+                            provider="openai",
+                            model="example-model",
+                            endpoint_family="chat.completions",
+                            supported_modes=(
+                                ToolDiscoveryModeCapability("engine_projected"),
+                            ),
+                        )
+                    )
+                except LLMToolCallCapabilityError:
+                    pass
+                ```
+
+        Args:
+            capabilities: Exact provider, model, endpoint, and mode record.
+
+        Returns:
+            None: Stores the validated immutable capability record.
+
+        Notes:
+            No capabilities are inferred from provider name. A discovery
+            request fails closed until its exact record has been bound.
+        """
+
+        if not isinstance(capabilities, ToolDiscoveryCapabilities):
+            raise TypeError("tool discovery capabilities must be ToolDiscoveryCapabilities")
+        self._validate_tool_discovery_binding(
+            capabilities=capabilities,
+            model=self.model,
+        )
+        self._tool_discovery_capabilities = capabilities
+
+    def _validate_tool_discovery_binding(
+        self,
+        *,
+        model: str,
+        capabilities: ToolDiscoveryCapabilities | None = None,
+        request: ToolCallRequest | None = None,
+    ) -> ToolDiscoveryModeCapability | None:
+        """
+        Validate discovery against the exact active provider binding.
+
+        The check is transport-free and returns the selected per-mode record
+        when a request is present. Binding-only validation is used when an
+        adapter installs its capability record.
+
+        Examples:
+            Validate an exact binding without a request:
+                ```python
+                from aethergraph.services.llm import (
+                    ToolDiscoveryCapabilities,
+                    ToolDiscoveryModeCapability,
+                )
+                from aethergraph.services.llm.generic_client import GenericLLMClient
+
+                client = GenericLLMClient("openai", "example-model")
+                record = ToolDiscoveryCapabilities(
+                    provider="openai",
+                    model="example-model",
+                    endpoint_family="responses",
+                    supported_modes=(
+                        ToolDiscoveryModeCapability("engine_projected"),
+                    ),
+                )
+                assert client._validate_tool_discovery_binding(
+                    capabilities=record,
+                    model="example-model",
+                ) is None
+                ```
+
+            Reject discovery when no record is bound:
+                ```python
+                from aethergraph.services.llm import (
+                    LLMToolCallCapabilityError,
+                    ToolCallRequest,
+                    ToolDefinition,
+                    ToolDiscoveryRequest,
+                )
+                from aethergraph.services.llm.generic_client import GenericLLMClient
+
+                client = GenericLLMClient("openai", "example-model")
+                request = ToolCallRequest(
+                    tools=(ToolDefinition("finish", "Finish.", {"type": "object"}),),
+                    discovery=ToolDiscoveryRequest("engine_projected"),
+                )
+                try:
+                    client._validate_tool_discovery_binding(
+                        model="example-model",
+                        request=request,
+                    )
+                except LLMToolCallCapabilityError:
+                    pass
+                ```
+
+        Args:
+            model: Exact model or deployment selected for the request.
+            capabilities: Optional record being installed instead of the bound record.
+            request: Optional Tool request whose discovery mode must be supported.
+
+        Returns:
+            ToolDiscoveryModeCapability | None: Selected mode record, or None
+                for binding-only validation and requests without discovery.
+
+        Notes:
+            This method never substitutes a model, endpoint, discovery mode,
+            or result bound.
+        """
+
+        discovery = request.discovery if request is not None else None
+        if request is not None and discovery is None:
+            return None
+        record = capabilities or self._tool_discovery_capabilities
+        feature = (
+            f"tool_discovery.{discovery.mode}"
+            if discovery is not None
+            else "tool_discovery_binding"
+        )
+        endpoint_family = _TOOL_CALL_ENDPOINT_FAMILIES.get(self.provider)
+        if endpoint_family is None:
+            raise LLMToolCallCapabilityError(
+                provider=self.provider,
+                model=model,
+                feature=feature,
+                detail="The active client has no Tool-call endpoint family.",
+            )
+        if record is None:
+            raise LLMToolCallCapabilityError(
+                provider=self.provider,
+                model=model,
+                feature=feature,
+                detail=(
+                    "No exact discovery capability record is bound for endpoint "
+                    f"'{endpoint_family}'."
+                ),
+            )
+        actual_binding = (self.provider, str(model), endpoint_family)
+        declared_binding = (record.provider, record.model, record.endpoint_family)
+        if declared_binding != actual_binding:
+            raise LLMToolCallCapabilityError(
+                provider=self.provider,
+                model=model,
+                feature=feature,
+                detail=(
+                    "Capability record binding "
+                    f"{declared_binding!r} does not match active binding "
+                    f"{actual_binding!r}."
+                ),
+            )
+        if discovery is None:
+            return None
+        mode_capability = next(
+            (item for item in record.supported_modes if item.mode == discovery.mode),
+            None,
+        )
+        if mode_capability is None:
+            raise LLMToolCallCapabilityError(
+                provider=self.provider,
+                model=model,
+                feature=feature,
+                detail="The selected discovery mode is not declared for this binding.",
+            )
+        if not mode_capability.supports(discovery):
+            raise LLMToolCallCapabilityError(
+                provider=self.provider,
+                model=model,
+                feature=feature,
+                detail=(
+                    f"Requested max_results={discovery.max_results} cannot be "
+                    f"honored by {mode_capability.result_limit_behavior} limit "
+                    f"{mode_capability.max_results}."
+                ),
+            )
+        return mode_capability
 
     def _normalize_output_format(self, output_format: ChatOutputFormat) -> ChatOutputFormat:
         if output_format == "json":
@@ -1213,6 +1442,8 @@ class GenericLLMClient(
             validate_json=validate_json,
             fail_on_unsupported=fail_on_unsupported,
         )
+        model = kw.pop("model", self.model)
+        discovery_capability: ToolDiscoveryModeCapability | None = None
         if tool_request is not None:
             if not isinstance(tool_request, ToolCallRequest):
                 raise TypeError("tool_request must be a ToolCallRequest")
@@ -1224,6 +1455,10 @@ class GenericLLMClient(
                 raise ValueError("Native Tool calling cannot be combined with structured output")
             if kw.get("tools") is not None or kw.get("tool_choice") is not None:
                 raise ValueError("tool_request cannot be combined with legacy tools/tool_choice")
+            discovery_capability = self._validate_tool_discovery_binding(
+                model=model,
+                request=tool_request,
+            )
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
         reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
@@ -1231,7 +1466,6 @@ class GenericLLMClient(
             kw["thinking_mode"] = self.thinking_mode
         if "thinking_budget" not in kw and self.thinking_budget is not None:
             kw["thinking_budget"] = self.thinking_budget
-        model = kw.pop("model", self.model)
         trace_payload = kw.pop("trace_payload", None)
         call_name = kw.pop("call_name", None)
         canonical_json_schema = json_schema
@@ -1381,6 +1615,16 @@ class GenericLLMClient(
                 "tool_names": [tool.name for tool in tool_request.tools],
                 "tool_count": len(tool_request.tools),
             }
+            if tool_request.discovery is not None and discovery_capability is not None:
+                tool_request_summary["discovery"] = {
+                    "mode": tool_request.discovery.mode,
+                    "max_results": tool_request.discovery.max_results,
+                    "endpoint_family": _TOOL_CALL_ENDPOINT_FAMILIES[self.provider],
+                    "replay_requirement": discovery_capability.replay_requirement,
+                    "result_limit_behavior": discovery_capability.result_limit_behavior,
+                    "capability_max_results": discovery_capability.max_results,
+                    "protocol_version": discovery_capability.protocol_version,
+                }
             request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
             provider_request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
         if prepared_structured_output is not None:
@@ -1953,11 +2197,7 @@ class GenericLLMClient(
         # Extract cross-provider extras if any
         tools = kw.pop("tools", None)
         tool_choice = kw.pop("tool_choice", None)
-        if tool_request is not None and self.provider not in {
-            "openai",
-            "anthropic",
-            "google",
-        }:
+        if tool_request is not None and self.provider not in _TOOL_CALL_ENDPOINT_FAMILIES:
             raise LLMToolCallCapabilityError(
                 provider=self.provider,
                 model=model,

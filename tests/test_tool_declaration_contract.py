@@ -102,6 +102,23 @@ def test_deferred_tool_requires_discovery_metadata() -> None:
             return None
 
 
+def test_deferred_tool_requires_summary_and_bounds_discovery_metadata() -> None:
+    with pytest.raises(ValueError, match="non-empty discovery summary"):
+
+        @tool(
+            exposure="deferred",
+            discovery=ToolDiscoveryMetadata(namespace="docs"),
+        )
+        def hidden_without_summary() -> None:
+            return None
+
+    with pytest.raises(ValueError, match="more than 32"):
+        ToolDiscoveryMetadata(
+            namespace="docs",
+            aliases=tuple(f"alias {index}" for index in range(33)),
+        )
+
+
 def test_tool_normalizes_compact_argument_schema_to_canonical_object() -> None:
     @tool(
         args_schema={

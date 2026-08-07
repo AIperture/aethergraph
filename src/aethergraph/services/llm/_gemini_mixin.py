@@ -67,7 +67,7 @@ def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
             )
         )
     return ToolCallResponse(
-        calls=tuple(calls),
+        items=tuple(calls),
         text="".join(text_parts),
         finish_reason=str(candidate.get("finishReason") or ""),
         provider_metadata={

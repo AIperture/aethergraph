@@ -74,7 +74,7 @@ def _openai_tool_call_response(data: dict[str, Any]) -> ToolCallResponse:
             if "text" in part:
                 text_parts.append(str(part.get("text") or ""))
     return ToolCallResponse(
-        calls=tuple(calls),
+        items=tuple(calls),
         text="".join(text_parts),
         finish_reason=str(data.get("status") or ""),
         provider_metadata={

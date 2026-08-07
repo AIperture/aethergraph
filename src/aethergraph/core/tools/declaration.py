@@ -25,6 +25,8 @@ def _normalized_discovery_strings(
         raise ValueError(f"tool discovery {field_name} must not contain empty values")
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"tool discovery {field_name} must not contain duplicates")
+    if len(normalized) > 32:
+        raise ValueError(f"tool discovery {field_name} must not contain more than 32 values")
     if any(len(value) > 200 for value in normalized):
         raise ValueError(f"tool discovery {field_name} values must not exceed 200 characters")
     return normalized
@@ -285,6 +287,8 @@ def build_tool_definition(
         raise TypeError("tool discovery must be ToolDiscoveryMetadata or None")
     if exposure == "deferred" and discovery is None:
         raise ValueError("deferred tools require discovery metadata")
+    if exposure == "deferred" and discovery is not None and not discovery.summary:
+        raise ValueError("deferred tools require a non-empty discovery summary")
     if result_schema is not None and result_schema.get("type") != "object":
         raise ValueError(
             "tool result_schema must be an object schema for the structured " "result data payload"

@@ -55,7 +55,7 @@ def _anthropic_tool_call_response(data: dict[str, Any]) -> ToolCallResponse:
             )
         )
     return ToolCallResponse(
-        calls=tuple(calls),
+        items=tuple(calls),
         text="".join(text_parts),
         finish_reason=str(data.get("stop_reason") or ""),
         provider_metadata={

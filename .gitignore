@@ -40,6 +40,8 @@ output/
 *.db
 *.json
 *.jsonl
+!tests/fixtures/llm_tool_discovery/provider_matrix.json
+!tests/fixtures/integration/semantic_event_v2.json
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
