@@ -221,6 +221,13 @@ def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None
     azure = resolve_tool_discovery_capabilities("azure", "gpt-5.5", "responses")
     assert azure is not None
     assert [mode.mode for mode in azure.supported_modes] == ["native_client"]
+    google = resolve_tool_discovery_capabilities(
+        "google",
+        "gemini-2.5-pro",
+        "generateContent",
+    )
+    assert google is not None
+    assert [mode.mode for mode in google.supported_modes] == ["engine_projected"]
 
 
 def test_response_observation_normalizes_events_without_exposing_checkpoint() -> None:
@@ -658,6 +665,67 @@ async def test_anthropic_hosted_search_normalizes_references_before_call() -> No
 
 
 @pytest.mark.asyncio
+async def test_anthropic_hosted_search_normalizes_structured_failure() -> None:
+    client = GenericLLMClient(
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        api_key="test",
+        base_url="https://api.anthropic.test",
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "msg_hosted_error_1",
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_error_1",
+                    "name": "tool_search_tool_bm25",
+                    "input": {"query": "open document"},
+                },
+                {
+                    "type": "tool_search_tool_result",
+                    "tool_use_id": "srvtoolu_error_1",
+                    "content": {
+                        "type": "tool_search_tool_result_error",
+                        "error_code": "unavailable",
+                        "error_message": "Search is temporarily unavailable.",
+                    },
+                },
+            ],
+            "usage": {"input_tokens": 10},
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=ToolCallRequest(
+            tools=(
+                ToolDefinition(
+                    "read_document",
+                    "Read one document.",
+                    {"type": "object"},
+                    exposure="deferred",
+                ),
+            ),
+            discovery=ToolDiscoveryRequest("native_hosted", max_results=5),
+            turn_id="turn_1",
+        ),
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.discovery_events[0].status == "failed"
+    assert response.discovery_events[0].error == ToolDiscoveryError(
+        code="unavailable",
+        summary="Search is temporarily unavailable.",
+        retryable=True,
+    )
+    assert response.calls == ()
+
+
+@pytest.mark.asyncio
 async def test_anthropic_client_search_replays_unchanged_history_and_references() -> None:
     client = GenericLLMClient(
         "anthropic",
@@ -883,6 +951,48 @@ async def test_discovery_rejection_occurs_before_provider_traffic(
             [{"role": "user", "content": "finish"}],
             tool_request=tool_call_request,
             **kwargs,
+        )
+
+    assert fake_http.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "client_kwargs"),
+    [
+        ("openai", "gpt-5.6", {}),
+        (
+            "azure",
+            "gpt-5.5",
+            {
+                "base_url": "https://example.openai.azure.com",
+                "azure_deployment": "gpt-5.5",
+            },
+        ),
+    ],
+)
+async def test_exact_native_client_bindings_do_not_fallback_to_hosted(
+    provider: str,
+    model: str,
+    client_kwargs: dict[str, str],
+) -> None:
+    client = GenericLLMClient(
+        provider=provider,
+        model=model,
+        api_key="test",
+        **client_kwargs,
+    )
+    fake_http = _CountingHttpClient()
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(
+        LLMToolCallCapabilityError,
+        match="selected discovery mode is not declared",
+    ):
+        await client.chat(
+            [{"role": "user", "content": "find a tool"}],
+            tool_request=_discovery_request("native_hosted"),
         )
 
     assert fake_http.calls == 0
