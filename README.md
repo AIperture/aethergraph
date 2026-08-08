@@ -96,6 +96,10 @@ For hosted agents, bespoke applications, Slack, and Telegram, see
 [AG Host, Agent Endpoint, and integrations](docs/integrations_and_host.md). Provider
 credentials and routes belong to the Host deployment, not an agent `.env` file.
 
+Provider-neutral deferred Tool transport, exact mode binding, replay checkpoints, and
+semantic v2 Tool failures are documented in
+[Tool discovery transport](docs/tool_discovery_transport.md).
+
 > **Where should `.env` live?**
 > In your **project root** (the directory where you run your Python entry point).
 > You can override with `AETHERGRAPH_ENV_FILE=/path/to/.env` if needed.
