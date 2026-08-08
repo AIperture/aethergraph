@@ -206,6 +206,13 @@ def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None
 
     assert openai is not None
     assert [mode.mode for mode in openai.supported_modes] == ["native_client"]
+    studio_openai = resolve_tool_discovery_capabilities(
+        "openai",
+        "gpt-5.6-luna",
+        "responses",
+    )
+    assert studio_openai is not None
+    assert [mode.mode for mode in studio_openai.supported_modes] == ["engine_projected"]
     assert resolve_tool_discovery_capabilities("openai", "gpt-5.5", "responses") is None
     assert resolve_tool_discovery_capabilities("azure", "gpt-5.5", "chat.completions") is None
     anthropic = resolve_tool_discovery_capabilities(
