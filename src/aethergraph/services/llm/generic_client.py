@@ -1940,6 +1940,11 @@ class GenericLLMClient(
                         if prepared_prompt_cache is not None
                         else None
                     ),
+                    prompt_cache_stable_message_count=(
+                        prepared_prompt_cache.stable_message_count
+                        if prepared_prompt_cache is not None
+                        else None
+                    ),
                     tool_request=tool_request,
                     **kw,
                 ),
@@ -2397,6 +2402,7 @@ class GenericLLMClient(
         fail_on_unsupported: bool,
         structured_output_fields: dict[str, Any] | None = None,
         prompt_cache_fields: dict[str, Any] | None = None,
+        prompt_cache_stable_message_count: int | None = None,
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
@@ -2425,6 +2431,7 @@ class GenericLLMClient(
                 tool_request=tool_request,
                 structured_output_fields=structured_output_fields,
                 prompt_cache_fields=prompt_cache_fields,
+                prompt_cache_stable_message_count=prompt_cache_stable_message_count,
                 **kw,
             )
 

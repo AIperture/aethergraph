@@ -32,6 +32,7 @@ class PreparedPromptCache:
 
     messages: tuple[dict[str, Any], ...]
     provider_request_fields: dict[str, Any]
+    stable_message_count: int
     observation: dict[str, Any]
 
 
@@ -105,6 +106,7 @@ def prepare_prompt_cache(
     _validate_message_indexes(request.stable_message_indexes, messages)
     normalized_provider = str(provider or "").strip().lower()
     normalized_model = str(model or "").strip().lower()
+    stable_message_count = request.stable_message_indexes[-1] + 1
     capability = _resolve_capability(
         normalized_provider,
         normalized_model,
@@ -136,6 +138,15 @@ def prepare_prompt_cache(
             selected_indexes,
         )
         provider_fields = _openai_explicit_fields(key)
+        if (
+            tool_request is not None
+            and tool_request.discovery is not None
+            and tool_request.discovery.mode == "native_client"
+        ):
+            # A Responses continuation grows at the latest Tool/message boundary.
+            # Keep Engine-owned stable breakpoints, but retain OpenAI's implicit
+            # latest-boundary write instead of restricting writes to explicit-only.
+            provider_fields.pop("prompt_cache_options")
     elif normalized_provider == "anthropic" and capability.mode == "explicit":
         translated_messages = _mark_anthropic_boundaries(
             translated_messages,
@@ -158,11 +169,20 @@ def prepare_prompt_cache(
             else ""
         ),
     }
+    if (
+        normalized_provider == "openai"
+        and capability.mode == "explicit"
+        and tool_request is not None
+        and tool_request.discovery is not None
+        and tool_request.discovery.mode == "native_client"
+    ):
+        observation["implicit_latest_breakpoint"] = True
     if capability.max_new_writes_per_request is not None:
         observation["max_new_writes_per_request"] = capability.max_new_writes_per_request
     return PreparedPromptCache(
         messages=tuple(translated_messages),
         provider_request_fields=provider_fields,
+        stable_message_count=stable_message_count,
         observation=observation,
     )
 

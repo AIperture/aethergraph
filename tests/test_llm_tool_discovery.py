@@ -8,6 +8,7 @@ import pytest
 
 from aethergraph.services.llm import (
     LLMToolCallCapabilityError,
+    PromptCacheRequest,
     ToolCall,
     ToolCallOutput,
     ToolCallRequest,
@@ -23,9 +24,14 @@ from aethergraph.services.llm import (
     ToolTransportCheckpoint,
     resolve_tool_discovery_capabilities,
 )
-from aethergraph.services.llm._openai_mixin import _openai_checkpoint
+from aethergraph.services.llm._openai_mixin import (
+    _openai_appended_prompt_input,
+    _openai_checkpoint,
+    _openai_prompt_prefix_digest,
+)
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.tool_calling import (
+    LLMToolCallResponseError,
     tool_call_request_fingerprint,
     tool_call_surface_fingerprint,
 )
@@ -49,6 +55,7 @@ class _CountingHttpClient:
         self.payload = payload or {}
         self.calls = 0
         self.last_json: dict[str, Any] | None = None
+        self.json_calls: list[dict[str, Any]] = []
         self.last_headers: dict[str, str] | None = None
         self.last_url: str | None = None
 
@@ -61,6 +68,7 @@ class _CountingHttpClient:
     ) -> _FakeResponse:
         self.calls += 1
         self.last_json = json
+        self.json_calls.append(json)
         self.last_headers = headers
         self.last_url = url
         return _FakeResponse(self.payload)
@@ -443,10 +451,16 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         discovery=ToolDiscoveryRequest("native_client", max_results=5),
         turn_id="turn_1",
     )
+    initial_messages = [
+        {"role": "system", "content": "stable agent header"},
+        {"role": "user", "content": "ledger request: open the document"},
+        {"role": "user", "content": "volatile frame: cycle 0"},
+    ]
 
     first, _usage = await client.chat(
-        [{"role": "user", "content": "open the document"}],
+        initial_messages,
         tool_request=initial_request,
+        prompt_cache=PromptCacheRequest((0, 1), "agent.ledger.v1"),
     )
 
     assert isinstance(first, ToolCallResponse)
@@ -457,6 +471,8 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tools"][-1]["execution"] == "client"
+    assert "prompt_cache_options" not in fake_http.last_json
+    cache_key = fake_http.last_json["prompt_cache_key"]
     assert all(tool.get("name") != "read_document" for tool in fake_http.last_json["tools"])
     fake_http.payload = {
         "id": "resp_call_1",
@@ -477,10 +493,21 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
     )
+    discovery_ledger = [
+        {"role": "assistant", "content": "ledger discovery: docs tools requested"},
+        {"role": "user", "content": "ledger plan event: inspect the requested document"},
+        {"role": "user", "content": "ledger observation: read_document activated"},
+    ]
+    discovery_messages = [
+        *initial_messages[:2],
+        *discovery_ledger,
+        {"role": "user", "content": "volatile frame: cycle 1"},
+    ]
 
     second, _usage = await client.chat(
-        [{"role": "user", "content": "open the document"}],
+        discovery_messages,
         tool_request=continuation_request,
+        prompt_cache=PromptCacheRequest((0, 1, 2, 3, 4), "agent.ledger.v1"),
     )
 
     assert isinstance(second, ToolCallResponse)
@@ -490,15 +517,29 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_search_1"
     assert "tools" not in fake_http.last_json
+    assert fake_http.last_json["prompt_cache_key"] == cache_key
+    assert "prompt_cache_options" not in fake_http.last_json
     search_output = fake_http.last_json["input"][0]
     assert search_output["type"] == "tool_search_output"
     assert search_output["call_id"] == "search_call_1"
     assert [tool["name"] for tool in search_output["tools"]] == ["read_document"]
+    appended_after_search = fake_http.last_json["input"][1:]
+    assert [item["role"] for item in appended_after_search] == [
+        "assistant",
+        "user",
+        "user",
+        "user",
+    ]
+    assert "ledger discovery" in appended_after_search[0]["content"][0]["text"]
+    assert "ledger plan event" in appended_after_search[1]["content"][0]["text"]
+    assert "ledger observation" in appended_after_search[2]["content"][0]["text"]
+    assert appended_after_search[3]["content"] == "volatile frame: cycle 1"
     observed = sink.records[-1].request_args["native_tool_calling"]
     assert observed["active_tool_names"] == ["read_document"]
     assert observed["active_tool_count"] == 1
     assert observed["tool_catalog_fingerprint"]
     assert observed["tool_surface_fingerprint"]
+    assert sink.records[-1].request_args["prompt_cache"]["implicit_latest_breakpoint"] is True
 
     fake_http.payload = {
         "id": "resp_finish_1",
@@ -520,10 +561,22 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         transport_checkpoint=second.transport_checkpoint,
         tool_outputs=(ToolCallOutput("call_1", '{"path":"a.md","status":"ok"}'),),
     )
+    result_ledger = [
+        {"role": "assistant", "content": "ledger tool call: read_document"},
+        {"role": "user", "content": "ledger tool result: document contents"},
+        {"role": "user", "content": "ledger plan event: inspection complete"},
+        {"role": "user", "content": "ledger observation: ready to finish"},
+    ]
+    result_messages = [
+        *discovery_messages[:5],
+        *result_ledger,
+        {"role": "user", "content": "volatile frame: cycle 2"},
+    ]
 
     third, _usage = await client.chat(
-        [{"role": "user", "content": "open the document"}],
+        result_messages,
         tool_request=result_request,
+        prompt_cache=PromptCacheRequest(tuple(range(9)), "agent.ledger.v1"),
     )
 
     assert isinstance(third, ToolCallResponse)
@@ -533,13 +586,46 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_call_1"
     assert "tools" not in fake_http.last_json
-    assert fake_http.last_json["input"] == [
-        {
-            "type": "function_call_output",
-            "call_id": "call_1",
-            "output": '{"path":"a.md","status":"ok"}',
-        }
+    assert fake_http.last_json["prompt_cache_key"] == cache_key
+    assert "prompt_cache_options" not in fake_http.last_json
+    assert fake_http.last_json["input"][0] == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": '{"path":"a.md","status":"ok"}',
+    }
+    appended_after_result = fake_http.last_json["input"][1:]
+    assert [item["role"] for item in appended_after_result] == [
+        "assistant",
+        "user",
+        "user",
+        "user",
+        "user",
     ]
+    assert "ledger tool call" in appended_after_result[0]["content"][0]["text"]
+    assert "ledger tool result" in appended_after_result[1]["content"][0]["text"]
+    assert "ledger plan event" in appended_after_result[2]["content"][0]["text"]
+    assert "ledger observation" in appended_after_result[3]["content"][0]["text"]
+    assert appended_after_result[4]["content"] == "volatile frame: cycle 2"
+
+
+def test_openai_continuation_rejects_rewritten_stable_prefix() -> None:
+    original = [{"role": "system", "content": "stable header"}]
+    checkpoint_payload = {
+        "prompt_stable_message_count": 1,
+        "prompt_stable_prefix_digest": _openai_prompt_prefix_digest(original, 1),
+    }
+
+    with pytest.raises(LLMToolCallResponseError) as raised:
+        _openai_appended_prompt_input(
+            [
+                {"role": "system", "content": "rewritten header"},
+                {"role": "user", "content": "new ledger event"},
+            ],
+            stable_message_count=1,
+            checkpoint_payload=checkpoint_payload,
+        )
+
+    assert raised.value.code == "prompt_continuation_diverged"
 
 
 @pytest.mark.asyncio

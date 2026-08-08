@@ -182,6 +182,8 @@ def _openai_checkpoint(
     provider: str = "openai",
     response_output: list[dict[str, Any]] | None = None,
     pending_call_ids: list[str] | None = None,
+    prompt_stable_message_count: int | None = None,
+    prompt_stable_prefix_digest: str | None = None,
 ) -> ToolTransportCheckpoint:
     """Build one integrity-bound OpenAI Tool-continuation checkpoint.
 
@@ -222,6 +224,9 @@ def _openai_checkpoint(
         provider: Exact Responses transport provider identifier.
         response_output: Optional exact output replay required by the provider.
         pending_call_ids: Provider call identities awaiting Engine results.
+        prompt_stable_message_count: Number of stable prompt messages already
+            represented by the response.
+        prompt_stable_prefix_digest: Integrity digest of those stable messages.
 
     Returns:
         ToolTransportCheckpoint: Bounded latest same-turn replay checkpoint.
@@ -241,6 +246,11 @@ def _openai_checkpoint(
     }
     if response_output is not None:
         payload["response_output"] = list(response_output)
+    if prompt_stable_message_count is not None or prompt_stable_prefix_digest is not None:
+        if prompt_stable_message_count is None or prompt_stable_prefix_digest is None:
+            raise ValueError("OpenAI prompt continuation metadata is incomplete")
+        payload["prompt_stable_message_count"] = prompt_stable_message_count
+        payload["prompt_stable_prefix_digest"] = prompt_stable_prefix_digest
     canonical = json.dumps(
         payload,
         ensure_ascii=True,
@@ -333,7 +343,69 @@ def _openai_checkpoint_payload(
         isinstance(name, str) and name.strip() for name in active_names
     ):
         raise ValueError("OpenAI Tool checkpoint activation state is invalid")
+    prompt_count = payload.get("prompt_stable_message_count")
+    prompt_digest = payload.get("prompt_stable_prefix_digest")
+    if (prompt_count is None) != (prompt_digest is None):
+        raise ValueError("OpenAI Tool checkpoint prompt state is incomplete")
+    if prompt_count is not None:
+        if isinstance(prompt_count, bool) or not isinstance(prompt_count, int) or prompt_count <= 0:
+            raise ValueError("OpenAI Tool checkpoint prompt count is invalid")
+        if not isinstance(prompt_digest, str) or len(prompt_digest) != 64:
+            raise ValueError("OpenAI Tool checkpoint prompt digest is invalid")
     return payload
+
+
+def _openai_prompt_prefix_digest(
+    input_messages: list[dict[str, Any]],
+    stable_message_count: int,
+) -> str:
+    """Return the canonical digest of one provider-visible stable prompt prefix."""
+
+    if stable_message_count <= 0 or stable_message_count > len(input_messages):
+        raise ValueError("OpenAI stable prompt message count is outside the request input")
+    canonical = json.dumps(
+        input_messages[:stable_message_count],
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _openai_appended_prompt_input(
+    input_messages: list[dict[str, Any]],
+    *,
+    stable_message_count: int | None,
+    checkpoint_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return every prompt message appended after the prior stable prefix."""
+
+    prior_count = checkpoint_payload.get("prompt_stable_message_count")
+    prior_digest = checkpoint_payload.get("prompt_stable_prefix_digest")
+    if prior_count is None:
+        if stable_message_count is not None:
+            raise LLMToolCallResponseError(
+                code="prompt_continuation_state_missing",
+                message="OpenAI continuation checkpoint has no stable prompt state.",
+            )
+        return []
+    if stable_message_count is None:
+        raise LLMToolCallResponseError(
+            code="prompt_continuation_state_missing",
+            message="OpenAI continuation request has no stable prompt state.",
+        )
+    if stable_message_count < prior_count or prior_count > len(input_messages):
+        raise LLMToolCallResponseError(
+            code="prompt_continuation_diverged",
+            message="OpenAI continuation prompt no longer extends its stable prefix.",
+        )
+    current_prior_digest = _openai_prompt_prefix_digest(input_messages, prior_count)
+    if current_prior_digest != prior_digest:
+        raise LLMToolCallResponseError(
+            code="prompt_continuation_diverged",
+            message="OpenAI continuation prompt changed inside its stable prefix.",
+        )
+    return input_messages[prior_count:]
 
 
 def _openai_tool_call_response(
@@ -342,6 +414,8 @@ def _openai_tool_call_response(
     tool_request: ToolCallRequest,
     model: str,
     provider: str = "openai",
+    prompt_stable_message_count: int | None = None,
+    prompt_stable_prefix_digest: str | None = None,
 ) -> ToolCallResponse:
     """Normalize ordered OpenAI Tool and discovery response items.
 
@@ -476,6 +550,8 @@ def _openai_tool_call_response(
                 if provider == "azure"
                 else None
             ),
+            prompt_stable_message_count=prompt_stable_message_count,
+            prompt_stable_prefix_digest=prompt_stable_prefix_digest,
         )
     elif function_call_ids and provider == "openai" and tool_request.discovery is not None:
         if not response_id:
@@ -490,6 +566,8 @@ def _openai_tool_call_response(
             state="pending_tool_outputs",
             provider=provider,
             pending_call_ids=function_call_ids,
+            prompt_stable_message_count=prompt_stable_message_count,
+            prompt_stable_prefix_digest=prompt_stable_prefix_digest,
         )
     elif tool_request.transport_checkpoint is not None:
         prior_payload = _openai_checkpoint_payload(
@@ -503,6 +581,8 @@ def _openai_tool_call_response(
                 response_id=response_id,
                 state="consumed",
                 provider=provider,
+                prompt_stable_message_count=prompt_stable_message_count,
+                prompt_stable_prefix_digest=prompt_stable_prefix_digest,
             )
     return ToolCallResponse(
         items=tuple(items),
@@ -559,6 +639,7 @@ class _OpenAIMixin:
         tool_choice: Any = None,
         tool_request: ToolCallRequest | None = None,
         prompt_cache_fields: dict[str, Any] | None = None,
+        prompt_cache_stable_message_count: int | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         await self._ensure_client()
@@ -568,6 +649,14 @@ class _OpenAIMixin:
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
         input_messages = _normalize_openai_responses_input(messages)
+        prompt_stable_prefix_digest = (
+            _openai_prompt_prefix_digest(
+                input_messages,
+                prompt_cache_stable_message_count,
+            )
+            if prompt_cache_stable_message_count is not None
+            else None
+        )
 
         body: dict[str, Any] = {"model": model, "input": input_messages}
         structured_output_fields = kw.pop("structured_output_fields", None)
@@ -609,6 +698,11 @@ class _OpenAIMixin:
         checkpoint_payload: dict[str, Any] | None = None
         if tool_request is not None and tool_request.transport_checkpoint is not None:
             checkpoint_payload = _openai_checkpoint_payload(tool_request.transport_checkpoint)
+            appended_prompt_input = _openai_appended_prompt_input(
+                input_messages,
+                stable_message_count=prompt_cache_stable_message_count,
+                checkpoint_payload=checkpoint_payload,
+            )
             if checkpoint_payload["state"] == "pending_search":
                 prior_active_names = {
                     str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
@@ -640,7 +734,8 @@ class _OpenAIMixin:
                         "tools": [
                             _openai_function_tool(tool, defer_loading=True) for tool in loaded_tools
                         ],
-                    }
+                    },
+                    *appended_prompt_input,
                 ]
             elif checkpoint_payload["state"] == "pending_tool_outputs":
                 pending_call_ids = tuple(
@@ -662,7 +757,7 @@ class _OpenAIMixin:
                         "output": outputs_by_id[call_id],
                     }
                     for call_id in pending_call_ids
-                ]
+                ] + appended_prompt_input
 
         # Tools (Responses API style)
         if tool_request is not None:
@@ -718,6 +813,8 @@ class _OpenAIMixin:
                             data,
                             tool_request=tool_request,
                             model=model,
+                            prompt_stable_message_count=prompt_cache_stable_message_count,
+                            prompt_stable_prefix_digest=prompt_stable_prefix_digest,
                         ),
                         usage,
                     ),
