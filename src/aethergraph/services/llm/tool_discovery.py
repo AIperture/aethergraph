@@ -763,21 +763,6 @@ def resolve_tool_discovery_capabilities(
                 ),
             ),
         )
-    if binding == ("openai", "gpt-5.6-luna", "responses"):
-        return ToolDiscoveryCapabilities(
-            provider="openai",
-            model="gpt-5.6-luna",
-            endpoint_family="responses",
-            supported_modes=(
-                ToolDiscoveryModeCapability(
-                    mode="engine_projected",
-                    replay_requirement="previous_response",
-                    result_limit_behavior="request_bound",
-                    max_results=50,
-                    protocol_version="responses.tool_calls",
-                ),
-            ),
-        )
     if binding == ("azure", "gpt-5.5", "responses"):
         return ToolDiscoveryCapabilities(
             provider="azure",
