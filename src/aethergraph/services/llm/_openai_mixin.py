@@ -181,8 +181,9 @@ def _openai_checkpoint(
     call_id: str = "",
     provider: str = "openai",
     response_output: list[dict[str, Any]] | None = None,
+    pending_call_ids: list[str] | None = None,
 ) -> ToolTransportCheckpoint:
-    """Build one integrity-bound OpenAI Tool-search checkpoint.
+    """Build one integrity-bound OpenAI Tool-continuation checkpoint.
 
     Only bounded replay facts are retained; raw response history and Tool
     schemas remain outside the checkpoint payload.
@@ -200,13 +201,14 @@ def _openai_checkpoint(
             assert checkpoint.revision == 1
             ```
 
-        Advance a consumed checkpoint:
+        Await one function result:
             ```python
             checkpoint = _openai_checkpoint(
                 request=continued_request,
                 model="gpt-5.6",
                 response_id="resp_2",
-                state="consumed",
+                state="pending_tool_outputs",
+                pending_call_ids=["call_1"],
             )
             assert checkpoint.revision == 2
             ```
@@ -215,10 +217,11 @@ def _openai_checkpoint(
         request: Exact same-turn discovery request.
         model: Exact Responses model binding.
         response_id: Provider response identity for continuation.
-        state: Private replay state, pending_search or consumed.
+        state: Private replay state, pending_search or pending_tool_outputs.
         call_id: Pending client Tool-search call identity, when present.
         provider: Exact Responses transport provider identifier.
         response_output: Optional exact output replay required by the provider.
+        pending_call_ids: Provider call identities awaiting Engine results.
 
     Returns:
         ToolTransportCheckpoint: Bounded latest same-turn replay checkpoint.
@@ -234,6 +237,7 @@ def _openai_checkpoint(
         "response_id": response_id,
         "call_id": call_id,
         "active_tool_names": list(request.active_tool_names),
+        "pending_call_ids": list(pending_call_ids or []),
     }
     if response_output is not None:
         payload["response_output"] = list(response_output)
@@ -304,13 +308,26 @@ def _openai_checkpoint_payload(
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if digest != checkpoint.integrity_digest:
         raise ValueError("OpenAI Tool checkpoint integrity validation failed")
-    if payload.get("state") not in {"pending_search", "consumed"}:
+    if payload.get("state") not in {
+        "pending_search",
+        "pending_tool_outputs",
+        "consumed",
+    }:
         raise ValueError("OpenAI Tool checkpoint state is invalid")
     if payload["state"] == "pending_search" and (
         not str(payload.get("response_id") or "").strip()
         or not str(payload.get("call_id") or "").strip()
     ):
         raise ValueError("OpenAI pending Tool checkpoint identity is invalid")
+    pending_call_ids = payload.get("pending_call_ids", [])
+    if not isinstance(pending_call_ids, list) or not all(
+        isinstance(call_id, str) and call_id.strip() for call_id in pending_call_ids
+    ):
+        raise ValueError("OpenAI Tool checkpoint pending-call state is invalid")
+    if len(pending_call_ids) != len(set(pending_call_ids)):
+        raise ValueError("OpenAI Tool checkpoint pending-call identities are not unique")
+    if payload["state"] == "pending_tool_outputs" and not pending_call_ids:
+        raise ValueError("OpenAI pending Tool-output checkpoint has no calls")
     active_names = payload.get("active_tool_names")
     if not isinstance(active_names, list) or not all(
         isinstance(name, str) and name.strip() for name in active_names
@@ -360,6 +377,7 @@ def _openai_tool_call_response(
     items: list[ToolDiscoveryEvent | ToolCall] = []
     text_parts: list[str] = []
     search_call_ids: list[str] = []
+    function_call_ids: list[str] = []
     for output_index, item in enumerate(list(data.get("output") or [])):
         if not isinstance(item, dict):
             continue
@@ -399,11 +417,12 @@ def _openai_tool_call_response(
                 item.get("arguments"),
                 call_name=str(item.get("name") or ""),
             )
+            function_call_id = str(
+                item.get("call_id") or item.get("id") or f"openai-call-{output_index}"
+            )
             items.append(
                 ToolCall(
-                    call_id=str(
-                        item.get("call_id") or item.get("id") or f"openai-call-{output_index}"
-                    ),
+                    call_id=function_call_id,
                     name=str(item.get("name") or ""),
                     arguments=arguments,
                     provider_metadata={
@@ -413,6 +432,7 @@ def _openai_tool_call_response(
                     },
                 )
             )
+            function_call_ids.append(function_call_id)
             continue
         if item.get("type") != "message":
             continue
@@ -430,6 +450,11 @@ def _openai_tool_call_response(
         raise LLMToolCallResponseError(
             code="discovery_cardinality_invalid",
             message="OpenAI returned more than one pending client Tool search.",
+        )
+    if search_call_ids and function_call_ids:
+        raise LLMToolCallResponseError(
+            code="discovery_order_invalid",
+            message="OpenAI returned Tool calls before completing client Tool search.",
         )
     checkpoint: ToolTransportCheckpoint | None = None
     response_id = str(data.get("id") or "").strip()
@@ -451,6 +476,20 @@ def _openai_tool_call_response(
                 if provider == "azure"
                 else None
             ),
+        )
+    elif function_call_ids and provider == "openai" and tool_request.discovery is not None:
+        if not response_id:
+            raise LLMToolCallResponseError(
+                code="tool_call_reference_missing",
+                message="OpenAI Tool calls omitted their response id.",
+            )
+        checkpoint = _openai_checkpoint(
+            request=tool_request,
+            model=model,
+            response_id=response_id,
+            state="pending_tool_outputs",
+            provider=provider,
+            pending_call_ids=function_call_ids,
         )
     elif tool_request.transport_checkpoint is not None:
         prior_payload = _openai_checkpoint_payload(
@@ -603,10 +642,31 @@ class _OpenAIMixin:
                         ],
                     }
                 ]
+            elif checkpoint_payload["state"] == "pending_tool_outputs":
+                pending_call_ids = tuple(
+                    str(call_id)
+                    for call_id in list(checkpoint_payload.get("pending_call_ids") or [])
+                )
+                outputs_by_id = {item.call_id: item.output for item in tool_request.tool_outputs}
+                missing = [call_id for call_id in pending_call_ids if call_id not in outputs_by_id]
+                if missing:
+                    raise LLMToolCallResponseError(
+                        code="tool_output_missing",
+                        message="OpenAI continuation is missing a completed Tool output.",
+                    )
+                body["previous_response_id"] = str(checkpoint_payload.get("response_id") or "")
+                body["input"] = [
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": outputs_by_id[call_id],
+                    }
+                    for call_id in pending_call_ids
+                ]
 
         # Tools (Responses API style)
         if tool_request is not None:
-            if checkpoint_payload is None or checkpoint_payload["state"] != "pending_search":
+            if checkpoint_payload is None or checkpoint_payload["state"] == "consumed":
                 body["tools"] = _openai_request_tools(tool_request)
                 body["tool_choice"] = tool_request.choice
                 body["parallel_tool_calls"] = tool_request.max_calls > 1

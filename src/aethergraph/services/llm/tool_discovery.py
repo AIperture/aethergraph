@@ -709,10 +709,11 @@ def resolve_tool_discovery_capabilities(
     model: str,
     endpoint_family: str,
 ) -> ToolDiscoveryCapabilities | None:
-    """Resolve one exact built-in provider discovery capability record.
+    """Resolve one evidence-backed built-in provider discovery capability record.
 
-    The registry contains only implemented and evidence-frozen bindings; it
-    never expands support from a provider name or model family prefix.
+    The registry contains only implemented and evidence-frozen bindings. OpenAI
+    Responses models use an explicit family/tier matrix, including dated model
+    snapshots, instead of an unbounded prefix match.
 
     Examples:
         Resolve the implemented OpenAI client mode:
@@ -723,12 +724,12 @@ def resolve_tool_discovery_capabilities(
             assert record is not None
             ```
 
-        Reject an unregistered model:
+        Resolve a supported OpenAI tier:
             ```python
             record = resolve_tool_discovery_capabilities(
-                "openai", "gpt-5.5", "responses"
+                "openai", "gpt-5.6-luna", "responses"
             )
-            assert record is None
+            assert record is not None
             ```
 
     Args:
@@ -737,10 +738,12 @@ def resolve_tool_discovery_capabilities(
         endpoint_family: Exact active transport endpoint family.
 
     Returns:
-        ToolDiscoveryCapabilities | None: Exact implemented record, if present.
+        ToolDiscoveryCapabilities | None: Implemented record, if present.
 
     Notes:
-        Absent modes fail closed and are never substituted by an adapter.
+        Absent modes fail closed and are never substituted by an adapter. OpenAI
+        families and tiers outside the matrix still require provider testing
+        before this registry is augmented.
     """
 
     binding = (
@@ -748,10 +751,14 @@ def resolve_tool_discovery_capabilities(
         str(model or "").strip(),
         str(endpoint_family or "").strip(),
     )
-    if binding == ("openai", "gpt-5.6", "responses"):
+    if (
+        binding[0] == "openai"
+        and binding[2] == "responses"
+        and _openai_native_tool_search_model(binding[1])
+    ):
         return ToolDiscoveryCapabilities(
             provider="openai",
-            model="gpt-5.6",
+            model=binding[1],
             endpoint_family="responses",
             supported_modes=(
                 ToolDiscoveryModeCapability(
@@ -820,6 +827,50 @@ def resolve_tool_discovery_capabilities(
             ),
         )
     return None
+
+
+def _openai_native_tool_search_model(model: str) -> bool:
+    """Return whether one exact OpenAI model name is in the tested search matrix.
+
+    Examples:
+        Accept a supported dated Luna snapshot:
+            ```python
+            assert _openai_native_tool_search_model(
+                "gpt-5.6-luna-2026-08-01"
+            )
+            ```
+
+        Reject an unsupported tier:
+            ```python
+            assert not _openai_native_tool_search_model("gpt-5.4-nano")
+            ```
+
+    Args:
+        model: Exact configured OpenAI Responses model identifier.
+
+    Returns:
+        bool: True only for a documented family and supported tier.
+
+    Notes:
+        This deliberately is not `startswith("gpt-5")`. Newly released families
+        and tiers must be verified against OpenAI Tool-search support first.
+    """
+
+    match = re.fullmatch(
+        r"gpt-(5\.[456])(?:-(mini|pro|nano|sol|terra|luna))?" r"(?:-\d{4}-\d{2}-\d{2})?",
+        str(model or "").strip(),
+    )
+    if match is None:
+        return False
+    family, tier = match.groups()
+    return (
+        tier
+        in {
+            "5.4": {None, "mini", "pro"},
+            "5.5": {None},
+            "5.6": {None, "sol", "terra", "luna"},
+        }[family]
+    )
 
 
 __all__ = [

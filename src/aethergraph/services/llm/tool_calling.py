@@ -218,6 +218,50 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True)
+class ToolCallOutput:
+    """Return one completed native Tool call to its provider continuation."""
+
+    call_id: str
+    output: str
+
+    def __post_init__(self) -> None:
+        """Validate one provider-call result without interpreting its payload.
+
+        Examples:
+            Return a JSON Tool result:
+                ```python
+                result = ToolCallOutput("call_1", '{"status":"ok"}')
+                assert result.call_id == "call_1"
+                ```
+
+            Reject an empty provider identity:
+                ```python
+                try:
+                    ToolCallOutput("", "completed")
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            self: Newly initialized native Tool-call output.
+
+        Returns:
+            None: Validates and normalizes the frozen value.
+
+        Notes:
+            The Engine serializes its canonical Tool result. Provider adapters
+            frame that opaque string for their own continuation protocol.
+        """
+
+        call_id = str(self.call_id or "").strip()
+        if not call_id:
+            raise ValueError("Tool-call output call_id must not be empty")
+        output = str(self.output)
+        object.__setattr__(self, "call_id", call_id)
+        object.__setattr__(self, "output", output)
+
+
+@dataclass(frozen=True)
 class ToolCallRequest:
     """Request native provider Tool selection for one model decision."""
 
@@ -228,6 +272,7 @@ class ToolCallRequest:
     turn_id: str | None = None
     active_tool_names: tuple[str, ...] = ()
     transport_checkpoint: ToolTransportCheckpoint | None = None
+    tool_outputs: tuple[ToolCallOutput, ...] = ()
 
     def __post_init__(self) -> None:
         """
@@ -307,10 +352,19 @@ class ToolCallRequest:
                 raise ValueError("Tool transport checkpoints require a semantic turn_id")
             if self.transport_checkpoint.turn_id != turn_id:
                 raise ValueError("Tool transport checkpoint turn_id must match the request")
+        tool_outputs = tuple(self.tool_outputs)
+        if not all(isinstance(item, ToolCallOutput) for item in tool_outputs):
+            raise TypeError("Tool-call request tool_outputs must be ToolCallOutput values")
+        output_ids = tuple(item.call_id for item in tool_outputs)
+        if len(output_ids) != len(set(output_ids)):
+            raise ValueError("Tool-call request tool_outputs must have unique call ids")
+        if tool_outputs and self.transport_checkpoint is None:
+            raise ValueError("Tool-call outputs require a transport checkpoint")
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "max_calls", int(self.max_calls))
         object.__setattr__(self, "turn_id", turn_id or None)
         object.__setattr__(self, "active_tool_names", active_tool_names)
+        object.__setattr__(self, "tool_outputs", tool_outputs)
 
 
 def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
@@ -731,6 +785,7 @@ __all__ = [
     "LLMToolCallError",
     "LLMToolCallResponseError",
     "ToolCall",
+    "ToolCallOutput",
     "ToolCallRequest",
     "ToolCallResponse",
     "ToolResponseItem",

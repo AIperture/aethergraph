@@ -9,6 +9,7 @@ import pytest
 from aethergraph.services.llm import (
     LLMToolCallCapabilityError,
     ToolCall,
+    ToolCallOutput,
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
@@ -206,15 +207,20 @@ def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None
 
     assert openai is not None
     assert [mode.mode for mode in openai.supported_modes] == ["native_client"]
-    assert (
-        resolve_tool_discovery_capabilities(
-            "openai",
-            "gpt-5.6-luna",
-            "responses",
-        )
-        is None
-    )
-    assert resolve_tool_discovery_capabilities("openai", "gpt-5.5", "responses") is None
+    for model in (
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-pro-2026-03-05",
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.6-luna-2026-08-01",
+    ):
+        assert resolve_tool_discovery_capabilities("openai", model, "responses")
+    for model in ("gpt-5.4-nano", "gpt-5.5-pro", "gpt-5.7", "gpt-5.6-lunar"):
+        assert resolve_tool_discovery_capabilities("openai", model, "responses") is None
+    assert resolve_tool_discovery_capabilities("openai", "gpt-5.6", "chat.completions") is None
     assert resolve_tool_discovery_capabilities("azure", "gpt-5.5", "chat.completions") is None
     anthropic = resolve_tool_discovery_capabilities(
         "anthropic",
@@ -493,6 +499,47 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert observed["active_tool_count"] == 1
     assert observed["tool_catalog_fingerprint"]
     assert observed["tool_surface_fingerprint"]
+
+    fake_http.payload = {
+        "id": "resp_finish_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call_finish_1",
+                "name": "finish",
+                "arguments": "{}",
+            }
+        ],
+    }
+    result_request = ToolCallRequest(
+        tools=(immediate, deferred),
+        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        turn_id="turn_1",
+        active_tool_names=("read_document",),
+        transport_checkpoint=second.transport_checkpoint,
+        tool_outputs=(ToolCallOutput("call_1", '{"path":"a.md","status":"ok"}'),),
+    )
+
+    third, _usage = await client.chat(
+        [{"role": "user", "content": "open the document"}],
+        tool_request=result_request,
+    )
+
+    assert isinstance(third, ToolCallResponse)
+    assert third.calls[0].name == "finish"
+    assert third.transport_checkpoint is not None
+    assert third.transport_checkpoint.revision == 3
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["previous_response_id"] == "resp_call_1"
+    assert "tools" not in fake_http.last_json
+    assert fake_http.last_json["input"] == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": '{"path":"a.md","status":"ok"}',
+        }
+    ]
 
 
 @pytest.mark.asyncio
