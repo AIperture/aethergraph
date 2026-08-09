@@ -9,7 +9,7 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from .schema import normalize_tool_args_schema
 
-TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v5"
+TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v6"
 TOOL_APPROVAL_TIERS = frozenset({"none", "expensive", "always"})
 TOOL_AVAILABILITY = frozenset({"normal", "plan_proposal", "plan_lifecycle"})
 TOOL_EXPOSURES = frozenset({"immediate", "deferred"})
@@ -36,7 +36,7 @@ def _normalized_discovery_strings(
 class ToolDiscoveryMetadata:
     """Declare compact provider-neutral discovery metadata for one Tool."""
 
-    namespace: str
+    path: str
     summary: str = ""
     aliases: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
@@ -52,18 +52,18 @@ class ToolDiscoveryMetadata:
             Declare a searchable change Tool:
                 ```python
                 metadata = ToolDiscoveryMetadata(
-                    namespace="change",
+                    path="studio.change.agents",
                     summary="Replace Agent Tool assignments.",
                     aliases=("assign tools",),
                     tags=("agent",),
                     effects=("project_write_proposal",),
                 )
-                assert metadata.namespace == "change"
+                assert metadata.path == "studio.change.agents"
                 ```
 
-            Declare namespace-only metadata:
+            Declare path-only metadata:
                 ```python
-                metadata = ToolDiscoveryMetadata(namespace="read")
+                metadata = ToolDiscoveryMetadata(path="studio.read")
                 assert metadata.summary == ""
                 ```
 
@@ -78,13 +78,18 @@ class ToolDiscoveryMetadata:
             intentionally excluded from this value.
         """
 
-        namespace = str(self.namespace or "").strip()
-        if re.fullmatch(r"[a-z][a-z0-9_.-]{0,99}", namespace) is None:
-            raise ValueError("tool discovery namespace must be a lowercase stable identifier")
+        path = str(self.path or "").strip()
+        if re.fullmatch(
+            r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*",
+            path,
+        ) is None or len(path) > 120:
+            raise ValueError(
+                "tool discovery path must be a lowercase dotted stable identifier"
+            )
         summary = str(self.summary or "").strip()
         if len(summary) > 500:
             raise ValueError("tool discovery summary must not exceed 500 characters")
-        object.__setattr__(self, "namespace", namespace)
+        object.__setattr__(self, "path", path)
         object.__setattr__(self, "summary", summary)
         object.__setattr__(
             self,
@@ -112,14 +117,14 @@ class ToolDiscoveryMetadata:
             Serialize complete metadata:
                 ```python
                 metadata = ToolDiscoveryMetadata(
-                    namespace="read", aliases=("lookup",)
+                    path="studio.read", aliases=("lookup",)
                 )
                 assert metadata.to_dict()["aliases"] == ["lookup"]
                 ```
 
             Serialize empty optional fields:
                 ```python
-                metadata = ToolDiscoveryMetadata(namespace="read")
+                metadata = ToolDiscoveryMetadata(path="studio.read")
                 assert metadata.to_dict()["effects"] == []
                 ```
 
@@ -134,7 +139,7 @@ class ToolDiscoveryMetadata:
         """
 
         return {
-            "namespace": self.namespace,
+            "path": self.path,
             "summary": self.summary,
             "aliases": list(self.aliases),
             "tags": list(self.tags),

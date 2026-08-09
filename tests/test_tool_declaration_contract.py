@@ -22,7 +22,7 @@ def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
 
     definition = search.__aether_tool_definition__
 
-    assert definition.api_version == "aethergraph.tool/v5"
+    assert definition.api_version == "aethergraph.tool/v6"
     assert definition.exposure == "immediate"
     assert definition.discovery is None
     assert definition.name == "search"
@@ -71,7 +71,7 @@ def test_tool_declares_deferred_exposure_and_discovery_metadata() -> None:
         description="Read one document.",
         exposure="deferred",
         discovery=ToolDiscoveryMetadata(
-            namespace="docs",
+            path="studio.docs",
             summary="Read a workspace document.",
             aliases=("open file",),
             tags=("read",),
@@ -86,7 +86,7 @@ def test_tool_declares_deferred_exposure_and_discovery_metadata() -> None:
     assert definition.exposure == "deferred"
     assert definition.discovery is not None
     assert definition.to_dict()["discovery"] == {
-        "namespace": "docs",
+        "path": "studio.docs",
         "summary": "Read a workspace document.",
         "aliases": ["open file"],
         "tags": ["read"],
@@ -107,14 +107,14 @@ def test_deferred_tool_requires_summary_and_bounds_discovery_metadata() -> None:
 
         @tool(
             exposure="deferred",
-            discovery=ToolDiscoveryMetadata(namespace="docs"),
+            discovery=ToolDiscoveryMetadata(path="studio.docs"),
         )
         def hidden_without_summary() -> None:
             return None
 
     with pytest.raises(ValueError, match="more than 32"):
         ToolDiscoveryMetadata(
-            namespace="docs",
+            path="studio.docs",
             aliases=tuple(f"alias {index}" for index in range(33)),
         )
 

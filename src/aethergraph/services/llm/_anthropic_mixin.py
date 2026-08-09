@@ -111,20 +111,35 @@ def _anthropic_request_tools(request: ToolCallRequest) -> list[dict[str, Any]]:
             }
         )
     elif discovery is not None and discovery.mode == "native_client":
+        if discovery.search_schema is None:
+            raise LLMToolCallResponseError(
+                code="tool_search_schema_missing",
+                message="Anthropic client Tool search requires an Engine-authored schema.",
+            )
         result.append(
             {
                 "name": "tool_search",
-                "description": "Find project tools needed to continue the task.",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}},
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                "description": _anthropic_tool_path_manifest_description(request),
+                "input_schema": discovery.search_schema,
             }
         )
     result.extend(_anthropic_function_tool(tool) for tool in request.tools)
     return result
+
+
+def _anthropic_tool_path_manifest_description(request: ToolCallRequest) -> str:
+    """Render the compact authorized Tool-path manifest for client search."""
+
+    paths = {
+        tool.path.path: tool.path.description
+        for tool in request.tools
+        if tool.path is not None and tool.exposure == "deferred"
+    }
+    manifest = "; ".join(
+        f"{path}: {description}" for path, description in sorted(paths.items())
+    )
+    prefix = "Find authorized project Tools. Available capability paths"
+    return f"{prefix}: {manifest}." if manifest else f"{prefix}: none."
 
 
 def _anthropic_checkpoint(

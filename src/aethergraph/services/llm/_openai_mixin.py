@@ -138,40 +138,99 @@ def _openai_request_tools(
             tool,
             defer_loading=True if deferred else None,
         )
-        if discovery_mode is None or tool.namespace is None:
+        if discovery_mode is None or tool.path is None:
             result.append(encoded)
             continue
-        namespace = grouped.get(tool.namespace.name)
+        namespace_name = _openai_namespace_name(tool.path.path)
+        namespace = grouped.get(namespace_name)
         if namespace is None:
             namespace = {
                 "type": "namespace",
-                "name": tool.namespace.name,
-                "description": tool.namespace.description,
+                "name": namespace_name,
+                "description": tool.path.description,
                 "tools": [],
             }
-            grouped[tool.namespace.name] = namespace
+            grouped[namespace_name] = namespace
             result.append(namespace)
         namespace["tools"].append(encoded)
     if discovery_mode == "native_client":
+        if request.discovery is None or request.discovery.search_schema is None:
+            raise LLMToolCallResponseError(
+                code="tool_search_schema_missing",
+                message="OpenAI client Tool search requires an Engine-authored schema.",
+            )
         result.append(
             {
                 "type": "tool_search",
                 "execution": "client",
-                "description": "Find project tools needed to continue the task.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"goal": {"type": "string"}},
-                    "required": ["goal"],
-                    "additionalProperties": False,
-                },
+                "description": _tool_path_manifest_description(request),
+                "parameters": request.discovery.search_schema,
             }
         )
     elif discovery_mode == "native_hosted":
-        raise LLMToolCallResponseError(
-            code="unsupported_discovery_mode",
-            message="OpenAI hosted Tool search is not bound to an enforceable result limit.",
+        result.append(
+            {
+                "type": "tool_search",
+                "execution": "hosted",
+                "description": _tool_path_manifest_description(request),
+            }
         )
     return result
+
+
+def _tool_path_manifest_description(request: ToolCallRequest) -> str:
+    """Render the compact authorized Tool-path manifest for client search."""
+
+    paths = {
+        tool.path.path: tool.path.description
+        for tool in request.tools
+        if tool.path is not None and tool.exposure == "deferred"
+    }
+    manifest = "; ".join(
+        f"{path}: {description}" for path, description in sorted(paths.items())
+    )
+    prefix = "Find authorized project Tools. Available capability paths"
+    return f"{prefix}: {manifest}." if manifest else f"{prefix}: none."
+
+
+def _openai_hosted_tool_refs(item: dict[str, Any]) -> tuple[str, ...]:
+    """Decode the exact flat callable names selected by hosted Tool search."""
+
+    raw_results = item.get("tools")
+    if raw_results is None:
+        raw_results = item.get("results")
+    if not isinstance(raw_results, list):
+        return ()
+    names: list[str] = []
+    for value in raw_results:
+        if isinstance(value, str):
+            name = value.strip()
+        elif isinstance(value, dict):
+            name = str(value.get("name") or value.get("tool_name") or "").strip()
+        else:
+            name = ""
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _openai_namespace_name(path: str) -> str:
+    """Project a Tool path to one reversible OpenAI-safe namespace name."""
+
+    encoded_segments: list[str] = []
+    for segment in str(path or "").split("."):
+        encoded_segments.append(
+            segment.replace("_", "_u").replace("-", "_h")
+        )
+    name = "tp_" + "_d".join(encoded_segments)
+    if len(name) > 64:
+        raise LLMToolCallResponseError(
+            code="tool_path_projection_invalid",
+            message=(
+                f"Tool path {path!r} exceeds the OpenAI namespace projection limit."
+            ),
+        )
+    return name
 
 
 def _openai_checkpoint(
@@ -460,33 +519,51 @@ def _openai_tool_call_response(
         if item.get("type") == "tool_search_call":
             discovery = tool_request.discovery
             execution = str(item.get("execution") or "")
-            if discovery is None or discovery.mode != "native_client" or execution != "client":
+            expected_mode = (
+                "native_client" if execution == "client" else "native_hosted"
+            )
+            if discovery is None or discovery.mode != expected_mode:
                 raise LLMToolCallResponseError(
                     code="discovery_mode_mismatch",
-                    message="OpenAI returned Tool search outside native client mode.",
+                    message="OpenAI returned Tool search outside the configured mode.",
                 )
             call_id = str(item.get("call_id") or "").strip()
-            if not call_id:
+            if expected_mode == "native_client" and not call_id:
                 raise LLMToolCallResponseError(
                     code="discovery_reference_missing",
                     message="OpenAI client Tool search omitted its call id.",
                 )
-            arguments = _openai_tool_arguments(
-                item.get("arguments"),
-                call_name="tool_search",
+            arguments = (
+                _openai_tool_arguments(
+                    item.get("arguments"),
+                    call_name="tool_search",
+                )
+                if item.get("arguments") is not None
+                else {}
             )
             query = str(arguments.get("goal") or arguments.get("query") or "").strip()
+            tool_refs = _openai_hosted_tool_refs(item) if expected_mode == "native_hosted" else ()
             items.append(
                 ToolDiscoveryEvent(
-                    event_id=str(item.get("id") or call_id),
-                    mode="native_client",
-                    source="provider_client",
+                    event_id=str(
+                        item.get("id")
+                        or call_id
+                        or f"{response_id or 'response'}:tool-search:{output_index}"
+                    ),
+                    mode=expected_mode,
+                    source=(
+                        "provider_client"
+                        if expected_mode == "native_client"
+                        else "provider_hosted"
+                    ),
                     arguments=arguments,
                     query=query or None,
-                    provider_reference_ids=(call_id,),
+                    tool_refs=tool_refs,
+                    provider_reference_ids=((call_id,) if call_id else ()),
                 )
             )
-            search_call_ids.append(call_id)
+            if expected_mode == "native_client":
+                search_call_ids.append(call_id)
             continue
         if item.get("type") == "function_call":
             arguments = _openai_tool_arguments(

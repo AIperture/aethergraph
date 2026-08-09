@@ -14,7 +14,7 @@ from .tool_discovery import (
     ToolDiscoveryEvent,
     ToolDiscoveryRequest,
     ToolExposure,
-    ToolNamespace,
+    ToolPath,
     ToolTransportCheckpoint,
 )
 from .types import LLMError
@@ -220,7 +220,7 @@ class ToolDefinition:
     description: str
     input_schema: dict[str, Any]
     exposure: ToolExposure = "immediate"
-    namespace: ToolNamespace | None = None
+    path: ToolPath | None = None
 
     def __post_init__(self) -> None:
         """
@@ -276,8 +276,8 @@ class ToolDefinition:
         schema.setdefault("type", "object")
         if self.exposure not in {"immediate", "deferred"}:
             raise ValueError("Tool definition exposure must be immediate or deferred")
-        if self.namespace is not None and not isinstance(self.namespace, ToolNamespace):
-            raise TypeError("Tool definition namespace must be ToolNamespace or None")
+        if self.path is not None and not isinstance(self.path, ToolPath):
+            raise TypeError("Tool definition path must be ToolPath or None")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "description", description)
         object.__setattr__(self, "input_schema", schema)
@@ -390,6 +390,18 @@ class ToolCallRequest:
         names = [tool.name for tool in tools]
         if len(set(names)) != len(names):
             raise ValueError("Tool-call request Tool names must be unique")
+        path_descriptions: dict[str, str] = {}
+        for tool in tools:
+            if tool.path is None:
+                continue
+            prior = path_descriptions.setdefault(
+                tool.path.path,
+                tool.path.description,
+            )
+            if prior != tool.path.description:
+                raise ValueError(
+                    f"Tool path {tool.path.path!r} has conflicting descriptions"
+                )
         if self.choice not in {"auto", "required", "none"}:
             raise ValueError("Tool-call request choice must be auto, required, or none")
         if not 1 <= int(self.max_calls) <= 4:
@@ -447,12 +459,12 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
                 "description": tool.description,
                 "input_schema": tool.input_schema,
                 "exposure": tool.exposure,
-                "namespace": (
+                "path": (
                     None
-                    if tool.namespace is None
+                    if tool.path is None
                     else {
-                        "name": tool.namespace.name,
-                        "description": tool.namespace.description,
+                        "path": tool.path.path,
+                        "description": tool.path.description,
                     }
                 ),
             }
@@ -464,6 +476,7 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
             else {
                 "mode": request.discovery.mode,
                 "max_results": request.discovery.max_results,
+                "search_schema": request.discovery.search_schema,
             }
         ),
     }

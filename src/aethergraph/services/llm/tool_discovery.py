@@ -15,10 +15,25 @@ ToolDiscoveryMode = Literal["native_hosted", "native_client", "engine_projected"
 ToolDiscoverySource = Literal["engine", "provider_hosted", "provider_client"]
 ToolDiscoveryStatus = Literal["completed", "failed"]
 ToolReplayRequirement = Literal["none", "previous_response", "full_history"]
-ToolResultLimitBehavior = Literal["request_bound", "provider_fixed"]
+ToolResultLimitBehavior = Literal[
+    "request_bound",
+    "provider_fixed",
+    "post_validated",
+]
+ToolSelectionOwner = Literal["provider", "application", "engine"]
+ToolInventoryTiming = Literal["request", "search", "preloaded"]
+ToolPathTransport = Literal["native_group", "metadata", "manifest", "none"]
+ToolRepresentation = Literal[
+    "full_definitions",
+    "search_schema_manifest",
+    "compact_catalog",
+]
 
 _REFERENCE_PATTERN = re.compile(r"^[A-Za-z0-9_.:/-]{1,240}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_TOOL_PATH_PATTERN = re.compile(
+    r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$"
+)
 
 
 def _bounded_text(value: str, *, field_name: str, maximum: int) -> str:
@@ -88,51 +103,56 @@ def _json_mapping(
 
 
 @dataclass(frozen=True)
-class ToolNamespace:
-    """Describe one provider-neutral Tool namespace."""
+class ToolPath:
+    """Describe one stable hierarchical Tool capability path."""
 
-    name: str
+    path: str
     description: str
 
     def __post_init__(self) -> None:
-        """Validate and normalize one Tool namespace.
+        """Validate and normalize one Tool path.
 
-        The namespace remains independent from provider-specific grouping and
+        The path remains independent from provider-specific grouping and
         reference syntax.
 
         Examples:
-            Create a namespace:
+            Create a path:
                 ```python
-                namespace = ToolNamespace("change", "Project change Tools.")
-                assert namespace.name == "change"
+                path = ToolPath("studio.change.files", "Project file changes.")
+                assert path.path == "studio.change.files"
                 ```
 
             Reject an empty description:
                 ```python
                 try:
-                    ToolNamespace("change", "")
+                    ToolPath("studio.change", "")
                 except ValueError:
                     pass
                 ```
 
         Args:
-            self: Newly initialized namespace.
+            self: Newly initialized path.
 
         Returns:
-            None: Normalizes the frozen namespace value.
+            None: Normalizes the frozen path value.
 
         Notes:
-            Provider adapters may project namespaces differently without
+            Provider adapters may project paths differently without
             changing this contract.
         """
 
-        object.__setattr__(self, "name", _reference(self.name, field_name="namespace name"))
+        path = str(self.path or "").strip()
+        if len(path) > 120 or _TOOL_PATH_PATTERN.fullmatch(path) is None:
+            raise ValueError(
+                "Tool path must be a lowercase dotted identifier of at most 120 characters"
+            )
+        object.__setattr__(self, "path", path)
         object.__setattr__(
             self,
             "description",
             _bounded_text(
                 self.description,
-                field_name="namespace description",
+                field_name="Tool path description",
                 maximum=1_000,
             ),
         )
@@ -144,6 +164,7 @@ class ToolDiscoveryRequest:
 
     mode: ToolDiscoveryMode
     max_results: int = 5
+    search_schema: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         """Validate one bounded discovery request.
@@ -181,6 +202,18 @@ class ToolDiscoveryRequest:
             raise ValueError("Tool discovery mode is unsupported")
         if not 1 <= int(self.max_results) <= 50:
             raise ValueError("Tool discovery max_results must be between 1 and 50")
+        if self.search_schema is not None:
+            schema = _json_mapping(
+                self.search_schema,
+                field_name="Tool discovery search_schema",
+                maximum_bytes=16_384,
+                maximum_depth=12,
+                maximum_items=512,
+                maximum_string=2_000,
+            )
+            if schema.get("type") != "object":
+                raise ValueError("Tool discovery search_schema must describe an object")
+            object.__setattr__(self, "search_schema", schema)
         object.__setattr__(self, "max_results", int(self.max_results))
 
 
@@ -470,6 +503,10 @@ class ToolDiscoveryModeCapability:
     result_limit_behavior: ToolResultLimitBehavior = "request_bound"
     max_results: int = 5
     protocol_version: str = ""
+    selection_owner: ToolSelectionOwner = "engine"
+    tool_representation: ToolRepresentation = "compact_catalog"
+    inventory_timing: ToolInventoryTiming = "request"
+    path_transport: ToolPathTransport = "manifest"
 
     def __post_init__(self) -> None:
         """
@@ -513,8 +550,24 @@ class ToolDiscoveryModeCapability:
             raise ValueError("Capability mode is unsupported")
         if self.replay_requirement not in {"none", "previous_response", "full_history"}:
             raise ValueError("Capability replay_requirement is unsupported")
-        if self.result_limit_behavior not in {"request_bound", "provider_fixed"}:
+        if self.result_limit_behavior not in {
+            "request_bound",
+            "provider_fixed",
+            "post_validated",
+        }:
             raise ValueError("Capability result_limit_behavior is unsupported")
+        if self.selection_owner not in {"provider", "application", "engine"}:
+            raise ValueError("Capability selection_owner is unsupported")
+        if self.tool_representation not in {
+            "full_definitions",
+            "search_schema_manifest",
+            "compact_catalog",
+        }:
+            raise ValueError("Capability tool_representation is unsupported")
+        if self.inventory_timing not in {"request", "search", "preloaded"}:
+            raise ValueError("Capability inventory_timing is unsupported")
+        if self.path_transport not in {"native_group", "metadata", "manifest", "none"}:
+            raise ValueError("Capability path_transport is unsupported")
         max_results = int(self.max_results)
         if not 1 <= max_results <= 50:
             raise ValueError("Capability max_results must be between 1 and 50")
@@ -571,7 +624,7 @@ class ToolDiscoveryModeCapability:
             raise TypeError("Discovery capability checks require ToolDiscoveryRequest")
         if request.mode != self.mode:
             return False
-        if self.result_limit_behavior == "request_bound":
+        if self.result_limit_behavior in {"request_bound", "post_validated"}:
             return request.max_results <= self.max_results
         return request.max_results >= self.max_results
 
@@ -762,11 +815,26 @@ def resolve_tool_discovery_capabilities(
             endpoint_family="responses",
             supported_modes=(
                 ToolDiscoveryModeCapability(
+                    mode="native_hosted",
+                    replay_requirement="none",
+                    result_limit_behavior="post_validated",
+                    max_results=50,
+                    protocol_version="responses.tool_search",
+                    selection_owner="provider",
+                    tool_representation="full_definitions",
+                    inventory_timing="request",
+                    path_transport="native_group",
+                ),
+                ToolDiscoveryModeCapability(
                     mode="native_client",
                     replay_requirement="previous_response",
                     result_limit_behavior="request_bound",
                     max_results=50,
                     protocol_version="responses.tool_search",
+                    selection_owner="application",
+                    tool_representation="search_schema_manifest",
+                    inventory_timing="search",
+                    path_transport="manifest",
                 ),
             ),
         )
@@ -782,6 +850,10 @@ def resolve_tool_discovery_capabilities(
                     result_limit_behavior="request_bound",
                     max_results=50,
                     protocol_version="responses.tool_search",
+                    selection_owner="application",
+                    tool_representation="search_schema_manifest",
+                    inventory_timing="search",
+                    path_transport="manifest",
                 ),
             ),
         )
@@ -797,6 +869,10 @@ def resolve_tool_discovery_capabilities(
                     result_limit_behavior="request_bound",
                     max_results=50,
                     protocol_version="generateContent.v1",
+                    selection_owner="engine",
+                    tool_representation="compact_catalog",
+                    inventory_timing="search",
+                    path_transport="manifest",
                 ),
             ),
         )
@@ -816,6 +892,10 @@ def resolve_tool_discovery_capabilities(
                     result_limit_behavior="provider_fixed",
                     max_results=5,
                     protocol_version="tool_search_tool_bm25_20251119",
+                    selection_owner="provider",
+                    tool_representation="full_definitions",
+                    inventory_timing="request",
+                    path_transport="metadata",
                 ),
                 ToolDiscoveryModeCapability(
                     mode="native_client",
@@ -823,6 +903,10 @@ def resolve_tool_discovery_capabilities(
                     result_limit_behavior="request_bound",
                     max_results=50,
                     protocol_version="messages.tool_reference",
+                    selection_owner="application",
+                    tool_representation="search_schema_manifest",
+                    inventory_timing="search",
+                    path_transport="manifest",
                 ),
             ),
         )
@@ -885,9 +969,13 @@ __all__ = [
     "ToolDiscoverySource",
     "ToolDiscoveryStatus",
     "ToolExposure",
-    "ToolNamespace",
+    "ToolPath",
     "ToolReplayRequirement",
     "ToolResultLimitBehavior",
+    "ToolInventoryTiming",
+    "ToolPathTransport",
+    "ToolRepresentation",
+    "ToolSelectionOwner",
     "ToolTransportCheckpoint",
     "resolve_tool_discovery_capabilities",
 ]

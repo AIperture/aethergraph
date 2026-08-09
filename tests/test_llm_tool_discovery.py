@@ -21,7 +21,7 @@ from aethergraph.services.llm import (
     ToolDiscoveryMode,
     ToolDiscoveryModeCapability,
     ToolDiscoveryRequest,
-    ToolNamespace,
+    ToolPath,
     ToolTransportCheckpoint,
     resolve_tool_discovery_capabilities,
 )
@@ -36,6 +36,14 @@ from aethergraph.services.llm.tool_calling import (
     tool_call_request_fingerprint,
     tool_call_surface_fingerprint,
 )
+
+
+_CLIENT_SEARCH_SCHEMA = {
+    "type": "object",
+    "properties": {"goal": {"type": "string"}},
+    "required": ["goal"],
+    "additionalProperties": False,
+}
 
 
 class _FakeResponse:
@@ -139,10 +147,12 @@ def test_tool_call_contract_carries_deferred_discovery_and_opaque_checkpoint() -
                 description="Read one document.",
                 input_schema={"type": "object", "properties": {}},
                 exposure="deferred",
-                namespace=ToolNamespace("docs", "Document operations."),
+                path=ToolPath("studio.docs", "Document operations."),
             ),
         ),
-        discovery=ToolDiscoveryRequest("native_client", max_results=7),
+        discovery=ToolDiscoveryRequest(
+            "native_client", max_results=7, search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
         transport_checkpoint=_checkpoint(),
     )
@@ -160,28 +170,65 @@ def test_discovery_turn_identity_is_required_but_does_not_rotate_cache_contract(
     with pytest.raises(ValueError, match="semantic turn_id"):
         ToolCallRequest(
             tools=(tool,),
-            discovery=ToolDiscoveryRequest("native_client"),
+            discovery=ToolDiscoveryRequest(
+                "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+            ),
         )
 
     first = ToolCallRequest(
         tools=(tool,),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
     )
     second = ToolCallRequest(
         tools=(tool,),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_2",
     )
 
     assert tool_call_request_fingerprint(first) == tool_call_request_fingerprint(second)
 
 
+def test_tool_path_is_hierarchical_and_has_one_catalog_description() -> None:
+    path = ToolPath("studio.code.intelligence", "Inspect and understand code.")
+    assert path.path == "studio.code.intelligence"
+
+    with pytest.raises(ValueError, match="lowercase dotted identifier"):
+        ToolPath("Studio Code", "Invalid path.")
+
+    with pytest.raises(ValueError, match="conflicting descriptions"):
+        ToolCallRequest(
+            tools=(
+                ToolDefinition(
+                    "inspect_code",
+                    "Inspect code.",
+                    {"type": "object"},
+                    path=path,
+                ),
+                ToolDefinition(
+                    "find_symbol",
+                    "Find a symbol.",
+                    {"type": "object"},
+                    path=ToolPath(
+                        "studio.code.intelligence",
+                        "A different description.",
+                    ),
+                ),
+            )
+        )
+
+
 def test_transport_checkpoint_must_match_request_turn() -> None:
     with pytest.raises(ValueError, match="must match"):
         ToolCallRequest(
             tools=(ToolDefinition("finish", "Finish.", {"type": "object"}),),
-            discovery=ToolDiscoveryRequest("native_client"),
+            discovery=ToolDiscoveryRequest(
+                "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+            ),
             turn_id="turn_2",
             transport_checkpoint=_checkpoint(turn_id="turn_1"),
         )
@@ -197,12 +244,16 @@ def test_native_client_deferred_activation_preserves_cache_contract() -> None:
     )
     initial = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
     )
     activated = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
         active_tool_names=("read_document",),
     )
@@ -215,7 +266,12 @@ def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None
     openai = resolve_tool_discovery_capabilities("openai", "gpt-5.6", "responses")
 
     assert openai is not None
-    assert [mode.mode for mode in openai.supported_modes] == ["native_client"]
+    assert [mode.mode for mode in openai.supported_modes] == [
+        "native_hosted",
+        "native_client",
+    ]
+    assert openai.supported_modes[0].selection_owner == "provider"
+    assert openai.supported_modes[0].result_limit_behavior == "post_validated"
     for model in (
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -467,11 +523,13 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
             "required": ["path"],
         },
         exposure="deferred",
-        namespace=ToolNamespace("docs", "Document operations."),
+        path=ToolPath("studio.docs", "Document operations."),
     )
     initial_request = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        discovery=ToolDiscoveryRequest(
+            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
     )
     initial_messages = [
@@ -511,7 +569,9 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     }
     continuation_request = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        discovery=ToolDiscoveryRequest(
+            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
@@ -578,7 +638,9 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     }
     result_request = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        discovery=ToolDiscoveryRequest(
+            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=second.transport_checkpoint,
@@ -683,7 +745,9 @@ async def test_openai_consumed_checkpoint_does_not_replay_search_output() -> Non
     )
     pending_request = ToolCallRequest(
         tools=(immediate,),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
     )
     pending = _openai_checkpoint(
@@ -695,7 +759,9 @@ async def test_openai_consumed_checkpoint_does_not_replay_search_output() -> Non
     )
     loaded_request = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=pending,
@@ -724,7 +790,9 @@ async def test_openai_consumed_checkpoint_does_not_replay_search_output() -> Non
     client._bound_loop = asyncio.get_running_loop()
     request = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=consumed,
@@ -924,7 +992,9 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
     )
     initial_request = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        discovery=ToolDiscoveryRequest(
+            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
     )
 
@@ -952,7 +1022,9 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
     }
     continuation_request = ToolCallRequest(
         tools=(immediate, deferred),
-        discovery=ToolDiscoveryRequest("native_client", max_results=5),
+        discovery=ToolDiscoveryRequest(
+            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
@@ -1020,7 +1092,9 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
                 exposure="deferred",
             ),
         ),
-        discovery=ToolDiscoveryRequest("native_client"),
+        discovery=ToolDiscoveryRequest(
+            "native_client", search_schema=_CLIENT_SEARCH_SCHEMA
+        ),
         turn_id="turn_1",
     )
 
@@ -1124,7 +1198,6 @@ async def test_discovery_rejection_occurs_before_provider_traffic(
 @pytest.mark.parametrize(
     ("provider", "model", "client_kwargs"),
     [
-        ("openai", "gpt-5.6", {}),
         (
             "azure",
             "gpt-5.5",
