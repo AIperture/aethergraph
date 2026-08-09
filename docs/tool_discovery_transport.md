@@ -16,8 +16,9 @@ and normalize the selected transport mode.
 - `native_hosted` uses a provider-owned search implementation and records only the
   evidence the provider actually supplies.
 
-`ToolCallResponse.items` is the sole ordered response authority. Discovery events and
-callable Tool calls stay in provider order; the derived `calls` and `discovery_events`
+`ToolCallResponse.items` is the sole ordered response authority. Assistant output,
+discovery events, and callable Tool calls stay in provider order; the derived `text`,
+`calls`, and `discovery_events`
 views never authorize a call independently. Engine consumes discovery events before
 decoding later calls in that same sequence.
 
@@ -30,14 +31,23 @@ The built-in exact native bindings are intentionally narrow:
 
 | Binding | Endpoint | Supported discovery mode |
 | --- | --- | --- |
-| OpenAI `gpt-5.6` | Responses | `native_client` |
+| OpenAI supported GPT-5.4+ bindings | Responses | `native_hosted`, `native_client` |
 | Azure `gpt-5.5` | Responses | `native_client` |
 | Anthropic `claude-sonnet-4-5-20250929` | Messages | `native_hosted`, `native_client` |
 | Google `gemini-2.5-pro` | `generateContent` | declared `engine_projected` transport capability |
 
-OpenAI and Azure hosted search are not declared because the implemented contract cannot
-yet prove an enforceable result maximum. Applications may bind another exact immutable
-capability record only when they own equivalent provider evidence and validation.
+OpenAI hosted selection is provider-owned and result count is post-validated; Engine
+cannot undo context cost already incurred by an oversized hosted result. Client search
+receives the Engine-authored semantic intent schema and compact authorized path manifest,
+then Engine performs deterministic local selection. Anthropic hosted selection remains
+provider-owned BM25/regex with metadata-only path projection. Gemini remains
+Engine-projected. Applications may bind another exact immutable capability record only
+when they own equivalent provider evidence and validation.
+
+`ToolPath` is the only provider-neutral grouping type. Callable Tool names remain flat.
+OpenAI namespaces are reversible wire projections of dotted paths, never authoring
+authority. A native-client no-match still sends the required empty search continuation
+so no provider checkpoint remains pending.
 
 ## Replay and prompt-cache behavior
 
@@ -51,6 +61,11 @@ it at the new-turn boundary. Stable native catalogs remain separate from the cur
 active callable surface so loading a deferred Tool does not rewrite catalog identity.
 Provider observations record the catalog and surface fingerprints and the selected
 mode-specific replay/limit/protocol facts.
+
+The opt-in cache diagnostic uses `AG_RUN_OPENAI_CACHE_SMOKE=1` and two isolated executors:
+raw Responses API control and `GenericLLMClient`. Each performs initial client search,
+first 50-schema load, and exact replay of that loaded branch with a distinct cache-key
+family. The first load may miss; the replay must read the longer schema branch.
 
 `engine_projected` needs no transport checkpoint. It works with any configured provider
 binding that already supports ordinary Tool calling; it does not inherit or require one
@@ -69,4 +84,3 @@ The same protocol emits one `turn.outcome` from Engine's `agent_outcome`:
 completion is a separate observability fact and must never be used as a semantic-success
 fallback. The closed v1 event types remain importable for legacy integrations but are
 not extended with v2 payloads.
-
