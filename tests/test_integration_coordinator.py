@@ -154,6 +154,15 @@ class _RootDispatcher:
         return "run-root-1"
 
 
+class _FailingRootDispatcher:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def start(self, **kwargs) -> str:
+        self.calls.append(kwargs)
+        raise ValueError("Agent not found: agent.support")
+
+
 class _ResumeRouter:
     def __init__(self) -> None:
         self.calls = []
@@ -296,6 +305,40 @@ async def test_coordinator_starts_one_root_turn_and_replays_receipt(tmp_path) ->
     assert len(semantic) == 1
     assert semantic[0].event.kind is SemanticEventKind.INPUT_ACCEPTED
     assert semantic[0].event.payload.input_id == "event-1"
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_completes_idempotency_after_unexpected_dispatch_failure(
+    tmp_path,
+) -> None:
+    continuation_store = InMemoryContinuationStore(secret=b"test-secret")
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    root = _FailingRootDispatcher()
+    coordinator = _coordinator(
+        tmp_path=tmp_path,
+        route=_route(),
+        continuation_store=continuation_store,
+        event_log=event_log,
+        root_dispatcher=root,
+        resume_router=_ResumeRouter(),
+    )
+
+    with pytest.raises(ValueError, match="Agent not found"):
+        await coordinator.accept(verified=_verified(), envelope=_envelope())
+    duplicate = await coordinator.accept(verified=_verified(), envelope=_envelope())
+
+    assert duplicate.accepted is False
+    assert duplicate.duplicate is True
+    assert duplicate.action == "rejected"
+    assert duplicate.rejection_code == "integration.dispatch_failed"
+    assert duplicate.event_cursor == 1
+    assert len(root.calls) == 1
+    semantic = await coordinator.semantic_events.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert [item.event.kind for item in semantic] == [SemanticEventKind.INPUT_ACCEPTED]
     await event_log.close()
 
 

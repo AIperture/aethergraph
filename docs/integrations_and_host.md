@@ -112,6 +112,11 @@ start a second turn. A choice response supplies the public `interaction_id` and 
 missing, mismatched, or ambiguous interactions reject instead of selecting the newest
 wait.
 
+If an unexpected root-dispatch or continuation-resume failure occurs after input
+acceptance, Ingress completes the idempotency key with the stable
+`integration.dispatch_failed` rejection before propagating the operational error. A
+retry therefore cannot leave the key permanently in progress or start a second turn.
+
 History and Server-Sent Events use the same ordered semantic cursor. Persist the last
 cursor and reconnect with `after_cursor`; do not merge this stream with legacy session
 chat or run polling. Cancellation requires the exact `turn_id` owned by the endpoint

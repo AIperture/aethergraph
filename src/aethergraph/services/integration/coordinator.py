@@ -278,29 +278,47 @@ class IntegrationIngressCoordinator:
             extensions={"aethergraph.route_id": route.route_id},
             timestamp=envelope.received_at,
         )
-        if resolved is not None:
-            continuation = resolved.continuation
-            await self.resume_router.resume(
-                run_id=continuation.run_id,
-                node_id=continuation.node_id,
-                token=continuation.token,
-                payload=build_interaction_payload(
-                    resolved=resolved,
+        try:
+            if resolved is not None:
+                continuation = resolved.continuation
+                await self.resume_router.resume(
+                    run_id=continuation.run_id,
+                    node_id=continuation.node_id,
+                    token=continuation.token,
+                    payload=build_interaction_payload(
+                        resolved=resolved,
+                        envelope=envelope,
+                        resources=resources,
+                    ),
+                )
+                action = "continuation_resumed"
+                turn_id = continuation.run_id
+            else:
+                turn_id = await self.root_dispatcher.start(
+                    verified=verified,
+                    route=route,
+                    binding=binding,
                     envelope=envelope,
                     resources=resources,
-                ),
+                )
+                action = "root_turn_started"
+        except Exception:
+            receipt = IngressReceipt(
+                accepted=False,
+                duplicate=False,
+                action="rejected",
+                deployment_id=self.manifest.deployment_id,
+                route_id=route.route_id,
+                session_id=binding.ag_session_id,
+                rejection_code="integration.dispatch_failed",
+                event_cursor=inbound.cursor,
             )
-            action = "continuation_resumed"
-            turn_id = continuation.run_id
-        else:
-            turn_id = await self.root_dispatcher.start(
-                verified=verified,
-                route=route,
-                binding=binding,
+            await self.idempotency_store.complete(
+                deployment_id=self.manifest.deployment_id,
                 envelope=envelope,
-                resources=resources,
+                receipt=receipt,
             )
-            action = "root_turn_started"
+            raise
 
         receipt = IngressReceipt(
             accepted=True,
