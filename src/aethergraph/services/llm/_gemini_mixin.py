@@ -10,10 +10,12 @@ from aethergraph.services.llm.provider_transport import (
     checked_response_metadata,
 )
 from aethergraph.services.llm.tool_calling import (
+    AssistantOutput,
     LLMToolCallResponseError,
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
+    assistant_output_identity,
 )
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
@@ -32,14 +34,30 @@ from aethergraph.services.llm.utils import (
 def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
     """Normalize Gemini function-call parts without flattening part boundaries."""
 
-    calls: list[ToolCall] = []
-    text_parts: list[str] = []
+    items: list[AssistantOutput | ToolCall] = []
     parts = list((candidate.get("content") or {}).get("parts") or [])
     for part_index, part in enumerate(parts):
         if not isinstance(part, dict):
             continue
         if "text" in part:
-            text_parts.append(str(part.get("text") or ""))
+            output_text = str(part.get("text") or "")
+            provider_item_id = str(part.get("id") or "")
+            items.append(
+                AssistantOutput(
+                    output_id=assistant_output_identity(
+                        provider="gemini",
+                        provider_item_id=provider_item_id,
+                        item_index=int(candidate.get("index") or 0),
+                        content_index=part_index,
+                        text=output_text,
+                    ),
+                    text=output_text,
+                    provider_metadata={
+                        "provider_item_id": provider_item_id,
+                        "part_index": part_index,
+                    },
+                )
+            )
         function_call = part.get("functionCall") or part.get("function_call")
         if not isinstance(function_call, dict):
             continue
@@ -56,7 +74,7 @@ def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
         thought_signature = part.get("thoughtSignature") or part.get("thought_signature")
         if thought_signature is not None:
             metadata["thought_signature"] = thought_signature
-        calls.append(
+        items.append(
             ToolCall(
                 call_id=str(
                     function_call.get("id") or part.get("id") or f"gemini-call-{part_index}"
@@ -67,8 +85,7 @@ def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
             )
         )
     return ToolCallResponse(
-        items=tuple(calls),
-        text="".join(text_parts),
+        items=tuple(items),
         finish_reason=str(candidate.get("finishReason") or ""),
         provider_metadata={
             "candidate_index": int(candidate.get("index") or 0),

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from aethergraph.services.llm import (
+    AssistantOutput,
     LLMToolCallCapabilityError,
     PromptCacheRequest,
     ToolCall,
@@ -277,6 +278,28 @@ def test_response_observation_normalizes_events_without_exposing_checkpoint() ->
     assert response.calls[0].call_id == "call_1"
     assert "transport_checkpoint" not in observation
     assert "opaque_payload" not in response.observation_text()
+
+
+def test_response_preserves_ordered_assistant_discovery_and_call_items() -> None:
+    message = AssistantOutput("message_1", "I will inspect the document.")
+    event = ToolDiscoveryEvent(
+        event_id="search_1",
+        mode="engine_projected",
+        source="engine",
+        arguments={"query": "document reader"},
+    )
+    call = ToolCall("call_1", "read_document", {"path": "a.md"})
+
+    response = ToolCallResponse(items=(message, event, call))
+
+    assert response.items == (message, event, call)
+    assert response.assistant_outputs == (message,)
+    assert response.text == "I will inspect the document."
+    assert [item["kind"] for item in json.loads(response.observation_text())["items"]] == [
+        "assistant_output",
+        "tool_discovery",
+        "tool_call",
+    ]
 
 
 def test_failed_discovery_event_requires_a_structured_error() -> None:

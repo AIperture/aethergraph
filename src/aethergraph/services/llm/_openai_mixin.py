@@ -12,11 +12,13 @@ from aethergraph.services.llm.provider_transport import (
     checked_response_metadata,
 )
 from aethergraph.services.llm.tool_calling import (
+    AssistantOutput,
     LLMToolCallResponseError,
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
+    assistant_output_identity,
 )
 from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryEvent,
@@ -448,10 +450,10 @@ def _openai_tool_call_response(
         Private replay state is carried only by `transport_checkpoint`.
     """
 
-    items: list[ToolDiscoveryEvent | ToolCall] = []
-    text_parts: list[str] = []
+    items: list[AssistantOutput | ToolDiscoveryEvent | ToolCall] = []
     search_call_ids: list[str] = []
     function_call_ids: list[str] = []
+    response_id = str(data.get("id") or "").strip()
     for output_index, item in enumerate(list(data.get("output") or [])):
         if not isinstance(item, dict):
             continue
@@ -510,16 +512,52 @@ def _openai_tool_call_response(
             continue
         if item.get("type") != "message":
             continue
-        for part in list(item.get("content") or []):
+        message_id = str(item.get("id") or f"openai-message-{output_index}")
+        for part_index, part in enumerate(list(item.get("content") or [])):
             if not isinstance(part, dict):
                 continue
             if part.get("type") == "refusal":
-                raise LLMToolCallResponseError(
-                    code="refused",
-                    message=str(part.get("refusal") or "OpenAI refused Tool selection."),
+                refusal_text = str(part.get("refusal") or "OpenAI refused Tool selection.")
+                items.append(
+                    AssistantOutput(
+                        output_id=assistant_output_identity(
+                            provider="openai",
+                            response_id=response_id,
+                            provider_item_id=message_id,
+                            item_index=output_index,
+                            content_index=part_index,
+                            text=refusal_text,
+                        ),
+                        text=refusal_text,
+                        content_type="refusal",
+                        provider_metadata={
+                            "item_id": message_id,
+                            "output_index": output_index,
+                            "content_index": part_index,
+                        },
+                    )
                 )
+                continue
             if "text" in part:
-                text_parts.append(str(part.get("text") or ""))
+                output_text = str(part.get("text") or "")
+                items.append(
+                    AssistantOutput(
+                        output_id=assistant_output_identity(
+                            provider="openai",
+                            response_id=response_id,
+                            provider_item_id=message_id,
+                            item_index=output_index,
+                            content_index=part_index,
+                            text=output_text,
+                        ),
+                        text=output_text,
+                        provider_metadata={
+                            "item_id": message_id,
+                            "output_index": output_index,
+                            "content_index": part_index,
+                        },
+                    )
+                )
     if len(search_call_ids) > 1:
         raise LLMToolCallResponseError(
             code="discovery_cardinality_invalid",
@@ -531,7 +569,6 @@ def _openai_tool_call_response(
             message="OpenAI returned Tool calls before completing client Tool search.",
         )
     checkpoint: ToolTransportCheckpoint | None = None
-    response_id = str(data.get("id") or "").strip()
     if search_call_ids:
         if not response_id:
             raise LLMToolCallResponseError(
@@ -586,7 +623,6 @@ def _openai_tool_call_response(
             )
     return ToolCallResponse(
         items=tuple(items),
-        text="".join(text_parts),
         finish_reason=str(data.get("status") or ""),
         provider_metadata={
             "response_id": response_id,

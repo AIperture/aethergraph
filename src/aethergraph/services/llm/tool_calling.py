@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 import hashlib
+from hashlib import sha256
 import json
 import re
 from typing import Any, Literal, TypeAlias
@@ -19,6 +20,8 @@ from .tool_discovery import (
 from .types import LLMError
 
 ToolChoice = Literal["auto", "required", "none"]
+AssistantOutputType = Literal["text", "refusal"]
+ASSISTANT_OUTPUT_NORMALIZATION_VERSION = "assistant_output/v1"
 _MODEL_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -144,6 +147,69 @@ class LLMToolCallResponseError(LLMToolCallError):
             raise ValueError("Tool-call response error message must not be empty")
         super().__init__(normalized_message)
         self.code = normalized_code
+
+
+@dataclass(frozen=True)
+class AssistantOutput:
+    """Preserve one ordered provider-authored assistant content block."""
+
+    output_id: str
+    text: str
+    content_type: AssistantOutputType = "text"
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Validate and detach one normalized assistant output item."""
+
+        output_id = str(self.output_id or "").strip()
+        if not output_id:
+            raise ValueError("Assistant output identity must not be empty")
+        if self.content_type not in {"text", "refusal"}:
+            raise ValueError("Assistant output content_type must be text or refusal")
+        if not isinstance(self.provider_metadata, dict):
+            raise TypeError("Assistant output provider_metadata must be an object")
+        object.__setattr__(self, "output_id", output_id)
+        object.__setattr__(self, "text", str(self.text or ""))
+        object.__setattr__(
+            self,
+            "provider_metadata",
+            copy.deepcopy(self.provider_metadata),
+        )
+
+
+def assistant_output_identity(
+    *,
+    provider: str,
+    response_id: str = "",
+    provider_item_id: str = "",
+    item_index: int = 0,
+    content_index: int = 0,
+    text: str = "",
+) -> str:
+    """Derive a provider-neutral assistant-output identity for replay correlation."""
+
+    try:
+        from .correlation import current_llm_call_correlation
+
+        correlation = current_llm_call_correlation()
+        llm_call_id = str(getattr(correlation, "llm_call_id", "") or "")
+    except Exception:
+        llm_call_id = ""
+    identity = json.dumps(
+        {
+            "version": ASSISTANT_OUTPUT_NORMALIZATION_VERSION,
+            "provider": str(provider or ""),
+            "llm_call_id": llm_call_id,
+            "response_id": str(response_id or ""),
+            "provider_item_id": str(provider_item_id or ""),
+            "item_index": int(item_index),
+            "content_index": int(content_index),
+            "content_digest": sha256(str(text or "").encode("utf-8")).hexdigest(),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "assistant_output_" + sha256(identity.encode("utf-8")).hexdigest()[:32]
 
 
 @dataclass(frozen=True)
@@ -516,7 +582,7 @@ class ToolCall:
         )
 
 
-ToolResponseItem: TypeAlias = ToolDiscoveryEvent | ToolCall
+ToolResponseItem: TypeAlias = AssistantOutput | ToolDiscoveryEvent | ToolCall
 
 
 @dataclass(frozen=True)
@@ -524,7 +590,6 @@ class ToolCallResponse:
     """Return one ordered provider discovery and Tool-call item stream."""
 
     items: tuple[ToolResponseItem, ...]
-    text: str = ""
     finish_reason: str = ""
     provider_metadata: dict[str, Any] = field(default_factory=dict)
     transport_checkpoint: ToolTransportCheckpoint | None = None
@@ -548,7 +613,9 @@ class ToolCallResponse:
 
             Represent a provider response with no call:
                 ```python
-                response = ToolCallResponse(items=(), text="No Tool selected.")
+                response = ToolCallResponse(
+                    items=(AssistantOutput("message_1", "No Tool selected."),)
+                )
                 assert not response.calls
                 ```
 
@@ -564,9 +631,12 @@ class ToolCallResponse:
         """
 
         items = tuple(self.items)
-        if not all(isinstance(item, (ToolDiscoveryEvent, ToolCall)) for item in items):
+        if not all(
+            isinstance(item, (AssistantOutput, ToolDiscoveryEvent, ToolCall)) for item in items
+        ):
             raise TypeError(
-                "Tool-call response items must be ToolDiscoveryEvent or ToolCall values"
+                "Tool-call response items must be AssistantOutput, "
+                "ToolDiscoveryEvent, or ToolCall values"
             )
         if not isinstance(self.provider_metadata, dict):
             raise TypeError("Tool-call response provider_metadata must be an object")
@@ -577,13 +647,24 @@ class ToolCallResponse:
                 "Tool-call response transport_checkpoint must be ToolTransportCheckpoint"
             )
         object.__setattr__(self, "items", items)
-        object.__setattr__(self, "text", str(self.text or ""))
         object.__setattr__(self, "finish_reason", str(self.finish_reason or ""))
         object.__setattr__(
             self,
             "provider_metadata",
             copy.deepcopy(self.provider_metadata),
         )
+
+    @property
+    def assistant_outputs(self) -> tuple[AssistantOutput, ...]:
+        """Return assistant content blocks in their original response order."""
+
+        return tuple(item for item in self.items if isinstance(item, AssistantOutput))
+
+    @property
+    def text(self) -> str:
+        """Return the derived concatenation of ordered assistant content."""
+
+        return "".join(item.text for item in self.assistant_outputs)
 
     @property
     def calls(self) -> tuple[ToolCall, ...]:
@@ -682,7 +763,9 @@ class ToolCallResponse:
 
             Serialize an empty response:
                 ```python
-                response = ToolCallResponse(items=(), text="No call")
+                response = ToolCallResponse(
+                    items=(AssistantOutput("message_1", "No call"),)
+                )
                 assert '"items":[]' in response.observation_text()
                 ```
 
@@ -700,7 +783,6 @@ class ToolCallResponse:
         return json.dumps(
             {
                 "items": [self._observation_item(item) for item in self.items],
-                "text": self.text,
                 "finish_reason": self.finish_reason,
                 "provider_metadata": self.provider_metadata,
             },
@@ -749,6 +831,14 @@ class ToolCallResponse:
             This helper preserves item order only through its caller's list.
         """
 
+        if isinstance(item, AssistantOutput):
+            return {
+                "kind": "assistant_output",
+                "output_id": item.output_id,
+                "text": item.text,
+                "content_type": item.content_type,
+                "provider_metadata": item.provider_metadata,
+            }
         if isinstance(item, ToolCall):
             return {
                 "kind": "tool_call",
@@ -781,6 +871,10 @@ class ToolCallResponse:
 
 
 __all__ = [
+    "ASSISTANT_OUTPUT_NORMALIZATION_VERSION",
+    "AssistantOutput",
+    "AssistantOutputType",
+    "assistant_output_identity",
     "LLMToolCallCapabilityError",
     "LLMToolCallError",
     "LLMToolCallResponseError",

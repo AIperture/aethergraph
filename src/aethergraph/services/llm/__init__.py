@@ -17,6 +17,9 @@ from .structured_output import (
     resolve_structured_output_capabilities,
 )
 from .tool_calling import (
+    ASSISTANT_OUTPUT_NORMALIZATION_VERSION,
+    AssistantOutput,
+    AssistantOutputType,
     LLMToolCallCapabilityError,
     LLMToolCallError,
     LLMToolCallResponseError,
@@ -26,6 +29,7 @@ from .tool_calling import (
     ToolCallResponse,
     ToolDefinition,
     ToolResponseItem,
+    assistant_output_identity,
 )
 from .tool_discovery import (
     JSONScalar,
@@ -62,6 +66,10 @@ from .types import (
 )
 
 __all__ = [
+    "ASSISTANT_OUTPUT_NORMALIZATION_VERSION",
+    "AssistantOutput",
+    "AssistantOutputType",
+    "assistant_output_identity",
     "LLMContextWindowExceededError",
     "LLMProviderRequestError",
     "LLMRequestEstimate",

@@ -12,12 +12,14 @@ from aethergraph.services.llm.provider_transport import (
     checked_response_metadata,
 )
 from aethergraph.services.llm.tool_calling import (
+    AssistantOutput,
     LLMToolCallCapabilityError,
     LLMToolCallResponseError,
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
+    assistant_output_identity,
 )
 from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryError,
@@ -299,16 +301,33 @@ def _anthropic_tool_call_response(
         Server search blocks never become executable Engine Tool calls.
     """
 
-    items: list[ToolDiscoveryEvent | ToolCall] = []
-    text_parts: list[str] = []
+    items: list[AssistantOutput | ToolDiscoveryEvent | ToolCall] = []
     blocks = list(data.get("content") or [])
+    response_id = str(data.get("id") or "").strip()
     hosted_calls: dict[str, dict[str, Any]] = {}
     client_search_ids: list[str] = []
     for block_index, block in enumerate(blocks):
         if not isinstance(block, dict):
             continue
         if block.get("type") == "text":
-            text_parts.append(str(block.get("text") or ""))
+            output_text = str(block.get("text") or "")
+            provider_item_id = str(block.get("id") or "")
+            items.append(
+                AssistantOutput(
+                    output_id=assistant_output_identity(
+                        provider="anthropic",
+                        response_id=response_id,
+                        provider_item_id=provider_item_id,
+                        item_index=block_index,
+                        text=output_text,
+                    ),
+                    text=output_text,
+                    provider_metadata={
+                        "provider_item_id": provider_item_id,
+                        "content_block_index": block_index,
+                    },
+                )
+            )
             continue
         block_type = block.get("type")
         if block_type == "server_tool_use":
@@ -455,10 +474,9 @@ def _anthropic_tool_call_response(
             )
     return ToolCallResponse(
         items=tuple(items),
-        text="".join(text_parts),
         finish_reason=str(data.get("stop_reason") or ""),
         provider_metadata={
-            "response_id": str(data.get("id") or ""),
+            "response_id": response_id,
             "content_block_count": len(blocks),
         },
         transport_checkpoint=checkpoint,
