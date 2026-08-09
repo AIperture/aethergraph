@@ -734,6 +734,7 @@ class ChannelSession:
         text: str,
         *,
         meta: dict[str, Any] | None = None,
+        upsert_key: str | None = None,
         channel: str | None = None,
         prefer_stream: bool = False,
         stream_threshold_chars: int | None = None,
@@ -764,6 +765,7 @@ class ChannelSession:
             await context.channel().send_text(
                 "Status update.",
                 meta={"priority": "high"},
+                upsert_key="assistant-output:turn-1:0",
                 channel="web:chat"
             )
             ```
@@ -771,6 +773,7 @@ class ChannelSession:
         Args:
             text: Message body to send.
             meta: Optional outbound event metadata.
+            upsert_key: Optional stable identity for idempotent delivery or revision.
             channel: Optional target channel key.
             prefer_stream: When True, attempt to stream longer text with a typing effect.
             stream_threshold_chars: Minimum text length required before streaming is attempted.
@@ -829,6 +832,7 @@ class ChannelSession:
             type="agent.message",
             channel=self._resolve_key(channel),
             text=text,
+            upsert_key=upsert_key,
             meta=self._inject_context_meta(
                 {
                     **(meta or {}),
