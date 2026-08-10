@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from aethergraph.contracts.integration import (
-    SEMANTIC_EVENT_PROTOCOL_V2,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
     HostManifest,
     IntegrationKind,
@@ -67,10 +66,7 @@ def install_integration_ingress(
     """
     if getattr(container, "integration_ingress", None) is not None:
         raise RuntimeError("Integration ingress is already installed on this Host.")
-    if manifest.semantic_event_protocol_version not in {
-        SEMANTIC_EVENT_PROTOCOL_VERSION,
-        SEMANTIC_EVENT_PROTOCOL_V2,
-    }:
+    if manifest.semantic_event_protocol_version != SEMANTIC_EVENT_PROTOCOL_VERSION:
         raise RuntimeError(
             "Semantic event protocol "
             f"{manifest.semantic_event_protocol_version!r} is negotiated but its "

@@ -26,7 +26,6 @@ from .versions import (
     INTEGRATION_ROUTE_SCHEMA_VERSION,
     ORIGIN_BINDING_SCHEMA_VERSION,
     RELEASE_COMPATIBILITY_SCHEMA_VERSION,
-    SEMANTIC_EVENT_PROTOCOL_V2,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
 )
 
@@ -34,10 +33,7 @@ Identifier = Annotated[str, Field(min_length=1, max_length=255)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 BoundedText = Annotated[str, Field(max_length=1_000_000)]
 MetadataScalar: TypeAlias = str | int | float | bool | None
-SemanticEventProtocolVersion: TypeAlias = Literal[
-    "aethergraph.semantic-event/v1",
-    "aethergraph.semantic-event/v2",
-]
+SemanticEventProtocolVersion: TypeAlias = Literal["aethergraph.semantic-event/v2"]
 
 
 class IntegrationContract(BaseModel):
@@ -55,8 +51,8 @@ class IntegrationKind(StrEnum):
     TELEGRAM = "telegram"
 
 
-class SemanticEventKind(StrEnum):
-    """Semantic events exposed to transport projectors and endpoint clients."""
+class LegacySemanticEventKind(StrEnum):
+    """Semantic v1 kinds retained only for persisted-event decoding."""
 
     INPUT_ACCEPTED = "input.accepted"
     MESSAGE_STARTED = "message.started"
@@ -74,8 +70,8 @@ class SemanticEventKind(StrEnum):
     TURN_FAILED = "turn.failed"
 
 
-class SemanticEventKindV2(StrEnum):
-    """Semantic events available only under the v2 event envelope."""
+class SemanticEventKind(StrEnum):
+    """Canonical semantic events exposed to integrations and endpoint clients."""
 
     INPUT_ACCEPTED = "input.accepted"
     MESSAGE_STARTED = "message.started"
@@ -99,7 +95,7 @@ class IntegrationCapabilities(IntegrationContract):
         INTEGRATION_CAPABILITIES_SCHEMA_VERSION
     )
     semantic_event_protocol_version: SemanticEventProtocolVersion = SEMANTIC_EVENT_PROTOCOL_VERSION
-    event_kinds: tuple[SemanticEventKind | SemanticEventKindV2, ...]
+    event_kinds: tuple[SemanticEventKind, ...]
     streaming: bool
     interactions: bool
     attachments: bool
@@ -109,8 +105,8 @@ class IntegrationCapabilities(IntegrationContract):
     @classmethod
     def _unique_event_kinds(
         cls,
-        value: tuple[SemanticEventKind | SemanticEventKindV2, ...],
-    ) -> tuple[SemanticEventKind | SemanticEventKindV2, ...]:
+        value: tuple[SemanticEventKind, ...],
+    ) -> tuple[SemanticEventKind, ...]:
         values = tuple(item.value for item in value)
         if len(values) != len(set(values)):
             raise ValueError("event_kinds must not contain duplicates")
@@ -119,16 +115,17 @@ class IntegrationCapabilities(IntegrationContract):
     @model_validator(mode="after")
     def _validate_event_protocol(self) -> IntegrationCapabilities:
         """
-        Require event kinds from the explicitly selected semantic protocol.
+        Require unique event kinds from the canonical semantic protocol.
 
-        Shared v1/v2 event names remain valid in either protocol, while each
-        protocol's terminal kinds stay closed to that exact selection.
+        Intro:
+            Capability validation accepts only the active semantic-event vocabulary
+            and preserves the caller's unique event ordering.
 
         Examples:
-            Validate v1 completion:
+            Validate message completion:
                 ```python
                 capabilities = IntegrationCapabilities(
-                    event_kinds=(SemanticEventKind.TURN_COMPLETED,),
+                    event_kinds=(SemanticEventKind.MESSAGE_COMPLETED,),
                     streaming=False,
                     interactions=False,
                     attachments=False,
@@ -136,11 +133,10 @@ class IntegrationCapabilities(IntegrationContract):
                 )
                 ```
 
-            Validate a v2 outcome:
+            Validate a terminal outcome:
                 ```python
                 capabilities = IntegrationCapabilities(
-                    semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
-                    event_kinds=(SemanticEventKindV2.TURN_OUTCOME,),
+                    event_kinds=(SemanticEventKind.TURN_OUTCOME,),
                     streaming=False,
                     interactions=False,
                     attachments=False,
@@ -155,25 +151,13 @@ class IntegrationCapabilities(IntegrationContract):
             IntegrationCapabilities: The unchanged protocol-consistent record.
 
         Notes:
-            The validator never substitutes a terminal kind or protocol.
+            The validator never substitutes event kinds or protocols.
         """
 
-        kind_type = (
-            SemanticEventKind
-            if self.semantic_event_protocol_version == SEMANTIC_EVENT_PROTOCOL_VERSION
-            else SemanticEventKindV2
-        )
-        allowed = {item.value for item in kind_type}
-        unsupported = sorted({item.value for item in self.event_kinds} - allowed)
-        if unsupported:
-            raise ValueError(
-                "event_kinds are incompatible with semantic_event_protocol_version: "
-                + ", ".join(unsupported)
-            )
         object.__setattr__(
             self,
             "event_kinds",
-            tuple(kind_type(item.value) for item in self.event_kinds),
+            tuple(SemanticEventKind(item.value) for item in self.event_kinds),
         )
         return self
 
@@ -583,8 +567,8 @@ class InteractionResolvedPayload(IntegrationContract):
     artifact_ids: tuple[Identifier, ...] = ()
 
 
-class ToolActivityPayload(IntegrationContract):
-    """Semantic payload reporting transport-neutral Tool activity."""
+class LegacyToolActivityPayload(IntegrationContract):
+    """Semantic v1 Tool activity retained only for persisted-event decoding."""
 
     tool_call_id: Identifier
     tool_name: Identifier
@@ -631,13 +615,13 @@ class ToolErrorPayload(IntegrationContract):
         return value
 
 
-class ToolActivityPayloadV2(ToolActivityPayload):
-    """Semantic v2 Tool activity carrying an optional structured failure."""
+class ToolActivityPayload(LegacyToolActivityPayload):
+    """Canonical Tool activity carrying an optional structured failure."""
 
     error: ToolErrorPayload | None = None
 
     @model_validator(mode="after")
-    def _validate_error_status(self) -> ToolActivityPayloadV2:
+    def _validate_error_status(self) -> ToolActivityPayload:
         if self.status == "failed" and self.error is None:
             raise ValueError("Failed v2 Tool activity requires a structured error")
         if self.status != "failed" and self.error is not None:
@@ -669,14 +653,14 @@ class WarningRaisedPayload(IntegrationContract):
     details: dict[str, JsonValue] = Field(default_factory=dict)
 
 
-class TurnCompletedPayload(IntegrationContract):
-    """Semantic payload marking successful terminal turn completion."""
+class LegacyTurnCompletedPayload(IntegrationContract):
+    """Semantic v1 successful completion retained for historical decoding."""
 
     result_available: bool
 
 
-class TurnFailedPayload(IntegrationContract):
-    """Semantic payload marking terminal turn failure."""
+class LegacyTurnFailedPayload(IntegrationContract):
+    """Semantic v1 terminal failure retained for historical decoding."""
 
     code: Identifier
     message: Annotated[str, Field(min_length=1, max_length=4_000)]
@@ -693,6 +677,85 @@ class TurnOutcomePayload(IntegrationContract):
     engine_turn_id: Identifier
 
 
+LegacySemanticPayload: TypeAlias = (
+    InputAcceptedPayload
+    | MessageStartedPayload
+    | MessageDeltaPayload
+    | MessageCompletedPayload
+    | PhaseChangedPayload
+    | ProgressChangedPayload
+    | InteractionRequestedPayload
+    | InteractionResolvedPayload
+    | LegacyToolActivityPayload
+    | ArtifactAvailablePayload
+    | StructuredOutputPayload
+    | WarningRaisedPayload
+    | LegacyTurnCompletedPayload
+    | LegacyTurnFailedPayload
+)
+
+
+_LEGACY_PAYLOAD_BY_KIND: dict[LegacySemanticEventKind, type[IntegrationContract]] = {
+    LegacySemanticEventKind.INPUT_ACCEPTED: InputAcceptedPayload,
+    LegacySemanticEventKind.MESSAGE_STARTED: MessageStartedPayload,
+    LegacySemanticEventKind.MESSAGE_DELTA: MessageDeltaPayload,
+    LegacySemanticEventKind.MESSAGE_COMPLETED: MessageCompletedPayload,
+    LegacySemanticEventKind.PHASE_CHANGED: PhaseChangedPayload,
+    LegacySemanticEventKind.PROGRESS_CHANGED: ProgressChangedPayload,
+    LegacySemanticEventKind.INTERACTION_REQUESTED: InteractionRequestedPayload,
+    LegacySemanticEventKind.INTERACTION_RESOLVED: InteractionResolvedPayload,
+    LegacySemanticEventKind.TOOL_ACTIVITY: LegacyToolActivityPayload,
+    LegacySemanticEventKind.ARTIFACT_AVAILABLE: ArtifactAvailablePayload,
+    LegacySemanticEventKind.STRUCTURED_OUTPUT: StructuredOutputPayload,
+    LegacySemanticEventKind.WARNING_RAISED: WarningRaisedPayload,
+    LegacySemanticEventKind.TURN_COMPLETED: LegacyTurnCompletedPayload,
+    LegacySemanticEventKind.TURN_FAILED: LegacyTurnFailedPayload,
+}
+
+
+class LegacySemanticEvent(IntegrationContract):
+    """Read-only semantic v1 event retained for persisted-event decoding."""
+
+    schema_version: Literal["aethergraph.semantic-event/v1"] = "aethergraph.semantic-event/v1"
+    event_id: Identifier
+    deployment_id: Identifier
+    session_id: Identifier
+    turn_id: Identifier
+    sequence: Annotated[int, Field(ge=0)]
+    producer: Identifier
+    timestamp: datetime
+    kind: LegacySemanticEventKind
+    payload: LegacySemanticPayload
+    extensions: dict[Identifier, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _parse_payload_for_kind(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        raw_kind = value.get("kind")
+        try:
+            kind = LegacySemanticEventKind(raw_kind)
+        except (TypeError, ValueError):
+            return value
+        raw_payload = value.get("payload")
+        if isinstance(raw_payload, dict):
+            parsed = dict(value)
+            parsed["payload"] = _LEGACY_PAYLOAD_BY_KIND[kind].model_validate(raw_payload)
+            return parsed
+        return value
+
+    @model_validator(mode="after")
+    def _validate_payload_kind(self) -> LegacySemanticEvent:
+        expected_type = _LEGACY_PAYLOAD_BY_KIND[self.kind]
+        if type(self.payload) is not expected_type:
+            raise ValueError(f"payload for {self.kind.value} must be {expected_type.__name__}")
+        for key in self.extensions:
+            if "." not in key:
+                raise ValueError("semantic extension keys must be namespaced")
+        return self
+
+
 SemanticPayload: TypeAlias = (
     InputAcceptedPayload
     | MessageStartedPayload
@@ -706,8 +769,7 @@ SemanticPayload: TypeAlias = (
     | ArtifactAvailablePayload
     | StructuredOutputPayload
     | WarningRaisedPayload
-    | TurnCompletedPayload
-    | TurnFailedPayload
+    | TurnOutcomePayload
 )
 
 
@@ -724,15 +786,14 @@ _PAYLOAD_BY_KIND: dict[SemanticEventKind, type[IntegrationContract]] = {
     SemanticEventKind.ARTIFACT_AVAILABLE: ArtifactAvailablePayload,
     SemanticEventKind.STRUCTURED_OUTPUT: StructuredOutputPayload,
     SemanticEventKind.WARNING_RAISED: WarningRaisedPayload,
-    SemanticEventKind.TURN_COMPLETED: TurnCompletedPayload,
-    SemanticEventKind.TURN_FAILED: TurnFailedPayload,
+    SemanticEventKind.TURN_OUTCOME: TurnOutcomePayload,
 }
 
 
 class SemanticEvent(IntegrationContract):
-    """Ordered transport-neutral event emitted by an AG execution turn."""
+    """Ordered canonical semantic event with structured errors and one outcome."""
 
-    schema_version: Literal["aethergraph.semantic-event/v1"] = SEMANTIC_EVENT_PROTOCOL_VERSION
+    schema_version: Literal["aethergraph.semantic-event/v2"] = SEMANTIC_EVENT_PROTOCOL_VERSION
     event_id: Identifier
     deployment_id: Identifier
     session_id: Identifier
@@ -764,83 +825,6 @@ class SemanticEvent(IntegrationContract):
     @model_validator(mode="after")
     def _validate_payload_kind(self) -> SemanticEvent:
         expected_type = _PAYLOAD_BY_KIND[self.kind]
-        if type(self.payload) is not expected_type:
-            raise ValueError(f"payload for {self.kind.value} must be {expected_type.__name__}")
-        for key in self.extensions:
-            if "." not in key:
-                raise ValueError("semantic extension keys must be namespaced")
-        return self
-
-
-SemanticPayloadV2: TypeAlias = (
-    InputAcceptedPayload
-    | MessageStartedPayload
-    | MessageDeltaPayload
-    | MessageCompletedPayload
-    | PhaseChangedPayload
-    | ProgressChangedPayload
-    | InteractionRequestedPayload
-    | InteractionResolvedPayload
-    | ToolActivityPayloadV2
-    | ArtifactAvailablePayload
-    | StructuredOutputPayload
-    | WarningRaisedPayload
-    | TurnOutcomePayload
-)
-
-
-_PAYLOAD_BY_KIND_V2: dict[SemanticEventKindV2, type[IntegrationContract]] = {
-    SemanticEventKindV2.INPUT_ACCEPTED: InputAcceptedPayload,
-    SemanticEventKindV2.MESSAGE_STARTED: MessageStartedPayload,
-    SemanticEventKindV2.MESSAGE_DELTA: MessageDeltaPayload,
-    SemanticEventKindV2.MESSAGE_COMPLETED: MessageCompletedPayload,
-    SemanticEventKindV2.PHASE_CHANGED: PhaseChangedPayload,
-    SemanticEventKindV2.PROGRESS_CHANGED: ProgressChangedPayload,
-    SemanticEventKindV2.INTERACTION_REQUESTED: InteractionRequestedPayload,
-    SemanticEventKindV2.INTERACTION_RESOLVED: InteractionResolvedPayload,
-    SemanticEventKindV2.TOOL_ACTIVITY: ToolActivityPayloadV2,
-    SemanticEventKindV2.ARTIFACT_AVAILABLE: ArtifactAvailablePayload,
-    SemanticEventKindV2.STRUCTURED_OUTPUT: StructuredOutputPayload,
-    SemanticEventKindV2.WARNING_RAISED: WarningRaisedPayload,
-    SemanticEventKindV2.TURN_OUTCOME: TurnOutcomePayload,
-}
-
-
-class SemanticEventV2(IntegrationContract):
-    """Ordered v2 semantic event with structured Tool errors and one outcome."""
-
-    schema_version: Literal["aethergraph.semantic-event/v2"] = SEMANTIC_EVENT_PROTOCOL_V2
-    event_id: Identifier
-    deployment_id: Identifier
-    session_id: Identifier
-    turn_id: Identifier
-    sequence: Annotated[int, Field(ge=0)]
-    producer: Identifier
-    timestamp: datetime
-    kind: SemanticEventKindV2
-    payload: SemanticPayloadV2
-    extensions: dict[Identifier, JsonValue] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _parse_payload_for_kind(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
-        raw_kind = value.get("kind")
-        try:
-            kind = SemanticEventKindV2(raw_kind)
-        except (TypeError, ValueError):
-            return value
-        raw_payload = value.get("payload")
-        if isinstance(raw_payload, dict):
-            parsed = dict(value)
-            parsed["payload"] = _PAYLOAD_BY_KIND_V2[kind].model_validate(raw_payload)
-            return parsed
-        return value
-
-    @model_validator(mode="after")
-    def _validate_payload_kind(self) -> SemanticEventV2:
-        expected_type = _PAYLOAD_BY_KIND_V2[self.kind]
         if type(self.payload) is not expected_type:
             raise ValueError(f"payload for {self.kind.value} must be {expected_type.__name__}")
         for key in self.extensions:

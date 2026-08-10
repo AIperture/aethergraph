@@ -33,8 +33,7 @@ from aethergraph.contracts.integration import (
     SemanticEventKind,
     StructuredOutputPayload,
     ToolActivityPayload,
-    TurnCompletedPayload,
-    TurnFailedPayload,
+    TurnOutcomePayload,
     WarningRaisedPayload,
 )
 from aethergraph.services.channel.resources import InputResource
@@ -569,7 +568,16 @@ async def test_shared_fixture_semantics_cover_streaming_activity_interactions_an
                         code="fixture.warning", message="Deliberate non-terminal warning."
                     ),
                 ),
-                (SemanticEventKind.TURN_COMPLETED, TurnCompletedPayload(result_available=True)),
+                (
+                    SemanticEventKind.TURN_OUTCOME,
+                    TurnOutcomePayload(
+                        outcome="completed",
+                        code="completed",
+                        summary="Fixture completed.",
+                        resumable=False,
+                        engine_turn_id=f"{case.name}-engine-success",
+                    ),
+                ),
             )
             records = []
             for sequence, (kind, payload) in enumerate(payloads):
@@ -612,11 +620,13 @@ async def test_shared_fixture_semantics_cover_streaming_activity_interactions_an
                     sequence=0,
                     producer="fixture.vertical",
                     timestamp=_NOW + timedelta(seconds=2),
-                    kind=SemanticEventKind.TURN_FAILED,
-                    payload=TurnFailedPayload(
+                    kind=SemanticEventKind.TURN_OUTCOME,
+                    payload=TurnOutcomePayload(
+                        outcome="failed",
                         code="fixture.failure",
-                        message="Deliberate terminal failure.",
-                        retryable=False,
+                        summary="Deliberate terminal failure.",
+                        resumable=False,
+                        engine_turn_id=f"{case.name}-engine-failed",
                     ),
                 )
             )
@@ -628,7 +638,7 @@ async def test_shared_fixture_semantics_cover_streaming_activity_interactions_an
             assert [item.cursor for item in replay] == [normal.cursor, failed.cursor]
             assert [item.event.kind for item in replay] == [
                 SemanticEventKind.MESSAGE_COMPLETED,
-                SemanticEventKind.TURN_FAILED,
+                SemanticEventKind.TURN_OUTCOME,
             ]
 
         assert len(set(sessions.values())) == len(_CASES)

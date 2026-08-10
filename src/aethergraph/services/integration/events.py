@@ -12,12 +12,12 @@ from aethergraph.contracts.integration import (
     IngressEnvelope,
     IntegrationRoute,
     SemanticEvent,
-    SemanticEventV2,
 )
+from aethergraph.contracts.integration.models import LegacySemanticEvent
 from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.services.channel.resources import InputResource
 
-SemanticEventValue: TypeAlias = SemanticEvent | SemanticEventV2
+StoredSemanticEvent: TypeAlias = LegacySemanticEvent | SemanticEvent
 
 
 class SemanticEventStoreError(RuntimeError):
@@ -71,7 +71,7 @@ class PersistedSemanticEvent:
     """One validated semantic event paired with its durable event-log cursor."""
 
     cursor: int
-    event: SemanticEventValue
+    event: StoredSemanticEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,11 +195,11 @@ class EventLogInboundEventStore:
 class SemanticEventStore(Protocol):
     """Provider-neutral ordered semantic-event persistence contract."""
 
-    async def append(self, event: SemanticEventValue) -> PersistedSemanticEvent:
+    async def append(self, event: SemanticEvent) -> PersistedSemanticEvent:
         """Append one event at its authored turn sequence.
 
         Intro:
-            Persists either closed semantic envelope through the same ordered store.
+            Persists the canonical semantic envelope through the ordered store.
 
         Examples:
             Persist a completed message:
@@ -294,11 +294,11 @@ class EventLogSemanticEventStore:
         """
         self.event_log = event_log
 
-    async def append(self, event: SemanticEventValue) -> PersistedSemanticEvent:
+    async def append(self, event: SemanticEvent) -> PersistedSemanticEvent:
         """Append one closed semantic event and return its durable cursor.
 
         Intro:
-            Writes v1 and v2 envelopes without changing their authored schema version.
+            Writes only the canonical v2 envelope without rewriting authored data.
 
         Examples:
             Persist an event:
@@ -406,9 +406,9 @@ class EventLogSemanticEventStore:
             try:
                 schema_version = payload.get("schema_version")
                 if schema_version == "aethergraph.semantic-event/v1":
-                    event = SemanticEvent.model_validate(payload)
+                    event = LegacySemanticEvent.model_validate(payload)
                 elif schema_version == "aethergraph.semantic-event/v2":
-                    event = SemanticEventV2.model_validate(payload)
+                    event = SemanticEvent.model_validate(payload)
                 else:
                     raise ValueError("Unsupported semantic event schema version")
             except Exception as exc:

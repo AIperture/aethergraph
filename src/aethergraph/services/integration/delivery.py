@@ -9,7 +9,6 @@ from typing import Any
 from uuid import uuid4
 
 from aethergraph.contracts.integration import (
-    SEMANTIC_EVENT_PROTOCOL_V2,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
     InteractionOption,
     InteractionRequestedPayload,
@@ -20,15 +19,10 @@ from aethergraph.contracts.integration import (
     ProgressChangedPayload,
     SemanticEvent,
     SemanticEventKind,
-    SemanticEventKindV2,
     SemanticEventProtocolVersion,
-    SemanticEventV2,
     StructuredOutputPayload,
     ToolActivityPayload,
-    ToolActivityPayloadV2,
     ToolErrorPayload,
-    TurnCompletedPayload,
-    TurnFailedPayload,
     TurnOutcomePayload,
 )
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
@@ -65,7 +59,7 @@ class SemanticEventEmitter:
             emitter = SemanticEventEmitter(deployment_id="deployment-1", store=store)
             ```
 
-            Select semantic-event v2:
+            Select the canonical semantic protocol explicitly:
             ```python
             emitter = SemanticEventEmitter(
                 deployment_id="deployment-1",
@@ -87,10 +81,7 @@ class SemanticEventEmitter:
         """
         self.deployment_id = deployment_id
         self.store = store
-        if semantic_event_protocol_version not in {
-            SEMANTIC_EVENT_PROTOCOL_VERSION,
-            SEMANTIC_EVENT_PROTOCOL_V2,
-        }:
+        if semantic_event_protocol_version != SEMANTIC_EVENT_PROTOCOL_VERSION:
             raise SemanticDeliveryError(
                 f"Unsupported semantic event protocol: {semantic_event_protocol_version}"
             )
@@ -165,7 +156,7 @@ class SemanticEventEmitter:
         session_id: str,
         turn_id: str,
         producer: str,
-        kind: SemanticEventKind | SemanticEventKindV2,
+        kind: SemanticEventKind,
         payload: Any,
         extensions: dict[str, Any] | None = None,
         timestamp: datetime | None = None,
@@ -177,28 +168,36 @@ class SemanticEventEmitter:
             presentation events, such as the terminal state of a submitted run.
 
         Examples:
-            Record successful completion:
+            Record a terminal outcome:
             ```python
             await emitter.emit_semantic(
                 session_id="session-1",
                 turn_id="run-1",
                 producer="aethergraph.run_manager",
-                kind=SemanticEventKind.TURN_COMPLETED,
-                payload=TurnCompletedPayload(result_available=True),
+                kind=SemanticEventKind.TURN_OUTCOME,
+                payload=TurnOutcomePayload(
+                    outcome="completed",
+                    code="completed",
+                    summary="Execution completed.",
+                    resumable=False,
+                    engine_turn_id="turn-1",
+                ),
             )
             ```
 
-            Record terminal failure:
+            Record a paused outcome:
             ```python
             await emitter.emit_semantic(
                 session_id="session-1",
-                turn_id="run-1",
-                producer="aethergraph.run_manager",
-                kind=SemanticEventKind.TURN_FAILED,
-                payload=TurnFailedPayload(
-                    code="run_failed",
-                    message="Execution failed.",
-                    retryable=False,
+                turn_id="run-2",
+                producer="aethergraph.engine",
+                kind=SemanticEventKind.TURN_OUTCOME,
+                payload=TurnOutcomePayload(
+                    outcome="paused",
+                    code="interaction_required",
+                    summary="Waiting for user input.",
+                    resumable=True,
+                    engine_turn_id="turn-2",
                 ),
             )
             ```
@@ -246,17 +245,10 @@ class SemanticEventEmitter:
             self._sequences[key] = sequence + 1
         return record
 
-    def _build_event(self, **values: Any) -> SemanticEvent | SemanticEventV2:
+    def _build_event(self, **values: Any) -> SemanticEvent:
         event_values = dict(values)
         kind = event_values.pop("kind", None)
-        kind_value = (
-            kind.value if isinstance(kind, SemanticEventKind | SemanticEventKindV2) else kind
-        )
-        if self.semantic_event_protocol_version == SEMANTIC_EVENT_PROTOCOL_V2:
-            return SemanticEventV2(
-                **event_values,
-                kind=SemanticEventKindV2(kind_value),
-            )
+        kind_value = kind.value if isinstance(kind, SemanticEventKind) else kind
         return SemanticEvent(
             **event_values,
             kind=SemanticEventKind(kind_value),
@@ -276,7 +268,7 @@ class SemanticEventEmitter:
     def _project(
         self,
         event: OutEvent,
-    ) -> tuple[tuple[SemanticEventKind | SemanticEventKindV2, Any], ...]:
+    ) -> tuple[tuple[SemanticEventKind, Any], ...]:
         message_id = event.upsert_key or f"message-{uuid4().hex}"
         if event.type == "agent.stream.start":
             return (
@@ -415,26 +407,21 @@ class SemanticEventEmitter:
                 "status": status,
                 "message": (str(rich.get("message")) if rich.get("message") is not None else None),
             }
-            if self.semantic_event_protocol_version == SEMANTIC_EVENT_PROTOCOL_V2:
-                raw_error = rich.get("error")
-                try:
-                    error = (
-                        ToolErrorPayload.model_validate(raw_error)
-                        if isinstance(raw_error, dict)
-                        else None
-                    )
-                    payload = ToolActivityPayloadV2(**payload_values, error=error)
-                except Exception as exc:
-                    raise SemanticDeliveryError(
-                        "Invalid structured Tool activity for semantic-event/v2."
-                    ) from exc
-                kind: SemanticEventKind | SemanticEventKindV2 = SemanticEventKindV2.TOOL_ACTIVITY
-            else:
-                payload = ToolActivityPayload(**payload_values)
-                kind = SemanticEventKind.TOOL_ACTIVITY
+            raw_error = rich.get("error")
+            try:
+                error = (
+                    ToolErrorPayload.model_validate(raw_error)
+                    if isinstance(raw_error, dict)
+                    else None
+                )
+                payload = ToolActivityPayload(**payload_values, error=error)
+            except Exception as exc:
+                raise SemanticDeliveryError(
+                    "Invalid structured Tool activity for semantic-event/v2."
+                ) from exc
             return (
                 (
-                    kind,
+                    SemanticEventKind.TOOL_ACTIVITY,
                     payload,
                 ),
             )
@@ -664,52 +651,29 @@ class SemanticTurnMonitor:
             "aethergraph.integration_id": integration_id,
             "aethergraph.route_id": route_id,
         }
-        if self.emitter.semantic_event_protocol_version == SEMANTIC_EVENT_PROTOCOL_V2:
-            record, outputs = await self.run_manager.wait_run(run_id, return_outputs=True)
-            if record.status != RunStatus.succeeded:
-                return
-            raw_outcome = (outputs or {}).get("agent_outcome")
-            try:
-                if not isinstance(raw_outcome, dict):
-                    raise TypeError("agent_outcome must be an object")
-                payload = TurnOutcomePayload(
-                    outcome=raw_outcome.get("outcome"),
-                    code=raw_outcome.get("code"),
-                    summary=raw_outcome.get("summary"),
-                    resumable=raw_outcome.get("resumable"),
-                    engine_turn_id=raw_outcome.get("engine_turn_id"),
-                )
-            except Exception as exc:
-                raise SemanticDeliveryError(
-                    "A succeeded Engine integration run requires a valid agent_outcome."
-                ) from exc
-            await self.emitter.emit_semantic(
-                session_id=session_id,
-                turn_id=run_id,
-                producer="aethergraph.engine",
-                kind=SemanticEventKindV2.TURN_OUTCOME,
-                payload=payload,
-                extensions=extensions,
-            )
+        record, outputs = await self.run_manager.wait_run(run_id, return_outputs=True)
+        if record.status != RunStatus.succeeded:
             return
-        record = await self.run_manager.wait_run(run_id)
-        if record.status == RunStatus.succeeded:
-            await self.emitter.emit_semantic(
-                session_id=session_id,
-                turn_id=run_id,
-                producer="aethergraph.run_manager",
-                kind=SemanticEventKind.TURN_COMPLETED,
-                payload=TurnCompletedPayload(result_available=bool(record.result_available)),
-                extensions=extensions,
+        raw_outcome = (outputs or {}).get("agent_outcome")
+        try:
+            if not isinstance(raw_outcome, dict):
+                raise TypeError("agent_outcome must be an object")
+            payload = TurnOutcomePayload(
+                outcome=raw_outcome.get("outcome"),
+                code=raw_outcome.get("code"),
+                summary=raw_outcome.get("summary"),
+                resumable=raw_outcome.get("resumable"),
+                engine_turn_id=raw_outcome.get("engine_turn_id"),
             )
-            return
-        code = "run_canceled" if record.status == RunStatus.canceled else "run_failed"
-        message = str(record.error or code.replace("_", " ").capitalize())[:4_000]
+        except Exception as exc:
+            raise SemanticDeliveryError(
+                "A succeeded Engine integration run requires a valid agent_outcome."
+            ) from exc
         await self.emitter.emit_semantic(
             session_id=session_id,
             turn_id=run_id,
-            producer="aethergraph.run_manager",
-            kind=SemanticEventKind.TURN_FAILED,
-            payload=TurnFailedPayload(code=code, message=message, retryable=False),
+            producer="aethergraph.engine",
+            kind=SemanticEventKind.TURN_OUTCOME,
+            payload=payload,
             extensions=extensions,
         )

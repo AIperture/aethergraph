@@ -6,10 +6,8 @@ from hashlib import sha256
 from pathlib import Path
 
 from aethergraph.contracts.integration import (
-    SEMANTIC_EVENT_PROTOCOL_VERSION,
     ReleaseCompatibility,
     ReleaseDependency,
-    SemanticEventProtocolVersion,
 )
 
 HOST_CAPABILITIES = frozenset({"canonical_ingress", "origin_delivery", "semantic_event_log"})
@@ -38,15 +36,13 @@ def build_release_compatibility(
     architecture: str,
     dependency_lock: tuple[ReleaseDependency, ...],
     dependency_lock_digest: str,
-    semantic_event_protocol_version: SemanticEventProtocolVersion = (
-        SEMANTIC_EVENT_PROTOCOL_VERSION
-    ),
 ) -> ReleaseCompatibility:
     """Build exact compatibility evidence for one verified compiled release.
 
-    The function inspects compiler-owned metadata without importing generated
-    code, binds it to one probed Host environment, and hashes the compiled
-    manifest used as release provenance.
+    Intro:
+        The function inspects compiler-owned metadata without importing generated
+        code, binds it to one probed Host environment, and hashes the compiled
+        manifest used as release provenance.
 
     Examples:
         Build local compatibility evidence:
@@ -78,7 +74,6 @@ def build_release_compatibility(
         architecture: Probed machine architecture.
         dependency_lock: Exact installed Host distribution lock.
         dependency_lock_digest: Canonical digest of the dependency lock.
-        semantic_event_protocol_version: Exact semantic protocol selected by the Host routes.
 
     Returns:
         ReleaseCompatibility: Closed pre-import Host compatibility contract.
@@ -103,7 +98,6 @@ def build_release_compatibility(
         architecture=architecture,
         dependency_lock=dependency_lock,
         dependency_lock_digest=dependency_lock_digest,
-        semantic_event_protocol_version=semantic_event_protocol_version,
         host_capability_requirements=tuple(sorted(HOST_CAPABILITIES)),
         service_requirements=tuple(sorted(HOST_SERVICES)),
         logical_output_requirements=compiled.logical_output_requirements,

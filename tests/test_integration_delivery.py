@@ -5,17 +5,13 @@ from types import SimpleNamespace
 import pytest
 
 from aethergraph.contracts.integration import (
-    SEMANTIC_EVENT_PROTOCOL_V2,
+    SEMANTIC_EVENT_PROTOCOL_VERSION,
     InteractionRequestedPayload,
     MessageCompletedPayload,
+    SemanticEvent,
     SemanticEventKind,
-    SemanticEventKindV2,
-    SemanticEventV2,
     StructuredOutputPayload,
     ToolActivityPayload,
-    ToolActivityPayloadV2,
-    TurnCompletedPayload,
-    TurnFailedPayload,
     TurnOutcomePayload,
     WarningRaisedPayload,
 )
@@ -350,7 +346,7 @@ async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
 
 
 @pytest.mark.asyncio
-async def test_v2_tool_failure_preserves_structured_error_in_one_activity_path(
+async def test_tool_failure_preserves_structured_error_in_one_activity_path(
     tmp_path,
 ) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
@@ -359,7 +355,7 @@ async def test_v2_tool_failure_preserves_structured_error_in_one_activity_path(
         emitter=SemanticEventEmitter(
             deployment_id="deployment-1",
             store=store,
-            semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
+            semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_VERSION,
         )
     )
 
@@ -394,51 +390,12 @@ async def test_v2_tool_failure_preserves_structured_error_in_one_activity_path(
         session_id="session-1",
     )
     event = history[0].event
-    assert isinstance(event, SemanticEventV2)
-    assert event.kind == SemanticEventKindV2.TOOL_ACTIVITY
-    assert isinstance(event.payload, ToolActivityPayloadV2)
+    assert isinstance(event, SemanticEvent)
+    assert event.kind == SemanticEventKind.TOOL_ACTIVITY
+    assert isinstance(event.payload, ToolActivityPayload)
     assert event.payload.error is not None
     assert event.payload.error.code == "design_not_applied"
     assert event.payload.error.allowed_actions == ("apply_design",)
-    await event_log.close()
-
-
-@pytest.mark.asyncio
-async def test_v1_tool_failure_remains_closed_when_channel_carries_v2_error(
-    tmp_path,
-) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
-    emitter = SemanticEventEmitter(deployment_id="deployment-1", store=store)
-
-    await emitter.emit(
-        OutEvent(
-            type="agent.tool.activity",
-            channel="endpoint:sessions/public-1",
-            rich={
-                "tool_call_id": "call-1",
-                "tool_name": "run_design",
-                "status": "failed",
-                "message": "Failed.",
-                "error": {
-                    "kind": "internal",
-                    "code": "tool_internal_error",
-                    "summary": "The Tool failed internally.",
-                },
-            },
-            meta=_meta(),
-        )
-    )
-
-    event = (
-        await store.list_session(
-            deployment_id="deployment-1",
-            session_id="session-1",
-        )
-    )[0].event
-    assert isinstance(event.payload, ToolActivityPayload)
-    assert type(event.payload) is ToolActivityPayload
-    assert "error" not in event.payload.model_dump()
     await event_log.close()
 
 
@@ -457,12 +414,20 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
     )
 
     class _RunManager:
-        async def wait_run(self, run_id):
+        async def wait_run(self, run_id, *, return_outputs=False):
             assert run_id == "run-1"
-            return SimpleNamespace(
-                status=RunStatus.succeeded,
-                result_available=True,
-                error=None,
+            assert return_outputs is True
+            return (
+                SimpleNamespace(status=RunStatus.succeeded),
+                {
+                    "agent_outcome": {
+                        "outcome": "completed",
+                        "code": "completed",
+                        "summary": "Execution completed.",
+                        "resumable": False,
+                        "engine_turn_id": "engine-turn-1",
+                    }
+                },
             )
 
     monitor = SemanticTurnMonitor(run_manager=_RunManager(), emitter=emitter)
@@ -478,9 +443,9 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
         session_id="session-1",
     )
     assert [item.event.sequence for item in history] == [0, 1]
-    assert history[1].event.kind == SemanticEventKind.TURN_COMPLETED
-    assert isinstance(history[1].event.payload, TurnCompletedPayload)
-    assert history[1].event.payload.result_available is True
+    assert history[1].event.kind == SemanticEventKind.TURN_OUTCOME
+    assert isinstance(history[1].event.payload, TurnOutcomePayload)
+    assert history[1].event.payload.outcome == "completed"
     assert history[1].event.extensions == {
         "aethergraph.integration_id": "agstudio",
         "aethergraph.route_id": "studio-assistant",
@@ -489,44 +454,7 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_turn_monitor_projects_cancellation_as_terminal_failure(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
-
-    class _RunManager:
-        async def wait_run(self, run_id):
-            return SimpleNamespace(
-                status=RunStatus.canceled,
-                result_available=False,
-                error="Run cancelled by user",
-            )
-
-    monitor = SemanticTurnMonitor(
-        run_manager=_RunManager(),
-        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store),
-    )
-    await monitor._observe(
-        run_id="run-canceled",
-        session_id="session-1",
-        route_id="studio-assistant",
-        integration_id="agstudio",
-    )
-
-    history = await store.list_session(
-        deployment_id="deployment-1",
-        session_id="session-1",
-    )
-    event = history[0].event
-    assert event.kind == SemanticEventKind.TURN_FAILED
-    assert isinstance(event.payload, TurnFailedPayload)
-    assert event.payload.code == "run_canceled"
-    assert event.payload.message == "Run cancelled by user"
-    assert event.payload.retryable is False
-    await event_log.close()
-
-
-@pytest.mark.asyncio
-async def test_v2_turn_monitor_uses_engine_outcome_after_infrastructure_success(
+async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
     tmp_path,
 ) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
@@ -534,13 +462,13 @@ async def test_v2_turn_monitor_uses_engine_outcome_after_infrastructure_success(
     emitter = SemanticEventEmitter(
         deployment_id="deployment-1",
         store=store,
-        semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
+        semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_VERSION,
     )
     await emitter.emit_semantic(
         session_id="session-1",
         turn_id="run-1",
         producer="aethergraph.engine",
-        kind=SemanticEventKindV2.WARNING_RAISED,
+        kind=SemanticEventKind.WARNING_RAISED,
         payload=WarningRaisedPayload(
             code="partial_context",
             message="One optional source was unavailable.",
@@ -579,8 +507,8 @@ async def test_v2_turn_monitor_uses_engine_outcome_after_infrastructure_success(
         session_id="session-1",
     )
     assert [item.event.kind for item in history] == [
-        SemanticEventKindV2.WARNING_RAISED,
-        SemanticEventKindV2.TURN_OUTCOME,
+        SemanticEventKind.WARNING_RAISED,
+        SemanticEventKind.TURN_OUTCOME,
     ]
     payload = history[1].event.payload
     assert isinstance(payload, TurnOutcomePayload)
@@ -591,7 +519,7 @@ async def test_v2_turn_monitor_uses_engine_outcome_after_infrastructure_success(
 
 
 @pytest.mark.asyncio
-async def test_v2_turn_monitor_does_not_invent_outcome_for_infrastructure_failure(
+async def test_turn_monitor_does_not_invent_outcome_for_infrastructure_failure(
     tmp_path,
 ) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
@@ -607,7 +535,7 @@ async def test_v2_turn_monitor_does_not_invent_outcome_for_infrastructure_failur
         emitter=SemanticEventEmitter(
             deployment_id="deployment-1",
             store=store,
-            semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_V2,
+            semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_VERSION,
         ),
     )
     await monitor._observe(

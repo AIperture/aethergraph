@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from aethergraph.contracts.integration import (
-    SEMANTIC_EVENT_PROTOCOL_V2,
+    SEMANTIC_EVENT_PROTOCOL_VERSION,
     ExternalIdentity,
     ExternalSessionBinding,
     HostManifest,
@@ -236,7 +236,7 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_host_installer_enables_negotiated_v2_projector(tmp_path) -> None:
+async def test_host_installer_enables_canonical_semantic_projector(tmp_path) -> None:
     class _Channels:
         def __init__(self) -> None:
             self.adapters = {"slack": SimpleNamespace(capabilities=set(), send=None)}
@@ -255,18 +255,12 @@ async def test_host_installer_enables_negotiated_v2_projector(tmp_path) -> None:
         run_manager=SimpleNamespace(),
         channels=_Channels(),
     )
-    payload = _manifest(_route()).model_dump(mode="json")
-    payload["semantic_event_protocol_version"] = SEMANTIC_EVENT_PROTOCOL_V2
-    payload["release_compatibility"]["semantic_event_protocol_version"] = SEMANTIC_EVENT_PROTOCOL_V2
-    payload["integration_routes"][0]["required_capabilities"]["semantic_event_protocol_version"] = (
-        SEMANTIC_EVENT_PROTOCOL_V2
-    )
-    manifest = HostManifest.model_validate(payload)
+    manifest = _manifest(_route())
 
     coordinator = install_integration_ingress(container=container, manifest=manifest)
 
     assert coordinator.semantic_emitter.semantic_event_protocol_version == (
-        SEMANTIC_EVENT_PROTOCOL_V2
+        SEMANTIC_EVENT_PROTOCOL_VERSION
     )
     assert container.integration_ingress is coordinator
     assert container.host_manifest is manifest
