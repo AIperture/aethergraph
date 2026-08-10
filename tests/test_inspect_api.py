@@ -527,25 +527,11 @@ def test_connected_trace_router_uses_observability_facade(client: TestClient) ->
     assert resp.json()["items"][0]["latest_trace_id"] == "run-1"
 
 
-def test_connected_runtime_v2_router_is_turn_shaped(client: TestClient) -> None:
-    sessions = client.get("/api/trace/v2/sessions")
-    turn = client.get("/api/trace/v2/turns/run-1")
-
-    assert sessions.status_code == 200
-    assert sessions.json()["items"][0]["latest_turn"]["root_run_id"] == "run-1"
-    assert turn.status_code == 200
-    assert turn.json()["turn"]["session_id"] == "sess-1"
-    assert turn.json()["runs"][0]["parent_run_id"] is None
-
-
-def test_connected_runtime_v2_llm_reads_are_scoped_to_turn(client: TestClient) -> None:
-    calls = client.get("/api/trace/v2/turns/run-1/llm-calls")
-    detail = client.get("/api/trace/v2/turns/run-1/llm-calls/call-1")
-
-    assert calls.status_code == 200
-    assert {item["call_id"] for item in calls.json()["items"]} == {"call-1", "call-2"}
-    assert detail.status_code == 200
-    assert detail.json()["raw_text"] == "world"
+def test_engine_semantic_trace_v2_routes_are_removed(client: TestClient) -> None:
+    paths = {
+        path for route in client.app.routes if (path := getattr(route, "path", None)) is not None
+    }
+    assert not any(path.startswith("/api/trace/v2") for path in paths)
 
 
 def test_connected_trace_router_deletes_completed_session_observations(
