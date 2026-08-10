@@ -21,6 +21,8 @@ from aethergraph.contracts.integration import (
 )
 from aethergraph.contracts.services.channel import Button, OutEvent
 from aethergraph.core.runtime.run_types import RunStatus
+from aethergraph.services.channel.channel_bus import ChannelBus
+from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.integration import (
     EventLogSemanticEventStore,
     SemanticDeliveryError,
@@ -157,6 +159,123 @@ async def test_semantic_adapter_persists_named_structured_output(tmp_path) -> No
     assert isinstance(history[0].event.payload, StructuredOutputPayload)
     assert history[0].event.payload.output_name == "workflow.status"
     assert history[0].event.payload.value == {"operation": "clear"}
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_bus_interaction_reaches_semantic_delivery(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+    bus = ChannelBus(adapters={"endpoint": adapter})
+
+    await bus.notify(
+        Continuation(
+            run_id="run-1",
+            node_id="node-1",
+            token="private-token",
+            kind="choice",
+            channel="endpoint:sessions/public-1",
+            prompt={"title": "Proceed?", "choices": [{"id": "yes", "label": "Yes"}]},
+            session_id="session-1",
+            payload={"_interaction_id": "interaction-public-1"},
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert history[0].event.turn_id == "run-1"
+    assert history[0].event.producer == "node-1"
+    assert history[0].event.kind == SemanticEventKind.INTERACTION_REQUESTED
+    assert history[0].event.payload.interaction_id == "interaction-public-1"
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_preserves_authored_buttons(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+
+    await adapter.send(
+        OutEvent(
+            type="link.buttons",
+            channel="endpoint:sessions/public-1",
+            text="Choose",
+            buttons=[
+                Button(
+                    label="Open report",
+                    value="report",
+                    url="https://example.test/report",
+                    style="primary",
+                )
+            ],
+            meta=_meta(),
+        )
+    )
+
+    payload = (
+        await store.list_session(
+            deployment_id="deployment-1",
+            session_id="session-1",
+        )
+    )[0].event.payload
+    assert isinstance(payload, StructuredOutputPayload)
+    assert payload.output_name == "channel.link.buttons"
+    assert payload.value == {
+        "text": "Choose",
+        "buttons": [
+            {
+                "label": "Open report",
+                "value": "report",
+                "url": "https://example.test/report",
+                "style": "primary",
+            }
+        ],
+        "file": None,
+    }
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_projects_remote_file_as_structured_output(tmp_path) -> None:
+    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    store = EventLogSemanticEventStore(event_log)
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+
+    await adapter.send(
+        OutEvent(
+            type="agent.message",
+            channel="endpoint:sessions/public-1",
+            text="Report",
+            file={"filename": "report.pdf", "url": "https://example.test/report.pdf"},
+            meta=_meta(),
+        )
+    )
+
+    payload = (
+        await store.list_session(
+            deployment_id="deployment-1",
+            session_id="session-1",
+        )
+    )[0].event.payload
+    assert isinstance(payload, StructuredOutputPayload)
+    assert payload.output_name == "channel.attachment"
+    assert payload.value == {
+        "text": "Report",
+        "file": {
+            "filename": "report.pdf",
+            "url": "https://example.test/report.pdf",
+        },
+    }
     await event_log.close()
 
 

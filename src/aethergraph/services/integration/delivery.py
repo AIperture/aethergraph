@@ -301,6 +301,19 @@ class SemanticEventEmitter:
                     ),
                 )
             artifact_ids = self._artifact_ids(event)
+            if event.file is not None and not artifact_ids:
+                return (
+                    (
+                        SemanticEventKind.STRUCTURED_OUTPUT,
+                        StructuredOutputPayload(
+                            output_name="channel.attachment",
+                            value={
+                                "text": event.text,
+                                "file": self._json_file(event.file),
+                            },
+                        ),
+                    ),
+                )
             return (
                 (
                     SemanticEventKind.MESSAGE_COMPLETED,
@@ -434,7 +447,12 @@ class SemanticEventEmitter:
                         value={
                             "text": event.text,
                             "buttons": [
-                                {"label": button.label, "value": button.value, "url": button.url}
+                                {
+                                    "label": button.label,
+                                    "value": button.value,
+                                    "url": button.url,
+                                    "style": button.style,
+                                }
                                 for button in (event.buttons or [])
                             ],
                             "file": self._json_file(event.file),

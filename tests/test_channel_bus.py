@@ -51,7 +51,7 @@ async def test_publish_reports_structured_missing_adapter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_notify_exposes_only_public_interaction_identity() -> None:
+async def test_notify_exposes_public_identity_and_semantic_delivery_scope() -> None:
     class _PushAdapter:
         capabilities = {"text", "buttons"}
 
@@ -95,8 +95,8 @@ async def test_notify_exposes_only_public_interaction_identity() -> None:
     assert event_meta["interaction_id"] == "interaction-public-1"
     assert "token" not in event_meta
     assert "resume_key" not in event_meta
-    assert "run_id" not in event_meta
-    assert "node_id" not in event_meta
+    assert event_meta["run_id"] == "run-secret"
+    assert event_meta["node_id"] == "node-secret"
     assert store.bindings[0][0] == "token-secret"
 
 

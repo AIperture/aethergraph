@@ -181,6 +181,14 @@ class ChannelBus:
         if session_id is not None:
             meta.setdefault("session_id", session_id)
 
+        run_id = getattr(continuation, "run_id", None)
+        if run_id is not None:
+            meta.setdefault("run_id", run_id)
+
+        node_id = getattr(continuation, "node_id", None)
+        if node_id is not None:
+            meta.setdefault("node_id", node_id)
+
         agent_id = getattr(continuation, "agent_id", None)
         if agent_id is not None:
             meta.setdefault("agent_id", agent_id)

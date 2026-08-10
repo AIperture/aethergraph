@@ -136,33 +136,12 @@ class InteractionResolver:
         waits = await self.store.list_waits()
         open_waits = [wait for wait in waits if self._is_open(wait)]
         if envelope.choice is not None:
-            exact = [
-                wait
-                for wait in open_waits
-                if self._interaction_id(wait) == envelope.choice.interaction_id
-            ]
-            if not exact:
-                raise InteractionResolutionError(
-                    code="integration.interaction_not_found",
-                    message="The supplied interaction identity is not open.",
-                )
-            if len(exact) > 1:
-                raise InteractionResolutionError(
-                    code="integration.interaction_ambiguous",
-                    message="The supplied interaction identity is not unique.",
-                )
-            wait = exact[0]
-            if wait.get("session_id") != binding.ag_session_id:
-                raise InteractionResolutionError(
-                    code="integration.interaction_session_mismatch",
-                    message="The interaction does not belong to the bound AG session.",
-                )
-            if wait.get("kind") not in {"approval", "choice"}:
-                raise InteractionResolutionError(
-                    code="integration.interaction_kind_mismatch",
-                    message="The interaction does not accept a choice response.",
-                )
-            return await self._load(wait)
+            return await self.resolve_exact(
+                session_id=binding.ag_session_id,
+                interaction_id=envelope.choice.interaction_id,
+                expected_kinds={"approval", "choice"},
+                waits=open_waits,
+            )
 
         eligible_kinds = self._eligible_kinds(envelope)
         if not eligible_kinds:
@@ -181,6 +160,80 @@ class InteractionResolver:
                 message="More than one eligible interaction is open in the bound session.",
             )
         return await self._load(eligible[0])
+
+    async def resolve_exact(
+        self,
+        *,
+        session_id: str,
+        interaction_id: str,
+        expected_kinds: set[str],
+        waits: list[dict[str, Any]] | None = None,
+    ) -> ResolvedInteraction:
+        """Resolve one public interaction identity to its open continuation.
+
+        This gives Hosts that already have a canonical interaction response the
+        same exact, session-bound resolution used by integration ingress. It reads
+        continuation state without exposing the private continuation token.
+
+        Examples:
+            Resolve a Studio text response:
+                ```python
+                resolved = await resolver.resolve_exact(
+                    session_id="session-1",
+                    interaction_id="interaction-1",
+                    expected_kinds={"user_input"},
+                )
+                ```
+
+            Resolve a choice response:
+                ```python
+                resolved = await resolver.resolve_exact(
+                    session_id="session-1",
+                    interaction_id="interaction-2",
+                    expected_kinds={"approval", "choice"},
+                )
+                ```
+
+        Args:
+            session_id: Exact AG session that owns the interaction.
+            interaction_id: Public interaction identity emitted by Channel.
+            expected_kinds: Continuation kinds accepted by the response.
+            waits: Optional already-read open-wait snapshot used by `resolve`.
+
+        Returns:
+            ResolvedInteraction: Exact open continuation and public identity.
+
+        Notes:
+            Continuation tokens remain private. Resolution never guesses by newest
+            wait, Channel prefix, or correlator.
+        """
+
+        candidates = waits
+        if candidates is None:
+            candidates = [wait for wait in await self.store.list_waits() if self._is_open(wait)]
+        exact = [wait for wait in candidates if self._interaction_id(wait) == interaction_id]
+        if not exact:
+            raise InteractionResolutionError(
+                code="integration.interaction_not_found",
+                message="The supplied interaction identity is not open.",
+            )
+        if len(exact) > 1:
+            raise InteractionResolutionError(
+                code="integration.interaction_ambiguous",
+                message="The supplied interaction identity is not unique.",
+            )
+        wait = exact[0]
+        if wait.get("session_id") != session_id:
+            raise InteractionResolutionError(
+                code="integration.interaction_session_mismatch",
+                message="The interaction does not belong to the bound AG session.",
+            )
+        if wait.get("kind") not in expected_kinds:
+            raise InteractionResolutionError(
+                code="integration.interaction_kind_mismatch",
+                message="The interaction does not accept this response kind.",
+            )
+        return await self._load(wait)
 
     async def _load(self, wait: dict[str, Any]) -> ResolvedInteraction:
         token = str(wait.get("token") or "")

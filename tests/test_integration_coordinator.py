@@ -409,6 +409,54 @@ async def test_interaction_resolver_rejects_ambiguous_bound_session_text() -> No
 
 
 @pytest.mark.asyncio
+async def test_interaction_resolver_resolves_exact_public_identity() -> None:
+    continuation_store = InMemoryContinuationStore(secret=b"test-secret")
+    await continuation_store.save(
+        Continuation(
+            run_id="run-1",
+            node_id="node-1",
+            kind="user_input",
+            token="private-token",
+            session_id="session-1",
+            payload={"_interaction_id": "interaction-public-1"},
+        )
+    )
+
+    resolved = await InteractionResolver(continuation_store).resolve_exact(
+        session_id="session-1",
+        interaction_id="interaction-public-1",
+        expected_kinds={"user_input"},
+    )
+
+    assert resolved.interaction_id == "interaction-public-1"
+    assert resolved.continuation.token == "private-token"
+
+
+@pytest.mark.asyncio
+async def test_interaction_resolver_rejects_exact_identity_from_other_session() -> None:
+    continuation_store = InMemoryContinuationStore(secret=b"test-secret")
+    await continuation_store.save(
+        Continuation(
+            run_id="run-1",
+            node_id="node-1",
+            kind="choice",
+            token="private-token",
+            session_id="session-1",
+            payload={"_interaction_id": "interaction-public-1"},
+        )
+    )
+
+    with pytest.raises(InteractionResolutionError) as exc_info:
+        await InteractionResolver(continuation_store).resolve_exact(
+            session_id="session-2",
+            interaction_id="interaction-public-1",
+            expected_kinds={"approval", "choice"},
+        )
+
+    assert exc_info.value.code == "integration.interaction_session_mismatch"
+
+
+@pytest.mark.asyncio
 async def test_coordinator_persists_disabled_route_rejection(tmp_path) -> None:
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
     root = _RootDispatcher()
