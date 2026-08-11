@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from aethergraph.api.v1.deps import RequestIdentity
@@ -30,6 +31,7 @@ class RootTurnDispatcher(Protocol):
         binding: ExternalSessionBinding,
         envelope: IngressEnvelope,
         resources: tuple[InputResource, ...],
+        admission_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         """Start one root turn selected only by an immutable manifest route.
 
@@ -62,6 +64,8 @@ class RootTurnDispatcher(Protocol):
             binding: Durable external-to-AG session binding.
             envelope: Closed canonical ingress envelope.
             resources: Materialized inbound resources.
+            admission_callback: Optional Host callback that must persist the accepted
+                turn identity before execution can start.
 
         Returns:
             str: Submitted AG root run identifier used as the turn identity.
@@ -118,6 +122,7 @@ class AGRootTurnDispatcher:
         binding: ExternalSessionBinding,
         envelope: IngressEnvelope,
         resources: tuple[InputResource, ...],
+        admission_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         """Submit one exact route-selected root turn with immutable origin.
 
@@ -153,6 +158,8 @@ class AGRootTurnDispatcher:
             binding: Durable external-to-AG session binding.
             envelope: Closed canonical ingress envelope.
             resources: Materialized inbound resources.
+            admission_callback: Optional Host callback that must persist the accepted
+                turn identity before execution can start.
 
         Returns:
             str: Submitted AG run identifier.
@@ -207,6 +214,11 @@ class AGRootTurnDispatcher:
             app_id=agent_meta.get("app_id"),
             tags=[f"agent:{route.entry_agent_id}", f"route:{route.route_id}"],
             run_config={"origin_binding": origin_binding.model_dump(mode="json")},
+            admission_callback=(
+                None
+                if admission_callback is None
+                else lambda record: admission_callback(record.run_id)
+            ),
         )
         self.turn_monitor.observe(
             run_id=record.run_id,

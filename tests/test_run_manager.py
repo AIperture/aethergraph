@@ -608,6 +608,117 @@ async def test_wait_run_return_outputs_same_process(monkeypatch, dummy_meter):
 
 
 @pytest.mark.asyncio
+async def test_submit_run_admission_callback_precedes_execution(monkeypatch, dummy_meter):
+    """Prove durable Host admission completes before graph code can run.
+
+    Examples:
+        Persist a Studio execution lease before the graph starts.
+        Inspect the already-created run record inside the callback.
+
+    Args:
+        monkeypatch: Pytest mutation fixture.
+        dummy_meter: Isolated runtime-meter fixture.
+
+    Returns:
+        None.
+
+    Notes:
+        The callback and graph share one ordered event list to expose scheduling races.
+    """
+    store = InMemoryRunStore()
+    manager = RunManager(run_store=store, registry=UnifiedRegistry())
+    events: list[str] = []
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        events.append("executed")
+        return {"out": 1}
+
+    async def admit(record) -> None:
+        persisted = await store.get(record.run_id)
+        assert persisted is not None
+        assert persisted.status == RunStatus.running
+        events.append("admitted")
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record = await manager.submit_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+        admission_callback=admit,
+    )
+    finished = await manager.wait_run(record.run_id)
+
+    assert finished.status == RunStatus.succeeded
+    assert events == ["admitted", "executed"]
+
+
+@pytest.mark.asyncio
+async def test_submit_run_admission_failure_never_executes(monkeypatch, dummy_meter):
+    """Prove a rejected Host binding terminalizes without scheduling work.
+
+    Examples:
+        Reject a turn when its external execution lease cannot be persisted.
+        Wait on the resulting durable failed record without a hanging future.
+
+    Args:
+        monkeypatch: Pytest mutation fixture.
+        dummy_meter: Isolated runtime-meter fixture.
+
+    Returns:
+        None.
+
+    Notes:
+        Admission failure is a single fail-closed path, not a retry or direct-run path.
+    """
+    store = InMemoryRunStore()
+    manager = RunManager(run_store=store, registry=UnifiedRegistry())
+    executed = False
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        nonlocal executed
+        executed = True
+        return {"out": 1}
+
+    async def reject(_record) -> None:
+        raise RuntimeError("lease store unavailable")
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    with pytest.raises(RuntimeError, match="Run admission callback failed"):
+        await manager.submit_run(
+            graph_id="my-graph",
+            inputs={"x": 1},
+            run_id="run-admission-rejected",
+            admission_callback=reject,
+        )
+
+    record = await manager.wait_run("run-admission-rejected")
+    assert record.status == RunStatus.failed
+    assert record.meta["error_code"] == "run_admission_failed"
+    assert executed is False
+
+
+@pytest.mark.asyncio
 async def test_wait_run_return_outputs_uses_persisted_result_for_terminal_success(
     monkeypatch, dummy_meter
 ):

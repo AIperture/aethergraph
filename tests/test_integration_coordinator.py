@@ -151,6 +151,9 @@ class _RootDispatcher:
 
     async def start(self, **kwargs) -> str:
         self.calls.append(kwargs)
+        callback = kwargs.get("admission_callback")
+        if callback is not None:
+            await callback("run-root-1")
         return "run-root-1"
 
 
@@ -283,7 +286,16 @@ async def test_coordinator_starts_one_root_turn_and_replays_receipt(tmp_path) ->
         resume_router=resume,
     )
 
-    receipt = await coordinator.accept(verified=_verified(), envelope=_envelope())
+    admitted: list[str] = []
+
+    async def persist_admission(run_id: str) -> None:
+        admitted.append(run_id)
+
+    receipt = await coordinator.accept(
+        verified=_verified(),
+        envelope=_envelope(),
+        root_admission_callback=persist_admission,
+    )
     duplicate = await coordinator.accept(verified=_verified(), envelope=_envelope())
 
     assert receipt.action == "root_turn_started"
@@ -291,6 +303,7 @@ async def test_coordinator_starts_one_root_turn_and_replays_receipt(tmp_path) ->
     assert receipt.event_cursor == 1
     assert duplicate == receipt.model_copy(update={"duplicate": True})
     assert len(root.calls) == 1
+    assert admitted == ["run-root-1"]
     assert resume.calls == []
     semantic = await coordinator.semantic_events.list_session(
         deployment_id="deployment-1",

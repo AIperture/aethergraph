@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 import json
 import logging
@@ -886,14 +887,46 @@ class RunManager:
         app_id: str | None = None,
         app_name: str | None = None,
         run_config: dict[str, Any] | None = None,
+        admission_callback: Callable[[RunRecord], Awaitable[None]] | None = None,
     ) -> RunRecord:
-        """
-        Non-blocking entrypoint for the HTTP API.
+        """Persist and admit one run before scheduling background execution.
 
-        - Creates a RunRecord (status=running).
-        - Persists it to RunStore.
-        - Schedules background execution via asyncio.create_task.
-        - Returns immediately with the record (for run_id, status, etc).
+        Examples:
+            Submit an ordinary run::
+
+                record = await manager.submit_run("research", inputs={"topic": "AI"})
+
+            Bind an external execution lease before scheduling::
+
+                record = await manager.submit_run(
+                    "research",
+                    inputs={"topic": "AI"},
+                    admission_callback=persist_execution_lease,
+                )
+
+        Args:
+            graph_id: Exact registered graph or graph-function identity.
+            inputs: Inputs passed to the selected graph.
+            run_id: Optional caller-owned run identity.
+            session_id: Optional session used for root-turn serialization.
+            tags: Run classification tags.
+            identity: Authenticated request identity.
+            origin: Run origin used by scheduling and inspection.
+            visibility: Run visibility policy.
+            importance: Run retention importance.
+            agent_id: Optional owning Agent identity.
+            app_id: Optional owning application identity.
+            app_name: Optional application display name.
+            run_config: Optional trusted runtime configuration.
+            admission_callback: Optional Host callback invoked after durable run creation
+                and before execution becomes eligible to start.
+
+        Returns:
+            RunRecord: Persisted and admitted run metadata.
+
+        Notes:
+            A callback failure terminalizes the persisted run as failed and schedules
+            no graph work. There is no post-scheduling admission path.
         """
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
@@ -971,6 +1004,41 @@ class RunManager:
             if record is None:
                 raise RuntimeError("Failed to create run record")
             await self._ensure_cancellation_handle(record.run_id)
+            if admission_callback is not None:
+                try:
+                    await admission_callback(record)
+                except Exception as exc:
+                    record.status = RunStatus.failed
+                    record.finished_at = _utcnow()
+                    record.error = "Run admission callback failed"
+                    record.meta.update(
+                        {
+                            "error_kind": "admission",
+                            "error_code": "run_admission_failed",
+                            "error_stage": "run_admission",
+                            "error_message": record.error,
+                            "error_detail": None,
+                            "error_is_traceback": False,
+                        }
+                    )
+                    if self._store is not None:
+                        await self._store.update_status(
+                            record.run_id,
+                            RunStatus.failed,
+                            finished_at=record.finished_at,
+                            error=record.error,
+                            meta_update={
+                                "error_kind": "admission",
+                                "error_code": "run_admission_failed",
+                                "error_stage": "run_admission",
+                                "error_message": record.error,
+                                "error_detail": None,
+                                "error_is_traceback": False,
+                            },
+                        )
+                    await self._resolve_run_future(record.run_id, (record, None))
+                    await self._get_cancellation_registry().pop(record.run_id)
+                    raise RuntimeError("Run admission callback failed") from exc
 
             async def _bg():
                 try:

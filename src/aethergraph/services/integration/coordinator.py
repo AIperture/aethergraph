@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Literal
 from uuid import uuid4
 
@@ -154,6 +155,7 @@ class IntegrationIngressCoordinator:
         *,
         verified: VerifiedIntegrationContext,
         envelope: IngressEnvelope,
+        root_admission_callback: Callable[[str], Awaitable[None]] | None = None,
     ) -> IngressReceipt:
         """Accept one ingress envelope and perform exactly one terminal action.
 
@@ -181,6 +183,8 @@ class IntegrationIngressCoordinator:
         Args:
             verified: Authenticated integration authority from the transport edge.
             envelope: Closed canonical ingress envelope.
+            root_admission_callback: Optional Host callback that persists a new root
+                turn binding before RunManager schedules its execution.
 
         Returns:
             IngressReceipt: Durable original or duplicate terminal result.
@@ -300,6 +304,7 @@ class IntegrationIngressCoordinator:
                     binding=binding,
                     envelope=envelope,
                     resources=resources,
+                    admission_callback=root_admission_callback,
                 )
                 action = "root_turn_started"
         except Exception:
