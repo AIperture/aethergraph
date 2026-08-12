@@ -1297,6 +1297,49 @@ class GenericLLMClient(
             source="approximate_chars_div_4",
         )
 
+    def estimate(self, request: ModelRequest) -> LLMRequestEstimate:
+        """Estimate one canonical model request without invoking a provider.
+
+        The estimate uses the same request projection as `generate()` so Tool
+        schemas, structured output, and output reservation are counted once.
+
+        Examples:
+            Estimate a direct request:
+                ```python
+                estimate = client.estimate(request)
+                assert estimate.estimated_input_tokens > 0
+                ```
+
+            Estimate a Tool request:
+                ```python
+                estimate = client.estimate(tool_request)
+                assert estimate.estimated_total_tokens >= estimate.estimated_input_tokens
+                ```
+
+        Args:
+            request: Immutable canonical generation request.
+
+        Returns:
+            LLMRequestEstimate: Provider-neutral approximate request size and
+            configured model context limit.
+
+        Notes:
+            The current estimator remains explicitly approximate and is not a
+            provider billing receipt.
+        """
+
+        projection = project_model_request_to_chat(request)
+        return self.estimate_chat_request(
+            list(projection.messages),
+            max_output_tokens=request.generation.max_output_tokens,
+            structured_output=(
+                request.response_format
+                if isinstance(request.response_format, StructuredOutputRequest)
+                else None
+            ),
+            tool_request=projection.kwargs.get("tool_request"),
+        )
+
     def _preflight_llm_request(self, estimate: LLMRequestEstimate) -> None:
         if (
             estimate.context_window_tokens is not None

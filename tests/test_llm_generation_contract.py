@@ -22,6 +22,7 @@ from aethergraph.services.llm import (
     message_from_text,
 )
 from aethergraph.services.llm.compat import project_model_request_to_chat
+from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.tool_calling import tool_call_request_fingerprint
 
 
@@ -124,6 +125,26 @@ def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest()
     )
     assert projected.fingerprint_version == "model_request/v1"
     assert tool_call_request_fingerprint(projected) != tool_call_request_fingerprint(legacy)
+
+
+def test_canonical_estimate_counts_tool_schema_and_output_reservation() -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    direct = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        generation=GenerationOptions(max_output_tokens=64),
+    )
+    with_tool = ModelRequest(
+        messages=direct.messages,
+        tools=(_tool(),),
+        tool_choice="auto",
+        generation=direct.generation,
+    )
+
+    direct_estimate = client.estimate(direct)
+    tool_estimate = client.estimate(with_tool)
+
+    assert direct_estimate.reserved_output_tokens == 64
+    assert tool_estimate.estimated_input_tokens > direct_estimate.estimated_input_tokens
 
 
 def test_model_usage_distinguishes_unavailable_from_reported_zero() -> None:

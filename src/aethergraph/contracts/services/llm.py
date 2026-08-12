@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 
 
 class LLMClientProtocol(Protocol):
+    def estimate(self, request: ModelRequest) -> Any: ...
+
     async def generate(self, request: ModelRequest) -> ModelResponse: ...
 
     def estimate_chat_request(
