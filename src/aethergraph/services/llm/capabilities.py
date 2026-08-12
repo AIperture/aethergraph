@@ -6,7 +6,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from .catalog import catalog_digest, resolve_model_catalog_entry
+from .catalog import (
+    catalog_digest,
+    resolve_model_catalog_capability_entry,
+    resolve_model_catalog_entry,
+)
 from .profiles import CapabilityState, ChatProfile
 from .registry import get_endpoint_adapter, get_provider_descriptor
 
@@ -74,6 +78,7 @@ class ResolvedModelBinding(CapabilityContract):
     endpoint_id: str
     model_id: str
     catalog_key: str | None
+    catalog_keys: tuple[str, ...] = ()
     catalog_digest: str
     capabilities: ResolvedChatCapabilities
     diagnostics: tuple[CapabilityDiagnostic, ...] = ()
@@ -186,27 +191,57 @@ def resolve_chat_profile(
         raise ValueError("Chat profile endpoint is not registered for its provider")
     if "chat" not in adapter.implemented_operations:
         raise ValueError("Chat profile endpoint does not implement Chat")
-    entry = resolve_model_catalog_entry(
+    native_entry = resolve_model_catalog_entry(
         profile.connection.provider_id,
         profile.model.model_id,
         "chat",
         profile.connection.endpoint_id,
     )
+    structured_entry = resolve_model_catalog_capability_entry(
+        profile.connection.provider_id,
+        profile.model.model_id,
+        "chat",
+        profile.connection.endpoint_id,
+        capability="structured_output",
+    )
+    prompt_cache_entry = resolve_model_catalog_capability_entry(
+        profile.connection.provider_id,
+        profile.model.model_id,
+        "chat",
+        profile.connection.endpoint_id,
+        capability="prompt_cache",
+    )
     catalog_states: dict[ChatCapabilityName, CapabilityState] = {
         name: "unknown" for name in _CAPABILITY_NAMES
     }
-    if entry is not None:
-        native_modes = {item.mode for item in entry.native_tool_search}
+    if native_entry is not None:
+        native_modes = {item.mode for item in native_entry.native_tool_search}
         catalog_states["native_tool_search_hosted"] = (
             "supported" if "native_hosted" in native_modes else "unsupported"
         )
         catalog_states["native_tool_search_client"] = (
             "supported" if "native_client" in native_modes else "unsupported"
         )
+    if structured_entry is not None and structured_entry.structured_output is not None:
+        structured = structured_entry.structured_output
+        catalog_states["structured_output"] = (
+            "supported" if structured.native_schema or structured.json_object else "unsupported"
+        )
+    if prompt_cache_entry is not None and prompt_cache_entry.prompt_cache is not None:
+        catalog_states["prompt_cache"] = (
+            "supported" if prompt_cache_entry.prompt_cache.mode != "unavailable" else "unsupported"
+        )
+    capability_entries = {
+        "structured_output": structured_entry,
+        "prompt_cache": prompt_cache_entry,
+        "native_tool_search_hosted": native_entry,
+        "native_tool_search_client": native_entry,
+    }
     override_values = profile.capability_overrides.model_dump()
     effective: dict[str, EffectiveCapability] = {}
     for name in _CAPABILITY_NAMES:
         state = catalog_states[name]
+        entry = capability_entries.get(name)
         evidence = [
             CapabilityEvidence(
                 source="catalog" if entry is not None else "unknown",
@@ -252,11 +287,19 @@ def resolve_chat_profile(
         for name in required
         if getattr(capabilities, name).state != "supported"
     )
+    catalog_entries = tuple(
+        dict.fromkeys(
+            item.catalog_key
+            for item in (native_entry, structured_entry, prompt_cache_entry)
+            if item is not None
+        )
+    )
     return ResolvedModelBinding(
         provider_id=profile.connection.provider_id,
         endpoint_id=profile.connection.endpoint_id,
         model_id=profile.model.model_id,
-        catalog_key=entry.catalog_key if entry is not None else None,
+        catalog_key=catalog_entries[0] if catalog_entries else None,
+        catalog_keys=catalog_entries,
         catalog_digest=catalog_digest(),
         capabilities=capabilities,
         diagnostics=diagnostics,

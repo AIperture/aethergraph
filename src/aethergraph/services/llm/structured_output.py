@@ -9,6 +9,8 @@ import json
 import re
 from typing import Any, Literal
 
+from .catalog import resolve_model_catalog_capability_entry
+from .registry import resolve_endpoint_adapter
 from .types import LLMStructuredOutputCapabilityError, StructuredOutputRequest
 
 StructuredOutputPolicy = Literal["best_available", "native_required"]
@@ -130,108 +132,29 @@ def resolve_structured_output_capabilities(
         Capability discovery is AG infrastructure and has no engine dependency.
     """
 
-    normalized_provider = str(provider or "").lower()
-    normalized_model = str(model or "").lower()
-    openai_native = _starts_with(
-        normalized_model,
-        (
-            "gpt-4o",
-            "gpt-4.1",
-            "gpt-5",
-            "o1",
-            "o3",
-            "o4",
-        ),
-    )
-    if normalized_provider == "openai":
-        return StructuredOutputCapabilities(
-            provider=normalized_provider,
-            model=model,
-            native_strict_schema=openai_native,
-            native_schema=openai_native,
-            json_object=True,
-            prompt_json=True,
-            source="ag_static/openai_responses_v1",
-        )
-    if normalized_provider == "azure":
-        return StructuredOutputCapabilities(
-            provider=normalized_provider,
-            model=model,
-            native_strict_schema=openai_native,
-            native_schema=openai_native,
-            json_object=True,
-            prompt_json=True,
-            source="ag_static/azure_openai_v1",
-        )
-    if normalized_provider == "anthropic":
-        native = _anthropic_native_model(normalized_model)
-        return StructuredOutputCapabilities(
-            provider=normalized_provider,
-            model=model,
-            native_strict_schema=False,
-            native_schema=native,
-            json_object=False,
-            prompt_json=True,
-            source="ag_static/anthropic_messages_v1",
-        )
-    if normalized_provider == "google":
-        native = normalized_model.startswith("gemini-")
-        return StructuredOutputCapabilities(
-            provider=normalized_provider,
-            model=model,
-            native_strict_schema=False,
-            native_schema=native,
-            json_object=True,
-            prompt_json=True,
-            source="ag_static/gemini_generate_content_v1",
-        )
-    if normalized_provider == "deepseek":
-        return StructuredOutputCapabilities(
-            provider=normalized_provider,
-            model=model,
-            native_strict_schema=False,
-            native_schema=False,
-            json_object=True,
-            prompt_json=True,
-            source="ag_static/deepseek_json_output_v1",
-        )
-    if normalized_provider == "openrouter":
-        routed_native = _starts_with(
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model or "").strip().lower()
+    try:
+        endpoint = resolve_endpoint_adapter(normalized_provider, "chat")
+        entry = resolve_model_catalog_capability_entry(
+            normalized_provider,
             normalized_model,
-            ("openai/", "google/", "anthropic/"),
+            "chat",
+            endpoint.adapter_id,
+            capability="structured_output",
         )
-        routed_strict = normalized_model.startswith("openai/") and _starts_with(
-            normalized_model.removeprefix("openai/"),
-            ("gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4"),
-        )
+    except (KeyError, ValueError):
+        entry = None
+    if entry is not None and entry.structured_output is not None:
+        facts = entry.structured_output
         return StructuredOutputCapabilities(
             provider=normalized_provider,
             model=model,
-            native_strict_schema=routed_strict,
-            native_schema=routed_native,
-            json_object=True,
-            prompt_json=True,
-            source="ag_static/openrouter_compatible_models_v1",
-        )
-    if normalized_provider == "lmstudio":
-        return StructuredOutputCapabilities(
-            provider=normalized_provider,
-            model=model,
-            native_strict_schema=False,
-            native_schema=True,
-            json_object=True,
-            prompt_json=True,
-            source="ag_static/lmstudio_openai_compat_v1",
-        )
-    if normalized_provider == "ollama":
-        return StructuredOutputCapabilities(
-            provider=normalized_provider,
-            model=model,
-            native_strict_schema=False,
-            native_schema=False,
-            json_object=True,
-            prompt_json=True,
-            source="ag_static/ollama_openai_compat_v1",
+            native_strict_schema=facts.native_strict_schema,
+            native_schema=facts.native_schema,
+            json_object=facts.json_object,
+            prompt_json=facts.prompt_json,
+            source=facts.capability_source,
         )
     return StructuredOutputCapabilities(
         provider=normalized_provider,
@@ -590,26 +513,6 @@ def _native_schema_diagnostics(
 
     visit(schema, "$")
     return diagnostics
-
-
-def _anthropic_native_model(model: str) -> bool:
-    return any(
-        marker in model
-        for marker in (
-            "sonnet-4-5",
-            "sonnet-4.5",
-            "opus-4-1",
-            "opus-4.1",
-            "opus-4-5",
-            "opus-4.5",
-            "haiku-4-5",
-            "haiku-4.5",
-        )
-    )
-
-
-def _starts_with(value: str, prefixes: tuple[str, ...]) -> bool:
-    return any(value.startswith(prefix) for prefix in prefixes)
 
 
 __all__ = [

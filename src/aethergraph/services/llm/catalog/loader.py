@@ -8,7 +8,7 @@ from importlib.resources import files
 import json
 
 from ..registry import get_provider_descriptor, resolve_endpoint_adapter
-from .models import ModelCatalog, ModelCatalogEntry
+from .models import CatalogCapability, ModelCatalog, ModelCatalogEntry
 
 
 @lru_cache(maxsize=1)
@@ -147,6 +147,66 @@ def resolve_model_catalog_entry(
         Discovered model IDs do not manufacture catalog capability support.
     """
 
+    return resolve_model_catalog_capability_entry(
+        provider_id,
+        model_id,
+        operation,
+        endpoint_id,
+        capability="native_tool_search",
+        catalog=catalog,
+    )
+
+
+def resolve_model_catalog_capability_entry(
+    provider_id: str,
+    model_id: str,
+    operation: str,
+    endpoint_id: str,
+    *,
+    capability: CatalogCapability,
+    catalog: ModelCatalog | None = None,
+) -> ModelCatalogEntry | None:
+    """Resolve one capability-scoped production catalog entry.
+
+    Intro:
+        Resolution intersects provider, operation, endpoint, full model match,
+        and one capability domain. This permits independently sourced domains
+        to overlap on a model without creating false ambiguity.
+
+    Examples:
+        Resolve structured-output facts:
+            ```python
+            entry = resolve_model_catalog_capability_entry(
+                "openai", "gpt-5.6", "chat", "openai_responses",
+                capability="structured_output",
+            )
+            ```
+
+        Preserve unknown cache truth:
+            ```python
+            entry = resolve_model_catalog_capability_entry(
+                "deepseek", "deepseek-v4-pro", "chat",
+                "openai_chat_completions", capability="prompt_cache",
+            )
+            assert entry is None
+            ```
+
+    Args:
+        provider_id: Exact registered provider identity.
+        model_id: Exact configured provider model identity.
+        operation: Required model operation.
+        endpoint_id: Exact selected endpoint adapter.
+        capability: Capability domain to resolve.
+        catalog: Optional validated catalog override for tests.
+
+    Returns:
+        ModelCatalogEntry | None: Unique highest-priority domain entry, or
+        `None` when capability remains unknown.
+
+    Notes:
+        Equal-priority ambiguity fails closed within the selected domain only.
+    """
+
     value = catalog or load_model_catalog()
     matches = sorted(
         (
@@ -156,6 +216,7 @@ def resolve_model_catalog_entry(
             and entry.operation == operation
             and endpoint_id in entry.endpoint_ids
             and entry.matches(model_id)
+            and entry.declares(capability)
         ),
         key=lambda item: item.priority,
         reverse=True,
@@ -172,4 +233,9 @@ def resolve_model_catalog_entry(
     return matches[0]
 
 
-__all__ = ["catalog_digest", "load_model_catalog", "resolve_model_catalog_entry"]
+__all__ = [
+    "catalog_digest",
+    "load_model_catalog",
+    "resolve_model_catalog_capability_entry",
+    "resolve_model_catalog_entry",
+]

@@ -6,9 +6,10 @@ import copy
 from dataclasses import dataclass
 import hashlib
 import json
-import re
 from typing import Any, Literal
 
+from .catalog import resolve_model_catalog_capability_entry
+from .registry import resolve_endpoint_adapter
 from .tool_calling import (
     ToolCallRequest,
     tool_call_request_fingerprint,
@@ -20,9 +21,6 @@ PromptCacheMode = Literal["explicit", "implicit", "unavailable"]
 _OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
 _PROMPT_CACHE_KEY_PREFIX = "agpc_"
 
-_OPENAI_MAX_NEW_WRITES_PER_REQUEST = 4
-_ANTHROPIC_BOUNDARY_LIMIT = 4
-_OPENAI_VERSION_PATTERN = re.compile(r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?")
 _CACHE_SCOPE_KEYS = ("org_id", "app_id", "agent_id")
 
 
@@ -202,31 +200,24 @@ def _validate_message_indexes(
 
 
 def _resolve_capability(provider: str, model: str) -> _PromptCacheCapability:
-    if provider == "openai":
-        match = _OPENAI_VERSION_PATTERN.match(model)
-        if match is not None:
-            major = int(match.group("major"))
-            minor = int(match.group("minor") or 0)
-            if major > 5 or (major == 5 and minor >= 6):
-                return _PromptCacheCapability(
-                    mode="explicit",
-                    capability_source="openai_explicit_model_family",
-                    max_new_writes_per_request=(_OPENAI_MAX_NEW_WRITES_PER_REQUEST),
-                )
-        return _PromptCacheCapability(
-            mode="implicit",
-            capability_source="openai_conservative_implicit",
+    try:
+        endpoint = resolve_endpoint_adapter(provider, "chat")
+        entry = resolve_model_catalog_capability_entry(
+            provider,
+            model,
+            "chat",
+            endpoint.adapter_id,
+            capability="prompt_cache",
         )
-    if provider == "anthropic" and model.startswith("claude-"):
+    except (KeyError, ValueError):
+        entry = None
+    if entry is not None and entry.prompt_cache is not None:
+        facts = entry.prompt_cache
         return _PromptCacheCapability(
-            mode="explicit",
-            capability_source="anthropic_messages",
-            max_total_boundaries=_ANTHROPIC_BOUNDARY_LIMIT,
-        )
-    if provider == "google" and model.startswith("gemini-"):
-        return _PromptCacheCapability(
-            mode="implicit",
-            capability_source="gemini_generate_content",
+            mode=facts.mode,
+            capability_source=facts.capability_source,
+            max_total_boundaries=facts.max_total_boundaries,
+            max_new_writes_per_request=facts.max_new_writes_per_request,
         )
     return _PromptCacheCapability(
         mode="unavailable",

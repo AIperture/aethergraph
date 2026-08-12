@@ -98,8 +98,10 @@ class ChatDefaults(ProfileContract):
     thinking_mode: Literal["auto", "on", "off"] | None = None
     thinking_budget: int | None = Field(default=None, ge=0)
     reasoning_summary: str | None = None
+    compatibility_policy: Literal["compat", "strict"] = "compat"
     structured_output_policy: Literal["best_available", "native_required"] = "best_available"
     prompt_cache_policy: PromptCachePolicy = "auto"
+    context_window_tokens: int | None = Field(default=None, gt=0)
 
 
 class MultimodalInputPolicy(ProfileContract):

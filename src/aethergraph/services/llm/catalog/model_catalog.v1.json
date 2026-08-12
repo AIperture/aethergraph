@@ -1,0 +1,422 @@
+{
+  "schema_version": "aethergraph.model-catalog/v1",
+  "catalog_revision": 2,
+  "entries": [
+    {
+      "catalog_key": "openai/gpt-5.4-5.6-native-tool-search/v1",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses"],
+      "model_pattern": "(?:gpt-5\\.4(?:-(?:mini|pro))?|gpt-5\\.5|gpt-5\\.6(?:-(?:sol|terra|luna))?)(?:-\\d{4}-\\d{2}-\\d{2})?",
+      "native_tool_search": [
+        {
+          "mode": "native_hosted",
+          "replay_requirement": "none",
+          "result_limit_behavior": "post_validated",
+          "max_results": 50,
+          "protocol_version": "responses.tool_search",
+          "selection_owner": "provider",
+          "tool_representation": "full_definitions",
+          "inventory_timing": "request",
+          "path_transport": "native_group"
+        },
+        {
+          "mode": "native_client",
+          "replay_requirement": "previous_response",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "responses.tool_search",
+          "selection_owner": "application",
+          "tool_representation": "search_schema_manifest",
+          "inventory_timing": "search",
+          "path_transport": "manifest"
+        }
+      ],
+      "sources": ["https://developers.openai.com/api/docs/guides/tools-tool-search"],
+      "verified_at": "2026-08-07",
+      "catalog_revision": 1,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "azure/gpt-5.5-native-tool-search/v1",
+      "provider_id": "azure",
+      "operation": "chat",
+      "endpoint_ids": ["azure_responses"],
+      "model_id": "gpt-5.5",
+      "native_tool_search": [
+        {
+          "mode": "native_client",
+          "replay_requirement": "previous_response",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "responses.tool_search",
+          "selection_owner": "application",
+          "tool_representation": "search_schema_manifest",
+          "inventory_timing": "search",
+          "path_transport": "manifest"
+        }
+      ],
+      "sources": [
+        "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/tool-search",
+        "https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/responses"
+      ],
+      "verified_at": "2026-08-07",
+      "catalog_revision": 1,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "anthropic/claude-sonnet-4-5-20250929-native-tool-search/v1",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": ["anthropic_messages"],
+      "model_id": "claude-sonnet-4-5-20250929",
+      "native_tool_search": [
+        {
+          "mode": "native_hosted",
+          "replay_requirement": "full_history",
+          "result_limit_behavior": "provider_fixed",
+          "max_results": 5,
+          "protocol_version": "tool_search_tool_bm25_20251119",
+          "selection_owner": "provider",
+          "tool_representation": "full_definitions",
+          "inventory_timing": "request",
+          "path_transport": "metadata"
+        },
+        {
+          "mode": "native_client",
+          "replay_requirement": "full_history",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "messages.tool_reference",
+          "selection_owner": "application",
+          "tool_representation": "search_schema_manifest",
+          "inventory_timing": "search",
+          "path_transport": "manifest"
+        }
+      ],
+      "sources": [
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool",
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching"
+      ],
+      "verified_at": "2026-08-07",
+      "catalog_revision": 1,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/current-structured-output/v2",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses", "openai_chat_completions"],
+      "model_pattern": "(?:gpt-4o.*|gpt-4\\.1.*|gpt-5.*|o1.*|o3.*|o4.*)",
+      "structured_output": {
+        "native_strict_schema": true,
+        "native_schema": true,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/openai_responses_v1"
+      },
+      "sources": ["https://developers.openai.com/api/docs/guides/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "azure/current-structured-output/v2",
+      "provider_id": "azure",
+      "operation": "chat",
+      "endpoint_ids": ["azure_responses", "azure_chat_completions"],
+      "model_pattern": "(?:gpt-4o.*|gpt-4\\.1.*|gpt-5.*|o1.*|o3.*|o4.*)",
+      "structured_output": {
+        "native_strict_schema": true,
+        "native_schema": true,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/azure_openai_v1"
+      },
+      "sources": ["https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/json-output-compatibility/v2",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses", "openai_chat_completions"],
+      "model_pattern": ".+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": false,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/openai_responses_v1"
+      },
+      "sources": ["https://developers.openai.com/api/docs/guides/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 10
+    },
+    {
+      "catalog_key": "azure/json-output-compatibility/v2",
+      "provider_id": "azure",
+      "operation": "chat",
+      "endpoint_ids": ["azure_responses", "azure_chat_completions"],
+      "model_pattern": ".+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": false,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/azure_openai_v1"
+      },
+      "sources": ["https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/json-mode"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 10
+    },
+    {
+      "catalog_key": "anthropic/current-structured-output/v2",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": ["anthropic_messages"],
+      "model_pattern": ".*(?:sonnet-4-5|sonnet-4\\.5|opus-4-1|opus-4\\.1|opus-4-5|opus-4\\.5|haiku-4-5|haiku-4\\.5).*",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": true,
+        "json_object": false,
+        "prompt_json": true,
+        "capability_source": "ag_static/anthropic_messages_v1"
+      },
+      "sources": ["https://platform.claude.com/docs/en/build-with-claude/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "google/gemini-structured-output/v2",
+      "provider_id": "google",
+      "operation": "chat",
+      "endpoint_ids": ["gemini_generate_content"],
+      "model_pattern": "gemini-.*",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": true,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/gemini_generate_content_v1"
+      },
+      "sources": ["https://ai.google.dev/gemini-api/docs/structured-output"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "deepseek/json-output/v2",
+      "provider_id": "deepseek",
+      "operation": "chat",
+      "endpoint_ids": ["openai_chat_completions"],
+      "model_pattern": ".+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": false,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/deepseek_json_output_v1"
+      },
+      "sources": ["https://api-docs.deepseek.com/guides/json_mode/"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "google/json-output-compatibility/v2",
+      "provider_id": "google",
+      "operation": "chat",
+      "endpoint_ids": ["gemini_generate_content"],
+      "model_pattern": ".+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": false,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/gemini_generate_content_v1"
+      },
+      "sources": ["https://ai.google.dev/gemini-api/docs/structured-output"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 10
+    },
+    {
+      "catalog_key": "openrouter/openai-strict-structured-output/v2",
+      "provider_id": "openrouter",
+      "operation": "chat",
+      "endpoint_ids": ["openai_chat_completions"],
+      "model_pattern": "openai/(?:gpt-4o.*|gpt-4\\.1.*|gpt-5.*|o1.*|o3.*|o4.*)",
+      "structured_output": {
+        "native_strict_schema": true,
+        "native_schema": true,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/openrouter_compatible_models_v1"
+      },
+      "sources": ["https://openrouter.ai/docs/guides/features/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openrouter/routed-native-structured-output/v2",
+      "provider_id": "openrouter",
+      "operation": "chat",
+      "endpoint_ids": ["openai_chat_completions"],
+      "model_pattern": "(?:openai|google|anthropic)/.+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": true,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/openrouter_compatible_models_v1"
+      },
+      "sources": ["https://openrouter.ai/docs/guides/features/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "lmstudio/server-structured-output/v2",
+      "provider_id": "lmstudio",
+      "operation": "chat",
+      "endpoint_ids": ["openai_chat_completions"],
+      "model_pattern": ".+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": true,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/lmstudio_openai_compat_v1"
+      },
+      "sources": ["https://lmstudio.ai/docs/developer/openai-compat/structured-output"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openrouter/json-output-compatibility/v2",
+      "provider_id": "openrouter",
+      "operation": "chat",
+      "endpoint_ids": ["openai_chat_completions"],
+      "model_pattern": ".+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": false,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/openrouter_compatible_models_v1"
+      },
+      "sources": ["https://openrouter.ai/docs/guides/features/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 10
+    },
+    {
+      "catalog_key": "ollama/server-json-output/v2",
+      "provider_id": "ollama",
+      "operation": "chat",
+      "endpoint_ids": ["openai_chat_completions"],
+      "model_pattern": ".+",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": false,
+        "json_object": true,
+        "prompt_json": true,
+        "capability_source": "ag_static/ollama_openai_compat_v1"
+      },
+      "sources": ["https://docs.ollama.com/capabilities/structured-outputs"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/gpt-5.6-plus-explicit-prompt-cache/v2",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses"],
+      "model_pattern": "gpt-(?:(?:5\\.(?:[6-9]|[1-9]\\d))|(?:[6-9]|[1-9]\\d)(?:\\.\\d+)?).*",
+      "prompt_cache": {
+        "mode": "explicit",
+        "capability_source": "openai_explicit_model_family",
+        "max_new_writes_per_request": 4
+      },
+      "sources": ["https://developers.openai.com/api/docs/guides/prompt-caching"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/automatic-prompt-cache/v2",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses"],
+      "model_pattern": ".+",
+      "prompt_cache": {
+        "mode": "implicit",
+        "capability_source": "openai_conservative_implicit"
+      },
+      "sources": ["https://developers.openai.com/api/docs/guides/prompt-caching"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 10
+    },
+    {
+      "catalog_key": "anthropic/claude-prompt-cache/v2",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": ["anthropic_messages"],
+      "model_pattern": "claude-.*",
+      "prompt_cache": {
+        "mode": "explicit",
+        "capability_source": "anthropic_messages",
+        "max_total_boundaries": 4
+      },
+      "sources": ["https://platform.claude.com/docs/en/build-with-claude/prompt-caching"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "google/gemini-implicit-prompt-cache/v2",
+      "provider_id": "google",
+      "operation": "chat",
+      "endpoint_ids": ["gemini_generate_content"],
+      "model_pattern": "gemini-.*",
+      "prompt_cache": {
+        "mode": "implicit",
+        "capability_source": "gemini_generate_content"
+      },
+      "sources": ["https://ai.google.dev/gemini-api/docs/caching"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    }
+  ]
+}

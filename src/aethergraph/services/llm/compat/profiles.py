@@ -82,7 +82,9 @@ def chat_profile_from_legacy(
             thinking_mode=profile.thinking_mode,
             thinking_budget=profile.thinking_budget,
             reasoning_summary=profile.reasoning_summary,
+            compatibility_policy=profile.compatibility_policy,
             structured_output_policy=profile.structured_output_policy,
+            context_window_tokens=profile.context_window_tokens,
         ),
         input_policy=MultimodalInputPolicy(
             image_input_enabled=profile.vision_enabled,

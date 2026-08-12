@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, mod
 from ..registry import ModelOperation
 
 CatalogEvidenceStatus = Literal["verified", "conservative", "unknown"]
+CatalogCapability = Literal["native_tool_search", "structured_output", "prompt_cache"]
 
 
 class CatalogContract(BaseModel):
@@ -33,6 +34,25 @@ class CatalogNativeToolSearchMode(CatalogContract):
     path_transport: Literal["native_group", "metadata", "manifest", "none"]
 
 
+class CatalogStructuredOutput(CatalogContract):
+    """Evidence-backed structured-output modes for one model binding."""
+
+    native_strict_schema: bool
+    native_schema: bool
+    json_object: bool
+    prompt_json: bool = True
+    capability_source: str = Field(min_length=1, max_length=256)
+
+
+class CatalogPromptCache(CatalogContract):
+    """Evidence-backed prompt-cache semantics for one model binding."""
+
+    mode: Literal["explicit", "implicit", "unavailable"]
+    capability_source: str = Field(min_length=1, max_length=256)
+    max_total_boundaries: int | None = Field(default=None, ge=1, le=64)
+    max_new_writes_per_request: int | None = Field(default=None, ge=1, le=64)
+
+
 class ModelCatalogEntry(CatalogContract):
     """One exact or narrowly matched model-operation capability record."""
 
@@ -43,6 +63,8 @@ class ModelCatalogEntry(CatalogContract):
     model_id: str | None = Field(default=None, min_length=1, max_length=512)
     model_pattern: str | None = Field(default=None, min_length=1, max_length=1024)
     native_tool_search: tuple[CatalogNativeToolSearchMode, ...] = ()
+    structured_output: CatalogStructuredOutput | None = None
+    prompt_cache: CatalogPromptCache | None = None
     sources: tuple[HttpUrl, ...]
     verified_at: date
     catalog_revision: int = Field(ge=1)
@@ -132,8 +154,28 @@ class ModelCatalogEntry(CatalogContract):
         modes = tuple(item.mode for item in self.native_tool_search)
         if len(modes) != len(set(modes)):
             raise ValueError("catalog native Tool-search modes must be unique")
-        if self.native_tool_search and (self.evidence_status != "verified" or not self.sources):
-            raise ValueError("positive native Tool-search facts require verified URL evidence")
+        capability_count = sum(
+            (
+                bool(self.native_tool_search),
+                self.structured_output is not None,
+                self.prompt_cache is not None,
+            )
+        )
+        if capability_count != 1:
+            raise ValueError("catalog entry must declare exactly one capability domain")
+        positive_capability = bool(self.native_tool_search)
+        if self.structured_output is not None:
+            positive_capability = positive_capability or any(
+                (
+                    self.structured_output.native_strict_schema,
+                    self.structured_output.native_schema,
+                    self.structured_output.json_object,
+                )
+            )
+        if self.prompt_cache is not None:
+            positive_capability = positive_capability or self.prompt_cache.mode != "unavailable"
+        if positive_capability and (self.evidence_status != "verified" or not self.sources):
+            raise ValueError("positive capability facts require verified URL evidence")
         if self.stale_after is not None and self.stale_after < self.verified_at:
             raise ValueError("catalog stale_after must not precede verified_at")
         return self
@@ -171,6 +213,38 @@ class ModelCatalogEntry(CatalogContract):
         if self.model_id is not None:
             return candidate == self.model_id
         return re.fullmatch(self.model_pattern or r"(?!)", candidate) is not None
+
+    def declares(self, capability: CatalogCapability) -> bool:
+        """Return whether this entry owns the requested capability domain.
+
+        Intro:
+            Catalog entries deliberately contain one capability domain so
+            independently revised facts may overlap on the same model safely.
+
+        Examples:
+            Detect a structured-output entry:
+                ```python
+                assert structured_entry.declares("structured_output")
+                ```
+
+            Reject an unrelated domain:
+                ```python
+                assert not structured_entry.declares("prompt_cache")
+                ```
+
+        Args:
+            capability: Catalog capability domain to inspect.
+
+        Returns:
+            bool: True only when this entry declares that domain.
+
+        Notes:
+            Validation guarantees exactly one domain per entry.
+        """
+
+        if capability == "native_tool_search":
+            return bool(self.native_tool_search)
+        return getattr(self, capability) is not None
 
 
 class ModelCatalog(CatalogContract):
@@ -222,8 +296,11 @@ class ModelCatalog(CatalogContract):
 
 __all__ = [
     "CatalogContract",
+    "CatalogCapability",
     "CatalogEvidenceStatus",
     "CatalogNativeToolSearchMode",
+    "CatalogPromptCache",
+    "CatalogStructuredOutput",
     "ModelCatalog",
     "ModelCatalogEntry",
 ]

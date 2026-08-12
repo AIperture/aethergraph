@@ -13,6 +13,7 @@ from aethergraph.services.llm.catalog import (
     ModelCatalogEntry,
     catalog_digest,
     load_model_catalog,
+    resolve_model_catalog_capability_entry,
     resolve_model_catalog_entry,
     validate_catalog,
 )
@@ -70,6 +71,30 @@ def test_catalog_resolves_narrow_openai_family_and_rejects_unsupported_tiers() -
 
 def test_catalog_unknown_model_does_not_manufacture_capabilities() -> None:
     assert resolve_model_catalog_entry("openai", "future-model", "chat", "openai_responses") is None
+
+
+def test_catalog_resolves_overlapping_facts_within_capability_domain() -> None:
+    tool_search = resolve_model_catalog_entry("openai", "gpt-5.6", "chat", "openai_responses")
+    structured = resolve_model_catalog_capability_entry(
+        "openai",
+        "gpt-5.6",
+        "chat",
+        "openai_responses",
+        capability="structured_output",
+    )
+    prompt_cache = resolve_model_catalog_capability_entry(
+        "openai",
+        "gpt-5.6",
+        "chat",
+        "openai_responses",
+        capability="prompt_cache",
+    )
+
+    assert tool_search is not None and tool_search.native_tool_search
+    assert structured is not None and structured.structured_output is not None
+    assert structured.structured_output.native_strict_schema
+    assert prompt_cache is not None and prompt_cache.prompt_cache is not None
+    assert prompt_cache.prompt_cache.mode == "explicit"
 
 
 def test_tool_discovery_resolution_reads_production_catalog() -> None:
@@ -167,8 +192,29 @@ def test_resolver_combines_catalog_and_adapter_with_provenance() -> None:
     assert capability.provenance[0].source == "catalog"
 
 
+def test_resolver_uses_structured_output_and_prompt_cache_catalog_domains() -> None:
+    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="gpt-5.6"))
+
+    binding = resolve_chat_profile(
+        profile,
+        required=("structured_output", "prompt_cache"),
+    )
+
+    assert binding.valid
+    assert binding.capabilities.structured_output.state == "supported"
+    assert binding.capabilities.prompt_cache.state == "supported"
+    assert "openai/current-structured-output/v2" in binding.catalog_keys
+    assert "openai/gpt-5.6-plus-explicit-prompt-cache/v2" in binding.catalog_keys
+
+
 def test_resolver_unknown_does_not_satisfy_required_capability() -> None:
-    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="future-model"))
+    profile = chat_profile_from_legacy(
+        LLMProfile(
+            provider="openai_compatible",
+            model="future-model",
+            base_url="http://localhost:9000/v1",
+        )
+    )
 
     binding = resolve_chat_profile(profile, required=("prompt_cache",))
 
