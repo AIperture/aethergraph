@@ -11,6 +11,7 @@ import re
 from typing import Any, Literal, TypeAlias
 
 from .tool_discovery import (
+    ModelContinuation,
     ToolDiscoveryEvent,
     ToolDiscoveryRequest,
     ToolExposure,
@@ -18,6 +19,7 @@ from .tool_discovery import (
     ToolTransportCheckpoint,
 )
 from .types import LLMError
+from .usage import ModelUsage
 
 ToolChoice = Literal["auto", "required", "none"]
 AssistantOutputType = Literal["text", "refusal"]
@@ -399,9 +401,7 @@ class ToolCallRequest:
                 tool.path.description,
             )
             if prior != tool.path.description:
-                raise ValueError(
-                    f"Tool path {tool.path.path!r} has conflicting descriptions"
-                )
+                raise ValueError(f"Tool path {tool.path.path!r} has conflicting descriptions")
         if self.choice not in {"auto", "required", "none"}:
             raise ValueError("Tool-call request choice must be auto, required, or none")
         if not 1 <= int(self.max_calls) <= 4:
@@ -606,6 +606,7 @@ class ToolCallResponse:
     finish_reason: str = ""
     provider_metadata: dict[str, Any] = field(default_factory=dict)
     transport_checkpoint: ToolTransportCheckpoint | None = None
+    usage: ModelUsage = field(default_factory=ModelUsage.unavailable)
 
     def __post_init__(self) -> None:
         """
@@ -659,6 +660,8 @@ class ToolCallResponse:
             raise TypeError(
                 "Tool-call response transport_checkpoint must be ToolTransportCheckpoint"
             )
+        if not isinstance(self.usage, ModelUsage):
+            raise TypeError("Tool-call response usage must be ModelUsage")
         object.__setattr__(self, "items", items)
         object.__setattr__(self, "finish_reason", str(self.finish_reason or ""))
         object.__setattr__(
@@ -666,6 +669,40 @@ class ToolCallResponse:
             "provider_metadata",
             copy.deepcopy(self.provider_metadata),
         )
+
+    @property
+    def continuation(self) -> ModelContinuation | None:
+        """Return the canonical opaque provider continuation.
+
+        This property exposes the existing transport checkpoint through the
+        provider-neutral generation vocabulary without creating a second state
+        representation.
+
+        Examples:
+            Read an absent continuation:
+                ```python
+                response = ToolCallResponse(items=())
+                assert response.continuation is None
+                ```
+
+            Read an existing continuation alias:
+                ```python
+                response = ToolCallResponse(items=(), transport_checkpoint=checkpoint)
+                assert response.continuation is checkpoint
+                ```
+
+        Args:
+            self: Normalized model response.
+
+        Returns:
+            ModelContinuation | None: The exact provider replay value, if present.
+
+        Notes:
+            `transport_checkpoint` remains the public compatibility field for
+            the current deprecation window.
+        """
+
+        return self.transport_checkpoint
 
     @property
     def assistant_outputs(self) -> tuple[AssistantOutput, ...]:
@@ -883,6 +920,11 @@ class ToolCallResponse:
         }
 
 
+# `ModelResponse` is the canonical internal name. `ToolCallResponse` remains the
+# published compatibility name and is the exact same runtime class.
+ModelResponse = ToolCallResponse
+
+
 __all__ = [
     "ASSISTANT_OUTPUT_NORMALIZATION_VERSION",
     "AssistantOutput",
@@ -891,6 +933,7 @@ __all__ = [
     "LLMToolCallCapabilityError",
     "LLMToolCallError",
     "LLMToolCallResponseError",
+    "ModelResponse",
     "ToolCall",
     "ToolCallOutput",
     "ToolCallRequest",

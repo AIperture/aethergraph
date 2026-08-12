@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 import contextlib
 import copy
+from dataclasses import replace
 import hashlib
 import json
 import logging
@@ -84,6 +85,7 @@ from aethergraph.services.llm.types import (
     StructuredOutputRequest,
 )
 from aethergraph.services.llm.usage import (
+    ModelUsage,
     normalize_llm_usage,
     normalized_usage_metrics,
 )
@@ -1964,6 +1966,11 @@ class GenericLLMClient(
             observation_record.usage = usage or {}
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             normalized_usage = normalize_llm_usage(usage)
+            if isinstance(provider_value, ToolCallResponse):
+                provider_value = replace(
+                    provider_value,
+                    usage=ModelUsage.from_provider_usage(usage),
+                )
 
             quota_error = self._record_llm_quota_usage(usage=usage)
             await self._record_llm_usage(

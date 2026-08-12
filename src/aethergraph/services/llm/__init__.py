@@ -23,6 +23,7 @@ from .tool_calling import (
     LLMToolCallCapabilityError,
     LLMToolCallError,
     LLMToolCallResponseError,
+    ModelResponse,
     ToolCall,
     ToolCallOutput,
     ToolCallRequest,
@@ -34,6 +35,7 @@ from .tool_calling import (
 from .tool_discovery import (
     JSONScalar,
     JSONValue,
+    ModelContinuation,
     ToolDiscoveryCapabilities,
     ToolDiscoveryError,
     ToolDiscoveryEvent,
@@ -43,12 +45,12 @@ from .tool_discovery import (
     ToolDiscoverySource,
     ToolDiscoveryStatus,
     ToolExposure,
-    ToolPath,
-    ToolReplayRequirement,
-    ToolResultLimitBehavior,
     ToolInventoryTiming,
+    ToolPath,
     ToolPathTransport,
+    ToolReplayRequirement,
     ToolRepresentation,
+    ToolResultLimitBehavior,
     ToolSelectionOwner,
     ToolTransportCheckpoint,
     resolve_tool_discovery_capabilities,
@@ -68,6 +70,7 @@ from .types import (
     PromptCacheRequest,
     StructuredOutputRequest,
 )
+from .usage import ModelUsage, UsageAvailability
 
 __all__ = [
     "ASSISTANT_OUTPUT_NORMALIZATION_VERSION",
@@ -89,6 +92,9 @@ __all__ = [
     "LLMToolCallCapabilityError",
     "LLMToolCallError",
     "LLMToolCallResponseError",
+    "ModelContinuation",
+    "ModelResponse",
+    "ModelUsage",
     "PromptCacheRequest",
     "ProviderCallResult",
     "ProviderRateGate",
@@ -125,6 +131,7 @@ __all__ = [
     "ToolRepresentation",
     "ToolSelectionOwner",
     "ToolTransportCheckpoint",
+    "UsageAvailability",
     "prepare_structured_output",
     "resolve_structured_output_capabilities",
     "resolve_tool_discovery_capabilities",

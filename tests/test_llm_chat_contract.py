@@ -142,6 +142,9 @@ async def test_openai_native_tool_items_preserve_multiple_call_boundaries() -> N
     assert [call.call_id for call in response.calls] == ["call_1", "call_2"]
     assert [call.name for call in response.calls] == ["lookup", "finish"]
     assert response.calls[0].arguments == {"key": "A"}
+    assert response.usage.availability == "complete"
+    assert response.usage.total_input_tokens == 10
+    assert response.usage.output_tokens == 5
     assert usage["input_tokens"] == 10
     assert fake_http.last_json is not None
     assert fake_http.last_json["parallel_tool_calls"] is True

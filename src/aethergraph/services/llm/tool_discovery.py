@@ -31,9 +31,7 @@ ToolRepresentation = Literal[
 
 _REFERENCE_PATTERN = re.compile(r"^[A-Za-z0-9_.:/-]{1,240}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-_TOOL_PATH_PATTERN = re.compile(
-    r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$"
-)
+_TOOL_PATH_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*$")
 
 
 def _bounded_text(value: str, *, field_name: str, maximum: int) -> str:
@@ -957,9 +955,15 @@ def _openai_native_tool_search_model(model: str) -> bool:
     )
 
 
+# Canonical provider replay name. The legacy public name remains an exact alias
+# during the compatibility window; there is only one runtime representation.
+ModelContinuation = ToolTransportCheckpoint
+
+
 __all__ = [
     "JSONScalar",
     "JSONValue",
+    "ModelContinuation",
     "ToolDiscoveryCapabilities",
     "ToolDiscoveryError",
     "ToolDiscoveryEvent",
