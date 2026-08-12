@@ -797,161 +797,31 @@ def resolve_tool_discovery_capabilities(
         before this registry is augmented.
     """
 
-    binding = (
-        str(provider or "").strip().lower(),
-        str(model or "").strip(),
-        str(endpoint_family or "").strip(),
+    from .catalog import resolve_model_catalog_entry
+    from .registry import resolve_endpoint_family
+
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model or "").strip()
+    normalized_family = str(endpoint_family or "").strip()
+    try:
+        adapter = resolve_endpoint_family(normalized_provider, "chat", normalized_family)
+    except (KeyError, ValueError):
+        return None
+    entry = resolve_model_catalog_entry(
+        normalized_provider,
+        normalized_model,
+        "chat",
+        adapter.adapter_id,
     )
-    if (
-        binding[0] == "openai"
-        and binding[2] == "responses"
-        and _openai_native_tool_search_model(binding[1])
-    ):
-        return ToolDiscoveryCapabilities(
-            provider="openai",
-            model=binding[1],
-            endpoint_family="responses",
-            supported_modes=(
-                ToolDiscoveryModeCapability(
-                    mode="native_hosted",
-                    replay_requirement="none",
-                    result_limit_behavior="post_validated",
-                    max_results=50,
-                    protocol_version="responses.tool_search",
-                    selection_owner="provider",
-                    tool_representation="full_definitions",
-                    inventory_timing="request",
-                    path_transport="native_group",
-                ),
-                ToolDiscoveryModeCapability(
-                    mode="native_client",
-                    replay_requirement="previous_response",
-                    result_limit_behavior="request_bound",
-                    max_results=50,
-                    protocol_version="responses.tool_search",
-                    selection_owner="application",
-                    tool_representation="search_schema_manifest",
-                    inventory_timing="search",
-                    path_transport="manifest",
-                ),
-            ),
-        )
-    if binding == ("azure", "gpt-5.5", "responses"):
-        return ToolDiscoveryCapabilities(
-            provider="azure",
-            model="gpt-5.5",
-            endpoint_family="responses",
-            supported_modes=(
-                ToolDiscoveryModeCapability(
-                    mode="native_client",
-                    replay_requirement="previous_response",
-                    result_limit_behavior="request_bound",
-                    max_results=50,
-                    protocol_version="responses.tool_search",
-                    selection_owner="application",
-                    tool_representation="search_schema_manifest",
-                    inventory_timing="search",
-                    path_transport="manifest",
-                ),
-            ),
-        )
-    if binding == ("google", "gemini-2.5-pro", "generateContent"):
-        return ToolDiscoveryCapabilities(
-            provider="google",
-            model="gemini-2.5-pro",
-            endpoint_family="generateContent",
-            supported_modes=(
-                ToolDiscoveryModeCapability(
-                    mode="engine_projected",
-                    replay_requirement="full_history",
-                    result_limit_behavior="request_bound",
-                    max_results=50,
-                    protocol_version="generateContent.v1",
-                    selection_owner="engine",
-                    tool_representation="compact_catalog",
-                    inventory_timing="search",
-                    path_transport="manifest",
-                ),
-            ),
-        )
-    if binding == (
-        "anthropic",
-        "claude-sonnet-4-5-20250929",
-        "messages",
-    ):
-        return ToolDiscoveryCapabilities(
-            provider="anthropic",
-            model="claude-sonnet-4-5-20250929",
-            endpoint_family="messages",
-            supported_modes=(
-                ToolDiscoveryModeCapability(
-                    mode="native_hosted",
-                    replay_requirement="full_history",
-                    result_limit_behavior="provider_fixed",
-                    max_results=5,
-                    protocol_version="tool_search_tool_bm25_20251119",
-                    selection_owner="provider",
-                    tool_representation="full_definitions",
-                    inventory_timing="request",
-                    path_transport="metadata",
-                ),
-                ToolDiscoveryModeCapability(
-                    mode="native_client",
-                    replay_requirement="full_history",
-                    result_limit_behavior="request_bound",
-                    max_results=50,
-                    protocol_version="messages.tool_reference",
-                    selection_owner="application",
-                    tool_representation="search_schema_manifest",
-                    inventory_timing="search",
-                    path_transport="manifest",
-                ),
-            ),
-        )
-    return None
-
-
-def _openai_native_tool_search_model(model: str) -> bool:
-    """Return whether one exact OpenAI model name is in the tested search matrix.
-
-    Examples:
-        Accept a supported dated Luna snapshot:
-            ```python
-            assert _openai_native_tool_search_model(
-                "gpt-5.6-luna-2026-08-01"
-            )
-            ```
-
-        Reject an unsupported tier:
-            ```python
-            assert not _openai_native_tool_search_model("gpt-5.4-nano")
-            ```
-
-    Args:
-        model: Exact configured OpenAI Responses model identifier.
-
-    Returns:
-        bool: True only for a documented family and supported tier.
-
-    Notes:
-        This deliberately is not `startswith("gpt-5")`. Newly released families
-        and tiers must be verified against OpenAI Tool-search support first.
-    """
-
-    match = re.fullmatch(
-        r"gpt-(5\.[456])(?:-(mini|pro|nano|sol|terra|luna))?" r"(?:-\d{4}-\d{2}-\d{2})?",
-        str(model or "").strip(),
-    )
-    if match is None:
-        return False
-    family, tier = match.groups()
-    return (
-        tier
-        in {
-            "5.4": {None, "mini", "pro"},
-            "5.5": {None},
-            "5.6": {None, "sol", "terra", "luna"},
-        }[family]
+    if entry is None or not entry.native_tool_search:
+        return None
+    return ToolDiscoveryCapabilities(
+        provider=normalized_provider,
+        model=normalized_model,
+        endpoint_family=normalized_family,
+        supported_modes=tuple(
+            ToolDiscoveryModeCapability(**mode.model_dump()) for mode in entry.native_tool_search
+        ),
     )
 
 

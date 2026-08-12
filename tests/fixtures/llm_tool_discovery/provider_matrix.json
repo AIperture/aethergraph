@@ -1,5 +1,6 @@
 {
-  "schema_version": "aethergraph.provider-discovery-fixture/v1",
+  "schema_version": "aethergraph.provider-discovery-fixture/v2",
+  "capability_authority": "aethergraph.services.llm.catalog",
   "captured_at": "2026-08-07",
   "records": [
     {

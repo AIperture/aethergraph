@@ -12,15 +12,8 @@ from aethergraph.services.llm.provider_transport import ProviderRateGate
 from aethergraph.services.metering.eventlog_metering import MeteringService
 
 from ..secrets.base import Secrets
-from .factory import _provider_default_base_url  # reuse from LLM factory if possible
-
-
-def _resolve_key(direct: SecretStr | None, ref: str | None, secrets: Secrets) -> str | None:
-    if direct:
-        return direct.get_secret_value()
-    if ref:
-        return secrets.get(ref)
-    return None
+from .credentials import resolve_provider_credential
+from .registry import provider_default_base_url
 
 
 def _apply_env_overrides_to_embed_profile(
@@ -60,35 +53,21 @@ def _apply_env_overrides_to_embed_profile(
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:
-        p.base_url = _provider_default_base_url(p.provider)  # type: ignore[arg-type]
+        p.base_url = provider_default_base_url(p.provider)
 
     # 3) API key resolution:
     #    - prefer explicit api_key on profile
     #    - else api_key_ref + Secrets
     #    - else provider-specific env name
-    api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
-
-    if not api_key:
-        # Fallback to provider-specific env if nothing else was set
-        if p.provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
-        elif p.provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-        elif p.provider == "google":
-            api_key = os.getenv("GOOGLE_API_KEY")
-        elif p.provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY")
-        elif p.provider == "azure":
-            api_key = os.getenv("AZURE_OPENAI_KEY")
-
-        if api_key and not p.api_key_ref:
-            p.api_key_ref = {
-                "openai": "OPENAI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY",
-                "google": "GOOGLE_API_KEY",
-                "openrouter": "OPENROUTER_API_KEY",
-                "azure": "AZURE_OPENAI_KEY",
-            }.get(p.provider)  # type: ignore[index]
+    credential = resolve_provider_credential(
+        provider_id=p.provider,
+        direct=p.api_key,
+        secret_ref=p.api_key_ref,
+        secrets=secrets,
+    )
+    api_key = credential.value
+    if api_key and not p.api_key_ref and credential.source_ref:
+        p.api_key_ref = credential.source_ref
 
     if api_key:
         p.api_key = SecretStr(api_key)
@@ -103,7 +82,12 @@ def embed_client_from_profile(
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
 ) -> GenericEmbeddingClient:
-    api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
+    api_key = resolve_provider_credential(
+        provider_id=p.provider,
+        direct=p.api_key,
+        secret_ref=p.api_key_ref,
+        secrets=secrets,
+    ).value
 
     return GenericEmbeddingClient(
         provider=p.provider,

@@ -1,0 +1,229 @@
+"""Strict immutable contracts for the packaged model capability catalog."""
+
+from __future__ import annotations
+
+from datetime import date
+import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
+
+from ..registry import ModelOperation
+
+CatalogEvidenceStatus = Literal["verified", "conservative", "unknown"]
+
+
+class CatalogContract(BaseModel):
+    """Base class for closed immutable model catalog records."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class CatalogNativeToolSearchMode(CatalogContract):
+    """Evidence-backed native Tool-search mode for one model binding."""
+
+    mode: Literal["native_hosted", "native_client"]
+    replay_requirement: Literal["none", "previous_response", "full_history"]
+    result_limit_behavior: Literal["request_bound", "provider_fixed", "post_validated"]
+    max_results: int = Field(ge=1, le=50)
+    protocol_version: str = Field(min_length=1, max_length=256)
+    selection_owner: Literal["provider", "application"]
+    tool_representation: Literal["full_definitions", "search_schema_manifest"]
+    inventory_timing: Literal["request", "search", "preloaded"]
+    path_transport: Literal["native_group", "metadata", "manifest", "none"]
+
+
+class ModelCatalogEntry(CatalogContract):
+    """One exact or narrowly matched model-operation capability record."""
+
+    catalog_key: str = Field(pattern=r"^[a-z0-9][a-z0-9._/-]+$")
+    provider_id: str = Field(min_length=1, max_length=128)
+    operation: ModelOperation
+    endpoint_ids: tuple[str, ...]
+    model_id: str | None = Field(default=None, min_length=1, max_length=512)
+    model_pattern: str | None = Field(default=None, min_length=1, max_length=1024)
+    native_tool_search: tuple[CatalogNativeToolSearchMode, ...] = ()
+    sources: tuple[HttpUrl, ...]
+    verified_at: date
+    catalog_revision: int = Field(ge=1)
+    evidence_status: CatalogEvidenceStatus
+    priority: int = Field(default=0, ge=0, le=10_000)
+    stale_after: date | None = None
+
+    @field_validator("endpoint_ids")
+    @classmethod
+    def _validate_endpoint_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Require a non-empty unique ordered endpoint selection.
+
+        Intro:
+            Every catalog entry binds facts to explicit endpoint adapters and
+            cannot float across provider protocols.
+
+        Examples:
+            Accept one endpoint:
+                ```python
+                validated = ModelCatalogEntry.model_validate(payload)
+                ```
+
+            Reject duplicates:
+                ```python
+                try:
+                    ModelCatalogEntry.model_validate(duplicate_payload)
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            value: Parsed endpoint-adapter identities.
+
+        Returns:
+            tuple[str, ...]: Unchanged valid endpoint identities.
+
+        Notes:
+            Endpoint existence is validated by the catalog loader against the
+            production provider registry.
+        """
+
+        if not value or len(value) != len(set(value)):
+            raise ValueError("catalog endpoint_ids must be non-empty and unique")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_match_and_evidence(self) -> ModelCatalogEntry:
+        """Require one model selector and evidence for positive capabilities.
+
+        Intro:
+            Entries use either an exact model ID or a full-match regular
+            expression. Native Tool-search support requires verified URL
+            evidence and unique native modes.
+
+        Examples:
+            Validate an exact entry:
+                ```python
+                entry = ModelCatalogEntry.model_validate(exact_payload)
+                ```
+
+            Reject an unverified positive claim:
+                ```python
+                try:
+                    ModelCatalogEntry.model_validate(unverified_payload)
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            self: Fully parsed catalog entry.
+
+        Returns:
+            ModelCatalogEntry: Unchanged evidence-consistent entry.
+
+        Notes:
+            Regular expressions are compiled during validation and are always
+            applied with `fullmatch` by the loader.
+        """
+
+        if (self.model_id is None) == (self.model_pattern is None):
+            raise ValueError("catalog entry requires exactly one model_id or model_pattern")
+        if self.model_pattern is not None:
+            try:
+                re.compile(self.model_pattern)
+            except re.error as exc:
+                raise ValueError("catalog model_pattern is invalid") from exc
+        modes = tuple(item.mode for item in self.native_tool_search)
+        if len(modes) != len(set(modes)):
+            raise ValueError("catalog native Tool-search modes must be unique")
+        if self.native_tool_search and (self.evidence_status != "verified" or not self.sources):
+            raise ValueError("positive native Tool-search facts require verified URL evidence")
+        if self.stale_after is not None and self.stale_after < self.verified_at:
+            raise ValueError("catalog stale_after must not precede verified_at")
+        return self
+
+    def matches(self, model_id: str) -> bool:
+        """Return whether this entry selects one exact provider model ID.
+
+        Intro:
+            Exact entries compare directly. Pattern entries use full regular
+            expression matching so partial names cannot inherit capability.
+
+        Examples:
+            Match an exact model:
+                ```python
+                assert exact_entry.matches(exact_entry.model_id)
+                ```
+
+            Reject an unrelated model:
+                ```python
+                assert not exact_entry.matches("unrelated")
+                ```
+
+        Args:
+            model_id: Exact configured provider model identity.
+
+        Returns:
+            bool: True only when the complete model identity matches.
+
+        Notes:
+            Provider and endpoint matching are performed separately by the
+            catalog resolver.
+        """
+
+        candidate = str(model_id or "").strip()
+        if self.model_id is not None:
+            return candidate == self.model_id
+        return re.fullmatch(self.model_pattern or r"(?!)", candidate) is not None
+
+
+class ModelCatalog(CatalogContract):
+    """Versioned production collection of model capability records."""
+
+    schema_version: Literal["aethergraph.model-catalog/v1"]
+    catalog_revision: int = Field(ge=1)
+    entries: tuple[ModelCatalogEntry, ...]
+
+    @model_validator(mode="after")
+    def _validate_unique_keys(self) -> ModelCatalog:
+        """Require unique keys and monotonically bounded entry revisions.
+
+        Intro:
+            Catalog keys are stable provenance identities. Entry revisions
+            cannot be newer than the containing catalog revision.
+
+        Examples:
+            Validate a production catalog:
+                ```python
+                catalog = ModelCatalog.model_validate(payload)
+                ```
+
+            Reject duplicate keys:
+                ```python
+                try:
+                    ModelCatalog.model_validate(duplicate_payload)
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            self: Fully parsed model catalog.
+
+        Returns:
+            ModelCatalog: Unchanged catalog with unique provenance keys.
+
+        Notes:
+            Ambiguous model match precedence is checked by resolution tests.
+        """
+
+        keys = tuple(entry.catalog_key for entry in self.entries)
+        if len(keys) != len(set(keys)):
+            raise ValueError("model catalog keys must be unique")
+        if any(entry.catalog_revision > self.catalog_revision for entry in self.entries):
+            raise ValueError("model catalog entry revision exceeds catalog revision")
+        return self
+
+
+__all__ = [
+    "CatalogContract",
+    "CatalogEvidenceStatus",
+    "CatalogNativeToolSearchMode",
+    "ModelCatalog",
+    "ModelCatalogEntry",
+]

@@ -9,5 +9,6 @@ Provider = Literal[
     "openrouter",
     "lmstudio",
     "ollama",
+    "openai_compatible",
     "dummy",
 ]  # dummy for testing

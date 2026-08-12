@@ -1,45 +1,16 @@
 import logging
 import os
 
-from pydantic import SecretStr  # type: ignore[import]
+from pydantic import SecretStr
 
 from aethergraph.config.llm import LLMProfile, LLMSettings
 
 from ..secrets.base import Secrets
+from .credentials import resolve_provider_credential
 from .generic_client import GenericLLMClient
 from .observability import CaptureMode, LLMObservationSink
 from .provider_transport import ProviderRateGate
-from .providers import Provider
-
-
-def _resolve_key(direct: SecretStr | None, ref: str | None, secrets: Secrets) -> str | None:
-    if direct:
-        return direct.get_secret_value()
-    if ref:
-        return secrets.get(ref)
-    return None
-
-
-def _provider_default_base_url(provider: Provider) -> str | None:
-    # Fallback base URLs if not given in config or env
-    if provider == "openai":
-        return "https://api.openai.com/v1"
-    if provider == "azure":
-        # Must still rely on env/config for endpoint
-        return os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/") or None
-    if provider == "anthropic":
-        return "https://api.anthropic.com"
-    if provider == "google":
-        return "https://generativelanguage.googleapis.com"
-    if provider == "deepseek":
-        return "https://api.deepseek.com"
-    if provider == "openrouter":
-        return "https://openrouter.ai/api/v1"
-    if provider == "lmstudio":
-        return os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
-    if provider == "ollama":
-        return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    return None
+from .registry import provider_default_base_url
 
 
 def _apply_env_overrides_to_profile(
@@ -88,41 +59,21 @@ def _apply_env_overrides_to_profile(
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:
-        p.base_url = _provider_default_base_url(p.provider)  # type: ignore[arg-type]
+        p.base_url = provider_default_base_url(p.provider)
 
     # 3) API key resolution:
     #    - prefer explicit api_key on profile
     #    - else api_key_ref + Secrets
     #    - else provider-specific env name
-    api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
-
-    if not api_key:
-        # Fallback to provider-specific env if nothing else was set
-        if p.provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
-        elif p.provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-        elif p.provider == "google":
-            api_key = os.getenv("GOOGLE_API_KEY")
-        elif p.provider == "deepseek":
-            api_key = os.getenv("DEEPSEEK_API_KEY")
-        elif p.provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY")
-        elif p.provider == "azure":
-            api_key = os.getenv("AZURE_OPENAI_KEY")
-
-        # If we found one, and no api_key_ref was configured, we can
-        # optionally set api_key_ref so it's visible in config
-        if api_key and not p.api_key_ref:
-            # Optional: record that this profile is using that env key
-            p.api_key_ref = {
-                "openai": "OPENAI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY",
-                "google": "GOOGLE_API_KEY",
-                "deepseek": "DEEPSEEK_API_KEY",
-                "openrouter": "OPENROUTER_API_KEY",
-                "azure": "AZURE_OPENAI_KEY",
-            }.get(p.provider)  # type: ignore[index]
+    credential = resolve_provider_credential(
+        provider_id=p.provider,
+        direct=p.api_key,
+        secret_ref=p.api_key_ref,
+        secrets=secrets,
+    )
+    api_key = credential.value
+    if api_key and not p.api_key_ref and credential.source_ref:
+        p.api_key_ref = credential.source_ref
 
     # Finally, store the resolved key back into api_key for the client factory
     if api_key:
@@ -142,7 +93,12 @@ def client_from_profile(
 ) -> GenericLLMClient:
     # At this point, _apply_env_overrides_to_profile has already filled
     # p.base_url, p.api_key, etc. as much as possible.
-    api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
+    api_key = resolve_provider_credential(
+        provider_id=p.provider,
+        direct=p.api_key,
+        secret_ref=p.api_key_ref,
+        secrets=secrets,
+    ).value
 
     return GenericLLMClient(
         provider=p.provider,

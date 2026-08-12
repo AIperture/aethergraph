@@ -32,7 +32,8 @@ def _record(provider: str) -> dict[str, Any]:
 def test_provider_matrix_has_only_exact_bounded_bindings() -> None:
     matrix = _matrix()
 
-    assert matrix["schema_version"] == "aethergraph.provider-discovery-fixture/v1"
+    assert matrix["schema_version"] == "aethergraph.provider-discovery-fixture/v2"
+    assert matrix["capability_authority"] == "aethergraph.services.llm.catalog"
     assert matrix["captured_at"] == "2026-08-07"
     records = matrix["records"]
     assert {row["binding"]["provider"] for row in records} == _EXPECTED_PROVIDERS

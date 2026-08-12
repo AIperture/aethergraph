@@ -292,8 +292,7 @@ def test_builtin_discovery_capabilities_are_exact_and_implemented_only() -> None
         "gemini-2.5-pro",
         "generateContent",
     )
-    assert google is not None
-    assert [mode.mode for mode in google.supported_modes] == ["engine_projected"]
+    assert google is None
 
 
 def test_response_observation_normalizes_events_without_exposing_checkpoint() -> None:
