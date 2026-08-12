@@ -14,6 +14,7 @@ RequestFeature = Literal[
     "native_tool_calling",
     "native_tool_search",
     "parallel_tool_calls",
+    "raw_response",
     "structured_output",
     "tool_result_continuation",
 ]
@@ -179,6 +180,7 @@ def validate_model_request(
         isinstance(part, ImageInput) for message in request.messages for part in message.content
     )
     has_continuation = request.continuation is not None or bool(request.tool_outputs)
+    has_raw_response = request.response_format == "raw"
 
     if has_images:
         required_adapter.append("image_input")
@@ -209,6 +211,14 @@ def validate_model_request(
                 code="structured_output_with_native_tools",
                 features=("structured_output", "native_tool_calling"),
                 message="structured output cannot be combined with native Tool calling",
+            )
+        )
+    if has_tools and has_raw_response:
+        diagnostics.append(
+            RequestCompatibilityDiagnostic(
+                code="raw_response_with_native_tools",
+                features=("raw_response", "native_tool_calling"),
+                message="raw provider output cannot be combined with canonical native Tool calling",
             )
         )
     if has_continuation and not has_tools:

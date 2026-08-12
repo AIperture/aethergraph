@@ -12,6 +12,7 @@ from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profile_env
 from aethergraph.services.llm import (
     LLMToolCallCapabilityError,
+    LLMToolCallResponseError,
     ModelRequest,
     PromptCacheRequest,
     StructuredOutputRequest,
@@ -1037,6 +1038,158 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     assert fake_http.last_json["max_tokens"] == 256
     assert fake_http.last_json["reasoning_effort"] == "max"
     assert fake_http.last_json["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("deepseek", "deepseek-chat"),
+        ("openrouter", "openai/gpt-test"),
+        ("lmstudio", "local-model"),
+        ("ollama", "local-model"),
+        ("openai_compatible", "custom-model"),
+    ],
+)
+async def test_openai_compatible_generate_normalizes_native_tool_calls(
+    provider: str,
+    model: str,
+) -> None:
+    payload = {
+        "id": "chatcmpl_1",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "I will look that up.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"key":"A"}',
+                            },
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "finish", "arguments": "{}"},
+                        },
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 3},
+    }
+    client = GenericLLMClient(
+        provider=provider,
+        model=model,
+        api_key="test",
+        base_url=("http://localhost:9000/v1" if provider == "openai_compatible" else None),
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    tool_request = _native_tool_request(max_calls=2)
+
+    response = await client.generate(
+        ModelRequest(
+            messages=(message_from_text("user", "Look up A and finish"),),
+            tools=tool_request.tools,
+            tool_choice="auto",
+            max_tool_calls=2,
+        )
+    )
+
+    assert response.text == "I will look that up."
+    assert [call.call_id for call in response.calls] == ["call_1", "call_2"]
+    assert response.calls[0].arguments == {"key": "A"}
+    assert response.usage.total_input_tokens == 8
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["tool_choice"] == "auto"
+    assert fake_http.last_json["parallel_tool_calls"] is True
+    assert [item["function"]["name"] for item in fake_http.last_json["tools"]] == [
+        "lookup",
+        "finish",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_tool_request_accepts_direct_assistant_response() -> None:
+    payload = {
+        "id": "chatcmpl_direct",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "No Tool is needed."},
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 4},
+    }
+    client = GenericLLMClient(
+        provider="openrouter",
+        model="openai/gpt-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    tool_request = _native_tool_request(max_calls=1)
+
+    response = await client.generate(
+        ModelRequest(
+            messages=(message_from_text("user", "Say hello or use a Tool"),),
+            tools=tool_request.tools,
+            tool_choice="auto",
+        )
+    )
+
+    assert response.text == "No Tool is needed."
+    assert response.calls == ()
+    assert response.finish_reason == "stop"
+    assert response.usage.output_tokens == 4
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_tool_response_rejects_unknown_tool() -> None:
+    payload = {
+        "id": "chatcmpl_unknown",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "delete_everything", "arguments": "{}"},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    client = GenericLLMClient(
+        provider="openrouter",
+        model="openai/gpt-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMToolCallResponseError, match="unknown Tool"):
+        await client.chat(
+            [{"role": "user", "content": "Use a Tool"}],
+            tool_request=_native_tool_request(max_calls=1),
+        )
 
 
 @pytest.mark.asyncio

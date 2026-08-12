@@ -115,6 +115,11 @@ _TOOL_CALL_ENDPOINT_FAMILIES = {
     "azure": "responses",
     "anthropic": "messages",
     "google": "generateContent",
+    "deepseek": "chat.completions",
+    "openrouter": "chat.completions",
+    "lmstudio": "chat.completions",
+    "ollama": "chat.completions",
+    "openai_compatible": "chat.completions",
 }
 _QUOTA_LOCK_CREATION_GUARD = threading.Lock()
 _RLOCK_TYPE = type(threading.RLock())
@@ -184,7 +189,7 @@ class GenericLLMClient(
     LLMClientProtocol,
 ):
     """
-    provider: one of {"openai","azure","anthropic","google","openrouter","lmstudio","ollama"}
+    provider: one of {"openai","azure","anthropic","google","deepseek","openrouter","lmstudio","ollama","openai_compatible"}
     Configuration (read from env by default, but you can pass in):
       - OPENAI_API_KEY / OPENAI_BASE_URL
       - AZURE_OPENAI_KEY / AZURE_OPENAI_ENDPOINT / AZURE_OPENAI_DEPLOYMENT
@@ -1108,7 +1113,7 @@ class GenericLLMClient(
                     "max_tokens": max_output_tokens,
                 }
             )
-        if self.provider in {"openrouter", "lmstudio", "ollama"}:
+        if self.provider in {"openrouter", "lmstudio", "ollama", "openai_compatible"}:
             if self.provider == "lmstudio":
                 response_format: dict[str, Any] | None = None
                 if output_format == "json_object":
@@ -2746,7 +2751,13 @@ class GenericLLMClient(
             )
 
         # Everyone else
-        if self.provider in {"deepseek", "openrouter", "lmstudio", "ollama"}:
+        if self.provider in {
+            "deepseek",
+            "openrouter",
+            "lmstudio",
+            "ollama",
+            "openai_compatible",
+        }:
             return await self._chat_openai_like_chat_completions(
                 messages,
                 model=model,
@@ -2757,6 +2768,7 @@ class GenericLLMClient(
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
                 tool_choice=tool_choice,
+                tool_request=tool_request,
                 schema_name=schema_name,
                 strict_schema=strict_schema,
                 structured_output_fields=structured_output_fields,
@@ -3075,7 +3087,9 @@ class GenericLLMClient(
     # ================================================================
     def _headers_openai_like(self):
         hdr = {"Content-Type": "application/json"}
-        if self.provider in {"openai", "openrouter", "deepseek"}:
+        if self.provider in {"openai", "openrouter", "deepseek"} or (
+            self.provider == "openai_compatible" and self.api_key
+        ):
             hdr["Authorization"] = f"Bearer {self.api_key}"
         return hdr
 

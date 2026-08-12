@@ -146,6 +146,25 @@ def test_whole_request_validation_rejects_structured_output_with_native_tools() 
     assert report.diagnostics[0].code == "structured_output_with_native_tools"
 
 
+def test_whole_request_validation_rejects_raw_output_with_native_tools() -> None:
+    tool = ToolDefinition(
+        name="lookup",
+        description="Look up one value.",
+        input_schema={"type": "object", "properties": {}},
+    )
+    request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(tool,),
+        tool_choice="auto",
+        response_format="raw",
+    )
+
+    report = validate_model_request(request)
+
+    assert not report.valid
+    assert report.diagnostics[0].code == "raw_response_with_native_tools"
+
+
 def test_whole_request_validation_rejects_continuation_without_tool_catalog() -> None:
     request = ModelRequest(
         messages=(message_from_text("user", "Continue"),),
