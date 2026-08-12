@@ -524,6 +524,118 @@ async def test_llm_post_call_quota_violation_raises_typed_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_quota_reservation_prevents_concurrent_run_oversubscription() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        usage_quota_cfg=LLMUsageQuotaSettings(max_calls_per_run=1),
+    )
+    dispatched = 0
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        nonlocal dispatched
+        dispatched += 1
+        if dispatched > 1:
+            raise AssertionError("concurrent call reached provider dispatch")
+        first_started.set()
+        await release_first.wait()
+        return ProviderCallResult(("ok", {"prompt_tokens": 1, "completion_tokens": 1}))
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+    context = {"run_id": "run-concurrent-reservation"}
+    token = current_meter_context.set(context)
+    first = asyncio.create_task(client.chat([{"role": "user", "content": "first"}]))
+    try:
+        await first_started.wait()
+        with pytest.raises(LLMRunQuotaWouldExceedError):
+            await client.chat([{"role": "user", "content": "second"}])
+        assert dispatched == 1
+        release_first.set()
+        assert await first == ("ok", {"prompt_tokens": 1, "completion_tokens": 1})
+    finally:
+        release_first.set()
+        if not first.done():
+            first.cancel()
+        current_meter_context.reset(token)
+
+    state = context["_llm_usage_quota_state"]
+    assert state["calls"] == 1
+    assert state["reserved_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_llm_quota_reservation_is_released_after_provider_failure() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        usage_quota_cfg=LLMUsageQuotaSettings(max_calls_per_run=1),
+    )
+    dispatched = 0
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        nonlocal dispatched
+        dispatched += 1
+        if dispatched == 1:
+            raise ValueError("provider failed")
+        return ProviderCallResult(("ok", {"prompt_tokens": 1, "completion_tokens": 1}))
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+    context = {"run_id": "run-release-reservation"}
+    token = current_meter_context.set(context)
+    try:
+        with pytest.raises(ValueError, match="provider failed"):
+            await client.chat([{"role": "user", "content": "first"}])
+        result = await client.chat([{"role": "user", "content": "second"}])
+    finally:
+        current_meter_context.reset(token)
+
+    assert result == ("ok", {"prompt_tokens": 1, "completion_tokens": 1})
+    state = context["_llm_usage_quota_state"]
+    assert state["calls"] == 1
+    assert state["reserved_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_llm_quota_reservation_is_released_after_cancellation() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        usage_quota_cfg=LLMUsageQuotaSettings(max_calls_per_run=1),
+    )
+    first_started = asyncio.Event()
+    block_dispatch = True
+
+    async def fake_chat_dispatch(messages, **kwargs):
+        if block_dispatch:
+            first_started.set()
+            await asyncio.Event().wait()
+        return ProviderCallResult(("ok", {"prompt_tokens": 1, "completion_tokens": 1}))
+
+    client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
+    context = {"run_id": "run-cancel-reservation"}
+    token = current_meter_context.set(context)
+    first = asyncio.create_task(client.chat([{"role": "user", "content": "first"}]))
+    try:
+        await first_started.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        block_dispatch = False
+        result = await client.chat([{"role": "user", "content": "second"}])
+    finally:
+        if not first.done():
+            first.cancel()
+        current_meter_context.reset(token)
+
+    assert result == ("ok", {"prompt_tokens": 1, "completion_tokens": 1})
+    state = context["_llm_usage_quota_state"]
+    assert state["calls"] == 1
+    assert state["reserved_calls"] == 0
+
+
+@pytest.mark.asyncio
 async def test_llm_context_window_is_current_request_only() -> None:
     client = GenericLLMClient(
         provider="openai",

@@ -4,11 +4,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 import contextlib
 import copy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any
 import warnings
@@ -111,6 +112,21 @@ _TOOL_CALL_ENDPOINT_FAMILIES = {
     "anthropic": "messages",
     "google": "generateContent",
 }
+_QUOTA_LOCK_CREATION_GUARD = threading.Lock()
+_RLOCK_TYPE = type(threading.RLock())
+
+
+@dataclass
+class _LLMQuotaReservation:
+    """Track one active per-run estimate reserved before provider dispatch."""
+
+    run_id: str
+    state: dict[str, Any]
+    lock: threading.RLock
+    calls: int
+    input_tokens: int
+    output_tokens: int
+    active: bool = True
 
 
 def _merge_request_fields(
@@ -1231,7 +1247,7 @@ class GenericLLMClient(
         return None
 
     @staticmethod
-    def _quota_state() -> tuple[str, dict[str, int]] | None:
+    def _quota_state() -> tuple[str, dict[str, Any]] | None:
         ctx = current_meter_context.get()
         run_id = ctx.get("run_id")
         if not run_id:
@@ -1241,6 +1257,21 @@ class GenericLLMClient(
             {"calls": 0, "input_tokens": 0, "output_tokens": 0},
         )
         return str(run_id), state
+
+    def _initialize_shared_quota_state(self) -> None:
+        """Create the nested run ledger before tracing copies the meter context."""
+        if self._get_usage_quota_cfg() is not None:
+            self._quota_state()
+
+    @staticmethod
+    def _quota_lock(state: dict[str, Any]) -> threading.RLock:
+        lock = state.get("_reservation_lock")
+        if lock is None:
+            with _QUOTA_LOCK_CREATION_GUARD:
+                lock = state.setdefault("_reservation_lock", threading.RLock())
+        if not isinstance(lock, _RLOCK_TYPE):
+            raise TypeError("LLM usage quota reservation lock is invalid")
+        return lock
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
@@ -1404,7 +1435,10 @@ class GenericLLMClient(
             tool_request=projection.kwargs.get("tool_request"),
         )
 
-    def _preflight_llm_request(self, estimate: LLMRequestEstimate) -> None:
+    def _preflight_llm_request(
+        self,
+        estimate: LLMRequestEstimate,
+    ) -> _LLMQuotaReservation | None:
         if (
             estimate.context_window_tokens is not None
             and estimate.estimated_total_tokens > estimate.context_window_tokens
@@ -1421,97 +1455,155 @@ class GenericLLMClient(
         cfg = self._get_usage_quota_cfg()
         quota_state = self._quota_state()
         if cfg is None or quota_state is None:
-            return
+            return None
         run_id, state = quota_state
-        checks = (
-            ("llm_calls", state["calls"], 1, cfg.max_calls_per_run),
-            (
-                "input_tokens",
-                state["input_tokens"],
-                estimate.estimated_input_tokens,
-                cfg.max_input_tokens_per_run,
-            ),
-            (
-                "output_tokens",
-                state["output_tokens"],
-                estimate.reserved_output_tokens,
-                cfg.max_output_tokens_per_run,
-            ),
-            (
-                "total_tokens",
-                state["input_tokens"] + state["output_tokens"],
-                estimate.estimated_total_tokens,
-                cfg.max_total_tokens_per_run,
-            ),
+        lock = self._quota_lock(state)
+        with lock:
+            reserved_calls = int(state.get("reserved_calls", 0))
+            reserved_input = int(state.get("reserved_input_tokens", 0))
+            reserved_output = int(state.get("reserved_output_tokens", 0))
+            checks = (
+                (
+                    "llm_calls",
+                    int(state.get("calls", 0)) + reserved_calls,
+                    1,
+                    cfg.max_calls_per_run,
+                ),
+                (
+                    "input_tokens",
+                    int(state.get("input_tokens", 0)) + reserved_input,
+                    estimate.estimated_input_tokens,
+                    cfg.max_input_tokens_per_run,
+                ),
+                (
+                    "output_tokens",
+                    int(state.get("output_tokens", 0)) + reserved_output,
+                    estimate.reserved_output_tokens,
+                    cfg.max_output_tokens_per_run,
+                ),
+                (
+                    "total_tokens",
+                    int(state.get("input_tokens", 0))
+                    + int(state.get("output_tokens", 0))
+                    + reserved_input
+                    + reserved_output,
+                    estimate.estimated_total_tokens,
+                    cfg.max_total_tokens_per_run,
+                ),
+            )
+            for quota, consumed, requested, configured_limit in checks:
+                if configured_limit is None:
+                    continue
+                limit = int(configured_limit)
+                projected = consumed + requested
+                if projected > limit:
+                    raise LLMRunQuotaWouldExceedError(
+                        run_id=run_id,
+                        quota=quota,
+                        consumed=consumed,
+                        requested=requested,
+                        projected=projected,
+                        limit=limit,
+                        phase="would be exceeded before provider dispatch",
+                    )
+            state["reserved_calls"] = reserved_calls + 1
+            state["reserved_input_tokens"] = reserved_input + estimate.estimated_input_tokens
+            state["reserved_output_tokens"] = reserved_output + estimate.reserved_output_tokens
+        return _LLMQuotaReservation(
+            run_id=run_id,
+            state=state,
+            lock=lock,
+            calls=1,
+            input_tokens=estimate.estimated_input_tokens,
+            output_tokens=estimate.reserved_output_tokens,
         )
-        for quota, consumed, requested, configured_limit in checks:
-            if configured_limit is None:
-                continue
-            limit = int(configured_limit)
-            projected = consumed + requested
-            if projected > limit:
-                raise LLMRunQuotaWouldExceedError(
-                    run_id=run_id,
-                    quota=quota,
-                    consumed=consumed,
-                    requested=requested,
-                    projected=projected,
-                    limit=limit,
-                    phase="would be exceeded before provider dispatch",
-                )
+
+    @staticmethod
+    def _release_llm_quota_reservation(
+        reservation: _LLMQuotaReservation | None,
+    ) -> None:
+        if reservation is None or not reservation.active:
+            return
+        with reservation.lock:
+            if not reservation.active:
+                return
+            state = reservation.state
+            state["reserved_calls"] = max(
+                0,
+                int(state.get("reserved_calls", 0)) - reservation.calls,
+            )
+            state["reserved_input_tokens"] = max(
+                0,
+                int(state.get("reserved_input_tokens", 0)) - reservation.input_tokens,
+            )
+            state["reserved_output_tokens"] = max(
+                0,
+                int(state.get("reserved_output_tokens", 0)) - reservation.output_tokens,
+            )
+            reservation.active = False
 
     def _record_llm_quota_usage(
         self,
         *,
         usage: dict[str, Any],
+        reservation: _LLMQuotaReservation | None = None,
     ) -> LLMRunQuotaExceededError | None:
         cfg = self._get_usage_quota_cfg()
         if cfg is None:
+            self._release_llm_quota_reservation(reservation)
             return None
-        quota_state = self._quota_state()
+        quota_state = (
+            (reservation.run_id, reservation.state)
+            if reservation is not None
+            else self._quota_state()
+        )
         if quota_state is None:
             return None
         run_id, state = quota_state
         normalized = normalize_llm_usage(usage)
         input_tokens = int(normalized["input_tokens"])
         output_tokens = int(normalized["output_tokens"])
-        state["calls"] += 1
-        state["input_tokens"] += input_tokens
-        state["output_tokens"] += output_tokens
+        lock = reservation.lock if reservation is not None else self._quota_lock(state)
+        with lock:
+            if reservation is not None and reservation.active:
+                self._release_llm_quota_reservation(reservation)
+            state["calls"] = int(state.get("calls", 0)) + 1
+            state["input_tokens"] = int(state.get("input_tokens", 0)) + input_tokens
+            state["output_tokens"] = int(state.get("output_tokens", 0)) + output_tokens
 
-        checks = (
-            ("llm_calls", state["calls"], 1, cfg.max_calls_per_run),
-            (
-                "input_tokens",
-                state["input_tokens"],
-                input_tokens,
-                cfg.max_input_tokens_per_run,
-            ),
-            (
-                "output_tokens",
-                state["output_tokens"],
-                output_tokens,
-                cfg.max_output_tokens_per_run,
-            ),
-            (
-                "total_tokens",
-                state["input_tokens"] + state["output_tokens"],
-                input_tokens + output_tokens,
-                cfg.max_total_tokens_per_run,
-            ),
-        )
-        for quota, projected, requested, configured_limit in checks:
-            if configured_limit is not None and projected > int(configured_limit):
-                return LLMRunQuotaExceededError(
-                    run_id=run_id,
-                    quota=quota,
-                    consumed=projected - requested,
-                    requested=requested,
-                    projected=projected,
-                    limit=int(configured_limit),
-                    phase="was exceeded by actual provider usage",
-                    usage=normalized,
-                )
+            checks = (
+                ("llm_calls", state["calls"], 1, cfg.max_calls_per_run),
+                (
+                    "input_tokens",
+                    state["input_tokens"],
+                    input_tokens,
+                    cfg.max_input_tokens_per_run,
+                ),
+                (
+                    "output_tokens",
+                    state["output_tokens"],
+                    output_tokens,
+                    cfg.max_output_tokens_per_run,
+                ),
+                (
+                    "total_tokens",
+                    state["input_tokens"] + state["output_tokens"],
+                    input_tokens + output_tokens,
+                    cfg.max_total_tokens_per_run,
+                ),
+            )
+            for quota, projected, requested, configured_limit in checks:
+                if configured_limit is not None and projected > int(configured_limit):
+                    return LLMRunQuotaExceededError(
+                        run_id=run_id,
+                        quota=quota,
+                        consumed=projected - requested,
+                        requested=requested,
+                        projected=projected,
+                        limit=int(configured_limit),
+                        phase="was exceeded by actual provider usage",
+                        usage=normalized,
+                    )
         return None
 
     async def _account_llm_usage(
@@ -1520,10 +1612,14 @@ class GenericLLMClient(
         model: str,
         usage: dict[str, Any],
         latency_ms: int | None,
+        reservation: _LLMQuotaReservation | None = None,
     ) -> dict[str, int]:
         """Reconcile run quota and record metering for one completed provider call."""
         normalized = normalize_llm_usage(usage)
-        quota_error = self._record_llm_quota_usage(usage=usage)
+        quota_error = self._record_llm_quota_usage(
+            usage=usage,
+            reservation=reservation,
+        )
         await self._record_llm_usage(
             model=model,
             usage=usage,
@@ -2089,6 +2185,7 @@ class GenericLLMClient(
         tags = ["llm", "chat"]
         if call_name:
             tags.append(call_name)
+        self._initialize_shared_quota_state()
         tracer = resolve_tracer()
         span = await tracer.start_span(
             service="llm",
@@ -2109,8 +2206,9 @@ class GenericLLMClient(
 
         start = time.perf_counter()
         normalized_usage: dict[str, int] = {}
+        quota_reservation: _LLMQuotaReservation | None = None
         try:
-            self._preflight_llm_request(request_estimate)
+            quota_reservation = self._preflight_llm_request(request_estimate)
             # Provider-specific call (now symmetric)
             provider_result = await self._provider_retry.execute(
                 lambda: self._chat_dispatch(
@@ -2161,6 +2259,7 @@ class GenericLLMClient(
                 model=model,
                 usage=usage,
                 latency_ms=observation_record.latency_ms,
+                reservation=quota_reservation,
             )
             if isinstance(provider_value, ToolCallResponse):
                 provider_value = replace(
@@ -2224,6 +2323,7 @@ class GenericLLMClient(
             )
             raise
         finally:
+            self._release_llm_quota_reservation(quota_reservation)
             if not getattr(span, "finished", True):
                 with contextlib.suppress(Exception):
                     await span.fail(
@@ -2417,6 +2517,7 @@ class GenericLLMClient(
         tags = ["llm", "chat_stream"]
         if call_name:
             tags.append(call_name)
+        self._initialize_shared_quota_state()
         tracer = resolve_tracer()
         span = await tracer.start_span(
             service="llm",
@@ -2444,8 +2545,9 @@ class GenericLLMClient(
         if isinstance(_thinking_budget, int) and _thinking_budget <= 0:
             _thinking_budget = None
 
+        quota_reservation: _LLMQuotaReservation | None = None
         try:
-            self._preflight_llm_request(request_estimate)
+            quota_reservation = self._preflight_llm_request(request_estimate)
             if self.provider == "openai":
                 provider_result = await self._provider_retry.execute(
                     lambda: self._chat_openai_responses_stream(
@@ -2541,6 +2643,7 @@ class GenericLLMClient(
                 model=model,
                 usage=usage,
                 latency_ms=latency_ms,
+                reservation=quota_reservation,
             )
             await self._emit_observation(observation_record)
             await span.finish(
@@ -2571,6 +2674,7 @@ class GenericLLMClient(
             )
             raise
         finally:
+            self._release_llm_quota_reservation(quota_reservation)
             if not getattr(span, "finished", True):
                 with contextlib.suppress(Exception):
                     await span.fail(
