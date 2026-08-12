@@ -12,6 +12,7 @@ import httpx
 from aethergraph.contracts.services.llm import EmbeddingClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     ProviderRateGate,
@@ -19,6 +20,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRetrySettings,
     checked_response_metadata,
 )
+from aethergraph.services.llm.registry import provider_default_base_url
 
 
 @dataclass
@@ -26,7 +28,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
     """
     Provider-agnostic embedding client.
 
-    provider: one of {"openai","azure","anthropic","google","deepseek","openrouter","lmstudio","ollama","dummy"}
+    provider: one of {"openai","azure","anthropic","google","deepseek","openrouter","lmstudio","ollama","openai_compatible","dummy"}
 
     Configuration (env defaults, but can be passed directly):
 
@@ -63,30 +65,13 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             or "text-embedding-3-small"
         )
 
-        # Pick an API key from provider-specific envs (or explicit api_key)
-        if self.api_key is None:
-            self.api_key = (
-                os.getenv("OPENAI_API_KEY")
-                or os.getenv("AZURE_OPENAI_KEY")
-                or os.getenv("ANTHROPIC_API_KEY")
-                or os.getenv("GOOGLE_API_KEY")
-                or os.getenv("DEEPSEEK_API_KEY")
-                or os.getenv("OPENROUTER_API_KEY")
-            )
-
-        # Base URL defaults per provider
-        if self.base_url is None:
-            self.base_url = {
-                "openai": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                "azure": os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/"),
-                "anthropic": "https://api.anthropic.com",
-                "google": "https://generativelanguage.googleapis.com",
-                "deepseek": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-                "openrouter": "https://openrouter.ai/api/v1",
-                "lmstudio": os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
-                "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-                "dummy": "http://localhost:8745",  # for tests
-            }[self.provider]
+        self.api_key = resolve_provider_credential(
+            provider_id=self.provider,
+            direct=self.api_key,
+            secret_ref=None,
+            secrets=None,
+        ).value
+        self.base_url = self.base_url or provider_default_base_url(self.provider) or ""
 
         # Azure deployment (for /deployments/{name}/embeddings)
         if self.provider == "azure" and self.azure_deployment is None:
@@ -156,6 +141,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             "openrouter",
             "lmstudio",
             "ollama",
+            "openai_compatible",
             "azure",
             "google",
             "dummy",
@@ -163,7 +149,13 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             raise NotImplementedError(f"Unknown embedding provider: {self.provider}")
 
         async def _attempt() -> ProviderCallResult[list[list[float]]]:
-            if self.provider in {"openai", "openrouter", "lmstudio", "ollama"}:
+            if self.provider in {
+                "openai",
+                "openrouter",
+                "lmstudio",
+                "ollama",
+                "openai_compatible",
+            }:
                 return await self._embed_openai_like(texts, model=model, **kw)
             if self.provider == "azure":
                 return await self._embed_azure(texts, model=model, **kw)
@@ -315,7 +307,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
     ) -> ProviderCallResult[list[list[float]]]:
         assert self._client is not None
         base = self.base_url.rstrip("/")
-        api_key = self.api_key or os.getenv("GOOGLE_API_KEY") or ""
+        api_key = self.api_key or ""
         headers = {"Content-Type": "application/json"}
 
         batch_url_v1 = f"{base}/v1/models/{model}:batchEmbedContents?key={api_key}"

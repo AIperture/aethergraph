@@ -22,6 +22,7 @@ from aethergraph.services.llm.compat import (
 )
 from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.factory import client_from_profile
+from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.providers import Provider
 
 
@@ -117,6 +118,38 @@ def test_credential_resolution_uses_inline_store_environment_precedence() -> Non
         "environment",
         "OPENAI_API_KEY",
     )
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_key"),
+    [
+        ("openai", "openai-key"),
+        ("azure", "azure-key"),
+        ("google", "google-key"),
+        ("openrouter", "openrouter-key"),
+        ("openai_compatible", "compatible-key"),
+    ],
+)
+def test_embedding_client_uses_exact_registry_connection_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    expected_key: str,
+) -> None:
+    values = {
+        "OPENAI_API_KEY": "openai-key",
+        "AZURE_OPENAI_KEY": "azure-key",
+        "GOOGLE_API_KEY": "google-key",
+        "OPENROUTER_API_KEY": "openrouter-key",
+        "OPENAI_COMPATIBLE_API_KEY": "compatible-key",
+        "AZURE_OPENAI_ENDPOINT": "https://azure.example",
+        "OPENAI_COMPATIBLE_BASE_URL": "http://localhost:9000/v1",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    client = GenericEmbeddingClient(provider=provider, model="embed-test")
+
+    assert client.api_key == expected_key
 
 
 def test_legacy_chat_profile_projection_separates_operation_concerns() -> None:

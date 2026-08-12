@@ -231,7 +231,7 @@ _PROVIDERS = (
         "Dummy (tests)",
         ("dummy_chat",),
         {"chat": "dummy_chat"},
-        None,
+        "http://localhost:8745",
         None,
         (),
         None,
