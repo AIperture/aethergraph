@@ -28,7 +28,6 @@ from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
-from aethergraph.services.llm.compat import project_model_request_to_chat
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.credentials import resolve_provider_credential
@@ -51,6 +50,7 @@ from aethergraph.services.llm.provider_transport import (
     checked_response_metadata,
 )
 from aethergraph.services.llm.registry import provider_default_base_url, resolve_endpoint_adapter
+from aethergraph.services.llm.request_preparation import prepare_model_request
 from aethergraph.services.llm.request_validation import (
     LLMRequestCompatibilityError,
     validate_model_request,
@@ -123,6 +123,8 @@ _TOOL_CALL_ENDPOINT_FAMILIES = {
     "ollama": "chat.completions",
     "openai_compatible": "chat.completions",
 }
+
+
 _QUOTA_LOCK_CREATION_GUARD = threading.Lock()
 _RLOCK_TYPE = type(threading.RLock())
 
@@ -1586,7 +1588,7 @@ class GenericLLMClient(
     def estimate(self, request: ModelRequest) -> LLMRequestEstimate:
         """Estimate one canonical model request without invoking a provider.
 
-        The estimate uses the same request projection as `generate()` so Tool
+        The estimate uses the same canonical preparation as `generate()` so Tool
         schemas, structured output, and output reservation are counted once.
 
         Examples:
@@ -1615,16 +1617,16 @@ class GenericLLMClient(
         """
 
         self._require_compatible_model_request(request)
-        projection = project_model_request_to_chat(request)
+        messages, tool_request = prepare_model_request(request)
         return self.estimate_chat_request(
-            list(projection.messages),
+            messages,
             max_output_tokens=request.generation.max_output_tokens,
             structured_output=(
                 request.response_format
                 if isinstance(request.response_format, StructuredOutputRequest)
                 else None
             ),
-            tool_request=projection.kwargs.get("tool_request"),
+            tool_request=tool_request,
         )
 
     def _require_compatible_model_request(self, request: ModelRequest) -> None:
@@ -1985,16 +1987,37 @@ class GenericLLMClient(
             optional opaque continuation.
 
         Notes:
-            During the provider-runtime cutover this method uses the named Chat
-            compatibility projection. It is one physical invocation path and is
-            not a provider or feature fallback.
+            Canonical request preparation enters the shared invocation seam
+            directly. The public `chat()` facade is not part of this call path.
         """
 
         self._require_compatible_model_request(request)
-        projection = project_model_request_to_chat(request)
+        messages, tool_request = prepare_model_request(request)
+        generation_params: dict[str, Any] = {}
+        if request.generation.temperature is not None:
+            generation_params["temperature"] = request.generation.temperature
+        if request.generation.reasoning_budget is not None:
+            generation_params["thinking_budget"] = request.generation.reasoning_budget
+        if request.generation.reasoning_summary is not None:
+            generation_params["reasoning_summary"] = request.generation.reasoning_summary
         value, usage = await self._invoke_chat_runtime(
-            list(projection.messages),
-            **projection.kwargs,
+            messages,
+            call_name=request.call_name,
+            reasoning_effort=request.generation.reasoning_effort,
+            max_output_tokens=request.generation.max_output_tokens,
+            output_format=(
+                "text"
+                if isinstance(request.response_format, StructuredOutputRequest)
+                else request.response_format
+            ),
+            structured_output=(
+                request.response_format
+                if isinstance(request.response_format, StructuredOutputRequest)
+                else None
+            ),
+            tool_request=tool_request,
+            prompt_cache=request.prompt_cache,
+            **generation_params,
         )
         if isinstance(value, ToolCallResponse):
             return value

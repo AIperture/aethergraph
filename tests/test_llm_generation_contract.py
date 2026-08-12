@@ -6,6 +6,7 @@ from aethergraph.services.llm import (
     AssistantOutput,
     ChatMessage,
     GenerationOptions,
+    ImagePart,
     LLMRequestCompatibilityError,
     ModelContinuation,
     ModelRequest,
@@ -24,8 +25,8 @@ from aethergraph.services.llm import (
     message_from_text,
     validate_model_request,
 )
-from aethergraph.services.llm.compat import project_model_request_to_chat
 from aethergraph.services.llm.generic_client import GenericLLMClient
+from aethergraph.services.llm.request_preparation import prepare_model_request
 from aethergraph.services.llm.tool_calling import tool_call_request_fingerprint
 
 
@@ -102,6 +103,35 @@ def test_model_request_accepts_structured_response_contract() -> None:
     )
 
     assert request.response_format is response_format
+
+
+def test_canonical_request_preparation_preserves_multimodal_and_tool_messages() -> None:
+    request = ModelRequest(
+        messages=(
+            ChatMessage(
+                "user",
+                (
+                    TextPart("Inspect"),
+                    ImagePart(url="https://example.test/image.png"),
+                    ImagePart(data=b"image", mime_type="image/png"),
+                ),
+                name="operator",
+            ),
+            ChatMessage("tool", (TextPart("done"),), tool_call_id="call_1"),
+        )
+    )
+
+    messages, tool_request = prepare_model_request(request)
+
+    assert tool_request is None
+    assert messages[0]["name"] == "operator"
+    assert [part["type"] for part in messages[0]["content"]] == [
+        "text",
+        "image_url",
+        "image",
+    ]
+    assert messages[0]["content"][2]["source"]["data"] == "aW1hZ2U="
+    assert messages[1]["tool_call_id"] == "call_1"
 
 
 def test_model_request_requires_continuation_for_tool_outputs() -> None:
@@ -218,7 +248,10 @@ async def test_generate_rejects_invalid_whole_request_before_runtime(
     assert exc_info.value.report.diagnostics[0].code == ("structured_output_with_native_tools")
 
 
-def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest() -> None:
+@pytest.mark.asyncio
+async def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     legacy = ToolCallRequest(tools=(_tool(),), choice="auto")
     canonical_request = ModelRequest(
         messages=(message_from_text("user", "Look up"),),
@@ -226,15 +259,22 @@ def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest()
         tool_choice="auto",
         call_name="engine.select_action",
     )
-    projected = project_model_request_to_chat(canonical_request).kwargs["tool_request"]
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    captured = {}
+
+    async def capture_runtime(messages, **kwargs):
+        captured.update(kwargs)
+        return "done", {}
+
+    monkeypatch.setattr(client, "_invoke_chat_runtime", capture_runtime)
+    await client.generate(canonical_request)
+    projected = captured["tool_request"]
 
     assert tool_call_request_fingerprint(legacy) == (
         "b1944bede27a704b605692fc79bf14ac612f92ed1783540975c1e39aec9da1ee"
     )
     assert projected.fingerprint_version == "model_request/v1"
-    assert project_model_request_to_chat(canonical_request).kwargs["call_name"] == (
-        "engine.select_action"
-    )
+    assert captured["call_name"] == "engine.select_action"
     assert tool_call_request_fingerprint(projected) != tool_call_request_fingerprint(legacy)
 
 
