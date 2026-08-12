@@ -10,6 +10,8 @@ from aethergraph.contracts.integration import (
     ReleaseDependency,
 )
 
+from .compiled_build import inspect_compiled_build
+
 HOST_CAPABILITIES = frozenset({"canonical_ingress", "origin_delivery", "semantic_event_log"})
 HOST_SERVICES = frozenset(
     {"artifacts", "channels", "continuations", "eventlog", "runs", "sessions"}
@@ -80,10 +82,8 @@ def build_release_compatibility(
 
     Notes:
         Generated source is never imported by this function. Compiler integrity
-        inspection rejects stale versions and changed file checksums.
+        inspection rejects changed file indexes, identities, and checksums.
     """
-    from aethergraph_engine.compiler import inspect_compiled_build
-
     root = Path(build_root).resolve(strict=True)
     inspection = inspect_compiled_build(root)
     compiled = inspection.manifest

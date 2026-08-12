@@ -12,6 +12,8 @@ from pydantic import ValidationError
 
 from aethergraph.contracts.integration import HostManifest
 
+from .compiled_build import CompiledBuildInspection, inspect_compiled_build
+
 
 class HostManifestError(RuntimeError):
     """Report a closed, deterministic Host manifest validation failure."""
@@ -138,7 +140,7 @@ def load_host_manifest(path: str | Path) -> HostManifest:
     return manifest
 
 
-def validate_compiled_build(manifest: HostManifest):
+def validate_compiled_build(manifest: HostManifest) -> CompiledBuildInspection:
     """Inspect and match one compiler-owned build to a Host manifest.
 
     AG Engine verifies the complete compiler file index first. AG Host then
@@ -164,7 +166,7 @@ def validate_compiled_build(manifest: HostManifest):
         manifest: Digest-verified Host launch manifest.
 
     Returns:
-        CompiledBuildInspection: Engine-owned verified build inspection.
+        CompiledBuildInspection: AG-owned verified runtime artifact inspection.
 
     Notes:
         The initial local Host accepts `build_root` only. Release acquisition is
@@ -179,12 +181,8 @@ def validate_compiled_build(manifest: HostManifest):
     if build_root.name != manifest.build_id:
         raise HostManifestError("Compiled build directory does not match manifest build_id.")
     try:
-        from aethergraph_engine.compiler import inspect_compiled_build
-    except ImportError as exc:
-        raise HostManifestError("Compatible aethergraph-engine is required by AG Host.") from exc
-    try:
         inspection = inspect_compiled_build(build_root)
-    except Exception as exc:  # Engine exposes a versioned CompilationError type.
+    except Exception as exc:
         raise HostManifestError("Compiled build integrity verification failed.") from exc
 
     compiled = inspection.manifest
