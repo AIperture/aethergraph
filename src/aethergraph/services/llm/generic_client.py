@@ -1514,6 +1514,25 @@ class GenericLLMClient(
                 )
         return None
 
+    async def _account_llm_usage(
+        self,
+        *,
+        model: str,
+        usage: dict[str, Any],
+        latency_ms: int | None,
+    ) -> dict[str, int]:
+        """Reconcile run quota and record metering for one completed provider call."""
+        normalized = normalize_llm_usage(usage)
+        quota_error = self._record_llm_quota_usage(usage=usage)
+        await self._record_llm_usage(
+            model=model,
+            usage=usage,
+            latency_ms=latency_ms,
+        )
+        if quota_error is not None:
+            raise quota_error
+        return normalized
+
     def _current_dimensions(self) -> dict[str, Any]:
         ctx = current_meter_context.get()
         return {
@@ -2138,21 +2157,16 @@ class GenericLLMClient(
             )
             observation_record.usage = usage or {}
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
-            normalized_usage = normalize_llm_usage(usage)
+            normalized_usage = await self._account_llm_usage(
+                model=model,
+                usage=usage,
+                latency_ms=observation_record.latency_ms,
+            )
             if isinstance(provider_value, ToolCallResponse):
                 provider_value = replace(
                     provider_value,
                     usage=ModelUsage.from_provider_usage(usage),
                 )
-
-            quota_error = self._record_llm_quota_usage(usage=usage)
-            await self._record_llm_usage(
-                model=model,
-                usage=usage,
-                latency_ms=observation_record.latency_ms,
-            )
-            if quota_error is not None:
-                raise quota_error
 
             # Canonical parsing/validation happens only after response evidence
             # and provider usage have been retained and accounted.
@@ -2519,15 +2533,15 @@ class GenericLLMClient(
             observation_record.attempts = provider_result.attempts
 
             latency_ms = int((time.perf_counter() - start) * 1000)
-            normalized_usage = normalize_llm_usage(usage)
             observation_record.raw_text = text
             observation_record.usage = usage or {}
             observation_record.latency_ms = latency_ms
 
-            quota_error = self._record_llm_quota_usage(usage=usage)
-            await self._record_llm_usage(model=model, usage=usage, latency_ms=latency_ms)
-            if quota_error is not None:
-                raise quota_error
+            normalized_usage = await self._account_llm_usage(
+                model=model,
+                usage=usage,
+                latency_ms=latency_ms,
+            )
             await self._emit_observation(observation_record)
             await span.finish(
                 response={
@@ -2858,12 +2872,11 @@ class GenericLLMClient(
             result = provider_result.value
 
             latency_ms = int((time.perf_counter() - start) * 1000)
-            quota_error = self._record_llm_quota_usage(usage=result.usage or {})
-            await self._record_llm_usage(
-                model=model, usage=result.usage or {}, latency_ms=latency_ms
+            await self._account_llm_usage(
+                model=model,
+                usage=result.usage or {},
+                latency_ms=latency_ms,
             )
-            if quota_error is not None:
-                raise quota_error
             await span.finish(
                 response={"usage": result.usage or {}, "images_count": len(result.images or [])},
                 metadata=self._current_dimensions(),
