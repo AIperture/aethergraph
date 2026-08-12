@@ -4,10 +4,13 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from aethergraph.services.llm.tool_calling import ToolCallResponse
+    from aethergraph.services.llm.contracts import ModelRequest
+    from aethergraph.services.llm.tool_calling import ModelResponse, ToolCallResponse
 
 
 class LLMClientProtocol(Protocol):
+    async def generate(self, request: ModelRequest) -> ModelResponse: ...
+
     def estimate_chat_request(
         self,
         messages: list[dict[str, Any]],

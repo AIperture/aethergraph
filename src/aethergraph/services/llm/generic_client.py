@@ -27,6 +27,8 @@ from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
+from aethergraph.services.llm.compat import project_model_request_to_chat
+from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.observability import (
     CaptureMode,
@@ -53,9 +55,12 @@ from aethergraph.services.llm.structured_output import (
     resolve_structured_output_capabilities,
 )
 from aethergraph.services.llm.tool_calling import (
+    AssistantOutput,
     LLMToolCallCapabilityError,
+    ModelResponse,
     ToolCallRequest,
     ToolCallResponse,
+    assistant_output_identity,
     tool_call_request_fingerprint,
     tool_call_surface_fingerprint,
 )
@@ -1516,6 +1521,67 @@ class GenericLLMClient(
             # Don't attempt to close the old client here; it belongs to the old loop.
             self._client = httpx.AsyncClient(timeout=self._timeout)
             self._bound_loop = loop
+
+    # ================================================================
+    # generate() — canonical non-streaming request
+    # ================================================================
+    async def generate(self, request: ModelRequest) -> ModelResponse:
+        """Generate one canonical ordered model response.
+
+        The method accepts only provider-neutral request state and returns one
+        ordered response-item stream for direct output, discovery, and Tool calls.
+
+        Examples:
+            Generate a direct response:
+                ```python
+                response = await client.generate(request)
+                assert response.assistant_outputs
+                ```
+
+            Generate a Tool decision:
+                ```python
+                response = await client.generate(tool_request)
+                assert response.calls
+                ```
+
+        Args:
+            request: Immutable canonical generation request.
+
+        Returns:
+            ModelResponse: Ordered output items, finish reason, typed usage, and
+            optional opaque continuation.
+
+        Notes:
+            During the provider-runtime cutover this method uses the named Chat
+            compatibility projection. It is one physical invocation path and is
+            not a provider or feature fallback.
+        """
+
+        projection = project_model_request_to_chat(request)
+        value, usage = await self.chat(
+            list(projection.messages),
+            **projection.kwargs,
+        )
+        if isinstance(value, ToolCallResponse):
+            return value
+        assistant_output = AssistantOutput(
+            output_id=assistant_output_identity(
+                provider=self.provider,
+                item_index=0,
+                content_index=0,
+                text=value,
+            ),
+            text=value,
+        )
+        return ModelResponse(
+            items=(assistant_output,),
+            finish_reason="stop",
+            provider_metadata={
+                "provider": self.provider,
+                "model": self.model,
+            },
+            usage=ModelUsage.from_provider_usage(usage),
+        )
 
     # ================================================================
     # chat() — non-streaming

@@ -12,11 +12,13 @@ from aethergraph.config.llm import LLMProfile
 from aethergraph.config.llm_env import encode_llm_profile_env
 from aethergraph.services.llm import (
     LLMToolCallCapabilityError,
+    ModelRequest,
     PromptCacheRequest,
     StructuredOutputRequest,
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
+    message_from_text,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
@@ -86,6 +88,75 @@ def _native_tool_request(*, max_calls: int = 2) -> ToolCallRequest:
         ),
         max_calls=max_calls,
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_wraps_direct_assistant_output_with_typed_usage() -> None:
+    payload = {
+        "id": "response_1",
+        "status": "completed",
+        "output": [
+            {
+                "id": "message_1",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello."}],
+            }
+        ],
+        "usage": {"input_tokens": 4, "output_tokens": 2},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response = await client.generate(ModelRequest(messages=(message_from_text("user", "Hello"),)))
+
+    assert response.text == "Hello."
+    assert response.calls == ()
+    assert response.assistant_outputs[0].output_id.startswith("assistant_output_")
+    assert response.usage.availability == "complete"
+    assert response.usage.total_input_tokens == 4
+    assert response.usage.output_tokens == 2
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["input"][0]["content"] == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_generate_projects_canonical_tools_to_existing_provider_path() -> None:
+    payload = {
+        "id": "response_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "id": "function_1",
+                "call_id": "call_1",
+                "name": "lookup",
+                "arguments": '{"key":"A"}',
+                "status": "completed",
+            }
+        ],
+        "usage": {"input_tokens": 7, "output_tokens": 3},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    legacy = _native_tool_request(max_calls=1)
+
+    response = await client.generate(
+        ModelRequest(
+            messages=(message_from_text("user", "Look up A"),),
+            tools=legacy.tools,
+            tool_choice="required",
+        )
+    )
+
+    assert response.calls[0].call_id == "call_1"
+    assert response.calls[0].arguments == {"key": "A"}
+    assert response.usage.availability == "complete"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["tool_choice"] == "required"
 
 
 def test_native_tool_definition_rejects_provider_unsafe_name() -> None:
