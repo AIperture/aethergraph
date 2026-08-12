@@ -140,6 +140,21 @@ class _LLMQuotaReservation:
     active: bool = True
 
 
+@dataclass(frozen=True)
+class _LLMConnectionState:
+    provider: str
+    model: str
+    endpoint_id: str | None
+    base_url: str
+    api_key: str | None
+    azure_deployment: str | None
+    timeout: float
+    rate_limit_group: str | None
+    client: httpx.AsyncClient
+    provider_retry: ProviderRetryExecutor
+    tool_discovery_capabilities: ToolDiscoveryCapabilities | None
+
+
 def _merge_request_fields(
     base: dict[str, Any],
     override: dict[str, Any],
@@ -289,32 +304,23 @@ class GenericLLMClient(
             Explicit endpoint bindings never switch protocol according to request
             features or provider failures.
         """
-        self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
-        self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
-        self.endpoint_id = (
-            resolve_endpoint_adapter(self.provider, "chat", endpoint_id=endpoint_id).adapter_id
-            if endpoint_id is not None
-            else None
-        )
-        self.rate_limit_group = rate_limit_group
-        self._client = httpx.AsyncClient(timeout=timeout)
+        self._client: httpx.AsyncClient | None = None
+        self._retired_http_clients: list[httpx.AsyncClient] = []
         self._bound_loop = None
-        self._timeout = timeout
-
-        # Resolve creds/base
-        self.api_key = resolve_provider_credential(
-            provider_id=self.provider,
-            direct=api_key,
-            secret_ref=None,
-            secrets=None,
-        ).value
-        self.base_url = base_url or provider_default_base_url(self.provider) or ""
-        self.azure_deployment = azure_deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT")
-        self._provider_retry = ProviderRetryExecutor(
-            retry_settings,
-            rate_gate=rate_gate,
-            base_url=self.base_url,
-            credential=self.api_key,
+        self._apply_connection_state(
+            self._build_connection_state(
+                provider=provider,
+                model=model,
+                endpoint_id=endpoint_id,
+                base_url=base_url,
+                api_key=api_key,
+                azure_deployment=azure_deployment,
+                timeout=timeout,
+                retry_settings=retry_settings,
+                rate_limit_group=rate_limit_group,
+                rate_gate=rate_gate,
+            ),
+            retire_current=False,
         )
 
         self.metering = metering
@@ -337,12 +343,6 @@ class GenericLLMClient(
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
-        endpoint_family = self._active_endpoint_family()
-        self._tool_discovery_capabilities = resolve_tool_discovery_capabilities(
-            self.provider,
-            self.model,
-            endpoint_family,
-        )
         self._tool_transport_checkpoints: dict[str, ToolTransportCheckpoint] = {}
         self._latest_tool_checkpoint_refs: dict[tuple[str, str, str], str] = {}
         self._logger = logging.getLogger("aethergraph.services.llm")
@@ -357,6 +357,177 @@ class GenericLLMClient(
                 endpoint_id=self.endpoint_id,
             ).protocol_family
         return _TOOL_CALL_ENDPOINT_FAMILIES.get(self.provider, "")
+
+    @staticmethod
+    def _build_connection_state(
+        *,
+        provider: str | None,
+        model: str | None,
+        endpoint_id: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        azure_deployment: str | None,
+        timeout: float,
+        retry_settings: ProviderRetrySettings | None,
+        rate_limit_group: str | None,
+        rate_gate: ProviderRateGate | None,
+    ) -> _LLMConnectionState:
+        resolved_provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
+        resolved_model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
+        resolved_endpoint = (
+            resolve_endpoint_adapter(
+                resolved_provider,
+                "chat",
+                endpoint_id=endpoint_id,
+            ).adapter_id
+            if endpoint_id is not None
+            else None
+        )
+        resolved_api_key = resolve_provider_credential(
+            provider_id=resolved_provider,
+            direct=api_key,
+            secret_ref=None,
+            secrets=None,
+        ).value
+        resolved_base_url = base_url or provider_default_base_url(resolved_provider) or ""
+        endpoint_family = (
+            resolve_endpoint_adapter(
+                resolved_provider,
+                "chat",
+                endpoint_id=resolved_endpoint,
+            ).protocol_family
+            if resolved_endpoint is not None
+            else _TOOL_CALL_ENDPOINT_FAMILIES.get(resolved_provider, "")
+        )
+        tool_discovery_capabilities = resolve_tool_discovery_capabilities(
+            resolved_provider,
+            resolved_model,
+            endpoint_family,
+        )
+        client = httpx.AsyncClient(timeout=timeout)
+        provider_retry = ProviderRetryExecutor(
+            retry_settings,
+            rate_gate=rate_gate,
+            base_url=resolved_base_url,
+            credential=resolved_api_key,
+        )
+        return _LLMConnectionState(
+            provider=resolved_provider,
+            model=resolved_model,
+            endpoint_id=resolved_endpoint,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            azure_deployment=azure_deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            timeout=timeout,
+            rate_limit_group=rate_limit_group,
+            client=client,
+            provider_retry=provider_retry,
+            tool_discovery_capabilities=tool_discovery_capabilities,
+        )
+
+    def _apply_connection_state(
+        self,
+        state: _LLMConnectionState,
+        *,
+        retire_current: bool,
+    ) -> None:
+        current_client = self._client
+        self.provider = state.provider
+        self.model = state.model
+        self.endpoint_id = state.endpoint_id
+        self.base_url = state.base_url
+        self.api_key = state.api_key
+        self.azure_deployment = state.azure_deployment
+        self._timeout = state.timeout
+        self.rate_limit_group = state.rate_limit_group
+        self._client = state.client
+        self._provider_retry = state.provider_retry
+        self._tool_discovery_capabilities = state.tool_discovery_capabilities
+        self._bound_loop = None
+        if retire_current and current_client is not None:
+            self._retired_http_clients.append(current_client)
+
+    def reconfigure_connection(
+        self,
+        *,
+        provider: str,
+        model: str,
+        endpoint_id: str | None,
+        base_url: str | None,
+        api_key: str | None,
+        azure_deployment: str | None,
+        timeout: float,
+        retry_settings: ProviderRetrySettings | None = None,
+        rate_limit_group: str | None = None,
+    ) -> None:
+        """Replace the complete provider connection while preserving client identity.
+
+        Intro:
+            Settings hot reload uses this boundary so services holding the client
+            continue to see one object while all connection-derived state changes
+            together.
+
+        Examples:
+            Pin an OpenAI Responses binding:
+                ```python
+                client.reconfigure_connection(
+                    provider="openai",
+                    model="gpt-5-mini",
+                    endpoint_id="openai_responses",
+                    base_url=None,
+                    api_key=None,
+                    azure_deployment=None,
+                    timeout=60.0,
+                )
+                ```
+
+            Switch one Azure deployment atomically:
+                ```python
+                client.reconfigure_connection(
+                    provider="azure",
+                    model="deployment-b",
+                    endpoint_id="azure_chat_completions",
+                    base_url="https://example.openai.azure.com",
+                    api_key="secret",
+                    azure_deployment="deployment-b",
+                    timeout=90.0,
+                )
+                ```
+
+        Args:
+            provider: Registered provider identity.
+            model: Provider model or deployment identity.
+            endpoint_id: Optional exact registered Chat endpoint adapter.
+            base_url: Optional provider API base URL override.
+            api_key: Optional already-resolved provider credential.
+            azure_deployment: Optional Azure OpenAI deployment name.
+            timeout: HTTP request timeout in seconds.
+            retry_settings: Optional bounded provider retry policy.
+            rate_limit_group: Optional shared provider quota bucket.
+
+        Returns:
+            None: Replaces connection state on this client.
+
+        Notes:
+            Validation and replacement-client construction finish before the live
+            binding changes. Retired HTTP clients remain available to in-flight
+            calls and are closed when this client is closed.
+        """
+        state = self._build_connection_state(
+            provider=provider,
+            model=model,
+            endpoint_id=endpoint_id,
+            base_url=base_url,
+            api_key=api_key,
+            azure_deployment=azure_deployment,
+            timeout=timeout,
+            retry_settings=retry_settings,
+            rate_limit_group=rate_limit_group,
+            rate_gate=self._provider_retry.rate_gate,
+        )
+        self._apply_connection_state(state, retire_current=True)
+        self._tool_transport_checkpoints.clear()
+        self._latest_tool_checkpoint_refs.clear()
 
     def pin_tool_transport_checkpoint(
         self,
@@ -1774,8 +1945,13 @@ class GenericLLMClient(
             self._bound_loop = loop
             return
 
+        if self._bound_loop is None:
+            self._bound_loop = loop
+            return
+
         if self._bound_loop is not loop:
             # Don't attempt to close the old client here; it belongs to the old loop.
+            self._retired_http_clients.append(self._client)
             self._client = httpx.AsyncClient(timeout=self._timeout)
             self._bound_loop = loop
 
@@ -3153,8 +3329,45 @@ class GenericLLMClient(
             hdr["Authorization"] = f"Bearer {self.api_key}"
         return hdr
 
-    async def aclose(self):
-        await self._client.aclose()
+    async def aclose(self) -> None:
+        """Close active and safely retired provider HTTP clients.
+
+        Intro:
+            Connection hot reload preserves earlier transports for in-flight
+            calls, so shutdown owns cleanup for the complete client lifetime.
+
+        Examples:
+            Close one client directly:
+                ```python
+                await client.aclose()
+                ```
+
+            Close every client through its service:
+                ```python
+                await service.aclose()
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            None: Closes every reachable HTTP transport.
+
+        Notes:
+            A transport bound to an already-closed event loop is logged and
+            skipped so one retired connection cannot block remaining cleanup.
+        """
+        clients = [self._client, *self._retired_http_clients]
+        self._retired_http_clients = []
+        seen: set[int] = set()
+        for client in clients:
+            if client is None or id(client) in seen:
+                continue
+            seen.add(id(client))
+            try:
+                await client.aclose()
+            except RuntimeError as exc:
+                self._logger.warning("llm_http_client_close_failed: %s", exc)
 
     def _default_headers_for_raw(self) -> dict[str, str]:
         hdr = {"Content-Type": "application/json"}

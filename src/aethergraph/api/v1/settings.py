@@ -97,6 +97,7 @@ def _llm_profile_view(profile) -> LLMProfileView:
     return LLMProfileView(
         provider=profile.provider,
         model=profile.model,
+        endpoint_id=getattr(profile, "endpoint_id", None),
         base_url=profile.base_url,
         timeout=profile.timeout,
         api_key=_mask_secret(_secret_str_value(profile.api_key)),
@@ -283,6 +284,8 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["provider"] = payload.provider
         if payload.model is not None:
             kwargs["model"] = payload.model
+        if payload.endpoint_id is not None:
+            kwargs["endpoint_id"] = payload.endpoint_id
         if payload.api_key is not None and not _is_masked(payload.api_key):
             kwargs["api_key"] = payload.api_key
         if payload.base_url is not None:

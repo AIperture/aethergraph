@@ -1,11 +1,11 @@
-import asyncio
 import logging
 
-import httpx
+from pydantic import SecretStr
 
 from aethergraph.config.llm import LLMProfile
 
 from ..secrets.base import Secrets
+from .credentials import resolve_provider_credential
 from .generic_client import GenericLLMClient
 from .profiles import PromptCachePolicy
 from .providers import Provider
@@ -22,7 +22,39 @@ class LLMService:
         clients: dict[str, GenericLLMClient],
         secrets: Secrets | None = None,
         profiles: dict[str, LLMProfile] | None = None,
-    ):
+    ) -> None:
+        """Create the named-client registry and its runtime profile metadata.
+
+        Intro:
+            The service keeps stable client identities while coordinating
+            validated connection reconfiguration and profile metadata updates.
+
+        Examples:
+            Register one default client:
+                ```python
+                service = LLMService({"default": client})
+                ```
+
+            Retain profiles and a secret store for hot reload:
+                ```python
+                service = LLMService(
+                    {"default": client},
+                    secrets=secrets,
+                    profiles={"default": profile},
+                )
+                ```
+
+        Args:
+            clients: Named runtime Chat clients.
+            secrets: Optional exact-name secret store for connection updates.
+            profiles: Optional public runtime profile metadata by name.
+
+        Returns:
+            None: Initializes the service registry.
+
+        Notes:
+            The service does not persist settings; its host owns persistence.
+        """
         self._clients = clients
         self._secrets = secrets
         self._profiles = dict(profiles or {})
@@ -47,6 +79,7 @@ class LLMService:
         *,
         provider: Provider | None = None,
         model: str | None = None,
+        endpoint_id: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
         azure_deployment: str | None = None,
@@ -95,6 +128,7 @@ class LLMService:
             profile: Profile name to create or update.
             provider: Optional provider override.
             model: Optional model override.
+            endpoint_id: Optional exact registered Chat endpoint adapter.
             base_url: Optional provider base URL override.
             api_key: Optional in-memory API key override.
             azure_deployment: Optional Azure deployment override.
@@ -124,99 +158,13 @@ class LLMService:
             Persistence remains the host application's responsibility. Studio
             persists profiles before invoking this hot-reload boundary.
         """
-        if profile not in self._clients:
-            template = self._clients.get("default")
-            client = GenericLLMClient(
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                azure_deployment=azure_deployment,
-                timeout=timeout or 60.0,
-                reasoning_effort=reasoning_effort or getattr(template, "reasoning_effort", None),
-                thinking_mode=thinking_mode or getattr(template, "thinking_mode", None),
-                compatibility_policy=compatibility_policy
-                or getattr(template, "compatibility_policy", "compat"),
-                structured_output_policy=structured_output_policy
-                or getattr(
-                    template,
-                    "structured_output_policy",
-                    "best_available",
-                ),
-                prompt_cache_policy=prompt_cache_policy
-                or getattr(template, "prompt_cache_policy", "auto"),
-                context_window_tokens=(
-                    context_window_tokens
-                    if context_window_tokens is not None
-                    else getattr(template, "context_window_tokens", None)
-                ),
-                observation_sink=getattr(template, "observation_sink", None),
-                observation_capture_mode=getattr(template, "observation_capture_mode", "manifest"),
-            )
-            self._clients[profile] = client
-            self._profiles[profile] = self._updated_profile(
-                profile,
-                provider=provider,
-                model=model,
-                base_url=base_url,
-                azure_deployment=azure_deployment,
-                timeout=timeout,
-                reasoning_effort=reasoning_effort,
-                thinking_mode=thinking_mode,
-                compatibility_policy=compatibility_policy,
-                structured_output_policy=structured_output_policy,
-                prompt_cache_policy=prompt_cache_policy,
-                context_window_tokens=context_window_tokens,
-                vision_enabled=vision_enabled,
-                vision_max_images=vision_max_images,
-                vision_max_image_bytes=vision_max_image_bytes,
-                vision_resize_enabled=vision_resize_enabled,
-                vision_resize_max_dimension=vision_resize_max_dimension,
-                vision_resize_max_pixels=vision_resize_max_pixels,
-                vision_resize_jpeg_quality=vision_resize_jpeg_quality,
-                vision_resize_min_jpeg_quality=vision_resize_min_jpeg_quality,
-                vision_accepted_mime_prefixes=vision_accepted_mime_prefixes,
-                vision_accepted_mime_types=vision_accepted_mime_types,
-            )
-            return client
-
-        c = self._clients[profile]
-        if provider is not None:
-            c.provider = provider  # type: ignore[assignment]
-        if model is not None:
-            c.model = model
-        if base_url is not None:
-            c.base_url = base_url
-        if api_key is not None:
-            c.api_key = api_key
-        if azure_deployment is not None:
-            c.azure_deployment = azure_deployment
-        if timeout is not None:
-            # Recreate client with new timeout
-            old_client = c._client
-            c._client = httpx.AsyncClient(timeout=timeout)
-            try:
-                # best-effort async close
-                asyncio.create_task(old_client.aclose())
-            except RuntimeError:
-                logger.warning("Failed to close old httpx client")
-        if compatibility_policy is not None:
-            c.compatibility_policy = compatibility_policy
-        if structured_output_policy is not None:
-            c.structured_output_policy = structured_output_policy
-        if prompt_cache_policy is not None:
-            c.prompt_cache_policy = prompt_cache_policy
-        if context_window_tokens is not None:
-            c.context_window_tokens = int(context_window_tokens)
-        if reasoning_effort is not None:
-            c.reasoning_effort = reasoning_effort
-        if thinking_mode is not None:
-            c.thinking_mode = thinking_mode
-        self._profiles[profile] = self._updated_profile(
+        updated_profile = self._updated_profile(
             profile,
             provider=provider,
             model=model,
+            endpoint_id=endpoint_id,
             base_url=base_url,
+            api_key=api_key,
             azure_deployment=azure_deployment,
             timeout=timeout,
             reasoning_effort=reasoning_effort,
@@ -236,6 +184,86 @@ class LLMService:
             vision_accepted_mime_prefixes=vision_accepted_mime_prefixes,
             vision_accepted_mime_types=vision_accepted_mime_types,
         )
+        connection_changed = profile not in self._clients or any(
+            value is not None
+            for value in (
+                provider,
+                model,
+                endpoint_id,
+                base_url,
+                api_key,
+                azure_deployment,
+                timeout,
+            )
+        )
+        credential = (
+            resolve_provider_credential(
+                provider_id=updated_profile.provider,
+                direct=updated_profile.api_key,
+                secret_ref=updated_profile.api_key_ref,
+                secrets=self._secrets,
+            ).value
+            if connection_changed
+            else None
+        )
+
+        if profile not in self._clients:
+            template = self._clients.get("default")
+            client = GenericLLMClient(
+                provider=updated_profile.provider,
+                model=updated_profile.model,
+                endpoint_id=updated_profile.endpoint_id,
+                base_url=updated_profile.base_url,
+                api_key=credential,
+                azure_deployment=updated_profile.azure_deployment,
+                timeout=updated_profile.timeout,
+                retry_settings=updated_profile.retry,
+                rate_limit_group=updated_profile.rate_limit_group,
+                rate_gate=getattr(getattr(template, "_provider_retry", None), "rate_gate", None),
+                metering=getattr(template, "metering", None),
+                usage_quota_cfg=getattr(template, "_usage_quota_cfg", None),
+                reasoning_effort=updated_profile.reasoning_effort,
+                thinking_mode=updated_profile.thinking_mode,
+                thinking_budget=updated_profile.thinking_budget,
+                reasoning_summary=updated_profile.reasoning_summary,
+                compatibility_policy=updated_profile.compatibility_policy,
+                structured_output_policy=updated_profile.structured_output_policy,
+                prompt_cache_policy=updated_profile.prompt_cache_policy,
+                context_window_tokens=updated_profile.context_window_tokens,
+                observation_sink=getattr(template, "observation_sink", None),
+                observation_capture_mode=getattr(template, "observation_capture_mode", "manifest"),
+                profile_name=profile,
+            )
+            self._clients[profile] = client
+            self._profiles[profile] = updated_profile
+            return client
+
+        c = self._clients[profile]
+        if connection_changed:
+            c.reconfigure_connection(
+                provider=updated_profile.provider,
+                model=updated_profile.model,
+                endpoint_id=updated_profile.endpoint_id,
+                base_url=updated_profile.base_url,
+                api_key=credential,
+                azure_deployment=updated_profile.azure_deployment,
+                timeout=updated_profile.timeout,
+                retry_settings=updated_profile.retry,
+                rate_limit_group=updated_profile.rate_limit_group,
+            )
+        if compatibility_policy is not None:
+            c.compatibility_policy = compatibility_policy
+        if structured_output_policy is not None:
+            c.structured_output_policy = structured_output_policy
+        if prompt_cache_policy is not None:
+            c.prompt_cache_policy = prompt_cache_policy
+        if context_window_tokens is not None:
+            c.context_window_tokens = int(context_window_tokens)
+        if reasoning_effort is not None:
+            c.reasoning_effort = reasoning_effort
+        if thinking_mode is not None:
+            c.thinking_mode = thinking_mode
+        self._profiles[profile] = updated_profile
         return c
 
     def _updated_profile(
@@ -244,7 +272,9 @@ class LLMService:
         *,
         provider: Provider | None,
         model: str | None,
+        endpoint_id: str | None,
         base_url: str | None,
+        api_key: str | None,
         azure_deployment: str | None,
         timeout: float | None,
         reasoning_effort: str | None,
@@ -270,8 +300,12 @@ class LLMService:
             updated.provider = provider
         if model is not None:
             updated.model = model
+        if endpoint_id is not None:
+            updated.endpoint_id = endpoint_id
         if base_url is not None:
             updated.base_url = base_url
+        if api_key is not None:
+            updated.api_key = SecretStr(api_key)
         if azure_deployment is not None:
             updated.azure_deployment = azure_deployment
         if timeout is not None:

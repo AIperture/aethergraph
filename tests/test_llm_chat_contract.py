@@ -1747,6 +1747,8 @@ def test_llm_service_exposes_explicit_profile_metadata() -> None:
 
 def test_llm_service_configure_profile_updates_runtime_metadata() -> None:
     client = GenericLLMClient(provider="openai", model="gpt-test")
+    original_http_client = client._client
+    original_retry = client._provider_retry
     service = LLMService(
         clients={"default": client},
         profiles={"default": LLMProfile(provider="openai", model="gpt-test")},
@@ -1773,6 +1775,8 @@ def test_llm_service_configure_profile_updates_runtime_metadata() -> None:
     assert client.structured_output_policy == "native_required"
     assert profile.prompt_cache_policy == "disabled"
     assert client.prompt_cache_policy == "disabled"
+    assert client._client is original_http_client
+    assert client._provider_retry is original_retry
     assert profile.vision_enabled is True
     assert profile.vision_max_images == 1
     assert profile.vision_max_image_bytes == 1024
@@ -1806,6 +1810,119 @@ def test_settings_profile_view_includes_prompt_cache_policy() -> None:
     )
 
     assert view.prompt_cache_policy == "required"
+
+
+def test_settings_profile_view_includes_explicit_endpoint() -> None:
+    view = settings_api._llm_profile_view(
+        LLMProfile(
+            provider="openai",
+            model="gpt-5-mini",
+            endpoint_id="openai_responses",
+        )
+    )
+
+    assert view.endpoint_id == "openai_responses"
+
+
+def test_settings_hot_reload_rebinds_endpoint_without_replacing_client_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5-mini",
+        endpoint_id="openai_responses",
+    )
+    service = LLMService(
+        clients={"default": client},
+        profiles={
+            "default": LLMProfile(
+                provider="openai",
+                model="gpt-5-mini",
+                endpoint_id="openai_responses",
+            )
+        },
+    )
+    original_http_client = client._client
+    original_retry = client._provider_retry
+    original_rate_gate = original_retry.rate_gate
+    client._tool_transport_checkpoints["stale"] = object()  # type: ignore[assignment]
+    client._latest_tool_checkpoint_refs[("run", "turn", "tool")] = "stale"
+    monkeypatch.setattr(
+        settings_api,
+        "current_services",
+        lambda: type("Services", (), {"llm": service})(),
+    )
+
+    settings_api._hot_reload_llm(
+        {"default": LLMProfilePayload(endpoint_id="openai_chat_completions")}
+    )
+
+    assert service.get("default") is client
+    assert client.endpoint_id == "openai_chat_completions"
+    assert client._active_endpoint_family() == "chat.completions"
+    assert client._provider_retry is not original_retry
+    assert client._provider_retry.rate_gate is original_rate_gate
+    assert original_http_client in client._retired_http_clients
+    assert client._tool_transport_checkpoints == {}
+    assert client._latest_tool_checkpoint_refs == {}
+    profile = service.profile("default")
+    assert profile is not None
+    assert profile.endpoint_id == "openai_chat_completions"
+
+
+def test_invalid_endpoint_hot_reload_leaves_runtime_and_profile_unchanged() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5-mini",
+        endpoint_id="openai_responses",
+    )
+    original_profile = LLMProfile(
+        provider="openai",
+        model="gpt-5-mini",
+        endpoint_id="openai_responses",
+    )
+    service = LLMService(
+        clients={"default": client},
+        profiles={"default": original_profile},
+    )
+    original_http_client = client._client
+    original_retry = client._provider_retry
+
+    with pytest.raises(ValueError, match="not registered"):
+        service.configure_profile(
+            profile="default",
+            endpoint_id="azure_responses",
+        )
+
+    assert client.endpoint_id == "openai_responses"
+    assert client._client is original_http_client
+    assert client._provider_retry is original_retry
+    assert service.profile("default") is original_profile
+
+
+@pytest.mark.asyncio
+async def test_connection_reconfiguration_closes_active_and_retired_transports() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5-mini",
+        endpoint_id="openai_responses",
+    )
+    retired = client._client
+    client.reconfigure_connection(
+        provider="openai",
+        model="gpt-5-mini",
+        endpoint_id="openai_chat_completions",
+        base_url=None,
+        api_key=None,
+        azure_deployment=None,
+        timeout=60.0,
+    )
+    active = client._client
+
+    await client.aclose()
+
+    assert retired is not None and retired.is_closed
+    assert active is not None and active.is_closed
 
 
 def test_settings_hot_reload_applies_structured_output_policy(

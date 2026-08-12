@@ -54,6 +54,7 @@ class LLMProfileView(BaseModel):
 
     provider: str = "openai"
     model: str = "gpt-4o-mini"
+    endpoint_id: str | None = None
     base_url: str | None = None
     timeout: float = 60.0
     api_key: str | None = None  # masked
@@ -82,6 +83,7 @@ class LLMProfilePayload(BaseModel):
 
     provider: str | None = None
     model: str | None = None
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
     api_key: str | None = None
     base_url: str | None = None
     timeout: float | None = None

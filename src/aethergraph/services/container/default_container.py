@@ -432,7 +432,11 @@ def build_default_container(
         rate_gate=provider_rate_gate,
     )  # return {profile: GenericLLMClient}
     llm_profiles = {"default": cfg.llm.default, **dict(cfg.llm.profiles or {})}
-    llm_service = LLMService(clients=llm_clients, profiles=llm_profiles) if llm_clients else None
+    llm_service = (
+        LLMService(clients=llm_clients, secrets=secrets, profiles=llm_profiles)
+        if llm_clients
+        else None
+    )
 
     embed_clients = build_embedding_clients(
         cfg.embed,
