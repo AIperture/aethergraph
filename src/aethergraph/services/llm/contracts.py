@@ -309,6 +309,7 @@ class ModelRequest:
         generation: Shared provider-neutral generation controls.
         prompt_cache: Optional stable-prefix cache request.
         continuation: Optional opaque provider replay state.
+        call_name: Optional stable logical invocation identity for observations.
 
     Returns:
         ModelRequest: Immutable canonical request state.
@@ -330,6 +331,7 @@ class ModelRequest:
     generation: GenerationOptions = field(default_factory=GenerationOptions)
     prompt_cache: PromptCacheRequest | None = None
     continuation: ModelContinuation | None = None
+    call_name: str | None = None
 
     def __post_init__(self) -> None:
         """Validate and detach one canonical generation request.
@@ -405,6 +407,9 @@ class ModelRequest:
             raise ValueError("model request turn_id must not be empty")
         if self.native_tool_search is not None and not turn_id:
             raise ValueError("native Tool search requires turn_id")
+        call_name = None if self.call_name is None else str(self.call_name).strip()
+        if self.call_name is not None and not call_name:
+            raise ValueError("model request call_name must not be empty")
         if not all(isinstance(output, ToolCallOutput) for output in tool_outputs):
             raise TypeError("model request tool_outputs must be ToolCallOutput values")
         call_ids = tuple(output.call_id for output in tool_outputs)
@@ -433,6 +438,7 @@ class ModelRequest:
         object.__setattr__(self, "active_tool_names", active_tool_names)
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "tool_outputs", tool_outputs)
+        object.__setattr__(self, "call_name", call_name)
 
 
 def message_from_text(role: MessageRole, text: str) -> ChatMessage:

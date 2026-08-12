@@ -117,6 +117,7 @@ def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest()
         messages=(message_from_text("user", "Look up"),),
         tools=(_tool(),),
         tool_choice="auto",
+        call_name="engine.select_action",
     )
     projected = project_model_request_to_chat(canonical_request).kwargs["tool_request"]
 
@@ -124,6 +125,9 @@ def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest()
         "b1944bede27a704b605692fc79bf14ac612f92ed1783540975c1e39aec9da1ee"
     )
     assert projected.fingerprint_version == "model_request/v1"
+    assert project_model_request_to_chat(canonical_request).kwargs["call_name"] == (
+        "engine.select_action"
+    )
     assert tool_call_request_fingerprint(projected) != tool_call_request_fingerprint(legacy)
 
 

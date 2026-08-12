@@ -79,6 +79,7 @@ def project_model_request_to_chat(request: ModelRequest) -> LegacyChatProjection
     if not isinstance(request, ModelRequest):
         raise TypeError("request must be a ModelRequest")
     kwargs: dict[str, Any] = {
+        "call_name": request.call_name,
         "reasoning_effort": request.generation.reasoning_effort,
         "max_output_tokens": request.generation.max_output_tokens,
         "prompt_cache": request.prompt_cache,
