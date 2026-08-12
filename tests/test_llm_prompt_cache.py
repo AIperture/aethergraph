@@ -102,6 +102,31 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
     assert first.messages[1] == {"role": "user", "content": "volatile"}
 
 
+def test_prompt_cache_resolution_honors_preselected_endpoint() -> None:
+    prepared = prepare_prompt_cache(
+        PromptCacheRequest((0,), "agent.v1"),
+        [{"role": "system", "content": "stable"}],
+        provider="openai",
+        model="gpt-5.6",
+        endpoint_id="openai_chat_completions",
+    )
+
+    assert prepared.observation["effective_mode"] == "unavailable"
+    assert prepared.provider_request_fields == {}
+
+
+def test_required_prompt_cache_rejects_incompatible_preselected_endpoint() -> None:
+    with pytest.raises(LLMUnsupportedFeatureError, match="cataloged cache capability"):
+        prepare_prompt_cache(
+            PromptCacheRequest((0,), "agent.v1"),
+            [{"role": "system", "content": "stable"}],
+            provider="openai",
+            model="gpt-5.6",
+            endpoint_id="openai_chat_completions",
+            policy="required",
+        )
+
+
 def test_prepare_openai_assistant_boundary_uses_output_text() -> None:
     prepared = prepare_prompt_cache(
         PromptCacheRequest((0,), "agent.ledger.v1"),

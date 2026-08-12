@@ -26,7 +26,10 @@ from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
 )
 from aethergraph.services.llm.service import LLMService
-from aethergraph.services.llm.structured_output import prepare_structured_output
+from aethergraph.services.llm.structured_output import (
+    prepare_structured_output,
+    resolve_structured_output_capabilities,
+)
 from aethergraph.services.llm.types import (
     LLMStructuredOutputCapabilityError,
     LLMStructuredOutputParseError,
@@ -426,6 +429,26 @@ def test_openai_closed_schema_selects_native_strict_output() -> None:
     assert prepared.provider_schema == prepared.canonical_schema
     assert len(prepared.canonical_schema_fingerprint) == 64
     assert prepared.provider_schema_fingerprint == prepared.canonical_schema_fingerprint
+
+
+def test_structured_output_resolution_honors_preselected_endpoint() -> None:
+    capabilities = resolve_structured_output_capabilities(
+        "openai",
+        "gpt-5-mini",
+        endpoint_id="openai_chat_completions",
+    )
+
+    assert capabilities.native_schema is True
+    assert capabilities.native_strict_schema is True
+
+
+def test_structured_output_resolution_rejects_cross_provider_endpoint() -> None:
+    with pytest.raises(ValueError, match="not registered"):
+        resolve_structured_output_capabilities(
+            "anthropic",
+            "claude-sonnet-4-5",
+            endpoint_id="openai_responses",
+        )
 
 
 def test_openai_free_form_schema_preserves_semantics_in_native_schema_mode() -> None:

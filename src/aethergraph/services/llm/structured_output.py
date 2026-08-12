@@ -102,9 +102,14 @@ class PreparedStructuredOutput:
 def resolve_structured_output_capabilities(
     provider: str,
     model: str,
+    *,
+    endpoint_id: str | None = None,
 ) -> StructuredOutputCapabilities:
-    """
-    Resolve conservative structured-output capabilities for a provider/model.
+    """Resolve conservative structured-output capabilities for one model binding.
+
+    Intro:
+        Resolution uses the selected endpoint when supplied and otherwise
+        preserves the registered provider default for public compatibility.
 
     Examples:
         Resolve a current OpenAI model:
@@ -120,9 +125,20 @@ def resolve_structured_output_capabilities(
             assert caps.prompt_json
             ```
 
+        Resolve an explicitly selected endpoint:
+            ```python
+            caps = resolve_structured_output_capabilities(
+                "openai",
+                "gpt-5-mini",
+                endpoint_id="openai_responses",
+            )
+            assert caps.native_schema
+            ```
+
     Args:
         provider: Configured AG provider name.
         model: Configured model or deployment identifier.
+        endpoint_id: Optional endpoint adapter selected before request inspection.
 
     Returns:
         StructuredOutputCapabilities: Deterministic declared capabilities.
@@ -135,7 +151,11 @@ def resolve_structured_output_capabilities(
     normalized_provider = str(provider or "").strip().lower()
     normalized_model = str(model or "").strip().lower()
     try:
-        endpoint = resolve_endpoint_adapter(normalized_provider, "chat")
+        endpoint = resolve_endpoint_adapter(
+            normalized_provider,
+            "chat",
+            endpoint_id=endpoint_id,
+        )
         entry = resolve_model_catalog_capability_entry(
             normalized_provider,
             normalized_model,
@@ -144,6 +164,8 @@ def resolve_structured_output_capabilities(
             capability="structured_output",
         )
     except (KeyError, ValueError):
+        if endpoint_id is not None:
+            raise
         entry = None
     if entry is not None and entry.structured_output is not None:
         facts = entry.structured_output
@@ -174,9 +196,13 @@ def prepare_structured_output(
     model: str,
     policy: StructuredOutputPolicy = "best_available",
     allow_native_strict: bool = True,
+    endpoint_id: str | None = None,
 ) -> PreparedStructuredOutput:
-    """
-    Select and prepare the strongest safe structured-output mode.
+    """Select and prepare the strongest safe structured-output mode.
+
+    Intro:
+        Preparation resolves capability facts for one preselected endpoint,
+        retains the canonical schema, and emits one deterministic projection.
 
     Examples:
         Select strict native output for a closed OpenAI schema:
@@ -216,6 +242,7 @@ def prepare_structured_output(
         model: Configured model or deployment identifier.
         policy: Profile-owned capability requirement.
         allow_native_strict: Whether a deprecated caller explicitly disabled strict mode.
+        endpoint_id: Optional endpoint adapter selected before request inspection.
 
     Returns:
         PreparedStructuredOutput: Effective mode and provider projection.
@@ -228,7 +255,11 @@ def prepare_structured_output(
 
     if policy not in {"best_available", "native_required"}:
         raise ValueError(f"Unknown structured output policy: {policy}")
-    capabilities = resolve_structured_output_capabilities(provider, model)
+    capabilities = resolve_structured_output_capabilities(
+        provider,
+        model,
+        endpoint_id=endpoint_id,
+    )
     canonical = copy.deepcopy(request.schema)
     diagnostics: list[SchemaProjectionDiagnostic] = []
 

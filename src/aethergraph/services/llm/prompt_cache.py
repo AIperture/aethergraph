@@ -54,13 +54,14 @@ def prepare_prompt_cache(
     scope_dimensions: dict[str, Any] | None = None,
     tool_request: ToolCallRequest | None = None,
     policy: PromptCachePolicy = "auto",
+    endpoint_id: str | None = None,
 ) -> PreparedPromptCache:
-    """
-    Prepare one provider-neutral stable-prefix cache request.
+    """Prepare one provider-neutral stable-prefix cache request.
 
-    The function validates caller boundaries, derives an opaque provider key,
-    and translates only capabilities declared for the selected provider and
-    model. The caller-owned messages and request remain unchanged.
+    Intro:
+        The function validates caller boundaries, derives an opaque provider key,
+        and translates only capabilities declared for the selected provider,
+        model, and endpoint. Caller-owned values remain unchanged.
 
     Examples:
         Prepare explicit OpenAI boundaries:
@@ -94,6 +95,7 @@ def prepare_prompt_cache(
             to isolate the opaque provider key.
         tool_request: Exact provider-visible native Tool contract, when used.
         policy: Profile-owned disabled, automatic, or required cache policy.
+        endpoint_id: Optional endpoint adapter selected before request inspection.
 
     Returns:
         PreparedPromptCache: Detached translated messages, provider fields, and
@@ -131,6 +133,7 @@ def prepare_prompt_cache(
     capability = _resolve_capability(
         normalized_provider,
         normalized_model,
+        endpoint_id=endpoint_id,
     )
     if policy == "required" and capability.mode == "unavailable":
         raise LLMUnsupportedFeatureError(
@@ -250,9 +253,18 @@ def _validate_message_indexes(
         )
 
 
-def _resolve_capability(provider: str, model: str) -> _PromptCacheCapability:
+def _resolve_capability(
+    provider: str,
+    model: str,
+    *,
+    endpoint_id: str | None,
+) -> _PromptCacheCapability:
     try:
-        endpoint = resolve_endpoint_adapter(provider, "chat")
+        endpoint = resolve_endpoint_adapter(
+            provider,
+            "chat",
+            endpoint_id=endpoint_id,
+        )
         entry = resolve_model_catalog_capability_entry(
             provider,
             model,
@@ -261,6 +273,8 @@ def _resolve_capability(provider: str, model: str) -> _PromptCacheCapability:
             capability="prompt_cache",
         )
     except (KeyError, ValueError):
+        if endpoint_id is not None:
+            raise
         entry = None
     if entry is not None and entry.prompt_cache is not None:
         facts = entry.prompt_cache
