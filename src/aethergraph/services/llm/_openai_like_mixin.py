@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -16,7 +17,9 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
     assistant_output_identity,
+    tool_call_request_fingerprint,
 )
+from aethergraph.services.llm.tool_discovery import ToolTransportCheckpoint
 from aethergraph.services.llm.types import ChatOutputFormat
 from aethergraph.services.llm.utils import _ensure_system_json_directive
 
@@ -36,8 +39,56 @@ def _openai_like_tool_call_response(
     *,
     tool_request: ToolCallRequest,
     provider: str,
+    model: str,
+    stable_messages: list[dict[str, Any]],
+    replay_messages: tuple[dict[str, Any], ...] = (),
 ) -> ToolCallResponse:
-    """Normalize one OpenAI-compatible Chat Completions Tool response."""
+    """Normalize one OpenAI-compatible Chat Completions Tool response.
+
+    Intro:
+        The normalizer preserves ordered assistant output and Tool calls. When
+        the request has a semantic turn identity, pending calls also produce an
+        integrity-bound private checkpoint containing exact replay messages.
+
+    Examples:
+        Normalize an initial Tool call:
+            ```python
+            response = _openai_like_tool_call_response(
+                payload,
+                tool_request=request,
+                provider="openrouter",
+                model="openai/gpt-test",
+                stable_messages=messages,
+            )
+            ```
+
+        Normalize a continued Tool decision:
+            ```python
+            response = _openai_like_tool_call_response(
+                payload,
+                tool_request=continued_request,
+                provider="ollama",
+                model="local-model",
+                stable_messages=messages,
+                replay_messages=prior_replay,
+            )
+            ```
+
+    Args:
+        data: Parsed Chat Completions response payload.
+        tool_request: Exact provider-neutral Tool request.
+        provider: Exact registered provider identity.
+        model: Exact configured model identity.
+        stable_messages: Canonical prompt messages bound to the checkpoint.
+        replay_messages: Validated same-turn replay messages sent in this call.
+
+    Returns:
+        ToolCallResponse: Ordered normalized items and optional continuation.
+
+    Notes:
+        Private replay messages are omitted from observations and public response
+        metadata. A direct completion has no continuation checkpoint.
+    """
 
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -165,6 +216,16 @@ def _openai_like_tool_call_response(
             )
         )
 
+    checkpoint = None
+    if raw_calls and tool_request.turn_id:
+        checkpoint = _openai_like_checkpoint(
+            request=tool_request,
+            provider=provider,
+            model=model,
+            stable_messages=stable_messages,
+            replay_messages=(*replay_messages, dict(message)),
+            pending_call_ids=tuple(call.call_id for call in items if isinstance(call, ToolCall)),
+        )
     return ToolCallResponse(
         items=tuple(items),
         finish_reason=str(choice.get("finish_reason") or ""),
@@ -173,7 +234,294 @@ def _openai_like_tool_call_response(
             "choice_index": choice_index,
             "tool_call_count": len(raw_calls),
         },
+        transport_checkpoint=checkpoint,
     )
+
+
+def _openai_like_checkpoint(
+    *,
+    request: ToolCallRequest,
+    provider: str,
+    model: str,
+    stable_messages: list[dict[str, Any]],
+    replay_messages: tuple[dict[str, Any], ...],
+    pending_call_ids: tuple[str, ...],
+) -> ToolTransportCheckpoint:
+    """Build one integrity-bound Chat Completions continuation checkpoint.
+
+    Intro:
+        The checkpoint binds the exact provider, model, turn, Tool contract,
+        stable prompt, replay transcript, and outstanding provider call IDs.
+
+    Examples:
+        Preserve the first Tool decision:
+            ```python
+            checkpoint = _openai_like_checkpoint(
+                request=request,
+                provider="openrouter",
+                model="openai/gpt-test",
+                stable_messages=messages,
+                replay_messages=(assistant_message,),
+                pending_call_ids=("call_1",),
+            )
+            ```
+
+        Advance a continued decision:
+            ```python
+            checkpoint = _openai_like_checkpoint(
+                request=continued_request,
+                provider="ollama",
+                model="local-model",
+                stable_messages=messages,
+                replay_messages=continued_replay,
+                pending_call_ids=("call_2",),
+            )
+            assert checkpoint.revision == 2
+            ```
+
+    Args:
+        request: Exact same-turn Tool request.
+        provider: Exact registered provider identity.
+        model: Exact configured model identity.
+        stable_messages: Original prompt messages retained by the caller.
+        replay_messages: Complete provider replay transcript after the response.
+        pending_call_ids: Exact Tool calls awaiting Engine results.
+
+    Returns:
+        ToolTransportCheckpoint: Bounded opaque same-turn replay state.
+
+    Notes:
+        The checkpoint payload is private and its canonical digest is validated
+        before any continuation request reaches a provider.
+    """
+
+    previous = request.transport_checkpoint
+    revision = 1 if previous is None else previous.revision + 1
+    prompt_digest = _openai_like_messages_digest(stable_messages)
+    payload = {
+        "state": "pending_tool_outputs",
+        "tool_contract_fingerprint": tool_call_request_fingerprint(request),
+        "prompt_message_count": len(stable_messages),
+        "prompt_digest": prompt_digest,
+        "replay_messages": list(replay_messages),
+        "pending_call_ids": list(pending_call_ids),
+    }
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return ToolTransportCheckpoint(
+        checkpoint_id=f"{provider}_chat_completions_{revision}_{digest[:16]}",
+        revision=revision,
+        provider=provider,
+        model=model,
+        contract_version="chat.completions.tool_results/v1",
+        turn_id=str(request.turn_id or ""),
+        integrity_digest=digest,
+        opaque_payload=payload,
+    )
+
+
+def _openai_like_checkpoint_payload(
+    checkpoint: ToolTransportCheckpoint,
+    *,
+    request: ToolCallRequest,
+    provider: str,
+    model: str,
+    stable_messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate and detach one Chat Completions replay checkpoint.
+
+    Intro:
+        Validation rejects foreign bindings, modified payloads, changed prompts,
+        changed Tool contracts, and incomplete pending-call state before I/O.
+
+    Examples:
+        Restore a valid checkpoint:
+            ```python
+            payload = _openai_like_checkpoint_payload(
+                checkpoint,
+                request=continued_request,
+                provider="openrouter",
+                model="openai/gpt-test",
+                stable_messages=messages,
+            )
+            ```
+
+        Reject a foreign provider binding:
+            ```python
+            try:
+                _openai_like_checkpoint_payload(
+                    checkpoint,
+                    request=request,
+                    provider="ollama",
+                    model="local-model",
+                    stable_messages=messages,
+                )
+            except ValueError:
+                pass
+            ```
+
+    Args:
+        checkpoint: Candidate private provider replay state.
+        request: Exact continued Tool request.
+        provider: Exact registered provider identity.
+        model: Exact configured model identity.
+        stable_messages: Current original prompt messages.
+
+    Returns:
+        dict[str, Any]: Detached validated opaque payload.
+
+    Notes:
+        Failure diagnostics never include replay message content or Tool outputs.
+    """
+
+    if (
+        checkpoint.provider != provider
+        or checkpoint.model != model
+        or checkpoint.contract_version != "chat.completions.tool_results/v1"
+    ):
+        raise ValueError("Chat Completions Tool checkpoint binding does not match")
+    payload = dict(checkpoint.opaque_payload or {})
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if digest != checkpoint.integrity_digest:
+        raise ValueError("Chat Completions Tool checkpoint integrity validation failed")
+    if payload.get("state") != "pending_tool_outputs":
+        raise ValueError("Chat Completions Tool checkpoint state is invalid")
+    if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(request):
+        raise ValueError("Chat Completions Tool checkpoint contract changed")
+    if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
+        "prompt_digest"
+    ) != _openai_like_messages_digest(stable_messages):
+        raise ValueError("Chat Completions Tool checkpoint prompt changed")
+    pending_call_ids = payload.get("pending_call_ids")
+    if not isinstance(pending_call_ids, list) or not pending_call_ids:
+        raise ValueError("Chat Completions Tool checkpoint has no pending calls")
+    if not all(isinstance(call_id, str) and call_id.strip() for call_id in pending_call_ids):
+        raise ValueError("Chat Completions Tool checkpoint call identity is invalid")
+    if len(pending_call_ids) != len(set(pending_call_ids)):
+        raise ValueError("Chat Completions Tool checkpoint call identities are not unique")
+    replay_messages = payload.get("replay_messages")
+    if (
+        not isinstance(replay_messages, list)
+        or not replay_messages
+        or not all(isinstance(message, dict) for message in replay_messages)
+    ):
+        raise ValueError("Chat Completions Tool checkpoint replay state is invalid")
+    return payload
+
+
+def _openai_like_messages_digest(messages: list[dict[str, Any]]) -> str:
+    """Return the canonical identity of one stable Chat Completions prompt.
+
+    Intro:
+        The digest binds continuation replay to the exact provider-projected
+        prompt without persisting a second public conversation representation.
+
+    Examples:
+        Digest one prompt:
+            ```python
+            digest = _openai_like_messages_digest(messages)
+            assert len(digest) == 64
+            ```
+
+        Observe prompt changes:
+            ```python
+            assert _openai_like_messages_digest(first) != _openai_like_messages_digest(second)
+            ```
+
+    Args:
+        messages: Provider-projected stable conversation messages.
+
+    Returns:
+        str: Lowercase SHA-256 digest of canonical JSON.
+
+    Notes:
+        Prompt contents remain outside the checkpoint payload.
+    """
+
+    canonical = json.dumps(messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _openai_like_continuation_messages(
+    messages: list[dict[str, Any]],
+    *,
+    tool_request: ToolCallRequest,
+    provider: str,
+    model: str,
+) -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
+    """Append validated Tool results to one compatible replay transcript.
+
+    Intro:
+        Standard assistant Tool-call messages are replayed before one `tool`
+        message per pending call, in provider order and with exact call IDs.
+
+    Examples:
+        Prepare an initial Tool request:
+            ```python
+            provider_messages, replay = _openai_like_continuation_messages(
+                messages,
+                tool_request=request,
+                provider="openrouter",
+                model="openai/gpt-test",
+            )
+            assert replay == ()
+            ```
+
+        Prepare a continued Tool request:
+            ```python
+            provider_messages, replay = _openai_like_continuation_messages(
+                messages,
+                tool_request=continued_request,
+                provider="ollama",
+                model="local-model",
+            )
+            assert replay[-1]["role"] == "tool"
+            ```
+
+    Args:
+        messages: Stable provider-projected prompt messages.
+        tool_request: Exact current Tool request and optional checkpoint/results.
+        provider: Exact registered provider identity.
+        model: Exact configured model identity.
+
+    Returns:
+        tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]: Complete provider
+            messages and the private replay suffix used for the next checkpoint.
+
+    Notes:
+        Output IDs must exactly equal pending IDs; partial and extra results fail
+        before transport rather than being ignored or retried.
+    """
+
+    checkpoint = tool_request.transport_checkpoint
+    if checkpoint is None:
+        return messages, ()
+    payload = _openai_like_checkpoint_payload(
+        checkpoint,
+        request=tool_request,
+        provider=provider,
+        model=model,
+        stable_messages=messages,
+    )
+    pending_call_ids = tuple(str(call_id) for call_id in payload["pending_call_ids"])
+    outputs_by_id = {output.call_id: output.output for output in tool_request.tool_outputs}
+    if set(outputs_by_id) != set(pending_call_ids):
+        raise LLMToolCallResponseError(
+            code="tool_output_mismatch",
+            message="Chat Completions continuation requires exactly every pending Tool output.",
+        )
+    replay_messages = tuple(dict(message) for message in payload["replay_messages"])
+    result_messages = tuple(
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": outputs_by_id[call_id],
+        }
+        for call_id in pending_call_ids
+    )
+    replay = (*replay_messages, *result_messages)
+    return [*messages, *replay], replay
 
 
 def _openai_like_tool_definitions(tool_request: ToolCallRequest) -> list[dict[str, Any]]:
@@ -210,6 +558,58 @@ class _OpenAILikeMixin:
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
+        """Invoke one OpenAI-compatible Chat Completions request.
+
+        Intro:
+            The adapter projects text, structured output, native Tools, and
+            integrity-bound Tool-result continuation into one compatible call.
+
+        Examples:
+            Send a direct request:
+                ```python
+                result = await client._chat_openai_like_chat_completions(
+                    messages,
+                    model="local-model",
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=False,
+                )
+                ```
+
+            Continue a Tool request:
+                ```python
+                result = await client._chat_openai_like_chat_completions(
+                    messages,
+                    model="local-model",
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=False,
+                    tool_request=continued_request,
+                )
+                ```
+
+        Args:
+            messages: Provider-projected stable conversation messages.
+            model: Exact configured model identity.
+            reasoning_effort: Optional provider reasoning control.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Requested text, JSON, or raw response mode.
+            json_schema: Optional canonical JSON schema.
+            fail_on_unsupported: Whether unsupported native formatting fails.
+            tools: Optional legacy provider Tool declarations.
+            tool_choice: Optional legacy provider Tool-selection policy.
+            tool_request: Optional canonical native Tool request and continuation.
+            **kw: Additional bounded provider options.
+
+        Returns:
+            ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
+                Normalized response and raw provider usage with transport metadata.
+
+        Notes:
+            Each invocation is single-attempt at this adapter boundary. Shared
+            retry, rate gating, accounting, and observations remain caller-owned.
+        """
+
         await self._ensure_client()
         assert self._client is not None
 
@@ -217,6 +617,14 @@ class _OpenAILikeMixin:
         top_p = kw.get("top_p", 1.0)
 
         msg_for_provider = messages
+        replay_messages: tuple[dict[str, Any], ...] = ()
+        if tool_request is not None:
+            msg_for_provider, replay_messages = _openai_like_continuation_messages(
+                messages,
+                tool_request=tool_request,
+                provider=self.provider,
+                model=model,
+            )
         response_format = None
         structured_output_fields = kw.pop("structured_output_fields", None)
 
@@ -292,6 +700,9 @@ class _OpenAILikeMixin:
                     data,
                     tool_request=tool_request,
                     provider=self.provider,
+                    model=model,
+                    stable_messages=messages,
+                    replay_messages=replay_messages,
                 )
                 return ProviderCallResult((response, usage), metadata)
 

@@ -16,6 +16,7 @@ from aethergraph.services.llm import (
     ModelRequest,
     PromptCacheRequest,
     StructuredOutputRequest,
+    ToolCallOutput,
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
@@ -1118,6 +1119,7 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
         ("lmstudio", "local-model"),
         ("ollama", "local-model"),
         ("openai_compatible", "custom-model"),
+        ("azure", "deployment-a"),
     ],
 )
 async def test_openai_compatible_generate_normalizes_native_tool_calls(
@@ -1153,12 +1155,20 @@ async def test_openai_compatible_generate_normalizes_native_tool_calls(
         ],
         "usage": {"prompt_tokens": 8, "completion_tokens": 3},
     }
-    client = GenericLLMClient(
-        provider=provider,
-        model=model,
-        api_key="test",
-        base_url=("http://localhost:9000/v1" if provider == "openai_compatible" else None),
-    )
+    client_kwargs: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "api_key": "test",
+    }
+    if provider == "openai_compatible":
+        client_kwargs["base_url"] = "http://localhost:9000/v1"
+    elif provider == "azure":
+        client_kwargs.update(
+            endpoint_id="azure_chat_completions",
+            base_url="https://example.openai.azure.com",
+            azure_deployment=model,
+        )
+    client = GenericLLMClient(**client_kwargs)
     fake_http = _FakeHttpClient(payload)
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
@@ -1221,6 +1231,268 @@ async def test_openai_compatible_tool_request_accepts_direct_assistant_response(
     assert response.calls == ()
     assert response.finish_reason == "stop"
     assert response.usage.output_tokens == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("deepseek", "deepseek-chat"),
+        ("openrouter", "openai/gpt-test"),
+        ("lmstudio", "local-model"),
+        ("ollama", "local-model"),
+        ("openai_compatible", "custom-model"),
+    ],
+)
+async def test_openai_compatible_tool_results_continue_with_integrity_bound_replay(
+    provider: str,
+    model: str,
+) -> None:
+    initial_payload = {
+        "id": "chatcmpl_initial",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"key":"A"}',
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 2},
+    }
+    final_payload = {
+        "id": "chatcmpl_final",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "A is complete."},
+            }
+        ],
+        "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+    }
+    client = GenericLLMClient(
+        provider=provider,
+        model=model,
+        api_key="test",
+        base_url=("http://localhost:9000/v1" if provider == "openai_compatible" else None),
+    )
+    fake_http = _FakeHttpClient(initial_payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    tools = _native_tool_request(max_calls=1).tools
+    messages = (message_from_text("user", "Look up A"),)
+
+    initial = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            turn_id="turn-1",
+        )
+    )
+    assert initial.continuation is not None
+    assert initial.continuation.provider == provider
+    assert initial.continuation.revision == 1
+
+    fake_http.payload = final_payload
+    final = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            turn_id="turn-1",
+            continuation=initial.continuation,
+            tool_outputs=(ToolCallOutput("call_1", '{"value":"A"}'),),
+        )
+    )
+
+    assert final.text == "A is complete."
+    assert final.calls == ()
+    assert final.continuation is None
+    assert fake_http.last_json is not None
+    assert [message["role"] for message in fake_http.last_json["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert fake_http.last_json["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": '{"value":"A"}',
+    }
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_continuation_requires_exact_pending_outputs() -> None:
+    payload = {
+        "id": "chatcmpl_initial",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"A"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    client = GenericLLMClient(
+        provider="openrouter",
+        model="openai/gpt-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    tools = _native_tool_request(max_calls=1).tools
+    messages = (message_from_text("user", "Look up A"),)
+    initial = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            turn_id="turn-1",
+        )
+    )
+    assert initial.continuation is not None
+    first_payload = fake_http.last_json
+
+    with pytest.raises(LLMToolCallResponseError, match="exactly every pending Tool output"):
+        await client.generate(
+            ModelRequest(
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                turn_id="turn-1",
+                continuation=initial.continuation,
+            )
+        )
+
+    assert fake_http.last_json is first_payload
+
+    with pytest.raises(ValueError, match="checkpoint prompt changed"):
+        await client.generate(
+            ModelRequest(
+                messages=(message_from_text("user", "Look up B"),),
+                tools=tools,
+                tool_choice="auto",
+                turn_id="turn-1",
+                continuation=initial.continuation,
+                tool_outputs=(ToolCallOutput("call_1", '{"value":"A"}'),),
+            )
+        )
+
+    assert fake_http.last_json is first_payload
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_continuation_advances_multi_round_replay() -> None:
+    first_payload = {
+        "id": "chatcmpl_first",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"A"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    second_payload = {
+        "id": "chatcmpl_second",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "Checking B.",
+                    "tool_calls": [
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"B"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    client = GenericLLMClient(
+        provider="openrouter",
+        model="openai/gpt-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(first_payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    tools = _native_tool_request(max_calls=1).tools
+    messages = (message_from_text("user", "Look up A, then B"),)
+
+    first = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            turn_id="turn-1",
+        )
+    )
+    assert first.continuation is not None
+    fake_http.payload = second_payload
+
+    second = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            turn_id="turn-1",
+            continuation=first.continuation,
+            tool_outputs=(ToolCallOutput("call_1", '{"value":"A"}'),),
+        )
+    )
+
+    assert second.continuation is not None
+    assert second.continuation.revision == 2
+    assert second.calls[0].call_id == "call_2"
+    assert fake_http.last_json is not None
+    assert [message["role"] for message in fake_http.last_json["messages"]] == [
+        "user",
+        "assistant",
+        "tool",
+    ]
+    replay = second.continuation.opaque_payload["replay_messages"]
+    assert [message["role"] for message in replay] == ["assistant", "tool", "assistant"]
+    assert replay[-1]["tool_calls"][0]["id"] == "call_2"
 
 
 @pytest.mark.asyncio

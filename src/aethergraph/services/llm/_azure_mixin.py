@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from aethergraph.services.llm._openai_like_mixin import (
+    _openai_like_continuation_messages,
     _openai_like_tool_call_response,
     _openai_like_tool_definitions,
 )
@@ -64,6 +65,57 @@ class _AzureMixin:
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
+        """Invoke one Azure Chat Completions request.
+
+        Intro:
+            The adapter uses the explicitly pinned Azure Chat Completions route
+            for direct, structured, Tool-call, and Tool-result continuation calls.
+
+        Examples:
+            Send a direct request:
+                ```python
+                result = await client._chat_azure_chat_completions(
+                    messages,
+                    model="deployment-a",
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=False,
+                )
+                ```
+
+            Continue a Tool request:
+                ```python
+                result = await client._chat_azure_chat_completions(
+                    messages,
+                    model="deployment-a",
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=False,
+                    tool_request=continued_request,
+                )
+                ```
+
+        Args:
+            messages: Provider-projected stable conversation messages.
+            model: Exact Azure deployment identity.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Requested text, JSON, or raw response mode.
+            json_schema: Optional canonical JSON schema.
+            fail_on_unsupported: Whether unsupported native formatting fails.
+            tools: Optional legacy provider Tool declarations.
+            tool_choice: Optional legacy provider Tool-selection policy.
+            tool_request: Optional canonical native Tool request and continuation.
+            **kw: Additional bounded Azure request options.
+
+        Returns:
+            ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
+                Normalized response and raw Azure usage with transport metadata.
+
+        Notes:
+            The selected endpoint never switches to Azure Responses according to
+            Tool presence. Shared retry and accounting remain caller-owned.
+        """
+
         await self._ensure_client()
         assert self._client is not None
 
@@ -76,6 +128,14 @@ class _AzureMixin:
         top_p = kw.get("top_p", 1.0)
 
         msg_for_provider = messages
+        replay_messages: tuple[dict[str, Any], ...] = ()
+        if tool_request is not None:
+            msg_for_provider, replay_messages = _openai_like_continuation_messages(
+                messages,
+                tool_request=tool_request,
+                provider="azure",
+                model=model,
+            )
         payload: dict[str, Any] = {
             "messages": msg_for_provider,
             "temperature": temperature,
@@ -126,6 +186,9 @@ class _AzureMixin:
                     data,
                     tool_request=tool_request,
                     provider="azure",
+                    model=model,
+                    stable_messages=messages,
+                    replay_messages=replay_messages,
                 )
                 return ProviderCallResult((response, usage), metadata)
 

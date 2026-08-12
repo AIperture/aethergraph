@@ -2114,7 +2114,51 @@ class GenericLLMClient(
         fail_on_unsupported: bool | None | object = _UNSET,
         **kw: Any,
     ) -> tuple[str | ToolCallResponse, dict[str, int]]:
-        """Execute the shared non-streaming provider lifecycle for a projected request."""
+        """Execute the shared non-streaming provider lifecycle.
+
+        Intro:
+            Normalizes policy, validates provider-neutral contracts, prepares
+            structured output and caching, and invokes exactly one pinned adapter.
+
+        Examples:
+            Execute a projected text request:
+                ```python
+                text, usage = await client._invoke_chat_runtime(messages)
+                ```
+
+            Continue a native Tool turn:
+                ```python
+                response, usage = await client._invoke_chat_runtime(
+                    messages,
+                    tool_request=continued_request,
+                )
+                ```
+
+        Args:
+            messages: Provider-projected stable conversation messages.
+            reasoning_effort: Optional normalized reasoning level.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Requested text, JSON, schema, or raw format.
+            structured_output: Optional canonical structured-output request.
+            tool_request: Optional canonical native Tool request and continuation.
+            prompt_cache: Optional explicit stable-prefix cache request.
+            json_schema: Deprecated direct schema argument.
+            schema_name: Deprecated direct schema-name argument.
+            strict_schema: Deprecated direct schema strictness argument.
+            validate_json: Deprecated local JSON validation argument.
+            fail_on_unsupported: Deprecated native-format failure argument.
+            **kw: Additional bounded generation and observation options.
+
+        Returns:
+            tuple[str | ToolCallResponse, dict[str, int]]: Normalized provider
+                response and canonical token usage.
+
+        Notes:
+            Transport checkpoints are valid for ordinary Tool continuation and
+            discovery continuation. Provider, model, and turn bindings are always
+            validated before adapter I/O; discovery binding is validated only when
+            a discovery contract is actually present.
+        """
         (
             output_format,
             json_schema,
@@ -2157,8 +2201,6 @@ class GenericLLMClient(
                 request=tool_request,
             )
             if tool_request.transport_checkpoint is not None:
-                if tool_request.discovery is None:
-                    raise ValueError("transport_checkpoint requires an exact discovery request")
                 self._validate_tool_transport_checkpoint(
                     tool_request.transport_checkpoint,
                     model=model,
