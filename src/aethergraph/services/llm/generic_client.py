@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
 import copy
 from dataclasses import dataclass, replace
@@ -54,6 +54,12 @@ from aethergraph.services.llm.request_preparation import prepare_model_request
 from aethergraph.services.llm.request_validation import (
     LLMRequestCompatibilityError,
     validate_model_request,
+)
+from aethergraph.services.llm.streaming import (
+    ModelEvent,
+    ModelReasoningDelta,
+    ModelStreamCompleted,
+    ModelTextDelta,
 )
 from aethergraph.services.llm.structured_output import (
     PreparedStructuredOutput,
@@ -2621,8 +2627,230 @@ class GenericLLMClient(
                     )
 
     # ================================================================
-    # chat_stream() — streaming with thinking/reasoning support
+    # generate_stream() + public chat_stream() compatibility facade
     # ================================================================
+    async def generate_stream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]:
+        """Generate one typed canonical model event stream.
+
+        Intro:
+            Canonical text and reasoning deltas are yielded in provider arrival
+            order, followed by one authoritative terminal `ModelResponse` event.
+
+        Examples:
+            Consume text deltas:
+                ```python
+                async for event in client.generate_stream(request):
+                    if isinstance(event, ModelTextDelta):
+                        print(event.delta, end="")
+                ```
+
+            Read terminal usage:
+                ```python
+                async for event in client.generate_stream(request):
+                    if isinstance(event, ModelStreamCompleted):
+                        usage = event.response.usage
+                ```
+
+        Args:
+            request: Immutable canonical text-streaming request.
+
+        Returns:
+            AsyncIterator[ModelEvent]: Ordered typed deltas and one terminal
+                canonical response event.
+
+        Notes:
+            Streaming currently accepts text responses without native Tools or
+            prompt-cache boundaries. Unsupported combinations fail before provider
+            I/O. Closing the iterator cancels its active provider lifecycle and
+            releases the shared quota reservation in that lifecycle's `finally`.
+        """
+
+        self._require_compatible_model_request(request)
+        if request.response_format != "text":
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                self.model,
+                "streaming structured output",
+                "generate_stream() currently accepts only text responses",
+            )
+        if request.tools:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                self.model,
+                "streaming native Tools",
+                "generate_stream() currently accepts no Tool catalog",
+            )
+        if request.prompt_cache is not None:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                self.model,
+                "streaming prompt cache",
+                "generate_stream() does not silently drop cache boundaries",
+            )
+
+        messages, _tool_request = prepare_model_request(request)
+        queue: asyncio.Queue[ModelEvent | None] = asyncio.Queue(maxsize=64)
+        failure: BaseException | None = None
+        text_index = 0
+        reasoning_index = 0
+
+        async def on_delta(delta: str) -> None:
+            """Queue one typed assistant-text event.
+
+            Intro:
+                Converts a non-empty adapter callback into the next canonical
+                text event without blocking provider parsing.
+
+            Examples:
+                Queue text:
+                    ```python
+                    await on_delta("Hello")
+                    ```
+
+                Preserve whitespace:
+                    ```python
+                    await on_delta(" ")
+                    ```
+
+            Args:
+                delta: Exact adapter text delta.
+
+            Returns:
+                None: Completes after queuing the event.
+
+            Notes:
+                Empty provider frames carry no progress and are ignored.
+            """
+
+            nonlocal text_index
+            if not delta:
+                return
+            await queue.put(ModelTextDelta(delta=delta, index=text_index))
+            text_index += 1
+
+        async def on_reasoning_delta(delta: str) -> None:
+            """Queue one typed reasoning-summary event.
+
+            Intro:
+                Separates displayable reasoning text from assistant output while
+                retaining its independent arrival index.
+
+            Examples:
+                Queue reasoning:
+                    ```python
+                    await on_reasoning_delta("Checking")
+                    ```
+
+                Preserve whitespace:
+                    ```python
+                    await on_reasoning_delta(" ")
+                    ```
+
+            Args:
+                delta: Exact adapter reasoning-summary delta.
+
+            Returns:
+                None: Completes after queuing the event.
+
+            Notes:
+                Empty provider frames carry no progress and are ignored.
+            """
+
+            nonlocal reasoning_index
+            if not delta:
+                return
+            await queue.put(ModelReasoningDelta(delta=delta, index=reasoning_index))
+            reasoning_index += 1
+
+        async def run_stream() -> None:
+            """Run one provider stream and publish its terminal outcome.
+
+            Intro:
+                Executes the shared lifecycle in one child task so async-iterator
+                consumers receive deltas live and can cancel cleanly.
+
+            Examples:
+                Start the bridge task:
+                    ```python
+                    task = asyncio.create_task(run_stream())
+                    ```
+
+                Await direct completion:
+                    ```python
+                    await run_stream()
+                    ```
+
+            Args:
+                None.
+
+            Returns:
+                None: Publishes completion, failure state, and a final sentinel.
+
+            Notes:
+                Exceptions are re-raised by the consuming iterator after queued
+                deltas are delivered; private exception objects are never events.
+            """
+
+            nonlocal failure
+            try:
+                text, usage = await self._invoke_stream_runtime(
+                    messages,
+                    call_name=request.call_name,
+                    reasoning_effort=request.generation.reasoning_effort,
+                    thinking_budget=request.generation.reasoning_budget,
+                    reasoning_summary=request.generation.reasoning_summary,
+                    max_output_tokens=request.generation.max_output_tokens,
+                    output_format="text",
+                    on_delta=on_delta,
+                    on_thinking_delta=on_reasoning_delta,
+                    **(
+                        {"temperature": request.generation.temperature}
+                        if request.generation.temperature is not None
+                        else {}
+                    ),
+                )
+                assistant_output = AssistantOutput(
+                    output_id=assistant_output_identity(
+                        provider=self.provider,
+                        item_index=0,
+                        content_index=0,
+                        text=text,
+                    ),
+                    text=text,
+                )
+                response = ModelResponse(
+                    items=(assistant_output,),
+                    finish_reason="stop",
+                    provider_metadata={
+                        "provider": self.provider,
+                        "model": self.model,
+                        "endpoint_id": self.endpoint_id or "legacy_compat",
+                    },
+                    usage=ModelUsage.from_provider_usage(usage),
+                )
+                await queue.put(ModelStreamCompleted(response=response))
+            except BaseException as exc:
+                failure = exc
+            finally:
+                await queue.put(None)
+
+        task = asyncio.create_task(run_stream())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield event
+            if failure is not None:
+                raise failure
+        finally:
+            if not task.done():
+                task.cancel()
+                while not queue.empty():
+                    queue.get_nowait()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     async def chat_stream(
         self,
         messages: list[dict[str, Any]],
@@ -2642,64 +2870,131 @@ class GenericLLMClient(
         on_thinking_delta: ThinkingDeltaCallback | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
-        """
-        Stream a chat request to the LLM provider and return the accumulated response.
+        """Stream through the preserved public Chat compatibility boundary.
 
-        This method handles provider-specific streaming paths, falling back to non-streaming
-        chat() if streaming is not implemented. It supports real-time delta updates via
-        a callback function and returns the full response text and usage statistics at the end.
+        Intro:
+            Existing dictionary messages and callbacks retain their documented
+            behavior while sharing the same private streaming lifecycle as typed
+            canonical generation.
 
         Examples:
-            Basic usage with a list of messages:
-            ```python
-            response, usage = await context.llm().chat_stream(
-            messages=[{"role": "user", "content": "Hello, assistant!"}]
-            )
-            ```
+            Stream and collect text:
+                ```python
+                text, usage = await client.chat_stream(messages)
+                ```
 
-            Using a delta callback for real-time updates:
-            ```python
-            async def on_delta(delta):
-                print(delta, end="")
-
-            response, usage = await context.llm().chat_stream(
-                messages=[{"role": "user", "content": "Tell me a joke."}],
-                on_delta=on_delta
-            )
-            ```
+            Observe deltas:
+                ```python
+                text, usage = await client.chat_stream(messages, on_delta=on_delta)
+                ```
 
         Args:
-            messages: List of message dicts, each with "role" and "content" keys.
-            reasoning_effort: Optional string to control model reasoning depth.
-            thinking_budget: Anthropic extended thinking budget_tokens. Uses profile default
-                when omitted; pass None (or <=0) to disable for this call.
-            reasoning_summary: OpenAI reasoning summary mode ('auto'/'concise'). Uses profile
-                default when omitted; pass None to disable for this call.
-            max_output_tokens: Optional maximum number of output tokens.
-            output_format: Output format, e.g., "text" or "json".
-            structured_output: Provider-neutral schema request; streaming rejects it.
-            json_schema: Deprecated schema argument; removed in `0.2.0`.
-            schema_name: Deprecated root schema name; removed in `0.2.0`.
-            strict_schema: Deprecated strict-validation flag; removed in `0.2.0`.
-            validate_json: Deprecated local-validation flag; removed in `0.2.0`.
-            fail_on_unsupported: Deprecated provider-failure flag; removed in `0.2.0`.
-            on_delta: Optional callback function to handle real-time text deltas.
-            on_thinking_delta: Optional callback for thinking/reasoning token deltas.
-            **kw: Additional provider-specific keyword arguments.
+            messages: Provider-neutral legacy Chat message dictionaries.
+            reasoning_effort: Optional reasoning-depth override.
+            thinking_budget: Optional reasoning-token budget override.
+            reasoning_summary: Optional reasoning-summary mode override.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Requested text output mode.
+            structured_output: Unsupported canonical schema request.
+            json_schema: Deprecated direct schema argument.
+            schema_name: Deprecated direct schema-name argument.
+            strict_schema: Deprecated direct schema strictness argument.
+            validate_json: Deprecated local JSON validation argument.
+            fail_on_unsupported: Deprecated native-format failure argument.
+            on_delta: Optional async assistant-text callback.
+            on_thinking_delta: Optional async reasoning-summary callback.
+            **kw: Additional bounded legacy streaming arguments.
 
         Returns:
-            tuple[str, dict[str, int]]: The accumulated response text and usage statistics.
-
-        Raises:
-            NotImplementedError: If the provider is not supported.
-            RuntimeError: For various errors including invalid JSON output or rate limit violations.
-            LLMUnsupportedFeatureError: If a requested feature is unsupported by the provider.
+            tuple[str, dict[str, int]]: Accumulated text and provider usage.
 
         Notes:
-            - This method centralizes handling of streaming and non-streaming paths for LLM providers.
-            - The `on_delta` callback allows for real-time updates, making it suitable for interactive applications.
-            - The `on_thinking_delta` callback streams thinking/reasoning tokens (OpenAI reasoning summaries, Anthropic extended thinking).
-            - Rate limiting and usage metering are applied consistently across providers.
+            The return type and callback timing remain compatible through the
+            public `0.1.x` boundary. New code should consume `generate_stream()`.
+        """
+
+        return await self._invoke_stream_runtime(
+            messages,
+            reasoning_effort=reasoning_effort,
+            thinking_budget=thinking_budget,
+            reasoning_summary=reasoning_summary,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            structured_output=structured_output,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            fail_on_unsupported=fail_on_unsupported,
+            on_delta=on_delta,
+            on_thinking_delta=on_thinking_delta,
+            **kw,
+        )
+
+    async def _invoke_stream_runtime(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        reasoning_effort: str | None = None,
+        thinking_budget: int | None | object = _UNSET,
+        reasoning_summary: str | None | object = _UNSET,
+        max_output_tokens: int | None = None,
+        output_format: ChatOutputFormat = "text",
+        structured_output: StructuredOutputRequest | None = None,
+        json_schema: dict[str, Any] | None | object = _UNSET,
+        schema_name: str | object = _UNSET,
+        strict_schema: bool | object = _UNSET,
+        validate_json: bool | object = _UNSET,
+        fail_on_unsupported: bool | None | object = _UNSET,
+        on_delta: DeltaCallback | None = None,
+        on_thinking_delta: ThinkingDeltaCallback | None = None,
+        **kw: Any,
+    ) -> tuple[str, dict[str, int]]:
+        """Execute the shared text-streaming provider lifecycle.
+
+        Intro:
+            Applies common validation, estimation, quota reservation, retry,
+            accounting, observation, and tracing around one pinned adapter call.
+
+        Examples:
+            Accumulate a stream:
+                ```python
+                text, usage = await client._invoke_stream_runtime(messages)
+                ```
+
+            Forward ordered deltas:
+                ```python
+                text, usage = await client._invoke_stream_runtime(
+                    messages,
+                    on_delta=on_delta,
+                )
+                ```
+
+        Args:
+            messages: Stable provider-projected conversation messages.
+            reasoning_effort: Optional reasoning-depth override.
+            thinking_budget: Optional reasoning-token budget override.
+            reasoning_summary: Optional reasoning-summary mode override.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Requested text output mode.
+            structured_output: Unsupported canonical schema request.
+            json_schema: Deprecated direct schema argument.
+            schema_name: Deprecated direct schema-name argument.
+            strict_schema: Deprecated direct schema strictness argument.
+            validate_json: Deprecated local JSON validation argument.
+            fail_on_unsupported: Deprecated native-format failure argument.
+            on_delta: Optional async assistant-text callback.
+            on_thinking_delta: Optional async reasoning-summary callback.
+            **kw: Additional bounded adapter and observation options.
+
+        Returns:
+            tuple[str, dict[str, int]]: Accumulated text and provider usage.
+
+        Notes:
+            Endpoint adapters without a native stream still use the preserved
+            single-response compatibility behavior at this checkpoint. Removing
+            that behavior requires native Gemini and Azure streaming adapters and
+            remains an explicit Phase 2 item rather than an exception fallback.
         """
 
         (

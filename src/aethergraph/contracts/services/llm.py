@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from aethergraph.services.llm.contracts import ModelRequest
+    from aethergraph.services.llm.streaming import ModelEvent
     from aethergraph.services.llm.tool_calling import ModelResponse, ToolCallResponse
 
 
@@ -12,6 +13,8 @@ class LLMClientProtocol(Protocol):
     def estimate(self, request: ModelRequest) -> Any: ...
 
     async def generate(self, request: ModelRequest) -> ModelResponse: ...
+
+    def generate_stream(self, request: ModelRequest) -> AsyncIterator[ModelEvent]: ...
 
     def estimate_chat_request(
         self,

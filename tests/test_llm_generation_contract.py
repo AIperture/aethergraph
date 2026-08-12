@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from aethergraph.services.llm import (
@@ -9,8 +11,11 @@ from aethergraph.services.llm import (
     ImagePart,
     LLMRequestCompatibilityError,
     ModelContinuation,
+    ModelReasoningDelta,
     ModelRequest,
     ModelResponse,
+    ModelStreamCompleted,
+    ModelTextDelta,
     ModelUsage,
     StructuredOutputRequest,
     TextPart,
@@ -28,6 +33,7 @@ from aethergraph.services.llm import (
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.request_preparation import prepare_model_request
 from aethergraph.services.llm.tool_calling import tool_call_request_fingerprint
+from aethergraph.services.llm.types import LLMUnsupportedFeatureError
 
 
 def _continuation() -> ModelContinuation:
@@ -296,6 +302,84 @@ def test_canonical_estimate_counts_tool_schema_and_output_reservation() -> None:
 
     assert direct_estimate.reserved_output_tokens == 64
     assert tool_estimate.estimated_input_tokens > direct_estimate.estimated_input_tokens
+
+
+@pytest.mark.asyncio
+async def test_generate_stream_emits_typed_deltas_and_terminal_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+
+    async def fake_stream(messages, **kwargs):
+        await kwargs["on_thinking_delta"]("Plan")
+        await kwargs["on_delta"]("Hel")
+        await kwargs["on_delta"]("lo")
+        return "Hello", {"input_tokens": 3, "output_tokens": 2}
+
+    monkeypatch.setattr(client, "_invoke_stream_runtime", fake_stream)
+
+    events = [
+        event
+        async for event in client.generate_stream(
+            ModelRequest(messages=(message_from_text("user", "Hello"),))
+        )
+    ]
+
+    assert isinstance(events[0], ModelReasoningDelta)
+    assert events[0].index == 0
+    assert [event.delta for event in events[1:3] if isinstance(event, ModelTextDelta)] == [
+        "Hel",
+        "lo",
+    ]
+    assert isinstance(events[-1], ModelStreamCompleted)
+    assert events[-1].response.text == "Hello"
+    assert events[-1].response.usage.total_input_tokens == 3
+    assert events[-1].response.usage.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_generate_stream_rejects_tools_before_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+
+    async def reject_runtime(*args, **kwargs):
+        raise AssertionError("unsupported stream reached provider runtime")
+
+    monkeypatch.setattr(client, "_invoke_stream_runtime", reject_runtime)
+    request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(_tool(),),
+        tool_choice="auto",
+    )
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="streaming native Tools"):
+        async for _event in client.generate_stream(request):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_generate_stream_close_cancels_active_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    cancelled = asyncio.Event()
+
+    async def waiting_stream(messages, **kwargs):
+        try:
+            await kwargs["on_delta"]("ready")
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(client, "_invoke_stream_runtime", waiting_stream)
+    stream = client.generate_stream(ModelRequest(messages=(message_from_text("user", "Hi"),)))
+
+    first = await anext(stream)
+    assert isinstance(first, ModelTextDelta)
+    await stream.aclose()
+
+    assert cancelled.is_set()
 
 
 def test_model_usage_distinguishes_unavailable_from_reported_zero() -> None:

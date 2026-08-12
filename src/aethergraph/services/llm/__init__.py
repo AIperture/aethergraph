@@ -70,6 +70,12 @@ from .request_validation import (
     RequestModelCapability,
     validate_model_request,
 )
+from .streaming import (
+    ModelEvent,
+    ModelReasoningDelta,
+    ModelStreamCompleted,
+    ModelTextDelta,
+)
 from .structured_output import (
     StructuredOutputCapabilities,
     StructuredOutputMode,
@@ -184,11 +190,15 @@ __all__ = [
     "MODEL_REQUEST_CONTRACT_VERSION",
     "MessageRole",
     "ModelContinuation",
+    "ModelEvent",
+    "ModelReasoningDelta",
     "ModelRequest",
     "ModelOperation",
     "ModelResponse",
     "ModelResponseFormat",
     "ModelResponseItem",
+    "ModelStreamCompleted",
+    "ModelTextDelta",
     "ModelToolCall",
     "ModelToolSearchEvent",
     "ModelToolSpec",
