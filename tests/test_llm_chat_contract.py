@@ -1756,6 +1756,39 @@ async def test_explicit_openai_chat_completions_endpoint_never_switches_to_respo
 
 
 @pytest.mark.asyncio
+async def test_endpointless_azure_preserves_direct_and_tool_adapter_selection() -> None:
+    client = GenericLLMClient(
+        provider="azure",
+        model="deployment-a",
+        base_url="https://example.openai.azure.com",
+        azure_deployment="deployment-a",
+        api_key="test",
+    )
+    calls: list[str] = []
+
+    async def fake_chat_completions(messages, **kwargs):
+        calls.append("azure_chat_completions")
+        return ProviderCallResult(("direct", {}))
+
+    async def fake_responses(messages, **kwargs):
+        calls.append("azure_responses")
+        return ProviderCallResult((ToolCallResponse(items=()), {}))
+
+    client._chat_azure_chat_completions = fake_chat_completions  # type: ignore[method-assign]
+    client._chat_azure_responses = fake_responses  # type: ignore[method-assign]
+
+    direct, _usage = await client.chat([{"role": "user", "content": "Hello"}])
+    tools, _usage = await client.chat(
+        [{"role": "user", "content": "Look up A"}],
+        tool_request=_native_tool_request(max_calls=1),
+    )
+
+    assert direct == "direct"
+    assert isinstance(tools, ToolCallResponse)
+    assert calls == ["azure_chat_completions", "azure_responses"]
+
+
+@pytest.mark.asyncio
 async def test_explicit_azure_chat_completions_normalizes_native_tool_calls() -> None:
     payload = {
         "id": "chatcmpl_azure",
@@ -2311,7 +2344,9 @@ def test_settings_hot_reload_rebinds_endpoint_without_replacing_client_identity(
 
     assert service.get("default") is client
     assert client.endpoint_id == "openai_chat_completions"
-    assert client._active_endpoint_family() == "chat.completions"
+    assert (
+        client._resolve_chat_adapter(has_tool_request=False).protocol_family == "chat.completions"
+    )
     assert client._provider_retry is not original_retry
     assert client._provider_retry.rate_gate is original_rate_gate
     assert original_http_client in client._retired_http_clients

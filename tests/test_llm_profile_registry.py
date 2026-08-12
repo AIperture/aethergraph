@@ -19,6 +19,7 @@ from aethergraph.services.llm import (
 from aethergraph.services.llm.compat import (
     chat_profile_from_legacy,
     embedding_profile_from_legacy,
+    resolve_legacy_chat_adapter,
 )
 from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.factory import build_llm_clients, client_from_profile
@@ -244,6 +245,20 @@ def test_endpointless_legacy_settings_keep_temporary_compatibility_dispatch() ->
     )
 
     assert clients["default"].endpoint_id is None
+
+
+def test_endpointless_azure_compatibility_selection_is_explicit_and_bounded() -> None:
+    direct = resolve_legacy_chat_adapter("azure", None, has_tool_request=False)
+    tools = resolve_legacy_chat_adapter("azure", None, has_tool_request=True)
+    pinned = resolve_legacy_chat_adapter(
+        "azure",
+        "azure_chat_completions",
+        has_tool_request=True,
+    )
+
+    assert direct.adapter_id == "azure_chat_completions"
+    assert tools.adapter_id == "azure_responses"
+    assert pinned.adapter_id == "azure_chat_completions"
 
 
 def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:

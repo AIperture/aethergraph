@@ -28,6 +28,7 @@ from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
+from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.credentials import resolve_provider_credential
@@ -120,19 +121,6 @@ DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 UsageUpdateCallback = Callable[[dict[str, int]], Awaitable[None]]
 _UNSET = object()
-_TOOL_CALL_ENDPOINT_FAMILIES = {
-    "openai": "responses",
-    "azure": "responses",
-    "anthropic": "messages",
-    "google": "generateContent",
-    "deepseek": "chat.completions",
-    "openrouter": "chat.completions",
-    "lmstudio": "chat.completions",
-    "ollama": "chat.completions",
-    "openai_compatible": "chat.completions",
-}
-
-
 _QUOTA_LOCK_CREATION_GUARD = threading.Lock()
 _RLOCK_TYPE = type(threading.RLock())
 
@@ -357,16 +345,39 @@ class GenericLLMClient(
         self._latest_tool_checkpoint_refs: dict[tuple[str, str, str], str] = {}
         self._logger = logging.getLogger("aethergraph.services.llm")
 
-    def _active_endpoint_family(self) -> str:
-        """Return the pinned or legacy-compatible Chat protocol family."""
+    def _resolve_chat_adapter(self, *, has_tool_request: bool):
+        """Resolve the exact adapter for one current Chat invocation shape.
 
-        if self.endpoint_id is not None:
-            return resolve_endpoint_adapter(
-                self.provider,
-                "chat",
-                endpoint_id=self.endpoint_id,
-            ).protocol_family
-        return _TOOL_CALL_ENDPOINT_FAMILIES.get(self.provider, "")
+        Intro:
+            Keeps explicit bindings immutable and confines the endpoint-less Azure
+            v3 compatibility decision to one named boundary resolver.
+
+        Examples:
+            Resolve direct Chat:
+                ```python
+                adapter = client._resolve_chat_adapter(has_tool_request=False)
+                ```
+
+            Resolve native Tool traffic:
+                ```python
+                adapter = client._resolve_chat_adapter(has_tool_request=True)
+                ```
+
+        Args:
+            has_tool_request: Whether the invocation carries a native Tool contract.
+
+        Returns:
+            EndpointAdapterDescriptor: Exact registered Chat adapter.
+
+        Notes:
+            No provider transport or capability fallback occurs here.
+        """
+
+        return resolve_legacy_chat_adapter(
+            self.provider,
+            self.endpoint_id,
+            has_tool_request=has_tool_request,
+        )
 
     @staticmethod
     def _build_connection_state(
@@ -400,15 +411,11 @@ class GenericLLMClient(
             secrets=None,
         ).value
         resolved_base_url = base_url or provider_default_base_url(resolved_provider) or ""
-        endpoint_family = (
-            resolve_endpoint_adapter(
-                resolved_provider,
-                "chat",
-                endpoint_id=resolved_endpoint,
-            ).protocol_family
-            if resolved_endpoint is not None
-            else _TOOL_CALL_ENDPOINT_FAMILIES.get(resolved_provider, "")
-        )
+        endpoint_family = resolve_legacy_chat_adapter(
+            resolved_provider,
+            resolved_endpoint,
+            has_tool_request=True,
+        ).protocol_family
         tool_discovery_capabilities = resolve_tool_discovery_capabilities(
             resolved_provider,
             resolved_model,
@@ -883,7 +890,7 @@ class GenericLLMClient(
             if discovery is not None
             else "tool_discovery_binding"
         )
-        endpoint_family = self._active_endpoint_family()
+        endpoint_family = self._resolve_chat_adapter(has_tool_request=True).protocol_family
         if not endpoint_family:
             raise LLMToolCallCapabilityError(
                 provider=self.provider,
@@ -1638,14 +1645,10 @@ class GenericLLMClient(
         )
 
     def _require_compatible_model_request(self, request: ModelRequest) -> None:
-        adapter = (
-            resolve_endpoint_adapter(
-                self.provider,
-                "chat",
-                endpoint_id=self.endpoint_id,
+        adapter = self._resolve_chat_adapter(
+            has_tool_request=bool(
+                request.tools or request.native_tool_search or request.continuation
             )
-            if self.endpoint_id is not None
-            else None
         )
         report = validate_model_request(request, adapter=adapter)
         if not report.valid:
@@ -2045,6 +2048,9 @@ class GenericLLMClient(
                 "provider": self.provider,
                 "model": self.model,
                 "endpoint_id": self.endpoint_id or "legacy_compat",
+                "effective_endpoint_id": self._resolve_chat_adapter(
+                    has_tool_request=tool_request is not None,
+                ).adapter_id,
             },
             usage=ModelUsage.from_provider_usage(usage),
         )
@@ -2236,6 +2242,10 @@ class GenericLLMClient(
                     tool_request.transport_checkpoint,
                     model=model,
                 )
+        selected_adapter = self._resolve_chat_adapter(
+            has_tool_request=tool_request is not None,
+        )
+        effective_endpoint_id = selected_adapter.adapter_id
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
         reasoning_effort = self._resolve_reasoning_effort(reasoning_effort)
@@ -2263,13 +2273,13 @@ class GenericLLMClient(
                     model=model,
                     policy=effective_policy,
                     allow_native_strict=strict_schema,
-                    endpoint_id=self.endpoint_id,
+                    endpoint_id=effective_endpoint_id,
                 )
             except LLMStructuredOutputCapabilityError as exc:
                 capabilities = resolve_structured_output_capabilities(
                     self.provider,
                     model,
-                    endpoint_id=self.endpoint_id,
+                    endpoint_id=effective_endpoint_id,
                 )
                 request_args = self._build_request_args(
                     model=model,
@@ -2362,7 +2372,7 @@ class GenericLLMClient(
                 scope_dimensions=self._current_dimensions(),
                 tool_request=tool_request,
                 policy=self.prompt_cache_policy,
-                endpoint_id=self.endpoint_id,
+                endpoint_id=effective_endpoint_id,
             )
             provider_messages = list(prepared_prompt_cache.messages)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
@@ -2391,6 +2401,8 @@ class GenericLLMClient(
         )
         request_args["endpoint_id"] = self.endpoint_id or "legacy_compat"
         provider_request_args["endpoint_id"] = self.endpoint_id or "legacy_compat"
+        request_args["effective_endpoint_id"] = effective_endpoint_id
+        provider_request_args["effective_endpoint_id"] = effective_endpoint_id
         if tool_request is not None:
             tool_request_summary = {
                 "choice": tool_request.choice,
@@ -2406,7 +2418,9 @@ class GenericLLMClient(
                 tool_request_summary["discovery"] = {
                     "mode": tool_request.discovery.mode,
                     "max_results": tool_request.discovery.max_results,
-                    "endpoint_family": self._active_endpoint_family(),
+                    "endpoint_family": self._resolve_chat_adapter(
+                        has_tool_request=True
+                    ).protocol_family,
                     "replay_requirement": discovery_capability.replay_requirement,
                     "result_limit_behavior": discovery_capability.result_limit_behavior,
                     "capability_max_results": discovery_capability.max_results,
@@ -2560,6 +2574,7 @@ class GenericLLMClient(
                         "provider": self.provider,
                         "model": model,
                         "endpoint_id": self.endpoint_id or "legacy_compat",
+                        "effective_endpoint_id": effective_endpoint_id,
                     },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
@@ -2879,6 +2894,7 @@ class GenericLLMClient(
                         "provider": self.provider,
                         "model": self.model,
                         "endpoint_id": self.endpoint_id or "legacy_compat",
+                        "effective_endpoint_id": stream_adapter.adapter_id,
                     },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
@@ -3388,7 +3404,10 @@ class GenericLLMClient(
         # Extract cross-provider extras if any
         tools = kw.pop("tools", None)
         tool_choice = kw.pop("tool_choice", None)
-        endpoint_family = self._active_endpoint_family()
+        selected_adapter = self._resolve_chat_adapter(
+            has_tool_request=tool_request is not None,
+        )
+        endpoint_family = selected_adapter.protocol_family
         if tool_request is not None and not endpoint_family:
             raise LLMToolCallCapabilityError(
                 provider=self.provider,
@@ -3397,7 +3416,7 @@ class GenericLLMClient(
 
         # OpenAI is now symmetric too
         if self.provider == "openai":
-            if self.endpoint_id == "openai_chat_completions":
+            if selected_adapter.adapter_id == "openai_chat_completions":
                 return await self._chat_openai_like_chat_completions(
                     messages,
                     model=model,
@@ -3458,9 +3477,7 @@ class GenericLLMClient(
             )
 
         if self.provider == "azure":
-            if self.endpoint_id == "azure_responses" or (
-                self.endpoint_id is None and tool_request is not None
-            ):
+            if selected_adapter.adapter_id == "azure_responses":
                 if tool_request is None:
                     raise LLMUnsupportedFeatureError(
                         self.provider,
