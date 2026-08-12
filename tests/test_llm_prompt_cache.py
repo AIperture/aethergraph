@@ -13,6 +13,7 @@ from aethergraph.services.llm import (
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.prompt_cache import prepare_prompt_cache
+from aethergraph.services.llm.types import LLMUnsupportedFeatureError
 
 
 class _FakeResponse:
@@ -210,6 +211,48 @@ def test_prepare_implicit_and_unavailable_modes_add_no_provider_fields() -> None
     assert unknown.provider_request_fields == {}
 
 
+def test_disabled_policy_emits_no_cache_directive_or_key() -> None:
+    messages = [{"role": "system", "content": "stable"}]
+
+    prepared = prepare_prompt_cache(
+        PromptCacheRequest((0,), "agent.v1"),
+        messages,
+        provider="openai",
+        model="gpt-5.6",
+        policy="disabled",
+    )
+
+    assert prepared.messages == tuple(messages)
+    assert prepared.provider_request_fields == {}
+    assert prepared.observation["effective_mode"] == "disabled"
+    assert prepared.observation["effective_boundary_count"] == 0
+    assert prepared.observation["key_fingerprint"] == ""
+
+
+def test_required_policy_rejects_unknown_cache_capability() -> None:
+    with pytest.raises(LLMUnsupportedFeatureError, match="prompt_cache"):
+        prepare_prompt_cache(
+            PromptCacheRequest((0,), "agent.v1"),
+            [{"role": "system", "content": "stable"}],
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            policy="required",
+        )
+
+
+@pytest.mark.asyncio
+async def test_required_policy_rejects_missing_stable_prefix_request() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5.6",
+        api_key="test",
+        prompt_cache_policy="required",
+    )
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="explicit stable-prefix"):
+        await client.chat([{"role": "user", "content": "volatile"}])
+
+
 def test_prepare_prompt_cache_rejects_out_of_range_index() -> None:
     with pytest.raises(ValueError, match="outside the message list"):
         prepare_prompt_cache(
@@ -288,6 +331,39 @@ async def test_openai_chat_sends_explicit_cache_fields_and_markers() -> None:
         "mode": "explicit"
     }
     assert "prompt_cache_breakpoint" not in str(fake_http.last_json["input"][1])
+
+
+@pytest.mark.asyncio
+async def test_openai_disabled_policy_keeps_cache_fields_off_wire() -> None:
+    payload = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "ok"}],
+            }
+        ],
+        "usage": {},
+    }
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-5.6",
+        api_key="test",
+        prompt_cache_policy="disabled",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, _usage = await client.chat(
+        [{"role": "system", "content": "stable"}],
+        prompt_cache=PromptCacheRequest((0,), "agent.v1"),
+    )
+
+    assert text == "ok"
+    assert fake_http.last_json is not None
+    assert "prompt_cache_key" not in fake_http.last_json
+    assert "prompt_cache_options" not in fake_http.last_json
+    assert "prompt_cache_breakpoint" not in str(fake_http.last_json)
 
 
 @pytest.mark.asyncio

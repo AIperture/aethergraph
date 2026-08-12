@@ -106,6 +106,7 @@ def test_legacy_chat_profile_projection_separates_operation_concerns() -> None:
         api_key_ref="OPENAI_API_KEY",
         reasoning_effort="high",
         compatibility_policy="strict",
+        prompt_cache_policy="required",
         context_window_tokens=128_000,
         vision_enabled=True,
         vision_max_images=3,
@@ -119,6 +120,7 @@ def test_legacy_chat_profile_projection_separates_operation_concerns() -> None:
     assert canonical.credentials.secret_ref == "OPENAI_API_KEY"
     assert canonical.defaults.reasoning_effort == "high"
     assert canonical.defaults.compatibility_policy == "strict"
+    assert canonical.defaults.prompt_cache_policy == "required"
     assert canonical.defaults.context_window_tokens == 128_000
     assert canonical.input_policy.max_images == 3
     assert canonical.capability_overrides.image_input == "supported"
@@ -133,6 +135,7 @@ def test_chat_factory_consumes_canonical_profile_without_losing_policy() -> None
             model="gpt-5.6",
             compatibility_policy="strict",
             structured_output_policy="native_required",
+            prompt_cache_policy="disabled",
             context_window_tokens=128_000,
         )
     )
@@ -143,6 +146,7 @@ def test_chat_factory_consumes_canonical_profile_without_losing_policy() -> None
     assert client.model == "gpt-5.6"
     assert client.compatibility_policy == "strict"
     assert client.structured_output_policy == "native_required"
+    assert client.prompt_cache_policy == "disabled"
     assert client.context_window_tokens == 128_000
 
 

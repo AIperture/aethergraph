@@ -37,6 +37,7 @@ def _apply_env_overrides_to_profile(
         thinking_mode_env = os.getenv("LLM_THINKING_MODE")
         compat_env = os.getenv("LLM_COMPATIBILITY_POLICY")
         structured_output_env = os.getenv("LLM_STRUCTURED_OUTPUT_POLICY")
+        prompt_cache_env = os.getenv("LLM_PROMPT_CACHE_POLICY")
 
         if provider_env:
             p.provider = provider_env.lower()  # type: ignore[assignment]
@@ -58,6 +59,8 @@ def _apply_env_overrides_to_profile(
             p.compatibility_policy = compat_env.lower()  # type: ignore[assignment]
         if structured_output_env:
             p.structured_output_policy = structured_output_env.lower()  # type: ignore[assignment]
+        if prompt_cache_env:
+            p.prompt_cache_policy = prompt_cache_env.lower()  # type: ignore[assignment]
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:
@@ -151,6 +154,7 @@ def client_from_profile(
         thinking_mode=p.defaults.thinking_mode,
         compatibility_policy=p.defaults.compatibility_policy,
         structured_output_policy=p.defaults.structured_output_policy,
+        prompt_cache_policy=p.defaults.prompt_cache_policy,
         context_window_tokens=p.defaults.context_window_tokens,
         thinking_budget=p.defaults.thinking_budget,
         reasoning_summary=p.defaults.reasoning_summary,

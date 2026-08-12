@@ -110,6 +110,7 @@ def _llm_profile_view(profile) -> LLMProfileView:
             "structured_output_policy",
             "best_available",
         ),
+        prompt_cache_policy=getattr(profile, "prompt_cache_policy", "auto"),
         context_window_tokens=getattr(profile, "context_window_tokens", None),
         vision_enabled=bool(getattr(profile, "vision_enabled", False)),
         vision_max_images=getattr(profile, "vision_max_images", None),
@@ -296,6 +297,8 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["compatibility_policy"] = payload.compatibility_policy
         if payload.structured_output_policy is not None:
             kwargs["structured_output_policy"] = payload.structured_output_policy
+        if payload.prompt_cache_policy is not None:
+            kwargs["prompt_cache_policy"] = payload.prompt_cache_policy
         if payload.context_window_tokens is not None:
             kwargs["context_window_tokens"] = payload.context_window_tokens
         if payload.vision_enabled is not None:

@@ -9,15 +9,16 @@ import json
 from typing import Any, Literal
 
 from .catalog import resolve_model_catalog_capability_entry
+from .profiles import PromptCachePolicy
 from .registry import resolve_endpoint_adapter
 from .tool_calling import (
     ToolCallRequest,
     tool_call_request_fingerprint,
     tool_call_surface_fingerprint,
 )
-from .types import PromptCacheRequest
+from .types import LLMUnsupportedFeatureError, PromptCacheRequest
 
-PromptCacheMode = Literal["explicit", "implicit", "unavailable"]
+PromptCacheMode = Literal["disabled", "explicit", "implicit", "unavailable"]
 _OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
 _PROMPT_CACHE_KEY_PREFIX = "agpc_"
 
@@ -52,6 +53,7 @@ def prepare_prompt_cache(
     model: str,
     scope_dimensions: dict[str, Any] | None = None,
     tool_request: ToolCallRequest | None = None,
+    policy: PromptCachePolicy = "auto",
 ) -> PreparedPromptCache:
     """
     Prepare one provider-neutral stable-prefix cache request.
@@ -91,6 +93,7 @@ def prepare_prompt_cache(
         scope_dimensions: Optional non-secret execution dimensions used only
             to isolate the opaque provider key.
         tool_request: Exact provider-visible native Tool contract, when used.
+        policy: Profile-owned disabled, automatic, or required cache policy.
 
     Returns:
         PreparedPromptCache: Detached translated messages, provider fields, and
@@ -102,13 +105,40 @@ def prepare_prompt_cache(
     """
 
     _validate_message_indexes(request.stable_message_indexes, messages)
+    if policy not in {"disabled", "auto", "required"}:
+        raise ValueError("prompt-cache policy must be disabled, auto, or required")
     normalized_provider = str(provider or "").strip().lower()
     normalized_model = str(model or "").strip().lower()
     stable_message_count = request.stable_message_indexes[-1] + 1
+    tool_contract_fingerprint = tool_call_request_fingerprint(tool_request)
+    tool_surface_fingerprint = tool_call_surface_fingerprint(tool_request)
+    if policy == "disabled":
+        return PreparedPromptCache(
+            messages=tuple(copy.deepcopy(messages)),
+            provider_request_fields={},
+            stable_message_count=stable_message_count,
+            observation=_cache_observation(
+                request=request,
+                mode="disabled",
+                capability_source="profile_policy_disabled",
+                effective_boundary_count=0,
+                key_fingerprint="",
+                tool_request=tool_request,
+                tool_contract_fingerprint=tool_contract_fingerprint,
+                tool_surface_fingerprint=tool_surface_fingerprint,
+            ),
+        )
     capability = _resolve_capability(
         normalized_provider,
         normalized_model,
     )
+    if policy == "required" and capability.mode == "unavailable":
+        raise LLMUnsupportedFeatureError(
+            normalized_provider,
+            normalized_model,
+            "prompt_cache",
+            "profile policy requires a cataloged cache capability",
+        )
     if capability.mode != "explicit":
         selected_indexes: tuple[int, ...] = ()
     elif capability.max_total_boundaries is None:
@@ -120,8 +150,6 @@ def prepare_prompt_cache(
         )
     translated_messages = copy.deepcopy(messages)
     provider_fields: dict[str, Any] = {}
-    tool_contract_fingerprint = tool_call_request_fingerprint(tool_request)
-    tool_surface_fingerprint = tool_call_surface_fingerprint(tool_request)
     key = _derive_cache_key(
         provider=normalized_provider,
         model=normalized_model,
@@ -151,22 +179,16 @@ def prepare_prompt_cache(
             selected_indexes,
         )
 
-    observation = {
-        "strategy": request.strategy,
-        "requested_boundary_count": len(request.stable_message_indexes),
-        "effective_boundary_count": (len(selected_indexes) if capability.mode == "explicit" else 0),
-        "effective_mode": capability.mode,
-        "capability_source": capability.capability_source,
-        "key_fingerprint": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
-        "tool_contract_fingerprint": tool_contract_fingerprint[:16],
-        "tool_catalog_fingerprint": tool_contract_fingerprint[:16],
-        "tool_surface_fingerprint": tool_surface_fingerprint[:16],
-        "tool_discovery_mode": (
-            tool_request.discovery.mode
-            if tool_request is not None and tool_request.discovery is not None
-            else ""
-        ),
-    }
+    observation = _cache_observation(
+        request=request,
+        mode=capability.mode,
+        capability_source=capability.capability_source,
+        effective_boundary_count=(len(selected_indexes) if capability.mode == "explicit" else 0),
+        key_fingerprint=hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
+        tool_request=tool_request,
+        tool_contract_fingerprint=tool_contract_fingerprint,
+        tool_surface_fingerprint=tool_surface_fingerprint,
+    )
     if (
         normalized_provider == "openai"
         and capability.mode == "explicit"
@@ -183,6 +205,35 @@ def prepare_prompt_cache(
         stable_message_count=stable_message_count,
         observation=observation,
     )
+
+
+def _cache_observation(
+    *,
+    request: PromptCacheRequest,
+    mode: PromptCacheMode,
+    capability_source: str,
+    effective_boundary_count: int,
+    key_fingerprint: str,
+    tool_request: ToolCallRequest | None,
+    tool_contract_fingerprint: str,
+    tool_surface_fingerprint: str,
+) -> dict[str, Any]:
+    return {
+        "strategy": request.strategy,
+        "requested_boundary_count": len(request.stable_message_indexes),
+        "effective_boundary_count": effective_boundary_count,
+        "effective_mode": mode,
+        "capability_source": capability_source,
+        "key_fingerprint": key_fingerprint,
+        "tool_contract_fingerprint": tool_contract_fingerprint[:16],
+        "tool_catalog_fingerprint": tool_contract_fingerprint[:16],
+        "tool_surface_fingerprint": tool_surface_fingerprint[:16],
+        "tool_discovery_mode": (
+            tool_request.discovery.mode
+            if tool_request is not None and tool_request.discovery is not None
+            else ""
+        ),
+    }
 
 
 def _validate_message_indexes(

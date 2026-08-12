@@ -31,6 +31,13 @@ class LLMProfile(BaseModel):
             "Select the strongest safe structured-output mode or require native schema enforcement."
         ),
     )
+    prompt_cache_policy: Literal["disabled", "auto", "required"] = Field(
+        default="auto",
+        description=(
+            "Disable cache directives, use them when requested and supported, "
+            "or require an explicit supported stable-prefix cache request."
+        ),
+    )
     context_window_tokens: int | None = Field(
         default=None,
         gt=0,

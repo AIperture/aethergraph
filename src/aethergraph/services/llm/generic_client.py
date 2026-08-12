@@ -35,6 +35,7 @@ from aethergraph.services.llm.observability import (
     LLMObservationRecord,
     LLMObservationSink,
 )
+from aethergraph.services.llm.profiles import PromptCachePolicy
 from aethergraph.services.llm.prompt_cache import (
     PreparedPromptCache,
     prepare_prompt_cache,
@@ -194,6 +195,7 @@ class GenericLLMClient(
         reasoning_summary: str | None = None,
         compatibility_policy: str = "compat",
         structured_output_policy: StructuredOutputPolicy = "best_available",
+        prompt_cache_policy: PromptCachePolicy = "auto",
         context_window_tokens: int | None = None,
         retry_settings: ProviderRetrySettings | None = None,
         rate_limit_group: str | None = None,
@@ -204,6 +206,53 @@ class GenericLLMClient(
         # identity
         profile_name: str | None = None,
     ):
+        """Create a provider-neutral LLM client with profile-level runtime policies.
+
+        Examples:
+            Create an OpenAI client with default compatibility policies:
+            ```python
+            client = GenericLLMClient(provider="openai", model="gpt-5-mini")
+            ```
+
+            Require callers to identify a stable prompt prefix for every request:
+            ```python
+            client = GenericLLMClient(
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                prompt_cache_policy="required",
+            )
+            ```
+
+        Args:
+            provider: Provider identifier, or the configured environment default.
+            model: Default provider model identifier.
+            base_url: Optional provider API base URL override.
+            api_key: Optional provider credential override.
+            azure_deployment: Optional Azure OpenAI deployment name.
+            timeout: HTTP request timeout in seconds.
+            metering: Optional service for recording normalized usage.
+            usage_quota_cfg: Optional per-run usage quota configuration.
+            reasoning_effort: Default model reasoning-effort setting.
+            thinking_mode: Default provider thinking-mode setting.
+            thinking_budget: Default provider thinking-token budget.
+            reasoning_summary: Default provider reasoning-summary mode.
+            compatibility_policy: Provider compatibility strictness.
+            structured_output_policy: Structured-output capability requirement.
+            prompt_cache_policy: Stable-prefix cache requirement policy.
+            context_window_tokens: Optional context-window override.
+            retry_settings: Provider transport retry configuration.
+            rate_limit_group: Optional shared provider rate-limit group.
+            rate_gate: Optional shared provider rate gate.
+            observation_sink: Optional LLM request observation sink.
+            observation_capture_mode: Observation payload capture mode.
+            profile_name: Optional configured profile identity.
+
+        Returns:
+            None.
+
+        Notes:
+            The client owns provider transport resources and should be closed after use.
+        """
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
         self.rate_limit_group = rate_limit_group
@@ -254,6 +303,9 @@ class GenericLLMClient(
         self.reasoning_summary = reasoning_summary
         self.compatibility_policy = compatibility_policy or "compat"
         self.structured_output_policy = structured_output_policy
+        if prompt_cache_policy not in {"disabled", "auto", "required"}:
+            raise ValueError("prompt_cache_policy must be disabled, auto, or required")
+        self.prompt_cache_policy = prompt_cache_policy
         self.context_window_tokens = (
             int(context_window_tokens) if context_window_tokens is not None else None
         )
@@ -869,13 +921,13 @@ class GenericLLMClient(
             "reasoning_summary": extra_params.get("reasoning_summary", self.reasoning_summary),
             "max_output_tokens": max_output_tokens,
             "output_format": output_format,
-            "validate_json": validate_json
-            if output_format in ("json_object", "json_schema")
-            else None,
+            "validate_json": (
+                validate_json if output_format in ("json_object", "json_schema") else None
+            ),
             "strict_schema": strict_schema if output_format == "json_schema" else None,
-            "schema_name": schema_name
-            if output_format == "json_schema" and schema_name != "output"
-            else None,
+            "schema_name": (
+                schema_name if output_format == "json_schema" and schema_name != "output" else None
+            ),
             "json_schema_present": bool(json_schema) if output_format == "json_schema" else None,
             "deprecated_parameters": list(deprecated_parameters) or None,
             "structured_output_effective_mode": (
@@ -917,9 +969,9 @@ class GenericLLMClient(
             "temperature": extra_params.get("temperature"),
             "top_p": extra_params.get("top_p"),
             "tool_choice": extra_params.get("tool_choice"),
-            "tools_count": len(extra_params.get("tools") or [])
-            if extra_params.get("tools")
-            else None,
+            "tools_count": (
+                len(extra_params.get("tools") or []) if extra_params.get("tools") else None
+            ),
         }
         return self._prune_none(args)
 
@@ -950,18 +1002,24 @@ class GenericLLMClient(
                         {
                             "format": self._prune_none(
                                 {
-                                    "type": "json_object"
-                                    if output_format == "json_object"
-                                    else (
-                                        "json_schema" if output_format == "json_schema" else None
+                                    "type": (
+                                        "json_object"
+                                        if output_format == "json_object"
+                                        else (
+                                            "json_schema"
+                                            if output_format == "json_schema"
+                                            else None
+                                        )
                                     ),
                                     "name": schema_name if output_format == "json_schema" else None,
-                                    "strict": strict_schema
-                                    if output_format == "json_schema"
-                                    else None,
-                                    "schema_present": bool(json_schema)
-                                    if output_format == "json_schema"
-                                    else None,
+                                    "strict": (
+                                        strict_schema if output_format == "json_schema" else None
+                                    ),
+                                    "schema_present": (
+                                        bool(json_schema)
+                                        if output_format == "json_schema"
+                                        else None
+                                    ),
                                 }
                             )
                         }
@@ -984,9 +1042,11 @@ class GenericLLMClient(
             return self._prune_none(
                 {
                     "thinking": thinking,
-                    "output_config": {"format": {"type": "json_schema", "name": schema_name}}
-                    if output_format == "json_schema"
-                    else None,
+                    "output_config": (
+                        {"format": {"type": "json_schema", "name": schema_name}}
+                        if output_format == "json_schema"
+                        else None
+                    ),
                     "max_tokens": max_output_tokens,
                 }
             )
@@ -1000,12 +1060,14 @@ class GenericLLMClient(
                                 reasoning_effort=reasoning_effort,
                                 thinking_mode=extra_params.get("thinking_mode", self.thinking_mode),
                             ),
-                            "responseMimeType": "application/json"
-                            if output_format in ("json_object", "json_schema")
-                            else None,
-                            "responseJsonSchemaPresent": bool(json_schema)
-                            if output_format == "json_schema"
-                            else None,
+                            "responseMimeType": (
+                                "application/json"
+                                if output_format in ("json_object", "json_schema")
+                                else None
+                            ),
+                            "responseJsonSchemaPresent": (
+                                bool(json_schema) if output_format == "json_schema" else None
+                            ),
                             "maxOutputTokens": max_output_tokens,
                         }
                     )
@@ -1014,13 +1076,15 @@ class GenericLLMClient(
         if self.provider == "deepseek":
             return self._prune_none(
                 {
-                    "reasoning_effort": self._map_deepseek_reasoning_effort(reasoning_effort)
-                    if reasoning_effort is not None
-                    else None,
+                    "reasoning_effort": (
+                        self._map_deepseek_reasoning_effort(reasoning_effort)
+                        if reasoning_effort is not None
+                        else None
+                    ),
                     "thinking": self._deepseek_thinking_body(**extra_params).get("thinking"),
-                    "response_format": {"type": "json_object"}
-                    if output_format == "json_object"
-                    else None,
+                    "response_format": (
+                        {"type": "json_object"} if output_format == "json_object" else None
+                    ),
                     "max_tokens": max_output_tokens,
                 }
             )
@@ -1046,18 +1110,18 @@ class GenericLLMClient(
                 )
             return self._prune_none(
                 {
-                    "response_format": {"type": "json_object"}
-                    if output_format == "json_object"
-                    else None,
+                    "response_format": (
+                        {"type": "json_object"} if output_format == "json_object" else None
+                    ),
                     "max_tokens": max_output_tokens,
                 }
             )
         if self.provider == "azure":
             return self._prune_none(
                 {
-                    "response_format": {"type": "json_object"}
-                    if output_format == "json_object"
-                    else None,
+                    "response_format": (
+                        {"type": "json_object"} if output_format == "json_object" else None
+                    ),
                     "schema_present": bool(json_schema) if output_format == "json_schema" else None,
                     "max_tokens": max_output_tokens,
                 }
@@ -1646,35 +1710,17 @@ class GenericLLMClient(
         fail_on_unsupported: bool | None | object = _UNSET,
         **kw: Any,
     ) -> tuple[str | ToolCallResponse, dict[str, int]]:
-        """
-        Send a chat request to the LLM provider and return the response in a normalized format.
-        This method handles provider-specific dispatch, output postprocessing,
-        rate limiting, and usage metering. It supports structured output via JSON schema
-        validation and flexible output formats.
+        """Send a provider-neutral chat request and return normalized output and usage.
 
         Examples:
-            Basic usage with a list of messages:
-            ```python
-            response, usage = await context.llm().chat([
-                {"role": "user", "content": "Hello, assistant!"}
-            ])
-            ```
-
-            Request structured output with canonical JSON Schema:
+            Send a basic text request:
             ```python
             response, usage = await context.llm().chat(
-                messages=[{"role": "user", "content": "Summarize this text."}],
-                structured_output=StructuredOutputRequest(
-                    name="Summary",
-                    schema={
-                        "type": "object",
-                        "properties": {"summary": {"type": "string"}},
-                    },
-                ),
+                [{"role": "user", "content": "Hello, assistant!"}]
             )
             ```
 
-            Cache a stable header and append-only transcript boundary:
+            Request a cacheable stable prefix:
             ```python
             response, usage = await context.llm().chat(
                 messages,
@@ -1682,54 +1728,30 @@ class GenericLLMClient(
                     stable_message_indexes=(0, 4),
                     prefix_family="research-agent.v2",
                 ),
-                )
-            ```
-
-            Request one native Tool decision:
-            ```python
-            response, usage = await context.llm().chat(
-                messages,
-                tool_request=ToolCallRequest(
-                    tools=(ToolDefinition("lookup", "Look up a record.", schema),),
-                    max_calls=1,
-                ),
             )
             ```
 
         Args:
-            messages: List of message dicts, each with "role" and "content" keys.
-            reasoning_effort: Optional string to control model reasoning depth.
-            max_output_tokens: Optional maximum number of output tokens.
-            output_format: Output format, e.g., "text" or "json".
+            messages: Conversation messages with role and content fields.
+            reasoning_effort: Optional per-request reasoning-depth override.
+            max_output_tokens: Optional response token ceiling.
+            output_format: Requested text or JSON response format.
             structured_output: Provider-neutral canonical schema request.
-            tool_request: Provider-neutral native Tool-selection request.
+            tool_request: Provider-neutral native tool-selection request.
             prompt_cache: Provider-neutral stable-prefix cache request.
             json_schema: Deprecated schema argument; removed in `0.2.0`.
             schema_name: Deprecated root schema name; removed in `0.2.0`.
             strict_schema: Deprecated strict-validation flag; removed in `0.2.0`.
             validate_json: Deprecated local-validation flag; removed in `0.2.0`.
             fail_on_unsupported: Deprecated provider-failure flag; removed in `0.2.0`.
-            **kw: Additional provider-specific keyword arguments.
-                Common cross-provider options include:
-                - model: override default model name.
-                - tools: OpenAI-style tools / functions description.
-                - tool_choice: tool selection strategy (e.g., "auto", "none", or provider-specific dict).
+            **kw: Additional provider-specific request arguments.
 
         Returns:
-            tuple[str | ToolCallResponse, dict[str, int]]: Text or native
-                Tool-call response and provider usage statistics.
-
-        Raises:
-            NotImplementedError: If the provider is not supported.
-            RuntimeError: For various errors including invalid JSON output or rate limit violations.
-            LLMUnsupportedFeatureError: If a requested feature is unsupported by the provider.
+            Normalized text or tool-call response paired with provider usage statistics.
 
         Notes:
-            - This method centralizes handling of different LLM providers, ensuring consistent behavior.
-            - Deprecated structured-output parameters remain operational through
-              `0.1.x`, emit `DeprecationWarning`, and cannot be mixed with
-              `structured_output`.
-            - Rate limiting and metering help manage resource usage effectively.
+            Deprecated structured-output parameters remain operational through `0.1.x`,
+            emit `DeprecationWarning`, and cannot be mixed with `structured_output`.
         """
         (
             output_format,
@@ -1749,6 +1771,13 @@ class GenericLLMClient(
             fail_on_unsupported=fail_on_unsupported,
         )
         model = kw.pop("model", self.model)
+        if self.prompt_cache_policy == "required" and prompt_cache is None:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                model,
+                "prompt_cache",
+                "profile policy requires explicit stable-prefix boundaries",
+            )
         discovery_capability: ToolDiscoveryModeCapability | None = None
         if tool_request is not None:
             if not isinstance(tool_request, ToolCallRequest):
@@ -1895,6 +1924,7 @@ class GenericLLMClient(
                 model=model,
                 scope_dimensions=self._current_dimensions(),
                 tool_request=tool_request,
+                policy=self.prompt_cache_policy,
             )
             provider_messages = list(prepared_prompt_cache.messages)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)

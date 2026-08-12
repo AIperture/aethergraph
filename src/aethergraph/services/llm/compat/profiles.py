@@ -84,6 +84,7 @@ def chat_profile_from_legacy(
             reasoning_summary=profile.reasoning_summary,
             compatibility_policy=profile.compatibility_policy,
             structured_output_policy=profile.structured_output_policy,
+            prompt_cache_policy=profile.prompt_cache_policy,
             context_window_tokens=profile.context_window_tokens,
         ),
         input_policy=MultimodalInputPolicy(

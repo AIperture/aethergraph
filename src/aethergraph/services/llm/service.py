@@ -7,6 +7,7 @@ from aethergraph.config.llm import LLMProfile
 
 from ..secrets.base import Secrets
 from .generic_client import GenericLLMClient
+from .profiles import PromptCachePolicy
 from .providers import Provider
 from .structured_output import StructuredOutputPolicy
 
@@ -54,6 +55,7 @@ class LLMService:
         thinking_mode: str | None = None,
         compatibility_policy: str | None = None,
         structured_output_policy: StructuredOutputPolicy | None = None,
+        prompt_cache_policy: PromptCachePolicy | None = None,
         context_window_tokens: int | None = None,
         vision_enabled: bool | None = None,
         vision_max_images: int | None = None,
@@ -102,6 +104,7 @@ class LLMService:
             compatibility_policy: Optional unsupported-feature policy.
             structured_output_policy: Optional structured-output capability
                 policy.
+            prompt_cache_policy: Optional stable-prefix cache requirement policy.
             context_window_tokens: Optional model context-window capacity.
             vision_enabled: Optional image-input capability flag.
             vision_max_images: Optional maximum images per vision call.
@@ -140,6 +143,8 @@ class LLMService:
                     "structured_output_policy",
                     "best_available",
                 ),
+                prompt_cache_policy=prompt_cache_policy
+                or getattr(template, "prompt_cache_policy", "auto"),
                 context_window_tokens=(
                     context_window_tokens
                     if context_window_tokens is not None
@@ -160,6 +165,7 @@ class LLMService:
                 thinking_mode=thinking_mode,
                 compatibility_policy=compatibility_policy,
                 structured_output_policy=structured_output_policy,
+                prompt_cache_policy=prompt_cache_policy,
                 context_window_tokens=context_window_tokens,
                 vision_enabled=vision_enabled,
                 vision_max_images=vision_max_images,
@@ -198,6 +204,8 @@ class LLMService:
             c.compatibility_policy = compatibility_policy
         if structured_output_policy is not None:
             c.structured_output_policy = structured_output_policy
+        if prompt_cache_policy is not None:
+            c.prompt_cache_policy = prompt_cache_policy
         if context_window_tokens is not None:
             c.context_window_tokens = int(context_window_tokens)
         if reasoning_effort is not None:
@@ -215,6 +223,7 @@ class LLMService:
             thinking_mode=thinking_mode,
             compatibility_policy=compatibility_policy,
             structured_output_policy=structured_output_policy,
+            prompt_cache_policy=prompt_cache_policy,
             context_window_tokens=context_window_tokens,
             vision_enabled=vision_enabled,
             vision_max_images=vision_max_images,
@@ -242,6 +251,7 @@ class LLMService:
         thinking_mode: str | None,
         compatibility_policy: str | None,
         structured_output_policy: StructuredOutputPolicy | None,
+        prompt_cache_policy: PromptCachePolicy | None,
         context_window_tokens: int | None,
         vision_enabled: bool | None,
         vision_max_images: int | None,
@@ -274,6 +284,8 @@ class LLMService:
             updated.compatibility_policy = compatibility_policy  # type: ignore[assignment]
         if structured_output_policy is not None:
             updated.structured_output_policy = structured_output_policy
+        if prompt_cache_policy is not None:
+            updated.prompt_cache_policy = prompt_cache_policy
         if context_window_tokens is not None:
             updated.context_window_tokens = int(context_window_tokens)
         if vision_enabled is not None:

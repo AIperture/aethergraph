@@ -63,6 +63,7 @@ class LLMProfileView(BaseModel):
     reasoning_summary: str | None = None
     compatibility_policy: str = "compat"
     structured_output_policy: Literal["best_available", "native_required"] = "best_available"
+    prompt_cache_policy: Literal["disabled", "auto", "required"] = "auto"
     context_window_tokens: int | None = None
     vision_enabled: bool = False
     vision_max_images: int | None = None
@@ -88,6 +89,7 @@ class LLMProfilePayload(BaseModel):
     thinking_mode: str | None = None
     compatibility_policy: str | None = None
     structured_output_policy: Literal["best_available", "native_required"] | None = None
+    prompt_cache_policy: Literal["disabled", "auto", "required"] | None = None
     context_window_tokens: int | None = Field(default=None, gt=0)
     vision_enabled: bool | None = None
     vision_max_images: int | None = None

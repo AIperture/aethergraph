@@ -1263,6 +1263,19 @@ def test_encode_llm_profile_env_includes_structured_output_policy() -> None:
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__STRUCTURED_OUTPUT_POLICY"] == "native_required"
 
 
+def test_encode_llm_profile_env_includes_prompt_cache_policy() -> None:
+    env = encode_llm_profile_env(
+        "DEEPSEEK",
+        LLMProfilePayload(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            prompt_cache_policy="required",
+        ),
+    )
+
+    assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__PROMPT_CACHE_POLICY"] == "required"
+
+
 def test_encode_llm_profile_env_includes_explicit_vision_fields() -> None:
     env = encode_llm_profile_env(
         "local_vision",
@@ -1341,6 +1354,7 @@ def test_llm_service_configure_profile_updates_runtime_metadata() -> None:
     service.configure_profile(
         profile="default",
         structured_output_policy="native_required",
+        prompt_cache_policy="disabled",
         vision_enabled=True,
         vision_max_images=1,
         vision_max_image_bytes=1024,
@@ -1356,6 +1370,8 @@ def test_llm_service_configure_profile_updates_runtime_metadata() -> None:
     assert profile is not None
     assert profile.structured_output_policy == "native_required"
     assert client.structured_output_policy == "native_required"
+    assert profile.prompt_cache_policy == "disabled"
+    assert client.prompt_cache_policy == "disabled"
     assert profile.vision_enabled is True
     assert profile.vision_max_images == 1
     assert profile.vision_max_image_bytes == 1024
@@ -1377,6 +1393,18 @@ def test_settings_profile_view_includes_structured_output_policy() -> None:
     )
 
     assert view.structured_output_policy == "native_required"
+
+
+def test_settings_profile_view_includes_prompt_cache_policy() -> None:
+    view = settings_api._llm_profile_view(
+        LLMProfile(
+            provider="openai",
+            model="gpt-5-mini",
+            prompt_cache_policy="required",
+        )
+    )
+
+    assert view.prompt_cache_policy == "required"
 
 
 def test_settings_hot_reload_applies_structured_output_policy(
@@ -1406,6 +1434,28 @@ def test_settings_hot_reload_applies_structured_output_policy(
     profile = service.profile("default")
     assert profile is not None
     assert profile.structured_output_policy == "native_required"
+
+
+def test_settings_hot_reload_applies_prompt_cache_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-5-mini")
+    service = LLMService(
+        clients={"default": client},
+        profiles={"default": LLMProfile(provider="openai", model="gpt-5-mini")},
+    )
+    monkeypatch.setattr(
+        settings_api,
+        "current_services",
+        lambda: type("Services", (), {"llm": service})(),
+    )
+
+    settings_api._hot_reload_llm({"default": LLMProfilePayload(prompt_cache_policy="required")})
+
+    assert client.prompt_cache_policy == "required"
+    profile = service.profile("default")
+    assert profile is not None
+    assert profile.prompt_cache_policy == "required"
 
 
 @pytest.mark.asyncio
