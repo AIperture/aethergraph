@@ -958,12 +958,14 @@ def _openai_native_tool_search_model(model: str) -> bool:
 # Canonical provider replay name. The legacy public name remains an exact alias
 # during the compatibility window; there is only one runtime representation.
 ModelContinuation = ToolTransportCheckpoint
+ModelToolSearchEvent = ToolDiscoveryEvent
 
 
 __all__ = [
     "JSONScalar",
     "JSONValue",
     "ModelContinuation",
+    "ModelToolSearchEvent",
     "ToolDiscoveryCapabilities",
     "ToolDiscoveryError",
     "ToolDiscoveryEvent",

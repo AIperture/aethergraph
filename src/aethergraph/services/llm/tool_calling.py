@@ -922,18 +922,26 @@ class ToolCallResponse:
 
 # `ModelResponse` is the canonical internal name. `ToolCallResponse` remains the
 # published compatibility name and is the exact same runtime class.
+AssistantOutputPart = AssistantOutput
+ModelToolCall = ToolCall
+ModelToolSpec = ToolDefinition
 ModelResponse = ToolCallResponse
+ModelResponseItem = ToolResponseItem
 
 
 __all__ = [
     "ASSISTANT_OUTPUT_NORMALIZATION_VERSION",
     "AssistantOutput",
+    "AssistantOutputPart",
     "AssistantOutputType",
     "assistant_output_identity",
     "LLMToolCallCapabilityError",
     "LLMToolCallError",
     "LLMToolCallResponseError",
     "ModelResponse",
+    "ModelResponseItem",
+    "ModelToolCall",
+    "ModelToolSpec",
     "ToolCall",
     "ToolCallOutput",
     "ToolCallRequest",

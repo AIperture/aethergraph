@@ -4,12 +4,21 @@ import pytest
 
 from aethergraph.services.llm import (
     AssistantOutput,
+    ChatMessage,
+    GenerationOptions,
     ModelContinuation,
+    ModelRequest,
     ModelResponse,
     ModelUsage,
+    StructuredOutputRequest,
+    TextPart,
     ToolCall,
+    ToolCallOutput,
     ToolCallResponse,
+    ToolDefinition,
     ToolDiscoveryEvent,
+    ToolDiscoveryRequest,
+    message_from_text,
 )
 
 
@@ -24,6 +33,78 @@ def _continuation() -> ModelContinuation:
         integrity_digest="0" * 64,
         opaque_payload={"response_id": "response_1"},
     )
+
+
+def _tool() -> ToolDefinition:
+    return ToolDefinition(
+        name="lookup",
+        description="Look up one value.",
+        input_schema={"type": "object", "properties": {}},
+        exposure="deferred",
+    )
+
+
+def test_model_request_supports_direct_completion_without_tools() -> None:
+    request = ModelRequest(messages=(message_from_text("user", "Hello"),))
+
+    assert request.tool_choice == "none"
+    assert request.tools == ()
+    assert request.native_tool_search is None
+
+
+def test_model_request_preserves_native_discovery_continuation_state() -> None:
+    continuation = _continuation()
+    request = ModelRequest(
+        messages=(ChatMessage("user", (TextPart("Continue"),)),),
+        tools=(_tool(),),
+        tool_choice="auto",
+        max_tool_calls=2,
+        native_tool_search=ToolDiscoveryRequest("native_client"),
+        active_tool_names=("lookup",),
+        turn_id="turn_1",
+        continuation=continuation,
+        tool_outputs=(ToolCallOutput("call_1", "done"),),
+        generation=GenerationOptions(max_output_tokens=128),
+    )
+
+    assert request.continuation is continuation
+    assert request.tool_outputs[0].call_id == "call_1"
+    assert request.max_tool_calls == 2
+
+
+def test_model_request_rejects_engine_projected_as_native_search() -> None:
+    with pytest.raises(ValueError, match="native_hosted or native_client"):
+        ModelRequest(
+            messages=(message_from_text("user", "Search"),),
+            tools=(_tool(),),
+            tool_choice="auto",
+            turn_id="turn_1",
+            native_tool_search=ToolDiscoveryRequest("engine_projected"),
+        )
+
+
+def test_model_request_accepts_structured_response_contract() -> None:
+    response_format = StructuredOutputRequest(
+        name="Answer",
+        schema={"type": "object", "properties": {}},
+    )
+
+    request = ModelRequest(
+        messages=(message_from_text("user", "Answer"),),
+        response_format=response_format,
+    )
+
+    assert request.response_format is response_format
+
+
+def test_model_request_requires_continuation_for_tool_outputs() -> None:
+    with pytest.raises(ValueError, match="require a continuation"):
+        ModelRequest(
+            messages=(message_from_text("user", "Continue"),),
+            tools=(_tool(),),
+            tool_choice="auto",
+            tool_outputs=(ToolCallOutput("call_1", "done"),),
+        )
 
 
 def test_model_usage_distinguishes_unavailable_from_reported_zero() -> None:
