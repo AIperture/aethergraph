@@ -9,7 +9,7 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 
 from .schema import normalize_tool_args_schema
 
-TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v6"
+TOOL_DEFINITION_API_VERSION = "aethergraph.tool/v7"
 TOOL_APPROVAL_TIERS = frozenset({"none", "expensive", "always"})
 TOOL_AVAILABILITY = frozenset({"normal", "plan_proposal", "plan_lifecycle"})
 TOOL_EXPOSURES = frozenset({"immediate", "deferred"})
@@ -32,11 +32,31 @@ def _normalized_discovery_strings(
     return normalized
 
 
+def _normalized_discovery_paths(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = tuple(str(value or "").strip() for value in values)
+    if any(
+        len(value) > 120
+        or re.fullmatch(
+            r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*",
+            value,
+        )
+        is None
+        for value in normalized
+    ):
+        raise ValueError("tool discovery search_paths must be lowercase dotted stable identifiers")
+    if len(normalized) != len(set(normalized)):
+        raise ValueError("tool discovery search_paths must not contain duplicates")
+    if len(normalized) > 16:
+        raise ValueError("tool discovery search_paths must not contain more than 16 values")
+    return normalized
+
+
 @dataclass(frozen=True)
 class ToolDiscoveryMetadata:
     """Declare compact provider-neutral discovery metadata for one Tool."""
 
     path: str
+    search_paths: tuple[str, ...] = ()
     summary: str = ""
     aliases: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
@@ -53,6 +73,7 @@ class ToolDiscoveryMetadata:
                 ```python
                 metadata = ToolDiscoveryMetadata(
                     path="studio.change.agents",
+                    search_paths=("studio.authoring.agent",),
                     summary="Replace Agent Tool assignments.",
                     aliases=("assign tools",),
                     tags=("agent",),
@@ -79,17 +100,23 @@ class ToolDiscoveryMetadata:
         """
 
         path = str(self.path or "").strip()
-        if re.fullmatch(
-            r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*",
-            path,
-        ) is None or len(path) > 120:
-            raise ValueError(
-                "tool discovery path must be a lowercase dotted stable identifier"
+        if (
+            re.fullmatch(
+                r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*",
+                path,
             )
+            is None
+            or len(path) > 120
+        ):
+            raise ValueError("tool discovery path must be a lowercase dotted stable identifier")
         summary = str(self.summary or "").strip()
         if len(summary) > 500:
             raise ValueError("tool discovery summary must not exceed 500 characters")
         object.__setattr__(self, "path", path)
+        search_paths = _normalized_discovery_paths(self.search_paths)
+        if path in search_paths:
+            raise ValueError("tool discovery search_paths must not repeat the primary path")
+        object.__setattr__(self, "search_paths", search_paths)
         object.__setattr__(self, "summary", summary)
         object.__setattr__(
             self,
@@ -140,6 +167,7 @@ class ToolDiscoveryMetadata:
 
         return {
             "path": self.path,
+            "search_paths": list(self.search_paths),
             "summary": self.summary,
             "aliases": list(self.aliases),
             "tags": list(self.tags),
@@ -237,7 +265,7 @@ class ToolDefinition:
     injections: tuple[tuple[str, str], ...] = ()
     implementation_module: str = ""
     implementation_symbol: str = ""
-    api_version: Literal["aethergraph.tool/v5"] = TOOL_DEFINITION_API_VERSION
+    api_version: Literal["aethergraph.tool/v7"] = TOOL_DEFINITION_API_VERSION
     kind: Literal["tool"] = "tool"
 
     def to_dict(self) -> dict[str, Any]:

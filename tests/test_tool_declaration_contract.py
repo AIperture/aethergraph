@@ -22,7 +22,7 @@ def test_tool_attaches_versioned_definition_without_runtime_builder() -> None:
 
     definition = search.__aether_tool_definition__
 
-    assert definition.api_version == "aethergraph.tool/v6"
+    assert definition.api_version == "aethergraph.tool/v7"
     assert definition.exposure == "immediate"
     assert definition.discovery is None
     assert definition.name == "search"
@@ -72,6 +72,7 @@ def test_tool_declares_deferred_exposure_and_discovery_metadata() -> None:
         exposure="deferred",
         discovery=ToolDiscoveryMetadata(
             path="studio.docs",
+            search_paths=("studio.workspace.read",),
             summary="Read a workspace document.",
             aliases=("open file",),
             tags=("read",),
@@ -87,6 +88,7 @@ def test_tool_declares_deferred_exposure_and_discovery_metadata() -> None:
     assert definition.discovery is not None
     assert definition.to_dict()["discovery"] == {
         "path": "studio.docs",
+        "search_paths": ["studio.workspace.read"],
         "summary": "Read a workspace document.",
         "aliases": ["open file"],
         "tags": ["read"],

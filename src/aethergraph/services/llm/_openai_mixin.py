@@ -7,6 +7,9 @@ import hashlib
 import json
 from typing import Any
 
+from aethergraph.services.llm._tool_discovery_manifest import (
+    render_tool_search_description,
+)
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
@@ -163,7 +166,7 @@ def _openai_request_tools(
             {
                 "type": "tool_search",
                 "execution": "client",
-                "description": _tool_path_manifest_description(request),
+                "description": render_tool_search_description(request),
                 "parameters": request.discovery.search_schema,
             }
         )
@@ -172,25 +175,10 @@ def _openai_request_tools(
             {
                 "type": "tool_search",
                 "execution": "hosted",
-                "description": _tool_path_manifest_description(request),
+                "description": render_tool_search_description(request),
             }
         )
     return result
-
-
-def _tool_path_manifest_description(request: ToolCallRequest) -> str:
-    """Render the compact authorized Tool-path manifest for client search."""
-
-    paths = {
-        tool.path.path: tool.path.description
-        for tool in request.tools
-        if tool.path is not None and tool.exposure == "deferred"
-    }
-    manifest = "; ".join(
-        f"{path}: {description}" for path, description in sorted(paths.items())
-    )
-    prefix = "Find authorized project Tools. Available capability paths"
-    return f"{prefix}: {manifest}." if manifest else f"{prefix}: none."
 
 
 def _openai_hosted_tool_refs(item: dict[str, Any]) -> tuple[str, ...]:
@@ -219,16 +207,12 @@ def _openai_namespace_name(path: str) -> str:
 
     encoded_segments: list[str] = []
     for segment in str(path or "").split("."):
-        encoded_segments.append(
-            segment.replace("_", "_u").replace("-", "_h")
-        )
+        encoded_segments.append(segment.replace("_", "_u").replace("-", "_h"))
     name = "tp_" + "_d".join(encoded_segments)
     if len(name) > 64:
         raise LLMToolCallResponseError(
             code="tool_path_projection_invalid",
-            message=(
-                f"Tool path {path!r} exceeds the OpenAI namespace projection limit."
-            ),
+            message=(f"Tool path {path!r} exceeds the OpenAI namespace projection limit."),
         )
     return name
 
@@ -519,9 +503,7 @@ def _openai_tool_call_response(
         if item.get("type") == "tool_search_call":
             discovery = tool_request.discovery
             execution = str(item.get("execution") or "")
-            expected_mode = (
-                "native_client" if execution == "client" else "native_hosted"
-            )
+            expected_mode = "native_client" if execution == "client" else "native_hosted"
             if discovery is None or discovery.mode != expected_mode:
                 raise LLMToolCallResponseError(
                     code="discovery_mode_mismatch",
@@ -552,9 +534,7 @@ def _openai_tool_call_response(
                     ),
                     mode=expected_mode,
                     source=(
-                        "provider_client"
-                        if expected_mode == "native_client"
-                        else "provider_hosted"
+                        "provider_client" if expected_mode == "native_client" else "provider_hosted"
                     ),
                     arguments=arguments,
                     query=query or None,
