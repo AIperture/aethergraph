@@ -122,6 +122,37 @@ async def test_generate_wraps_direct_assistant_output_with_typed_usage() -> None
 
 
 @pytest.mark.asyncio
+async def test_generate_does_not_dispatch_through_public_chat_facade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "id": "response_1",
+        "status": "completed",
+        "output": [
+            {
+                "id": "message_1",
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello."}],
+            }
+        ],
+        "usage": {"input_tokens": 4, "output_tokens": 2},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    async def reject_public_chat(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("generate must not dispatch through the public chat facade")
+
+    monkeypatch.setattr(client, "chat", reject_public_chat)
+
+    response = await client.generate(ModelRequest(messages=(message_from_text("user", "Hello"),)))
+
+    assert response.text == "Hello."
+
+
+@pytest.mark.asyncio
 async def test_generate_projects_canonical_tools_to_existing_provider_path() -> None:
     payload = {
         "id": "response_1",

@@ -848,7 +848,7 @@ class GenericLLMClient(
                 "StructuredOutputRequest(...) instead. Legacy parameters remain "
                 "supported through AetherGraph 0.1.x and will be removed in 0.2.0.",
                 DeprecationWarning,
-                stacklevel=3,
+                stacklevel=4,
             )
         return (
             output_format,
@@ -1665,7 +1665,7 @@ class GenericLLMClient(
         """
 
         projection = project_model_request_to_chat(request)
-        value, usage = await self.chat(
+        value, usage = await self._invoke_chat_runtime(
             list(projection.messages),
             **projection.kwargs,
         )
@@ -1753,6 +1753,40 @@ class GenericLLMClient(
             Deprecated structured-output parameters remain operational through `0.1.x`,
             emit `DeprecationWarning`, and cannot be mixed with `structured_output`.
         """
+        return await self._invoke_chat_runtime(
+            messages,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
+            output_format=output_format,
+            structured_output=structured_output,
+            tool_request=tool_request,
+            prompt_cache=prompt_cache,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            strict_schema=strict_schema,
+            validate_json=validate_json,
+            fail_on_unsupported=fail_on_unsupported,
+            **kw,
+        )
+
+    async def _invoke_chat_runtime(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        output_format: ChatOutputFormat = "text",
+        structured_output: StructuredOutputRequest | None = None,
+        tool_request: ToolCallRequest | None = None,
+        prompt_cache: PromptCacheRequest | None = None,
+        json_schema: dict[str, Any] | None | object = _UNSET,
+        schema_name: str | object = _UNSET,
+        strict_schema: bool | object = _UNSET,
+        validate_json: bool | object = _UNSET,
+        fail_on_unsupported: bool | None | object = _UNSET,
+        **kw: Any,
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
+        """Execute the shared non-streaming provider lifecycle for a projected request."""
         (
             output_format,
             json_schema,
