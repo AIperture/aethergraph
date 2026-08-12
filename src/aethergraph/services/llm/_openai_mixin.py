@@ -704,9 +704,7 @@ def _openai_tool_arguments(value: Any, *, call_name: str) -> dict[str, Any]:
     if not isinstance(decoded, dict):
         raise LLMToolCallResponseError(
             code="invalid_arguments",
-            message=(
-                f"OpenAI Tool call '{call_name or '?'}' arguments must decode " "to one object."
-            ),
+            message=(f"OpenAI Tool call '{call_name or '?'}' arguments must decode to one object."),
         )
     return decoded
 
@@ -889,7 +887,7 @@ class _OpenAIMixin:
                     )
                 if structured_output_fields:
                     raise LLMStructuredOutputTruncationError(
-                        "OpenAI structured response was incomplete: " f"{detail}"
+                        f"OpenAI structured response was incomplete: {detail}"
                     )
 
             # If caller asked for raw provider payload, just return it as a JSON string
@@ -965,13 +963,73 @@ class _OpenAIMixin:
         fail_on_unsupported: bool,
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
+        on_usage_update: Callable[[dict[str, int]], Awaitable[None]] | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
-        """
-        Stream text using OpenAI Responses API.
+        """Stream text and reasoning summaries through OpenAI Responses.
 
-        Handles ``response.output_text.delta`` for content and
-        ``response.reasoning_summary_text.delta`` for thinking/reasoning summaries.
+        Intro:
+            Parses Responses SSE events into assistant, reasoning-summary, and
+            cumulative usage callbacks while retaining one terminal raw receipt.
+
+        Examples:
+            Stream assistant text:
+                ```python
+                result = await client._chat_openai_responses_stream(
+                    messages,
+                    model="gpt-test",
+                    reasoning_effort=None,
+                    reasoning_summary=None,
+                    max_output_tokens=256,
+                    output_format="text",
+                    json_schema=None,
+                    schema_name="Response",
+                    strict_schema=True,
+                    fail_on_unsupported=True,
+                    on_delta=on_delta,
+                )
+                ```
+
+            Observe cumulative usage:
+                ```python
+                result = await client._chat_openai_responses_stream(
+                    messages,
+                    model="gpt-test",
+                    reasoning_effort="medium",
+                    reasoning_summary="auto",
+                    max_output_tokens=256,
+                    output_format="text",
+                    json_schema=None,
+                    schema_name="Response",
+                    strict_schema=True,
+                    fail_on_unsupported=True,
+                    on_usage_update=on_usage_update,
+                )
+                ```
+
+        Args:
+            messages: Provider-projected stable conversation messages.
+            model: Exact configured OpenAI model identity.
+            reasoning_effort: Optional normalized reasoning-depth override.
+            reasoning_summary: Optional displayable reasoning-summary mode.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Requested text or structured output mode.
+            json_schema: Optional canonical JSON schema.
+            schema_name: Stable structured-output schema name.
+            strict_schema: Whether native schema enforcement is strict.
+            fail_on_unsupported: Whether unsupported native features must fail.
+            on_delta: Optional async assistant-text callback.
+            on_thinking_delta: Optional async reasoning-summary callback.
+            on_usage_update: Optional async cumulative usage callback.
+            **kw: Additional bounded OpenAI request options.
+
+        Returns:
+            ProviderCallResult[tuple[str, dict[str, int]]]: Accumulated text,
+                terminal provider usage, and transport metadata.
+
+        Notes:
+            Usage callbacks are cumulative observations. Shared accounting and
+            metering consume only the returned terminal receipt.
         """
         await self._ensure_client()
         assert self._client is not None
@@ -1018,6 +1076,41 @@ class _OpenAIMixin:
         usage: dict[str, int] = {}
 
         async def _handle_event(evt: dict[str, Any]):
+            """Apply one parsed OpenAI Responses stream event.
+
+            Intro:
+                Routes one provider event to its exact text, reasoning, usage,
+                completion, or error behavior without owning transport retries.
+
+            Examples:
+                Apply a text delta:
+                    ```python
+                    await _handle_event(
+                        {"type": "response.output_text.delta", "delta": "Hi"}
+                    )
+                    ```
+
+                Apply terminal usage:
+                    ```python
+                    await _handle_event(
+                        {
+                            "type": "response.completed",
+                            "response": {"usage": {"input_tokens": 1}},
+                        }
+                    )
+                    ```
+
+            Args:
+                evt: Parsed provider Responses event.
+
+            Returns:
+                None: Completes after routing the event.
+
+            Notes:
+                Malformed transport frames are filtered by the surrounding SSE
+                loop before this semantic dispatcher is called.
+            """
+
             nonlocal usage
 
             etype = evt.get("type")
@@ -1043,6 +1136,8 @@ class _OpenAIMixin:
                 resp = evt.get("response") or {}
                 # Usage may or may not be present, keep best-effort
                 usage = resp.get("usage") or usage
+                if usage and on_usage_update is not None:
+                    await on_usage_update(dict(usage))
 
             # Optional: basic error surface
             elif etype == "error":

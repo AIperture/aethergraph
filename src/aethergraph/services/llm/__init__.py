@@ -75,6 +75,7 @@ from .streaming import (
     ModelReasoningDelta,
     ModelStreamCompleted,
     ModelTextDelta,
+    ModelUsageUpdate,
 )
 from .structured_output import (
     StructuredOutputCapabilities,
@@ -199,6 +200,7 @@ __all__ = [
     "ModelResponseItem",
     "ModelStreamCompleted",
     "ModelTextDelta",
+    "ModelUsageUpdate",
     "ModelToolCall",
     "ModelToolSearchEvent",
     "ModelToolSpec",

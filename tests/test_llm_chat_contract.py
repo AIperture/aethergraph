@@ -1137,19 +1137,25 @@ async def test_azure_chat_completions_stream_uses_native_sse_and_terminal_usage(
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
     deltas: list[str] = []
+    usage_updates: list[dict[str, int]] = []
 
     async def on_delta(delta: str) -> None:
         deltas.append(delta)
 
+    async def on_usage_update(usage: dict[str, int]) -> None:
+        usage_updates.append(usage)
+
     text, usage = await client.chat_stream(
         [{"role": "user", "content": "Hello"}],
         on_delta=on_delta,
+        on_usage_update=on_usage_update,
     )
 
     assert text == "Hello"
     assert deltas == ["Hel", "lo"]
     assert usage["prompt_tokens"] == 3
     assert usage["completion_tokens"] == 2
+    assert usage_updates == [{"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}]
     assert fake_http.last_url is not None
     assert "/chat/completions?" in fake_http.last_url
     assert fake_http.last_json is not None
@@ -1175,6 +1181,7 @@ async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
     client._bound_loop = asyncio.get_running_loop()
     deltas: list[str] = []
     thoughts: list[str] = []
+    usage_updates: list[dict[str, int]] = []
 
     async def on_delta(delta: str) -> None:
         deltas.append(delta)
@@ -1182,17 +1189,22 @@ async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
     async def on_thinking_delta(delta: str) -> None:
         thoughts.append(delta)
 
+    async def on_usage_update(usage: dict[str, int]) -> None:
+        usage_updates.append(usage)
+
     text, usage = await client.chat_stream(
         [{"role": "user", "content": "Hello"}],
         reasoning_summary="auto",
         on_delta=on_delta,
         on_thinking_delta=on_thinking_delta,
+        on_usage_update=on_usage_update,
     )
 
     assert text == "Hello"
     assert deltas == ["Hel", "lo"]
     assert thoughts == ["Plan"]
     assert usage == {"input_tokens": 4, "output_tokens": 2, "reasoning_tokens": 3}
+    assert usage_updates == [usage]
     assert fake_http.last_url is not None
     assert ":streamGenerateContent?alt=sse&key=" in fake_http.last_url
     assert fake_http.last_json is not None

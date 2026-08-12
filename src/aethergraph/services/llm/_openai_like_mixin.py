@@ -533,6 +533,7 @@ async def _stream_openai_like_chat_completions(
     headers: dict[str, str],
     body: dict[str, Any],
     on_delta: Any = None,
+    on_usage_update: Any = None,
 ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
     """Execute one OpenAI-compatible Chat Completions SSE request.
 
@@ -563,6 +564,7 @@ async def _stream_openai_like_chat_completions(
                 headers=headers,
                 body=body,
                 on_delta=on_delta,
+                on_usage_update=on_usage_update,
             )
             ```
 
@@ -574,6 +576,7 @@ async def _stream_openai_like_chat_completions(
         headers: Exact adapter-owned authentication and content headers.
         body: Complete adapter-owned streaming request body.
         on_delta: Optional async assistant-text callback.
+        on_usage_update: Optional async cumulative usage callback.
 
     Returns:
         ProviderCallResult[tuple[str, dict[str, int]]]: Accumulated text, latest
@@ -616,6 +619,8 @@ async def _stream_openai_like_chat_completions(
             event_usage = event.get("usage")
             if isinstance(event_usage, dict) and event_usage:
                 usage = dict(event_usage)
+                if on_usage_update is not None:
+                    await on_usage_update(dict(usage))
 
     return ProviderCallResult(("".join(chunks), usage), metadata)
 
@@ -815,6 +820,7 @@ class _OpenAILikeMixin:
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
         on_delta: Any = None,
+        on_usage_update: Any = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         """Stream one OpenAI-compatible Chat Completions request.
@@ -839,6 +845,7 @@ class _OpenAILikeMixin:
                     model="local-model",
                     max_output_tokens=256,
                     on_delta=on_delta,
+                    on_usage_update=on_usage_update,
                 )
                 ```
 
@@ -848,6 +855,7 @@ class _OpenAILikeMixin:
             reasoning_effort: Optional compatible reasoning-depth override.
             max_output_tokens: Optional maximum generated tokens.
             on_delta: Optional async assistant-text callback.
+            on_usage_update: Optional async cumulative usage callback.
             **kw: Additional bounded compatible generation options.
 
         Returns:
@@ -886,4 +894,5 @@ class _OpenAILikeMixin:
             headers=self._headers_openai_like(),
             body=body,
             on_delta=on_delta,
+            on_usage_update=on_usage_update,
         )

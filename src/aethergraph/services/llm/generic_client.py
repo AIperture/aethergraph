@@ -60,6 +60,7 @@ from aethergraph.services.llm.streaming import (
     ModelReasoningDelta,
     ModelStreamCompleted,
     ModelTextDelta,
+    ModelUsageUpdate,
 )
 from aethergraph.services.llm.structured_output import (
     PreparedStructuredOutput,
@@ -117,6 +118,7 @@ from aethergraph.services.tracing import resolve_tracer
 
 DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
+UsageUpdateCallback = Callable[[dict[str, int]], Awaitable[None]]
 _UNSET = object()
 _TOOL_CALL_ENDPOINT_FAMILIES = {
     "openai": "responses",
@@ -2705,6 +2707,8 @@ class GenericLLMClient(
         failure: BaseException | None = None
         text_index = 0
         reasoning_index = 0
+        usage_index = 0
+        latest_usage_update: ModelUsage | None = None
 
         async def on_delta(delta: str) -> None:
             """Queue one typed assistant-text event.
@@ -2774,6 +2778,43 @@ class GenericLLMClient(
             await queue.put(ModelReasoningDelta(delta=delta, index=reasoning_index))
             reasoning_index += 1
 
+        async def on_usage_update(raw_usage: dict[str, int]) -> None:
+            """Queue one changed cumulative usage snapshot.
+
+            Intro:
+                Normalizes provider usage at the stream boundary and suppresses
+                repeated cumulative receipts without affecting final accounting.
+
+            Examples:
+                Queue partial input usage:
+                    ```python
+                    await on_usage_update({"input_tokens": 3})
+                    ```
+
+                Queue a later complete snapshot:
+                    ```python
+                    await on_usage_update({"input_tokens": 3, "output_tokens": 2})
+                    ```
+
+            Args:
+                raw_usage: Latest cumulative raw provider usage receipt.
+
+            Returns:
+                None: Completes after queuing a changed reported snapshot.
+
+            Notes:
+                Updates are informational. The terminal lifecycle performs the
+                only quota reconciliation and metering operation.
+            """
+
+            nonlocal latest_usage_update, usage_index
+            usage = ModelUsage.from_provider_usage(raw_usage)
+            if usage.availability == "unavailable" or usage == latest_usage_update:
+                return
+            await queue.put(ModelUsageUpdate(usage=usage, index=usage_index))
+            latest_usage_update = usage
+            usage_index += 1
+
         async def run_stream() -> None:
             """Run one provider stream and publish its terminal outcome.
 
@@ -2815,6 +2856,7 @@ class GenericLLMClient(
                     output_format="text",
                     on_delta=on_delta,
                     on_thinking_delta=on_reasoning_delta,
+                    on_usage_update=on_usage_update,
                     **(
                         {"temperature": request.generation.temperature}
                         if request.generation.temperature is not None
@@ -2880,6 +2922,7 @@ class GenericLLMClient(
         fail_on_unsupported: bool | None | object = _UNSET,
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
+        on_usage_update: UsageUpdateCallback | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         """Stream through the preserved public Chat compatibility boundary.
@@ -2915,6 +2958,7 @@ class GenericLLMClient(
             fail_on_unsupported: Deprecated native-format failure argument.
             on_delta: Optional async assistant-text callback.
             on_thinking_delta: Optional async reasoning-summary callback.
+            on_usage_update: Optional async cumulative usage callback.
             **kw: Additional bounded legacy streaming arguments.
 
         Returns:
@@ -2940,6 +2984,7 @@ class GenericLLMClient(
             fail_on_unsupported=fail_on_unsupported,
             on_delta=on_delta,
             on_thinking_delta=on_thinking_delta,
+            on_usage_update=on_usage_update,
             **kw,
         )
 
@@ -2960,6 +3005,7 @@ class GenericLLMClient(
         fail_on_unsupported: bool | None | object = _UNSET,
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
+        on_usage_update: UsageUpdateCallback | None = None,
         **kw: Any,
     ) -> tuple[str, dict[str, int]]:
         """Execute the shared text-streaming provider lifecycle.
@@ -2997,6 +3043,7 @@ class GenericLLMClient(
             fail_on_unsupported: Deprecated native-format failure argument.
             on_delta: Optional async assistant-text callback.
             on_thinking_delta: Optional async reasoning-summary callback.
+            on_usage_update: Optional async cumulative usage callback.
             **kw: Additional bounded adapter and observation options.
 
         Returns:
@@ -3170,6 +3217,7 @@ class GenericLLMClient(
                         fail_on_unsupported=fail_on_unsupported,
                         on_delta=on_delta,
                         on_thinking_delta=on_thinking_delta,
+                        on_usage_update=on_usage_update,
                         **kw,
                     ),
                     provider=self.provider,
@@ -3190,6 +3238,7 @@ class GenericLLMClient(
                         fail_on_unsupported=fail_on_unsupported,
                         on_delta=on_delta,
                         on_thinking_delta=on_thinking_delta,
+                        on_usage_update=on_usage_update,
                         reasoning_effort=reasoning_effort,
                         **kw,
                     ),
@@ -3208,6 +3257,7 @@ class GenericLLMClient(
                             reasoning_effort=reasoning_effort,
                             max_output_tokens=max_output_tokens,
                             on_delta=on_delta,
+                            on_usage_update=on_usage_update,
                             **kw,
                         ),
                         provider=self.provider,
@@ -3223,6 +3273,7 @@ class GenericLLMClient(
                             reasoning_effort=reasoning_effort,
                             max_output_tokens=max_output_tokens,
                             on_delta=on_delta,
+                            on_usage_update=on_usage_update,
                             **kw,
                         ),
                         provider=self.provider,
@@ -3242,6 +3293,7 @@ class GenericLLMClient(
                         max_output_tokens=max_output_tokens,
                         on_delta=on_delta,
                         on_thinking_delta=on_thinking_delta,
+                        on_usage_update=on_usage_update,
                         **{key: value for key, value in kw.items() if key != "thinking_mode"},
                     ),
                     provider=self.provider,

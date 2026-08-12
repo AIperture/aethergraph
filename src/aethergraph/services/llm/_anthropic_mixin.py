@@ -419,7 +419,7 @@ def _anthropic_tool_call_response(
             raise LLMToolCallResponseError(
                 code="invalid_arguments",
                 message=(
-                    f"Anthropic Tool call '{block.get('name') or '?'}' input " "must be an object."
+                    f"Anthropic Tool call '{block.get('name') or '?'}' input must be an object."
                 ),
             )
         call_id = str(block.get("id") or f"anthropic-call-{block_index}")
@@ -786,13 +786,65 @@ class _AnthropicMixin:
         fail_on_unsupported: bool,
         on_delta: DeltaCallback | None = None,
         on_thinking_delta: ThinkingDeltaCallback | None = None,
+        on_usage_update: Callable[[dict[str, int]], Awaitable[None]] | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
-        """
-        Stream text using Anthropic Messages API with SSE.
+        """Stream text and thinking summaries through Anthropic Messages.
 
-        Handles ``text_delta`` for content and ``thinking_delta`` for
-        extended thinking blocks when ``thinking_budget`` is set.
+        Intro:
+            Parses Messages SSE blocks into assistant, displayable thinking, and
+            cumulative usage callbacks while preserving cache-related counters.
+
+        Examples:
+            Stream assistant text:
+                ```python
+                result = await client._chat_anthropic_messages_stream(
+                    messages,
+                    model="claude-test",
+                    thinking_budget=None,
+                    max_output_tokens=256,
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=True,
+                    on_delta=on_delta,
+                )
+                ```
+
+            Observe thinking and usage:
+                ```python
+                result = await client._chat_anthropic_messages_stream(
+                    messages,
+                    model="claude-test",
+                    thinking_budget=1024,
+                    max_output_tokens=256,
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=True,
+                    on_thinking_delta=on_thinking_delta,
+                    on_usage_update=on_usage_update,
+                )
+                ```
+
+        Args:
+            messages: Provider-projected stable conversation messages.
+            model: Exact configured Anthropic model identity.
+            thinking_budget: Optional extended-thinking token budget.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Requested text or structured output mode.
+            json_schema: Optional canonical JSON schema.
+            fail_on_unsupported: Whether unsupported native features must fail.
+            on_delta: Optional async assistant-text callback.
+            on_thinking_delta: Optional async thinking-summary callback.
+            on_usage_update: Optional async cumulative usage callback.
+            **kw: Additional bounded Anthropic sampling and cache options.
+
+        Returns:
+            ProviderCallResult[tuple[str, dict[str, int]]]: Accumulated text,
+                cumulative provider usage, and transport metadata.
+
+        Notes:
+            Usage callbacks are cumulative observations. Shared accounting and
+            metering consume only the returned terminal receipt.
         """
         await self._ensure_client()
         assert self._client is not None
@@ -895,6 +947,41 @@ class _AnthropicMixin:
                 return metadata
 
         async def _handle_sse_event(event_type: str, data: dict[str, Any]):
+            """Apply one parsed Anthropic Messages stream event.
+
+            Intro:
+                Routes message usage, text, thinking, and error events while
+                retaining one cumulative raw usage receipt.
+
+            Examples:
+                Apply starting input usage:
+                    ```python
+                    await _handle_sse_event(
+                        "message_start",
+                        {"message": {"usage": {"input_tokens": 2}}},
+                    )
+                    ```
+
+                Apply an output usage update:
+                    ```python
+                    await _handle_sse_event(
+                        "message_delta",
+                        {"usage": {"output_tokens": 1}},
+                    )
+                    ```
+
+            Args:
+                event_type: Exact Anthropic SSE event name.
+                data: Parsed event payload.
+
+            Returns:
+                None: Completes after routing the event.
+
+            Notes:
+                Signature deltas remain provider integrity material and are not
+                exposed as displayable reasoning text.
+            """
+
             nonlocal usage
 
             if event_type == "message_start":
@@ -902,6 +989,8 @@ class _AnthropicMixin:
                 msg_usage = msg.get("usage", {})
                 if msg_usage:
                     usage.update(msg_usage)
+                    if on_usage_update is not None:
+                        await on_usage_update(dict(usage))
 
             elif event_type == "content_block_delta":
                 delta = data.get("delta", {})
@@ -925,6 +1014,8 @@ class _AnthropicMixin:
                 delta_usage = data.get("usage", {})
                 if delta_usage:
                     usage.update(delta_usage)
+                    if on_usage_update is not None:
+                        await on_usage_update(dict(usage))
 
             # content_block_start, content_block_stop, message_stop, ping: no action needed
 

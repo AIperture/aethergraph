@@ -440,6 +440,7 @@ class _GeminiMixin:
         max_output_tokens: int | None = None,
         on_delta: Any = None,
         on_thinking_delta: Any = None,
+        on_usage_update: Any = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         """Stream one Gemini GenerateContent request over SSE.
@@ -465,6 +466,7 @@ class _GeminiMixin:
                     model="gemini-test",
                     reasoning_summary="auto",
                     on_thinking_delta=on_thinking_delta,
+                    on_usage_update=on_usage_update,
                 )
                 ```
 
@@ -477,6 +479,7 @@ class _GeminiMixin:
             max_output_tokens: Optional maximum generated tokens.
             on_delta: Optional async assistant-text callback.
             on_thinking_delta: Optional async thought-summary callback.
+            on_usage_update: Optional async cumulative usage callback.
             **kw: Additional bounded Gemini sampling options.
 
         Returns:
@@ -542,6 +545,8 @@ class _GeminiMixin:
                 event_usage = _gemini_usage(event.get("usageMetadata"))
                 if event_usage:
                     usage = event_usage
+                    if on_usage_update is not None:
+                        await on_usage_update(dict(usage))
                 candidate = (event.get("candidates") or [{}])[0]
                 for part in (candidate.get("content") or {}).get("parts") or []:
                     if not isinstance(part, dict):

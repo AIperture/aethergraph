@@ -17,6 +17,7 @@ from aethergraph.services.llm import (
     ModelStreamCompleted,
     ModelTextDelta,
     ModelUsage,
+    ModelUsageUpdate,
     StructuredOutputRequest,
     TextPart,
     ToolCall,
@@ -312,8 +313,11 @@ async def test_generate_stream_emits_typed_deltas_and_terminal_response(
 
     async def fake_stream(messages, **kwargs):
         await kwargs["on_thinking_delta"]("Plan")
+        await kwargs["on_usage_update"]({"input_tokens": 3})
+        await kwargs["on_usage_update"]({"input_tokens": 3})
         await kwargs["on_delta"]("Hel")
         await kwargs["on_delta"]("lo")
+        await kwargs["on_usage_update"]({"input_tokens": 3, "output_tokens": 2})
         return "Hello", {"input_tokens": 3, "output_tokens": 2}
 
     monkeypatch.setattr(client, "_invoke_stream_runtime", fake_stream)
@@ -327,7 +331,11 @@ async def test_generate_stream_emits_typed_deltas_and_terminal_response(
 
     assert isinstance(events[0], ModelReasoningDelta)
     assert events[0].index == 0
-    assert [event.delta for event in events[1:3] if isinstance(event, ModelTextDelta)] == [
+    usage_updates = [event for event in events if isinstance(event, ModelUsageUpdate)]
+    assert [event.index for event in usage_updates] == [0, 1]
+    assert usage_updates[0].usage.availability == "partial"
+    assert usage_updates[1].usage.availability == "complete"
+    assert [event.delta for event in events if isinstance(event, ModelTextDelta)] == [
         "Hel",
         "lo",
     ]

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 from .tool_calling import ModelResponse
+from .usage import ModelUsage
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,87 @@ class ModelReasoningDelta:
 
 
 @dataclass(frozen=True)
+class ModelUsageUpdate:
+    """Carry one cumulative provider usage snapshot observed during streaming.
+
+    Intro:
+        Usage updates expose provider-reported progress without treating a
+        cumulative snapshot as an additive token delta or accounting receipt.
+
+    Examples:
+        Build a partial update:
+            ```python
+            event = ModelUsageUpdate(
+                usage=ModelUsage.from_provider_usage({"input_tokens": 3}),
+                index=0,
+            )
+            ```
+
+        Inspect cumulative output:
+            ```python
+            assert event.usage.output_tokens is None
+            ```
+
+    Args:
+        usage: Normalized cumulative usage known at this stream position.
+        index: Zero-based usage-update arrival index.
+
+    Returns:
+        ModelUsageUpdate: Immutable provider-neutral usage snapshot event.
+
+    Notes:
+        The terminal `ModelStreamCompleted.response.usage` remains authoritative
+        for quota reconciliation and metering. Consumers must not sum updates.
+    """
+
+    usage: ModelUsage
+    index: int
+
+    def __post_init__(self) -> None:
+        """Validate one cumulative usage update.
+
+        Intro:
+            The event rejects unavailable receipts and invalid indexes because
+            neither represents observable usage progress.
+
+        Examples:
+            Accept a complete update:
+                ```python
+                event = ModelUsageUpdate(
+                    ModelUsage.from_provider_usage(
+                        {"input_tokens": 1, "output_tokens": 1}
+                    ),
+                    0,
+                )
+                ```
+
+            Reject unavailable usage:
+                ```python
+                try:
+                    ModelUsageUpdate(ModelUsage.unavailable(), 0)
+                except ValueError:
+                    pass
+                ```
+
+        Args:
+            self: Newly initialized usage-update event.
+
+        Returns:
+            None: Validates the frozen event.
+
+        Notes:
+            Partial and complete snapshots are both valid provider progress.
+        """
+
+        if not isinstance(self.usage, ModelUsage):
+            raise TypeError("model usage update requires ModelUsage")
+        if self.usage.availability == "unavailable":
+            raise ValueError("model usage update requires reported usage")
+        if isinstance(self.index, bool) or not isinstance(self.index, int) or self.index < 0:
+            raise ValueError("model usage update index must be a non-negative integer")
+
+
+@dataclass(frozen=True)
 class ModelStreamCompleted:
     """Carry the authoritative terminal response for one model stream.
 
@@ -220,11 +302,14 @@ class ModelStreamCompleted:
             raise TypeError("model stream completion requires ModelResponse")
 
 
-ModelEvent: TypeAlias = ModelTextDelta | ModelReasoningDelta | ModelStreamCompleted
+ModelEvent: TypeAlias = (
+    ModelTextDelta | ModelReasoningDelta | ModelUsageUpdate | ModelStreamCompleted
+)
 
 __all__ = [
     "ModelEvent",
     "ModelReasoningDelta",
     "ModelStreamCompleted",
     "ModelTextDelta",
+    "ModelUsageUpdate",
 ]

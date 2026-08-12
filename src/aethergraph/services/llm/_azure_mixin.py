@@ -206,6 +206,7 @@ class _AzureMixin:
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
         on_delta: Any = None,
+        on_usage_update: Any = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
         """Stream one pinned Azure Chat Completions request.
@@ -230,6 +231,7 @@ class _AzureMixin:
                     model="deployment-a",
                     max_output_tokens=256,
                     on_delta=on_delta,
+                    on_usage_update=on_usage_update,
                 )
                 ```
 
@@ -240,6 +242,7 @@ class _AzureMixin:
                 shared signature; the pinned legacy Azure route does not project it.
             max_output_tokens: Optional maximum generated tokens.
             on_delta: Optional async assistant-text callback.
+            on_usage_update: Optional async cumulative usage callback.
             **kw: Additional bounded Azure sampling options.
 
         Returns:
@@ -281,6 +284,7 @@ class _AzureMixin:
             headers={"api-key": self.api_key, "Content-Type": "application/json"},
             body=body,
             on_delta=on_delta,
+            on_usage_update=on_usage_update,
         )
 
     async def _chat_azure_responses(
