@@ -2666,6 +2666,18 @@ class GenericLLMClient(
         """
 
         self._require_compatible_model_request(request)
+        stream_adapter = resolve_endpoint_adapter(
+            self.provider,
+            "chat",
+            endpoint_id=self.endpoint_id,
+        )
+        if "streaming" not in stream_adapter.implementation_capabilities:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                self.model,
+                "streaming",
+                f"endpoint adapter {stream_adapter.adapter_id!r} has no streaming implementation",
+            )
         if request.response_format != "text":
             raise LLMUnsupportedFeatureError(
                 self.provider,
@@ -2991,10 +3003,9 @@ class GenericLLMClient(
             tuple[str, dict[str, int]]: Accumulated text and provider usage.
 
         Notes:
-            Endpoint adapters without a native stream still use the preserved
-            single-response compatibility behavior at this checkpoint. Removing
-            that behavior requires native Gemini and Azure streaming adapters and
-            remains an explicit Phase 2 item rather than an exception fallback.
+            Every selected branch is a native streaming adapter. Endpoints without
+            a streaming implementation fail before transport and never issue a
+            non-streaming request as a fallback.
         """
 
         (
@@ -3014,6 +3025,18 @@ class GenericLLMClient(
             validate_json=validate_json,
             fail_on_unsupported=fail_on_unsupported,
         )
+        stream_adapter = resolve_endpoint_adapter(
+            self.provider,
+            "chat",
+            endpoint_id=self.endpoint_id,
+        )
+        if "streaming" not in stream_adapter.implementation_capabilities:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                self.model,
+                "streaming",
+                (f"endpoint adapter {stream_adapter.adapter_id!r} has no streaming implementation"),
+            )
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
@@ -3176,15 +3199,50 @@ class GenericLLMClient(
                     rate_limit_group=self.rate_limit_group,
                 )
                 text, usage = provider_result.value
-            elif self._active_endpoint_family() == "chat.completions" and self.provider != "azure":
+            elif stream_adapter.protocol_family == "chat.completions":
+                if self.provider == "azure":
+                    provider_result = await self._provider_retry.execute(
+                        lambda: self._chat_azure_chat_completions_stream(
+                            messages,
+                            model=model,
+                            reasoning_effort=reasoning_effort,
+                            max_output_tokens=max_output_tokens,
+                            on_delta=on_delta,
+                            **kw,
+                        ),
+                        provider=self.provider,
+                        model=model,
+                        operation="chat_stream",
+                        rate_limit_group=self.rate_limit_group,
+                    )
+                else:
+                    provider_result = await self._provider_retry.execute(
+                        lambda: self._chat_openai_like_chat_completions_stream(
+                            messages,
+                            model=model,
+                            reasoning_effort=reasoning_effort,
+                            max_output_tokens=max_output_tokens,
+                            on_delta=on_delta,
+                            **kw,
+                        ),
+                        provider=self.provider,
+                        model=model,
+                        operation="chat_stream",
+                        rate_limit_group=self.rate_limit_group,
+                    )
+                text, usage = provider_result.value
+            elif self.provider == "google" and stream_adapter.protocol_family == "generateContent":
                 provider_result = await self._provider_retry.execute(
-                    lambda: self._chat_openai_like_chat_completions_stream(
+                    lambda: self._chat_gemini_generate_content_stream(
                         messages,
                         model=model,
                         reasoning_effort=reasoning_effort,
+                        reasoning_summary=_reasoning_summary,
+                        thinking_mode=kw.get("thinking_mode"),
                         max_output_tokens=max_output_tokens,
                         on_delta=on_delta,
-                        **kw,
+                        on_thinking_delta=on_thinking_delta,
+                        **{key: value for key, value in kw.items() if key != "thinking_mode"},
                     ),
                     provider=self.provider,
                     model=model,
@@ -3193,28 +3251,15 @@ class GenericLLMClient(
                 )
                 text, usage = provider_result.value
             else:
-                provider_result = await self._provider_retry.execute(
-                    lambda: self._chat_dispatch(
-                        messages,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        max_output_tokens=max_output_tokens,
-                        output_format=output_format,
-                        json_schema=json_schema,
-                        schema_name=schema_name,
-                        strict_schema=strict_schema,
-                        validate_json=validate_json,
-                        fail_on_unsupported=fail_on_unsupported,
-                        **kw,
-                    ),
+                raise LLMUnsupportedFeatureError(
                     provider=self.provider,
                     model=model,
-                    operation="chat",
-                    rate_limit_group=self.rate_limit_group,
+                    feature="streaming",
+                    detail=(
+                        f"endpoint adapter {stream_adapter.adapter_id!r} "
+                        "has no native streaming adapter"
+                    ),
                 )
-                text, usage = provider_result.value
-                if on_delta is not None and text:
-                    await on_delta(text)
 
             observation_record.attempts = provider_result.attempts
 

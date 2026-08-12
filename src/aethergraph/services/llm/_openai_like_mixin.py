@@ -524,6 +524,102 @@ def _openai_like_continuation_messages(
     return [*messages, *replay], replay
 
 
+async def _stream_openai_like_chat_completions(
+    *,
+    http_client: Any,
+    provider: str,
+    model: str,
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    on_delta: Any = None,
+) -> ProviderCallResult[tuple[str, dict[str, int]]]:
+    """Execute one OpenAI-compatible Chat Completions SSE request.
+
+    Intro:
+        The shared parser preserves ordered text deltas and the latest provider
+        usage receipt while endpoint adapters retain URL, headers, and body ownership.
+
+    Examples:
+        Stream a compatible endpoint:
+            ```python
+            result = await _stream_openai_like_chat_completions(
+                http_client=client,
+                provider="openrouter",
+                model="openai/gpt-test",
+                url=url,
+                headers=headers,
+                body=body,
+            )
+            ```
+
+        Forward deltas:
+            ```python
+            result = await _stream_openai_like_chat_completions(
+                http_client=client,
+                provider="azure",
+                model="deployment-a",
+                url=url,
+                headers=headers,
+                body=body,
+                on_delta=on_delta,
+            )
+            ```
+
+    Args:
+        http_client: Bound asynchronous HTTP client.
+        provider: Exact registered provider identity.
+        model: Exact configured model or deployment identity.
+        url: Exact adapter-owned Chat Completions URL.
+        headers: Exact adapter-owned authentication and content headers.
+        body: Complete adapter-owned streaming request body.
+        on_delta: Optional async assistant-text callback.
+
+    Returns:
+        ProviderCallResult[tuple[str, dict[str, int]]]: Accumulated text, latest
+            usage receipt, and sanitized transport metadata.
+
+    Notes:
+        Malformed non-data SSE frames are ignored. Provider error responses and
+        rate-limit metadata are handled by the shared transport classifier.
+    """
+
+    chunks: list[str] = []
+    usage: dict[str, int] = {}
+    async with http_client.stream(
+        "POST",
+        url,
+        headers=headers,
+        json=body,
+    ) as response:
+        if response.is_error:
+            await response.aread()
+        metadata = checked_response_metadata(provider, model, "chat_stream", response)
+
+        async for line in response.aiter_lines():
+            if not line or not line.startswith("data:"):
+                continue
+            data_str = line[len("data:") :].strip()
+            if not data_str or data_str == "[DONE]":
+                break
+            try:
+                event = json.loads(data_str)
+            except (TypeError, ValueError):
+                continue
+            choices = event.get("choices") or []
+            if choices:
+                delta = (choices[0].get("delta") or {}).get("content") or ""
+                if delta:
+                    chunks.append(delta)
+                    if on_delta is not None:
+                        await on_delta(delta)
+            event_usage = event.get("usage")
+            if isinstance(event_usage, dict) and event_usage:
+                usage = dict(event_usage)
+
+    return ProviderCallResult(("".join(chunks), usage), metadata)
+
+
 def _openai_like_tool_definitions(tool_request: ToolCallRequest) -> list[dict[str, Any]]:
     """Project canonical Tools into Chat Completions function declarations."""
 
@@ -721,6 +817,48 @@ class _OpenAILikeMixin:
         on_delta: Any = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
+        """Stream one OpenAI-compatible Chat Completions request.
+
+        Intro:
+            Builds the exact compatible request and delegates only SSE parsing to
+            the adjacent shared Chat Completions stream helper.
+
+        Examples:
+            Stream default text:
+                ```python
+                result = await client._chat_openai_like_chat_completions_stream(
+                    messages,
+                    model="local-model",
+                )
+                ```
+
+            Stream with a token ceiling:
+                ```python
+                result = await client._chat_openai_like_chat_completions_stream(
+                    messages,
+                    model="local-model",
+                    max_output_tokens=256,
+                    on_delta=on_delta,
+                )
+                ```
+
+        Args:
+            messages: Provider-projected stable conversation messages.
+            model: Exact configured model identity.
+            reasoning_effort: Optional compatible reasoning-depth override.
+            max_output_tokens: Optional maximum generated tokens.
+            on_delta: Optional async assistant-text callback.
+            **kw: Additional bounded compatible generation options.
+
+        Returns:
+            ProviderCallResult[tuple[str, dict[str, int]]]: Accumulated text,
+                provider usage, and sanitized transport metadata.
+
+        Notes:
+            Retry, rate gating, quota accounting, and observations remain owned by
+            the shared invocation lifecycle.
+        """
+
         await self._ensure_client()
         assert self._client is not None
 
@@ -740,47 +878,12 @@ class _OpenAILikeMixin:
         if self.provider == "deepseek":
             body.update(self._deepseek_thinking_body(**kw))
 
-        chunks: list[str] = []
-        usage: dict[str, int] = {}
-
-        async def _call():
-            nonlocal usage
-            async with self._client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers=self._headers_openai_like(),
-                json=body,
-            ) as r:
-                if r.is_error:
-                    await r.aread()
-                metadata = checked_response_metadata(
-                    self.provider,
-                    model,
-                    "chat_stream",
-                    r,
-                )
-
-                async for line in r.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data_str = line[len("data:") :].strip()
-                    if not data_str or data_str == "[DONE]":
-                        break
-                    try:
-                        evt = json.loads(data_str)
-                    except Exception:
-                        continue
-                    choices = evt.get("choices") or []
-                    if choices:
-                        delta = (choices[0].get("delta") or {}).get("content") or ""
-                        if delta:
-                            chunks.append(delta)
-                            if on_delta is not None:
-                                await on_delta(delta)
-                    if evt.get("usage"):
-                        usage = evt.get("usage") or usage
-
-                return metadata
-
-        metadata = await _call()
-        return ProviderCallResult(("".join(chunks), usage), metadata)
+        return await _stream_openai_like_chat_completions(
+            http_client=self._client,
+            provider=self.provider,
+            model=model,
+            url=f"{self.base_url}/chat/completions",
+            headers=self._headers_openai_like(),
+            body=body,
+            on_delta=on_delta,
+        )

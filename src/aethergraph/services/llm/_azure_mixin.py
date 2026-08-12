@@ -9,6 +9,7 @@ from aethergraph.services.llm._openai_like_mixin import (
     _openai_like_continuation_messages,
     _openai_like_tool_call_response,
     _openai_like_tool_definitions,
+    _stream_openai_like_chat_completions,
 )
 from aethergraph.services.llm._openai_mixin import (
     _openai_checkpoint_payload,
@@ -196,6 +197,91 @@ class _AzureMixin:
             return ProviderCallResult((txt, usage), metadata)
 
         return await _call()
+
+    async def _chat_azure_chat_completions_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        on_delta: Any = None,
+        **kw: Any,
+    ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
+        """Stream one pinned Azure Chat Completions request.
+
+        Intro:
+            Uses Azure's deployment-scoped Chat Completions SSE route and requests
+            the terminal usage chunk without switching to Azure Responses.
+
+        Examples:
+            Stream default text:
+                ```python
+                result = await client._chat_azure_chat_completions_stream(
+                    messages,
+                    model="deployment-a",
+                )
+                ```
+
+            Forward text deltas:
+                ```python
+                result = await client._chat_azure_chat_completions_stream(
+                    messages,
+                    model="deployment-a",
+                    max_output_tokens=256,
+                    on_delta=on_delta,
+                )
+                ```
+
+        Args:
+            messages: Provider-projected stable conversation messages.
+            model: Exact Azure deployment identity.
+            reasoning_effort: Optional reasoning-depth override retained for the
+                shared signature; the pinned legacy Azure route does not project it.
+            max_output_tokens: Optional maximum generated tokens.
+            on_delta: Optional async assistant-text callback.
+            **kw: Additional bounded Azure sampling options.
+
+        Returns:
+            ProviderCallResult[tuple[str, dict[str, int]]]: Accumulated text,
+                terminal provider usage when received, and transport metadata.
+
+        Notes:
+            Azure may omit the final usage chunk when a stream is interrupted.
+            Canonical terminal usage then remains explicitly unavailable.
+        """
+
+        await self._ensure_client()
+        assert self._client is not None
+        if not (self.base_url and self.azure_deployment):
+            raise RuntimeError(
+                "Azure OpenAI requires AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_DEPLOYMENT"
+            )
+        if str(model or "").strip() != str(self.azure_deployment).strip():
+            raise ValueError("Azure Chat Completions model must match the configured deployment")
+
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": kw.get("temperature", 0.5),
+            "top_p": kw.get("top_p", 1.0),
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if max_output_tokens is not None:
+            body["max_tokens"] = max_output_tokens
+        url = (
+            f"{self.base_url}/openai/deployments/{self.azure_deployment}"
+            "/chat/completions?api-version=2024-08-01-preview"
+        )
+        return await _stream_openai_like_chat_completions(
+            http_client=self._client,
+            provider="azure",
+            model=model,
+            url=url,
+            headers={"api-key": self.api_key, "Content-Type": "application/json"},
+            body=body,
+            on_delta=on_delta,
+        )
 
     async def _chat_azure_responses(
         self,

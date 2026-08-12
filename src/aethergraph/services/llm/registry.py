@@ -90,7 +90,7 @@ _ENDPOINTS = (
         "azure_responses",
         "responses",
         ("chat",),
-        ("image_input", "streaming", "native_tools", "native_tool_search", "structured_output"),
+        ("image_input", "native_tools", "native_tool_search", "structured_output"),
     ),
     EndpointAdapterDescriptor(
         "azure_chat_completions",

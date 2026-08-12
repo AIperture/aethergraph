@@ -67,6 +67,42 @@ class _FakeHttpClient:
         return _FakeResponse(self.payload)
 
 
+class _FakeStreamResponse:
+    def __init__(self, lines: list[str]):
+        self.lines = list(lines)
+        self.status_code = 200
+        self.headers: dict[str, str] = {}
+        self.is_error = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def aread(self) -> bytes:
+        return b""
+
+    async def aiter_lines(self):
+        for line in self.lines:
+            yield line
+
+
+class _FakeStreamingHttpClient:
+    def __init__(self, lines: list[str]):
+        self.lines = list(lines)
+        self.last_json: dict[str, Any] | None = None
+        self.last_url: str | None = None
+
+    def stream(self, method: str, url: str, headers: dict[str, str], json: dict[str, Any]):
+        self.last_url = url
+        self.last_json = json
+        return _FakeStreamResponse(self.lines)
+
+    async def post(self, *args: Any, **kwargs: Any):
+        raise AssertionError("native streaming adapter issued a non-streaming request")
+
+
 class _ObservationSink:
     def __init__(self) -> None:
         self.records = []
@@ -1072,6 +1108,138 @@ async def test_explicit_openai_chat_completions_stream_never_switches_to_respons
     assert text == "streamed"
     assert usage == {}
     assert calls == ["chat.completions"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint_id", [None, "azure_chat_completions"])
+async def test_azure_chat_completions_stream_uses_native_sse_and_terminal_usage(
+    endpoint_id: str | None,
+) -> None:
+    client = GenericLLMClient(
+        provider="azure",
+        model="deployment-a",
+        endpoint_id=endpoint_id,
+        base_url="https://example.openai.azure.com",
+        azure_deployment="deployment-a",
+        api_key="test",
+    )
+    fake_http = _FakeStreamingHttpClient(
+        [
+            'data: {"choices":[{"delta":{"content":"Hel"}}],"usage":null}',
+            'data: {"choices":[{"delta":{"content":"lo"}}],"usage":null}',
+            (
+                'data: {"choices":[],"usage":'
+                '{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}'
+            ),
+            "data: [DONE]",
+        ]
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    deltas: list[str] = []
+
+    async def on_delta(delta: str) -> None:
+        deltas.append(delta)
+
+    text, usage = await client.chat_stream(
+        [{"role": "user", "content": "Hello"}],
+        on_delta=on_delta,
+    )
+
+    assert text == "Hello"
+    assert deltas == ["Hel", "lo"]
+    assert usage["prompt_tokens"] == 3
+    assert usage["completion_tokens"] == 2
+    assert fake_http.last_url is not None
+    assert "/chat/completions?" in fake_http.last_url
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["stream"] is True
+    assert fake_http.last_json["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
+    client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
+    fake_http = _FakeStreamingHttpClient(
+        [
+            ('data: {"candidates":[{"content":{"parts":[{"text":"Plan","thought":true}]}}]}'),
+            'data: {"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}',
+            (
+                'data: {"candidates":[{"content":{"parts":[{"text":"lo"}]}}],'
+                '"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2,'
+                '"thoughtsTokenCount":3}}'
+            ),
+        ]
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    deltas: list[str] = []
+    thoughts: list[str] = []
+
+    async def on_delta(delta: str) -> None:
+        deltas.append(delta)
+
+    async def on_thinking_delta(delta: str) -> None:
+        thoughts.append(delta)
+
+    text, usage = await client.chat_stream(
+        [{"role": "user", "content": "Hello"}],
+        reasoning_summary="auto",
+        on_delta=on_delta,
+        on_thinking_delta=on_thinking_delta,
+    )
+
+    assert text == "Hello"
+    assert deltas == ["Hel", "lo"]
+    assert thoughts == ["Plan"]
+    assert usage == {"input_tokens": 4, "output_tokens": 2, "reasoning_tokens": 3}
+    assert fake_http.last_url is not None
+    assert ":streamGenerateContent?alt=sse&key=" in fake_http.last_url
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["generationConfig"]["thinkingConfig"]["includeThoughts"] is True
+
+
+@pytest.mark.asyncio
+async def test_azure_responses_stream_fails_before_transport() -> None:
+    client = GenericLLMClient(
+        provider="azure",
+        model="deployment-a",
+        endpoint_id="azure_responses",
+        base_url="https://example.openai.azure.com",
+        azure_deployment="deployment-a",
+        api_key="test",
+    )
+    fake_http = _FakeStreamingHttpClient([])
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="no streaming implementation"):
+        async for _event in client.generate_stream(
+            ModelRequest(messages=(message_from_text("user", "Hello"),))
+        ):
+            pass
+
+    assert fake_http.last_url is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_chat_stream_rejects_unimplemented_pinned_adapter_before_transport() -> None:
+    client = GenericLLMClient(
+        provider="azure",
+        model="deployment-a",
+        endpoint_id="azure_responses",
+        base_url="https://example.openai.azure.com",
+        azure_deployment="deployment-a",
+        api_key="test",
+    )
+    fake_http = _FakeStreamingHttpClient([])
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="no streaming implementation"):
+        await client.chat_stream([{"role": "user", "content": "Hello"}])
+
+    assert fake_http.last_url is None
 
 
 @pytest.mark.asyncio
