@@ -58,8 +58,10 @@ class _FakeHttpClient:
     def __init__(self, payload: dict[str, Any]):
         self.payload = payload
         self.last_json: dict[str, Any] | None = None
+        self.last_url: str | None = None
 
     async def post(self, url: str, headers: dict[str, str], json: dict[str, Any], timeout=None):
+        self.last_url = url
         self.last_json = json
         return _FakeResponse(self.payload)
 
@@ -1044,6 +1046,34 @@ async def test_chat_stream_rejects_structured_output_modes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_openai_chat_completions_stream_never_switches_to_responses() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        endpoint_id="openai_chat_completions",
+    )
+    calls: list[str] = []
+
+    async def fake_chat_completions_stream(messages, **kwargs):
+        calls.append("chat.completions")
+        return ProviderCallResult(("streamed", {}))
+
+    async def fail_responses_stream(messages, **kwargs):
+        raise AssertionError("pinned Chat Completions endpoint switched to Responses")
+
+    client._chat_openai_like_chat_completions_stream = (  # type: ignore[method-assign]
+        fake_chat_completions_stream
+    )
+    client._chat_openai_responses_stream = fail_responses_stream  # type: ignore[method-assign]
+
+    text, usage = await client.chat_stream([{"role": "user", "content": "hello"}])
+
+    assert text == "streamed"
+    assert usage == {}
+    assert calls == ["chat.completions"]
+
+
+@pytest.mark.asyncio
 async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     payload = {
         "choices": [{"message": {"content": '{"answer":"ok"}'}}],
@@ -1229,6 +1259,118 @@ async def test_openai_compatible_tool_response_rejects_unknown_tool() -> None:
             [{"role": "user", "content": "Use a Tool"}],
             tool_request=_native_tool_request(max_calls=1),
         )
+
+
+@pytest.mark.asyncio
+async def test_explicit_openai_chat_completions_endpoint_never_switches_to_responses() -> None:
+    payload = {
+        "id": "chatcmpl_explicit",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"A"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        endpoint_id="openai_chat_completions",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "Look up A"}],
+        tool_request=_native_tool_request(max_calls=1),
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.calls[0].name == "lookup"
+    assert fake_http.last_url == "https://api.openai.com/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_explicit_azure_chat_completions_normalizes_native_tool_calls() -> None:
+    payload = {
+        "id": "chatcmpl_azure",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": [
+                        {
+                            "id": "call_azure_1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"A"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 2},
+    }
+    client = GenericLLMClient(
+        provider="azure",
+        model="deployment-a",
+        endpoint_id="azure_chat_completions",
+        base_url="https://example.openai.azure.com",
+        azure_deployment="deployment-a",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "Look up A"}],
+        tool_request=_native_tool_request(max_calls=1),
+        max_output_tokens=128,
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.text == "Checking."
+    assert response.calls[0].call_id == "call_azure_1"
+    assert fake_http.last_url is not None
+    assert "/chat/completions?" in fake_http.last_url
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["max_tokens"] == 128
+
+
+@pytest.mark.asyncio
+async def test_explicit_azure_responses_rejects_direct_chat_without_switching() -> None:
+    client = GenericLLMClient(
+        provider="azure",
+        model="deployment-a",
+        endpoint_id="azure_responses",
+        base_url="https://example.openai.azure.com",
+        azure_deployment="deployment-a",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient({})
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="pinned Azure Responses"):
+        await client.chat([{"role": "user", "content": "Hello"}])
+
+    assert fake_http.last_url is None
 
 
 @pytest.mark.asyncio
@@ -1520,6 +1662,19 @@ def test_encode_llm_profile_env_includes_prompt_cache_policy() -> None:
     )
 
     assert env["AETHERGRAPH_LLM__PROFILES__DEEPSEEK__PROMPT_CACHE_POLICY"] == "required"
+
+
+def test_encode_llm_profile_env_includes_explicit_endpoint() -> None:
+    env = encode_llm_profile_env(
+        "AZURE_TOOLS",
+        LLMProfile(
+            provider="azure",
+            model="deployment-a",
+            endpoint_id="azure_responses",
+        ),
+    )
+
+    assert env["AETHERGRAPH_LLM__PROFILES__AZURE_TOOLS__ENDPOINT_ID"] == "azure_responses"
 
 
 def test_encode_llm_profile_env_includes_explicit_vision_fields() -> None:

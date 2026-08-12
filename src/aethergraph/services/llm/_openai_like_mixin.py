@@ -176,6 +176,22 @@ def _openai_like_tool_call_response(
     )
 
 
+def _openai_like_tool_definitions(tool_request: ToolCallRequest) -> list[dict[str, Any]]:
+    """Project canonical Tools into Chat Completions function declarations."""
+
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            },
+        }
+        for tool in tool_request.tools
+    ]
+
+
 class _OpenAILikeMixin:
     """Provider methods for OpenRouter, LMStudio, Ollama (OpenAI-compatible endpoints)."""
 
@@ -249,17 +265,7 @@ class _OpenAILikeMixin:
             if response_format is not None:
                 body["response_format"] = response_format
             if tool_request is not None:
-                body["tools"] = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema,
-                        },
-                    }
-                    for tool in tool_request.tools
-                ]
+                body["tools"] = _openai_like_tool_definitions(tool_request)
                 body["tool_choice"] = tool_request.choice
                 body["parallel_tool_calls"] = tool_request.max_calls > 1
             elif tools is not None:

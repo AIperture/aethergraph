@@ -57,7 +57,12 @@ def chat_profile_from_legacy(
         It remains available only to the separate embedding migration codec.
     """
 
-    adapter = resolve_endpoint_adapter(profile.provider, "chat", endpoint_id=endpoint_id)
+    selected_endpoint_id = endpoint_id or profile.endpoint_id
+    adapter = resolve_endpoint_adapter(
+        profile.provider,
+        "chat",
+        endpoint_id=selected_endpoint_id,
+    )
     credentials = (
         CredentialSelection(inline_secret=profile.api_key)
         if profile.api_key is not None

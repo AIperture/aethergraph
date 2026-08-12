@@ -1045,6 +1045,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     client = GenericLLMClient(
         "azure",
         "gpt-5.5",
+        endpoint_id="azure_responses",
         api_key="azure-test",
         base_url="https://example.openai.azure.com",
         azure_deployment="gpt-5.5",
@@ -1087,6 +1088,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert isinstance(response, ToolCallResponse)
     assert response.transport_checkpoint is not None
     assert response.transport_checkpoint.provider == "azure"
+    assert client.endpoint_id == "azure_responses"
     assert fake_http.last_url == ("https://example.openai.azure.com/openai/v1/responses")
     assert fake_http.last_headers is not None
     assert fake_http.last_headers["api-key"] == "azure-test"

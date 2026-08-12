@@ -50,7 +50,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRetrySettings,
     checked_response_metadata,
 )
-from aethergraph.services.llm.registry import provider_default_base_url
+from aethergraph.services.llm.registry import provider_default_base_url, resolve_endpoint_adapter
 from aethergraph.services.llm.request_validation import (
     LLMRequestCompatibilityError,
     validate_model_request,
@@ -209,6 +209,7 @@ class GenericLLMClient(
         *,
         base_url: str | None = None,
         api_key: str | None = None,
+        endpoint_id: str | None = None,
         azure_deployment: str | None = None,
         timeout: float = 60.0,
         # metering
@@ -235,6 +236,11 @@ class GenericLLMClient(
     ):
         """Create a provider-neutral LLM client with profile-level runtime policies.
 
+        Intro:
+            An explicit endpoint is validated and pinned before any request is
+            inspected. Omitting it preserves the temporary `0.1.x` legacy
+            provider-routing boundary while stored profiles are migrated.
+
         Examples:
             Create an OpenAI client with default compatibility policies:
             ```python
@@ -255,6 +261,7 @@ class GenericLLMClient(
             model: Default provider model identifier.
             base_url: Optional provider API base URL override.
             api_key: Optional provider credential override.
+            endpoint_id: Optional exact registered Chat endpoint adapter.
             azure_deployment: Optional Azure OpenAI deployment name.
             timeout: HTTP request timeout in seconds.
             metering: Optional service for recording normalized usage.
@@ -279,9 +286,16 @@ class GenericLLMClient(
 
         Notes:
             The client owns provider transport resources and should be closed after use.
+            Explicit endpoint bindings never switch protocol according to request
+            features or provider failures.
         """
         self.provider = (provider or os.getenv("LLM_PROVIDER") or "openai").lower()
         self.model = model or os.getenv("LLM_MODEL") or "gpt-4o-mini"
+        self.endpoint_id = (
+            resolve_endpoint_adapter(self.provider, "chat", endpoint_id=endpoint_id).adapter_id
+            if endpoint_id is not None
+            else None
+        )
         self.rate_limit_group = rate_limit_group
         self._client = httpx.AsyncClient(timeout=timeout)
         self._bound_loop = None
@@ -323,7 +337,7 @@ class GenericLLMClient(
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
-        endpoint_family = _TOOL_CALL_ENDPOINT_FAMILIES.get(self.provider, "")
+        endpoint_family = self._active_endpoint_family()
         self._tool_discovery_capabilities = resolve_tool_discovery_capabilities(
             self.provider,
             self.model,
@@ -332,6 +346,17 @@ class GenericLLMClient(
         self._tool_transport_checkpoints: dict[str, ToolTransportCheckpoint] = {}
         self._latest_tool_checkpoint_refs: dict[tuple[str, str, str], str] = {}
         self._logger = logging.getLogger("aethergraph.services.llm")
+
+    def _active_endpoint_family(self) -> str:
+        """Return the pinned or legacy-compatible Chat protocol family."""
+
+        if self.endpoint_id is not None:
+            return resolve_endpoint_adapter(
+                self.provider,
+                "chat",
+                endpoint_id=self.endpoint_id,
+            ).protocol_family
+        return _TOOL_CALL_ENDPOINT_FAMILIES.get(self.provider, "")
 
     def pin_tool_transport_checkpoint(
         self,
@@ -677,8 +702,8 @@ class GenericLLMClient(
             if discovery is not None
             else "tool_discovery_binding"
         )
-        endpoint_family = _TOOL_CALL_ENDPOINT_FAMILIES.get(self.provider)
-        if endpoint_family is None:
+        endpoint_family = self._active_endpoint_family()
+        if not endpoint_family:
             raise LLMToolCallCapabilityError(
                 provider=self.provider,
                 model=model,
@@ -1431,9 +1456,17 @@ class GenericLLMClient(
             tool_request=projection.kwargs.get("tool_request"),
         )
 
-    @staticmethod
-    def _require_compatible_model_request(request: ModelRequest) -> None:
-        report = validate_model_request(request)
+    def _require_compatible_model_request(self, request: ModelRequest) -> None:
+        adapter = (
+            resolve_endpoint_adapter(
+                self.provider,
+                "chat",
+                endpoint_id=self.endpoint_id,
+            )
+            if self.endpoint_id is not None
+            else None
+        )
+        report = validate_model_request(request, adapter=adapter)
         if not report.valid:
             raise LLMRequestCompatibilityError(report)
 
@@ -1804,6 +1837,7 @@ class GenericLLMClient(
             provider_metadata={
                 "provider": self.provider,
                 "model": self.model,
+                "endpoint_id": self.endpoint_id or "legacy_compat",
             },
             usage=ModelUsage.from_provider_usage(usage),
         )
@@ -1980,11 +2014,13 @@ class GenericLLMClient(
                     model=model,
                     policy=effective_policy,
                     allow_native_strict=strict_schema,
+                    endpoint_id=self.endpoint_id,
                 )
             except LLMStructuredOutputCapabilityError as exc:
                 capabilities = resolve_structured_output_capabilities(
                     self.provider,
                     model,
+                    endpoint_id=self.endpoint_id,
                 )
                 request_args = self._build_request_args(
                     model=model,
@@ -2077,6 +2113,7 @@ class GenericLLMClient(
                 scope_dimensions=self._current_dimensions(),
                 tool_request=tool_request,
                 policy=self.prompt_cache_policy,
+                endpoint_id=self.endpoint_id,
             )
             provider_messages = list(prepared_prompt_cache.messages)
         fail_on_unsupported = self._resolve_fail_on_unsupported(fail_on_unsupported)
@@ -2103,6 +2140,8 @@ class GenericLLMClient(
             strict_schema=strict_schema,
             extra_params=kw,
         )
+        request_args["endpoint_id"] = self.endpoint_id or "legacy_compat"
+        provider_request_args["endpoint_id"] = self.endpoint_id or "legacy_compat"
         if tool_request is not None:
             tool_request_summary = {
                 "choice": tool_request.choice,
@@ -2118,7 +2157,7 @@ class GenericLLMClient(
                 tool_request_summary["discovery"] = {
                     "mode": tool_request.discovery.mode,
                     "max_results": tool_request.discovery.max_results,
-                    "endpoint_family": _TOOL_CALL_ENDPOINT_FAMILIES[self.provider],
+                    "endpoint_family": self._active_endpoint_family(),
                     "replay_requirement": discovery_capability.replay_requirement,
                     "result_limit_behavior": discovery_capability.result_limit_behavior,
                     "capability_max_results": discovery_capability.max_results,
@@ -2267,6 +2306,12 @@ class GenericLLMClient(
             if isinstance(provider_value, ToolCallResponse):
                 provider_value = replace(
                     provider_value,
+                    provider_metadata={
+                        **provider_value.provider_metadata,
+                        "provider": self.provider,
+                        "model": model,
+                        "endpoint_id": self.endpoint_id or "legacy_compat",
+                    },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
 
@@ -2551,7 +2596,7 @@ class GenericLLMClient(
         quota_reservation: _LLMQuotaReservation | None = None
         try:
             quota_reservation = self._preflight_llm_request(request_estimate)
-            if self.provider == "openai":
+            if self.provider == "openai" and self.endpoint_id != "openai_chat_completions":
                 provider_result = await self._provider_retry.execute(
                     lambda: self._chat_openai_responses_stream(
                         messages,
@@ -2595,7 +2640,7 @@ class GenericLLMClient(
                     rate_limit_group=self.rate_limit_group,
                 )
                 text, usage = provider_result.value
-            elif self.provider == "deepseek":
+            elif self._active_endpoint_family() == "chat.completions" and self.provider != "azure":
                 provider_result = await self._provider_retry.execute(
                     lambda: self._chat_openai_like_chat_completions_stream(
                         messages,
@@ -2710,7 +2755,8 @@ class GenericLLMClient(
         # Extract cross-provider extras if any
         tools = kw.pop("tools", None)
         tool_choice = kw.pop("tool_choice", None)
-        if tool_request is not None and self.provider not in _TOOL_CALL_ENDPOINT_FAMILIES:
+        endpoint_family = self._active_endpoint_family()
+        if tool_request is not None and not endpoint_family:
             raise LLMToolCallCapabilityError(
                 provider=self.provider,
                 model=model,
@@ -2718,6 +2764,23 @@ class GenericLLMClient(
 
         # OpenAI is now symmetric too
         if self.provider == "openai":
+            if self.endpoint_id == "openai_chat_completions":
+                return await self._chat_openai_like_chat_completions(
+                    messages,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    max_output_tokens=max_output_tokens,
+                    output_format=output_format,
+                    json_schema=json_schema,
+                    fail_on_unsupported=fail_on_unsupported,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    tool_request=tool_request,
+                    schema_name=schema_name,
+                    strict_schema=strict_schema,
+                    structured_output_fields=structured_output_fields,
+                    **kw,
+                )
             return await self._chat_openai_responses(
                 messages,
                 model=model,
@@ -2762,7 +2825,16 @@ class GenericLLMClient(
             )
 
         if self.provider == "azure":
-            if tool_request is not None:
+            if self.endpoint_id == "azure_responses" or (
+                self.endpoint_id is None and tool_request is not None
+            ):
+                if tool_request is None:
+                    raise LLMUnsupportedFeatureError(
+                        self.provider,
+                        model,
+                        "direct_chat",
+                        "the pinned Azure Responses adapter currently requires a Tool request",
+                    )
                 return await self._chat_azure_responses(
                     messages,
                     model=model,
@@ -2775,11 +2847,13 @@ class GenericLLMClient(
             return await self._chat_azure_chat_completions(
                 messages,
                 model=model,
+                max_output_tokens=max_output_tokens,
                 output_format=output_format,
                 json_schema=json_schema,
                 fail_on_unsupported=fail_on_unsupported,
                 tools=tools,
                 tool_choice=tool_choice,
+                tool_request=tool_request,
                 structured_output_fields=structured_output_fields,
                 **kw,
             )

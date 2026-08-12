@@ -31,6 +31,7 @@ def _apply_env_overrides_to_profile(
     if is_default:
         provider_env = os.getenv("LLM_PROVIDER")
         model_env = os.getenv("LLM_MODEL")
+        endpoint_env = os.getenv("LLM_ENDPOINT_ID")
         base_env = os.getenv("LLM_BASE_URL")
         timeout_env = os.getenv("LLM_TIMEOUT")
         reasoning_effort_env = os.getenv("LLM_REASONING_EFFORT")
@@ -43,6 +44,8 @@ def _apply_env_overrides_to_profile(
             p.provider = provider_env.lower()  # type: ignore[assignment]
         if model_env:
             p.model = model_env
+        if endpoint_env:
+            p.endpoint_id = endpoint_env
         if base_env:
             p.base_url = base_env
         if timeout_env:
@@ -95,6 +98,7 @@ def client_from_profile(
     observation_sink: LLMObservationSink | None = None,
     observation_capture_mode: CaptureMode = "manifest",
     rate_gate: ProviderRateGate | None = None,
+    pin_endpoint: bool = True,
 ) -> GenericLLMClient:
     """Build one Chat client from an already canonicalized profile.
 
@@ -122,13 +126,15 @@ def client_from_profile(
         observation_sink: Optional provider-call observation sink.
         observation_capture_mode: Observation payload capture policy.
         rate_gate: Optional shared provider quota gate.
+        pin_endpoint: Whether runtime dispatch must use the canonical endpoint.
 
     Returns:
         GenericLLMClient: Configured provider-neutral Chat client.
 
     Notes:
         This function does not inspect legacy settings or choose a different
-        endpoint according to request features.
+        endpoint according to request features. Passing `False` is restricted
+        to the documented endpoint-less `0.1.x` settings migration boundary.
     """
 
     # At this point, _apply_env_overrides_to_profile has already filled
@@ -145,6 +151,7 @@ def client_from_profile(
         model=p.model.model_id,
         base_url=p.connection.base_url,
         api_key=api_key,
+        endpoint_id=p.connection.endpoint_id if pin_endpoint else None,
         azure_deployment=p.connection.deployment,
         timeout=p.transport.timeout_s,
         retry_settings=p.transport.retry,
@@ -225,6 +232,7 @@ def build_llm_clients(
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
             rate_gate=shared_rate_gate,
+            pin_endpoint=default_profile.endpoint_id is not None,
         )
     }
 
@@ -243,6 +251,7 @@ def build_llm_clients(
             observation_sink=observation_sink,
             observation_capture_mode=observation_capture_mode,
             rate_gate=shared_rate_gate,
+            pin_endpoint=prof.endpoint_id is not None,
         )
 
     return clients

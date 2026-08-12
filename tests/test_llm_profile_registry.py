@@ -7,7 +7,7 @@ from typing import get_args
 from pydantic import SecretStr, ValidationError
 import pytest
 
-from aethergraph.config.llm import EmbeddingProfile, LLMProfile
+from aethergraph.config.llm import EmbeddingProfile, LLMProfile, LLMSettings
 from aethergraph.services.llm import (
     ENDPOINT_ADAPTERS,
     PROVIDERS,
@@ -21,7 +21,8 @@ from aethergraph.services.llm.compat import (
     embedding_profile_from_legacy,
 )
 from aethergraph.services.llm.credentials import resolve_provider_credential
-from aethergraph.services.llm.factory import client_from_profile
+from aethergraph.services.llm.factory import build_llm_clients, client_from_profile
+from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.providers import Provider
 
@@ -197,11 +198,52 @@ def test_chat_factory_consumes_canonical_profile_without_losing_policy() -> None
     client = client_from_profile(canonical, _Secrets())
 
     assert client.provider == "openai"
+    assert client.endpoint_id == "openai_responses"
     assert client.model == "gpt-5.6"
     assert client.compatibility_policy == "strict"
     assert client.structured_output_policy == "native_required"
     assert client.prompt_cache_policy == "disabled"
     assert client.context_window_tokens == 128_000
+
+
+def test_legacy_profile_preserves_explicit_endpoint_selection() -> None:
+    legacy = LLMProfile(
+        provider="azure",
+        model="deployment-a",
+        endpoint_id="azure_responses",
+        azure_deployment="deployment-a",
+    )
+
+    canonical = chat_profile_from_legacy(legacy)
+    client = client_from_profile(canonical, _Secrets())
+
+    assert canonical.connection.endpoint_id == "azure_responses"
+    assert client.endpoint_id == "azure_responses"
+
+
+def test_explicit_endpoint_rejects_cross_provider_binding() -> None:
+    with pytest.raises(ValueError, match="not registered"):
+        GenericLLMClient(
+            provider="anthropic",
+            model="claude-test",
+            endpoint_id="openai_responses",
+        )
+
+
+def test_endpointless_legacy_settings_keep_temporary_compatibility_dispatch() -> None:
+    clients = build_llm_clients(
+        LLMSettings(
+            default=LLMProfile(
+                provider="azure",
+                model="deployment-a",
+                azure_deployment="deployment-a",
+                base_url="https://example.openai.azure.com",
+            )
+        ),
+        _Secrets(),
+    )
+
+    assert clients["default"].endpoint_id is None
 
 
 def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:

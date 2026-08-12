@@ -9,6 +9,15 @@ from aethergraph.services.llm.providers import Provider
 class LLMProfile(BaseModel):
     provider: Provider = "openai"
     model: str = "gpt-4o-mini"
+    endpoint_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description=(
+            "Optional explicit registered Chat endpoint adapter. Omission keeps "
+            "the legacy 0.1.x provider routing compatibility boundary."
+        ),
+    )
     embed_model: str | None = None  # separate embedding model
     base_url: str | None = None
     timeout: float = 60.0

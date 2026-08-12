@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from aethergraph.services.llm._openai_like_mixin import (
+    _openai_like_tool_call_response,
+    _openai_like_tool_definitions,
+)
 from aethergraph.services.llm._openai_mixin import (
     _openai_checkpoint_payload,
     _openai_function_tool,
@@ -51,13 +55,15 @@ class _AzureMixin:
         messages: list[dict[str, Any]],
         *,
         model: str,
+        max_output_tokens: int | None = None,
         output_format: ChatOutputFormat,
         json_schema: dict[str, Any] | None,
         fail_on_unsupported: bool,
         tools: list[dict[str, Any]] | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        tool_request: ToolCallRequest | None = None,
         **kw: Any,
-    ) -> ProviderCallResult[tuple[str, dict[str, int]]]:
+    ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         await self._ensure_client()
         assert self._client is not None
 
@@ -75,6 +81,8 @@ class _AzureMixin:
             "temperature": temperature,
             "top_p": top_p,
         }
+        if max_output_tokens is not None:
+            payload["max_tokens"] = max_output_tokens
         structured_output_fields = kw.pop("structured_output_fields", None)
 
         if structured_output_fields:
@@ -89,9 +97,13 @@ class _AzureMixin:
                 )
             payload["messages"] = _ensure_system_json_directive(messages, schema=json_schema)
 
-        if tools is not None:
+        if tool_request is not None:
+            payload["tools"] = _openai_like_tool_definitions(tool_request)
+            payload["tool_choice"] = tool_request.choice
+            payload["parallel_tool_calls"] = tool_request.max_calls > 1
+        elif tools is not None:
             payload["tools"] = tools
-        if tool_choice is not None:
+        if tool_request is None and tool_choice is not None:
             payload["tool_choice"] = tool_choice
 
         async def _call():
@@ -108,6 +120,14 @@ class _AzureMixin:
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
                 return ProviderCallResult((txt, usage), metadata)
+
+            if tool_request is not None:
+                response = _openai_like_tool_call_response(
+                    data,
+                    tool_request=tool_request,
+                    provider="azure",
+                )
+                return ProviderCallResult((response, usage), metadata)
 
             txt, _ = _first_text(data.get("choices", []))
             return ProviderCallResult((txt, usage), metadata)
