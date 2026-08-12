@@ -11,6 +11,7 @@ from .types import ImageInput, PromptCacheRequest, StructuredOutputRequest
 
 MessageRole = Literal["system", "developer", "user", "assistant", "tool"]
 ModelResponseFormat: TypeAlias = Literal["text", "json_object", "raw"] | StructuredOutputRequest
+MODEL_REQUEST_CONTRACT_VERSION = "model_request/v1"
 
 
 @dataclass(frozen=True)
@@ -474,6 +475,7 @@ __all__ = [
     "GenerationOptions",
     "ImagePart",
     "MessageRole",
+    "MODEL_REQUEST_CONTRACT_VERSION",
     "ModelRequest",
     "ModelResponseFormat",
     "TextPart",

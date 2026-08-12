@@ -14,12 +14,15 @@ from aethergraph.services.llm import (
     TextPart,
     ToolCall,
     ToolCallOutput,
+    ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
     ToolDiscoveryEvent,
     ToolDiscoveryRequest,
     message_from_text,
 )
+from aethergraph.services.llm.compat import project_model_request_to_chat
+from aethergraph.services.llm.tool_calling import tool_call_request_fingerprint
 
 
 def _continuation() -> ModelContinuation:
@@ -105,6 +108,22 @@ def test_model_request_requires_continuation_for_tool_outputs() -> None:
             tool_choice="auto",
             tool_outputs=(ToolCallOutput("call_1", "done"),),
         )
+
+
+def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest() -> None:
+    legacy = ToolCallRequest(tools=(_tool(),), choice="auto")
+    canonical_request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(_tool(),),
+        tool_choice="auto",
+    )
+    projected = project_model_request_to_chat(canonical_request).kwargs["tool_request"]
+
+    assert tool_call_request_fingerprint(legacy) == (
+        "b1944bede27a704b605692fc79bf14ac612f92ed1783540975c1e39aec9da1ee"
+    )
+    assert projected.fingerprint_version == "model_request/v1"
+    assert tool_call_request_fingerprint(projected) != tool_call_request_fingerprint(legacy)
 
 
 def test_model_usage_distinguishes_unavailable_from_reported_zero() -> None:

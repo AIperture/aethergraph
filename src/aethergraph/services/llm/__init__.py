@@ -1,6 +1,7 @@
 """Public provider-neutral LLM service contracts."""
 
 from .contracts import (
+    MODEL_REQUEST_CONTRACT_VERSION,
     ChatMessage,
     ContentPart,
     GenerationOptions,
@@ -113,6 +114,7 @@ __all__ = [
     "LLMToolCallCapabilityError",
     "LLMToolCallError",
     "LLMToolCallResponseError",
+    "MODEL_REQUEST_CONTRACT_VERSION",
     "MessageRole",
     "ModelContinuation",
     "ModelRequest",

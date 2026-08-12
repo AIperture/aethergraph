@@ -6,7 +6,7 @@ import base64
 from dataclasses import dataclass
 from typing import Any
 
-from ..contracts import ChatMessage, ModelRequest, TextPart
+from ..contracts import MODEL_REQUEST_CONTRACT_VERSION, ChatMessage, ModelRequest, TextPart
 from ..tool_calling import ToolCallRequest
 from ..types import ImageInput, StructuredOutputRequest
 
@@ -103,6 +103,7 @@ def project_model_request_to_chat(request: ModelRequest) -> LegacyChatProjection
             active_tool_names=request.active_tool_names,
             transport_checkpoint=request.continuation,
             tool_outputs=request.tool_outputs,
+            fingerprint_version=MODEL_REQUEST_CONTRACT_VERSION,
         )
     return LegacyChatProjection(
         messages=tuple(_project_message(message) for message in request.messages),

@@ -25,6 +25,7 @@ ToolChoice = Literal["auto", "required", "none"]
 AssistantOutputType = Literal["text", "refusal"]
 ASSISTANT_OUTPUT_NORMALIZATION_VERSION = "assistant_output/v1"
 _MODEL_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION = "tool_request/v1"
 
 
 class LLMToolCallError(LLMError):
@@ -341,6 +342,7 @@ class ToolCallRequest:
     active_tool_names: tuple[str, ...] = ()
     transport_checkpoint: ToolTransportCheckpoint | None = None
     tool_outputs: tuple[ToolCallOutput, ...] = ()
+    fingerprint_version: str = LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION
 
     def __post_init__(self) -> None:
         """
@@ -438,11 +440,15 @@ class ToolCallRequest:
             raise ValueError("Tool-call request tool_outputs must have unique call ids")
         if tool_outputs and self.transport_checkpoint is None:
             raise ValueError("Tool-call outputs require a transport checkpoint")
+        fingerprint_version = str(self.fingerprint_version or "").strip()
+        if not fingerprint_version:
+            raise ValueError("Tool-call request fingerprint_version must not be empty")
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "max_calls", int(self.max_calls))
         object.__setattr__(self, "turn_id", turn_id or None)
         object.__setattr__(self, "active_tool_names", active_tool_names)
         object.__setattr__(self, "tool_outputs", tool_outputs)
+        object.__setattr__(self, "fingerprint_version", fingerprint_version)
 
 
 def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
@@ -480,6 +486,8 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
             }
         ),
     }
+    if request.fingerprint_version != LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION:
+        payload["contract_version"] = request.fingerprint_version
     canonical = json.dumps(
         payload,
         ensure_ascii=True,
@@ -938,6 +946,7 @@ __all__ = [
     "LLMToolCallCapabilityError",
     "LLMToolCallError",
     "LLMToolCallResponseError",
+    "LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION",
     "ModelResponse",
     "ModelResponseItem",
     "ModelToolCall",
