@@ -27,6 +27,147 @@ from aethergraph.services.llm.registry import ENDPOINT_ADAPTERS, PROVIDERS
 router = APIRouter(prefix="/llm", tags=["llm"])
 
 
+def build_llm_registry_response(*, include_hidden: bool = False) -> LLMRegistryResponse:
+    """Build the versioned provider and endpoint registry projection.
+
+    Intro:
+        The builder gives embedded hosts the exact response used by the AG HTTP
+        route without requiring a second server or reimplementing registry truth.
+
+    Examples:
+        Build the Studio-visible registry:
+            ```python
+            response = build_llm_registry_response()
+            ```
+
+        Include internal providers for diagnostics:
+            ```python
+            response = build_llm_registry_response(include_hidden=True)
+            ```
+
+    Args:
+        include_hidden: Whether to include providers not intended for Studio.
+
+    Returns:
+        LLMRegistryResponse: Deterministically ordered versioned registry view.
+
+    Notes:
+        The builder reads immutable in-process descriptors and no environment
+        values, credentials, or provider APIs.
+    """
+
+    providers = tuple(
+        LLMProviderView(
+            provider_id=provider.provider_id,
+            display_name=provider.display_name,
+            studio_visible=provider.studio_visible,
+            default_endpoints=dict(provider.default_endpoints),
+            default_base_url=provider.default_base_url,
+            base_url_env=provider.base_url_env,
+            credential_envs=provider.credential_envs,
+            model_discovery_adapter_id=provider.model_discovery_adapter_id,
+            endpoints=tuple(
+                LLMEndpointAdapterView(
+                    adapter_id=adapter.adapter_id,
+                    protocol_family=adapter.protocol_family,
+                    implemented_operations=adapter.implemented_operations,
+                    implementation_capabilities=adapter.implementation_capabilities,
+                )
+                for adapter in (
+                    ENDPOINT_ADAPTERS[adapter_id] for adapter_id in provider.endpoint_ids
+                )
+            ),
+        )
+        for provider in sorted(PROVIDERS.values(), key=lambda item: item.provider_id)
+        if include_hidden or provider.studio_visible
+    )
+    return LLMRegistryResponse(providers=providers)
+
+
+def build_llm_model_catalog_response() -> LLMModelCatalogResponse:
+    """Build the versioned validated production-catalog projection.
+
+    Intro:
+        Embedded hosts receive the same catalog revision, entries, and canonical
+        digest as the AG HTTP route and live resolver.
+
+    Examples:
+        Read the catalog digest:
+            ```python
+            digest = build_llm_model_catalog_response().digest
+            ```
+
+        Inspect catalog entries:
+            ```python
+            entries = build_llm_model_catalog_response().entries
+            ```
+
+    Args:
+        None.
+
+    Returns:
+        LLMModelCatalogResponse: Validated catalog identity and entries.
+
+    Notes:
+        The builder performs no live documentation refresh or model discovery.
+    """
+
+    catalog = load_model_catalog()
+    return LLMModelCatalogResponse(
+        catalog_schema_version=catalog.schema_version,
+        catalog_revision=catalog.catalog_revision,
+        digest=catalog_digest(catalog),
+        entries=catalog.entries,
+    )
+
+
+def build_llm_chat_resolve_response(
+    body: LLMChatResolveRequest,
+) -> LLMChatResolveResponse:
+    """Build one side-effect-free explicit Chat binding resolution.
+
+    Intro:
+        Embedded hosts and the AG route share endpoint membership validation,
+        capability provenance, override handling, and fail-closed requirements.
+
+    Examples:
+        Resolve an ordinary binding:
+            ```python
+            response = build_llm_chat_resolve_response(request)
+            ```
+
+        Inspect failed requirements:
+            ```python
+            response = build_llm_chat_resolve_response(strict_request)
+            assert response.valid or response.binding.diagnostics
+            ```
+
+    Args:
+        body: Explicit provider, endpoint, model, overrides, and requirements.
+
+    Returns:
+        LLMChatResolveResponse: Pinned effective binding and validity.
+
+    Notes:
+        Invalid provider or endpoint combinations raise `KeyError` or `ValueError`
+        for the owning API boundary to translate without selecting a fallback.
+    """
+
+    profile = ChatProfile(
+        connection=ProviderConnection(
+            provider_id=body.provider_id,
+            endpoint_id=body.endpoint_id,
+        ),
+        model=ModelSelection(model_id=body.model_id),
+        capability_overrides=body.capability_overrides,
+    )
+    binding = resolve_chat_profile(
+        profile,
+        required=body.required_capabilities,
+    )
+    return LLMChatResolveResponse(valid=binding.valid, binding=binding)
+
+
 @router.get("/registry", response_model=LLMRegistryResponse)
 async def list_llm_registry(
     identity: Annotated[RequestIdentity, Depends(get_identity)],
@@ -64,32 +205,7 @@ async def list_llm_registry(
     """
 
     del identity
-    providers = tuple(
-        LLMProviderView(
-            provider_id=provider.provider_id,
-            display_name=provider.display_name,
-            studio_visible=provider.studio_visible,
-            default_endpoints=dict(provider.default_endpoints),
-            default_base_url=provider.default_base_url,
-            base_url_env=provider.base_url_env,
-            credential_envs=provider.credential_envs,
-            model_discovery_adapter_id=provider.model_discovery_adapter_id,
-            endpoints=tuple(
-                LLMEndpointAdapterView(
-                    adapter_id=adapter.adapter_id,
-                    protocol_family=adapter.protocol_family,
-                    implemented_operations=adapter.implemented_operations,
-                    implementation_capabilities=adapter.implementation_capabilities,
-                )
-                for adapter in (
-                    ENDPOINT_ADAPTERS[adapter_id] for adapter_id in provider.endpoint_ids
-                )
-            ),
-        )
-        for provider in sorted(PROVIDERS.values(), key=lambda item: item.provider_id)
-        if include_hidden or provider.studio_visible
-    )
-    return LLMRegistryResponse(providers=providers)
+    return build_llm_registry_response(include_hidden=include_hidden)
 
 
 @router.get("/catalog", response_model=LLMModelCatalogResponse)
@@ -126,13 +242,7 @@ async def get_llm_model_catalog(
     """
 
     del identity
-    catalog = load_model_catalog()
-    return LLMModelCatalogResponse(
-        catalog_schema_version=catalog.schema_version,
-        catalog_revision=catalog.catalog_revision,
-        digest=catalog_digest(catalog),
-        entries=catalog.entries,
-    )
+    return build_llm_model_catalog_response()
 
 
 @router.post("/resolve/chat", response_model=LLMChatResolveResponse)
@@ -185,22 +295,15 @@ async def resolve_llm_chat_binding(
     """
 
     del identity
-    profile = ChatProfile(
-        connection=ProviderConnection(
-            provider_id=body.provider_id,
-            endpoint_id=body.endpoint_id,
-        ),
-        model=ModelSelection(model_id=body.model_id),
-        capability_overrides=body.capability_overrides,
-    )
     try:
-        binding = resolve_chat_profile(
-            profile,
-            required=body.required_capabilities,
-        )
+        return build_llm_chat_resolve_response(body)
     except (KeyError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return LLMChatResolveResponse(valid=binding.valid, binding=binding)
 
 
-__all__ = ["router"]
+__all__ = [
+    "build_llm_chat_resolve_response",
+    "build_llm_model_catalog_response",
+    "build_llm_registry_response",
+    "router",
+]
