@@ -7,6 +7,13 @@ from pydantic import ValidationError
 import pytest
 
 from aethergraph.config.llm import LLMProfile
+from aethergraph.services.llm import (
+    ModelRequest,
+    ToolDefinition,
+    ToolDiscoveryRequest,
+    message_from_text,
+    resolve_model_request,
+)
 from aethergraph.services.llm.capabilities import resolve_chat_profile
 from aethergraph.services.llm.catalog import (
     ModelCatalog,
@@ -253,3 +260,59 @@ def test_override_is_clamped_when_adapter_explicitly_lacks_feature() -> None:
     capability = binding.capabilities.native_tool_search_client
     assert capability.state == "unsupported"
     assert capability.provenance[-1].source == "adapter"
+
+
+def test_complete_request_resolution_combines_adapter_and_model_requirements() -> None:
+    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="gpt-5.6")).model_copy(
+        update={"capability_overrides": ChatCapabilityOverrides(native_tool_calling="supported")}
+    )
+    request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(
+            ToolDefinition(
+                name="lookup",
+                description="Look up one value.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ),
+        tool_choice="auto",
+    )
+
+    resolved = resolve_model_request(profile, request)
+
+    assert resolved.valid is True
+    assert resolved.binding.endpoint_id == "openai_responses"
+    assert resolved.compatibility.required_model_capabilities == ("native_tool_calling",)
+
+
+def test_complete_request_resolution_never_switches_incompatible_adapter() -> None:
+    profile = chat_profile_from_legacy(
+        LLMProfile(provider="openrouter", model="openai/gpt-5.6")
+    ).model_copy(
+        update={
+            "capability_overrides": ChatCapabilityOverrides(
+                native_tool_calling="supported",
+                native_tool_search_client="supported",
+            )
+        }
+    )
+    request = ModelRequest(
+        messages=(message_from_text("user", "Find a Tool"),),
+        tools=(
+            ToolDefinition(
+                name="lookup",
+                description="Look up one value.",
+                input_schema={"type": "object", "properties": {}},
+                exposure="deferred",
+            ),
+        ),
+        tool_choice="auto",
+        native_tool_search=ToolDiscoveryRequest("native_client"),
+        turn_id="turn_1",
+    )
+
+    resolved = resolve_model_request(profile, request)
+
+    assert resolved.valid is False
+    assert resolved.binding.endpoint_id == "openai_chat_completions"
+    assert resolved.compatibility.diagnostics[0].code == ("adapter_capability_unimplemented")

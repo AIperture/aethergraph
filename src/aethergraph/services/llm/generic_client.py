@@ -49,6 +49,10 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRetrySettings,
     checked_response_metadata,
 )
+from aethergraph.services.llm.request_validation import (
+    LLMRequestCompatibilityError,
+    validate_model_request,
+)
 from aethergraph.services.llm.structured_output import (
     PreparedStructuredOutput,
     StructuredOutputPolicy,
@@ -1423,6 +1427,7 @@ class GenericLLMClient(
             provider billing receipt.
         """
 
+        self._require_compatible_model_request(request)
         projection = project_model_request_to_chat(request)
         return self.estimate_chat_request(
             list(projection.messages),
@@ -1434,6 +1439,12 @@ class GenericLLMClient(
             ),
             tool_request=projection.kwargs.get("tool_request"),
         )
+
+    @staticmethod
+    def _require_compatible_model_request(request: ModelRequest) -> None:
+        report = validate_model_request(request)
+        if not report.valid:
+            raise LLMRequestCompatibilityError(report)
 
     def _preflight_llm_request(
         self,
@@ -1779,6 +1790,7 @@ class GenericLLMClient(
             not a provider or feature fallback.
         """
 
+        self._require_compatible_model_request(request)
         projection = project_model_request_to_chat(request)
         value, usage = await self._invoke_chat_runtime(
             list(projection.messages),

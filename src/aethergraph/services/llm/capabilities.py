@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -11,8 +12,10 @@ from .catalog import (
     resolve_model_catalog_capability_entry,
     resolve_model_catalog_entry,
 )
+from .contracts import ModelRequest
 from .profiles import CapabilityState, ChatProfile
 from .registry import get_endpoint_adapter, get_provider_descriptor
+from .request_validation import RequestCompatibilityReport, validate_model_request
 
 ChatCapabilityName = Literal[
     "image_input",
@@ -114,6 +117,15 @@ class ResolvedModelBinding(CapabilityContract):
         """
 
         return not self.diagnostics
+
+
+@dataclass(frozen=True)
+class ResolvedModelRequest:
+    """Carry one pinned model binding and complete request-validation report."""
+
+    binding: ResolvedModelBinding
+    compatibility: RequestCompatibilityReport
+    valid: bool
 
 
 _CAPABILITY_NAMES: tuple[ChatCapabilityName, ...] = (
@@ -306,6 +318,81 @@ def resolve_chat_profile(
     )
 
 
+def resolve_model_request(
+    profile: ChatProfile,
+    request: ModelRequest,
+) -> ResolvedModelRequest:
+    """Resolve one canonical profile and complete generation request together.
+
+    Intro:
+        Resolution pins the configured endpoint before inspecting request
+        features, validates cross-feature and adapter combinations, and then
+        applies fail-closed model capability requirements with full provenance.
+
+    Examples:
+        Resolve a direct completion:
+        ```python
+        profile = ChatProfile(
+            connection=ProviderConnection(
+                provider_id="openai",
+                endpoint_id="openai_responses",
+            ),
+            model=ModelSelection(model_id="gpt-5.6"),
+        )
+        request = ModelRequest(
+            messages=(ChatMessage("user", (TextPart("Hello"),)),),
+        )
+        resolved = resolve_model_request(profile, request)
+        assert resolved.binding.endpoint_id == profile.connection.endpoint_id
+        ```
+
+        Inspect a rejected Tool request:
+        ```python
+        tool = ToolDefinition(
+            name="lookup",
+            description="Look up one value.",
+            input_schema={"type": "object", "properties": {}},
+        )
+        request = ModelRequest(
+            messages=(ChatMessage("user", (TextPart("Look up"),)),),
+            tools=(tool,),
+            tool_choice="auto",
+        )
+        resolved = resolve_model_request(profile, request)
+        if not resolved.valid:
+            assert resolved.compatibility.diagnostics or resolved.binding.diagnostics
+        ```
+
+    Args:
+        profile: Canonical immutable Chat profile with a preselected endpoint.
+        request: Complete immutable canonical generation request.
+
+    Returns:
+        ResolvedModelRequest: Pinned binding, combination report, and aggregate
+        validity without constructing a runtime client.
+
+    Notes:
+        Unknown model capabilities fail required checks. Resolution never changes
+        provider or endpoint according to request features.
+    """
+    if not isinstance(profile, ChatProfile):
+        raise TypeError("model request resolution requires a ChatProfile")
+    if not isinstance(request, ModelRequest):
+        raise TypeError("model request resolution requires a ModelRequest")
+    adapter = get_endpoint_adapter(profile.connection.endpoint_id)
+    compatibility = validate_model_request(request, adapter=adapter)
+    required = tuple(compatibility.required_model_capabilities)
+    binding = resolve_chat_profile(
+        profile,
+        required=required,  # type: ignore[arg-type]
+    )
+    return ResolvedModelRequest(
+        binding=binding,
+        compatibility=compatibility,
+        valid=compatibility.valid and binding.valid,
+    )
+
+
 __all__ = [
     "CapabilityDiagnostic",
     "CapabilityEvidence",
@@ -313,5 +400,7 @@ __all__ = [
     "EffectiveCapability",
     "ResolvedChatCapabilities",
     "ResolvedModelBinding",
+    "ResolvedModelRequest",
     "resolve_chat_profile",
+    "resolve_model_request",
 ]

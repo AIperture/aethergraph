@@ -6,6 +6,7 @@ from aethergraph.services.llm import (
     AssistantOutput,
     ChatMessage,
     GenerationOptions,
+    LLMRequestCompatibilityError,
     ModelContinuation,
     ModelRequest,
     ModelResponse,
@@ -19,7 +20,9 @@ from aethergraph.services.llm import (
     ToolDefinition,
     ToolDiscoveryEvent,
     ToolDiscoveryRequest,
+    get_endpoint_adapter,
     message_from_text,
+    validate_model_request,
 )
 from aethergraph.services.llm.compat import project_model_request_to_chat
 from aethergraph.services.llm.generic_client import GenericLLMClient
@@ -109,6 +112,91 @@ def test_model_request_requires_continuation_for_tool_outputs() -> None:
             tool_choice="auto",
             tool_outputs=(ToolCallOutput("call_1", "done"),),
         )
+
+
+def test_whole_request_validation_reports_required_adapter_capabilities() -> None:
+    request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(_tool(),),
+        tool_choice="auto",
+    )
+
+    report = validate_model_request(request)
+
+    assert report.valid is True
+    assert report.required_adapter_capabilities == ("native_tools",)
+    assert report.required_model_capabilities == ("native_tool_calling",)
+    assert report.diagnostics == ()
+
+
+def test_whole_request_validation_rejects_structured_output_with_native_tools() -> None:
+    request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(_tool(),),
+        tool_choice="auto",
+        response_format=StructuredOutputRequest(
+            name="Answer",
+            schema={"type": "object", "properties": {}},
+        ),
+    )
+
+    report = validate_model_request(request)
+
+    assert report.valid is False
+    assert report.diagnostics[0].code == "structured_output_with_native_tools"
+
+
+def test_whole_request_validation_rejects_continuation_without_tool_catalog() -> None:
+    request = ModelRequest(
+        messages=(message_from_text("user", "Continue"),),
+        turn_id="turn_1",
+        continuation=_continuation(),
+        tool_outputs=(ToolCallOutput("call_1", "done"),),
+    )
+
+    report = validate_model_request(request)
+
+    assert report.valid is False
+    assert report.diagnostics[0].code == "tool_continuation_without_tools"
+
+
+def test_whole_request_validation_clamps_to_preselected_adapter() -> None:
+    request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(_tool(),),
+        tool_choice="auto",
+    )
+
+    report = validate_model_request(
+        request,
+        adapter=get_endpoint_adapter("dummy_chat"),
+    )
+
+    assert report.valid is False
+    assert report.diagnostics[0].code == "adapter_capability_unimplemented"
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_invalid_whole_request_before_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = ModelRequest(
+        messages=(message_from_text("user", "Look up"),),
+        tools=(_tool(),),
+        tool_choice="auto",
+        response_format="json_object",
+    )
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+
+    async def reject_runtime(*args, **kwargs):
+        raise AssertionError("invalid request reached provider runtime")
+
+    monkeypatch.setattr(client, "_invoke_chat_runtime", reject_runtime)
+
+    with pytest.raises(LLMRequestCompatibilityError) as exc_info:
+        await client.generate(request)
+
+    assert exc_info.value.report.diagnostics[0].code == ("structured_output_with_native_tools")
 
 
 def test_canonical_request_versions_fingerprint_without_rotating_legacy_digest() -> None:

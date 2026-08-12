@@ -7,7 +7,9 @@ from .capabilities import (
     EffectiveCapability,
     ResolvedChatCapabilities,
     ResolvedModelBinding,
+    ResolvedModelRequest,
     resolve_chat_profile,
+    resolve_model_request,
 )
 from .contracts import (
     MODEL_REQUEST_CONTRACT_VERSION,
@@ -59,6 +61,14 @@ from .registry import (
     provider_default_base_url,
     resolve_endpoint_adapter,
     resolve_endpoint_family,
+)
+from .request_validation import (
+    LLMRequestCompatibilityError,
+    RequestCompatibilityDiagnostic,
+    RequestCompatibilityReport,
+    RequestFeature,
+    RequestModelCapability,
+    validate_model_request,
 )
 from .structured_output import (
     StructuredOutputCapabilities,
@@ -157,6 +167,7 @@ __all__ = [
     "ImageGenerationProfile",
     "LLMContextWindowExceededError",
     "LLMProviderRequestError",
+    "LLMRequestCompatibilityError",
     "LLMRequestEstimate",
     "LLMRunQuotaError",
     "LLMRunQuotaExceededError",
@@ -194,8 +205,13 @@ __all__ = [
     "ProviderTransportAttempt",
     "ProviderConnection",
     "ProviderDescriptor",
+    "RequestCompatibilityDiagnostic",
+    "RequestCompatibilityReport",
+    "RequestFeature",
+    "RequestModelCapability",
     "ResolvedChatCapabilities",
     "ResolvedModelBinding",
+    "ResolvedModelRequest",
     "StructuredOutputCapabilities",
     "StructuredOutputMode",
     "StructuredOutputPolicy",
@@ -237,6 +253,8 @@ __all__ = [
     "resolve_endpoint_adapter",
     "resolve_endpoint_family",
     "resolve_chat_profile",
+    "resolve_model_request",
     "resolve_structured_output_capabilities",
     "resolve_tool_discovery_capabilities",
+    "validate_model_request",
 ]
