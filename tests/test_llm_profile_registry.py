@@ -63,6 +63,27 @@ def test_registry_resolves_static_and_environment_base_urls() -> None:
         == "http://localhost:9000/v1"
     )
     assert provider_default_base_url("openai_compatible", environ={}) is None
+    assert (
+        provider_default_base_url(
+            "openai",
+            environ={"OPENAI_BASE_URL": "https://gateway.example/v1/"},
+        )
+        == "https://gateway.example/v1"
+    )
+    assert (
+        provider_default_base_url(
+            "deepseek",
+            environ={"DEEPSEEK_BASE_URL": "https://deepseek.example/v1/"},
+        )
+        == "https://deepseek.example/v1"
+    )
+    assert (
+        provider_default_base_url(
+            "openai_compatible",
+            environ={"OPENAI_COMPATIBLE_BASE_URL": "http://localhost:9000/v1/"},
+        )
+        == "http://localhost:9000/v1"
+    )
 
 
 def test_credential_resolution_uses_inline_store_environment_precedence() -> None:

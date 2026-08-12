@@ -31,6 +31,7 @@ from aethergraph.services.llm._openai_mixin import _OpenAIMixin
 from aethergraph.services.llm.compat import project_model_request_to_chat
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
+from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.observability import (
     CaptureMode,
     LLMObservationRecord,
@@ -49,6 +50,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRetrySettings,
     checked_response_metadata,
 )
+from aethergraph.services.llm.registry import provider_default_base_url
 from aethergraph.services.llm.request_validation import (
     LLMRequestCompatibilityError,
     validate_model_request,
@@ -286,29 +288,13 @@ class GenericLLMClient(
         self._timeout = timeout
 
         # Resolve creds/base
-        self.api_key = (
-            api_key
-            or os.getenv("OPENAI_API_KEY")
-            or os.getenv("ANTHROPIC_API_KEY")
-            or os.getenv("GOOGLE_API_KEY")
-            or os.getenv("DEEPSEEK_API_KEY")
-            or os.getenv("OPENROUTER_API_KEY")
-        )
-
-        self.base_url = (
-            base_url
-            or {
-                "openai": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                "azure": os.getenv("AZURE_OPENAI_ENDPOINT", "").rstrip("/"),
-                "anthropic": "https://api.anthropic.com",
-                "google": "https://generativelanguage.googleapis.com",
-                "deepseek": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-                "openrouter": "https://openrouter.ai/api/v1",
-                "lmstudio": os.getenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1"),
-                "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-                "dummy": "http://localhost:8745",  # for testing with a dummy server
-            }[self.provider]
-        )
+        self.api_key = resolve_provider_credential(
+            provider_id=self.provider,
+            direct=api_key,
+            secret_ref=None,
+            secrets=None,
+        ).value
+        self.base_url = base_url or provider_default_base_url(self.provider) or ""
         self.azure_deployment = azure_deployment or os.getenv("AZURE_OPENAI_DEPLOYMENT")
         self._provider_retry = ProviderRetryExecutor(
             retry_settings,

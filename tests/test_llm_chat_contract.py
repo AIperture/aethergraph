@@ -72,6 +72,45 @@ class _ObservationSink:
         self.records.append(record)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "expected_key"),
+    [
+        ("openai", "openai-key"),
+        ("azure", "azure-key"),
+        ("anthropic", "anthropic-key"),
+        ("google", "google-key"),
+        ("deepseek", "deepseek-key"),
+        ("openrouter", "openrouter-key"),
+        ("openai_compatible", "compatible-key"),
+    ],
+)
+async def test_generic_client_uses_only_exact_provider_environment_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    expected_key: str,
+) -> None:
+    values = {
+        "OPENAI_API_KEY": "openai-key",
+        "AZURE_OPENAI_KEY": "azure-key",
+        "ANTHROPIC_API_KEY": "anthropic-key",
+        "GOOGLE_API_KEY": "google-key",
+        "DEEPSEEK_API_KEY": "deepseek-key",
+        "OPENROUTER_API_KEY": "openrouter-key",
+        "OPENAI_COMPATIBLE_API_KEY": "compatible-key",
+        "AZURE_OPENAI_ENDPOINT": "https://azure.example",
+        "OPENAI_COMPATIBLE_BASE_URL": "http://localhost:9000/v1",
+    }
+    for name, value in values.items():
+        monkeypatch.setenv(name, value)
+
+    client = GenericLLMClient(provider=provider, model="test-model")
+    try:
+        assert client.api_key == expected_key
+    finally:
+        await client.aclose()
+
+
 def _native_tool_request(*, max_calls: int = 2) -> ToolCallRequest:
     return ToolCallRequest(
         tools=(

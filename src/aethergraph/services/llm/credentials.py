@@ -57,9 +57,9 @@ class ResolvedCredential:
 def resolve_provider_credential(
     *,
     provider_id: str,
-    direct: SecretStr | None,
+    direct: SecretStr | str | None,
     secret_ref: str | None,
-    secrets: SecretStore,
+    secrets: SecretStore | None,
     environ: Mapping[str, str] | None = None,
 ) -> ResolvedCredential:
     """Resolve one provider credential with deterministic precedence.
@@ -98,21 +98,26 @@ def resolve_provider_credential(
         provider_id: Registered provider identity.
         direct: Optional inline secret value.
         secret_ref: Optional secret-store reference.
-        secrets: Secret store used for named lookup.
+        secrets: Optional secret store used for named lookup.
         environ: Optional environment mapping used instead of `os.environ`.
 
     Returns:
         ResolvedCredential: Selected value and its non-secret source reference.
 
     Notes:
-        A missing named secret permits the provider environment fallback for
-        compatibility with existing `.env` behavior.
+        A missing named secret permits the exact provider environment fallback
+        for compatibility with existing `.env` behavior. Passing no store is
+        valid only when there is no named secret reference to resolve.
     """
 
     descriptor = get_provider_descriptor(provider_id)
     if direct is not None:
-        return ResolvedCredential(direct.get_secret_value(), None)
+        value = direct.get_secret_value() if isinstance(direct, SecretStr) else str(direct)
+        return ResolvedCredential(value, None)
+    if secret_ref and secrets is None:
+        raise ValueError("named credential resolution requires a secret store")
     if secret_ref:
+        assert secrets is not None
         value = secrets.get(secret_ref)
         if value:
             return ResolvedCredential(value, secret_ref)
