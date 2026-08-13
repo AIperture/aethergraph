@@ -31,6 +31,7 @@ from aethergraph.services.llm.adapters import (
     OpenAIResponsesAdapter,
     invoke_chat_stream_adapter,
     registered_chat_stream_adapter_ids,
+    registered_image_adapter_ids,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
@@ -1383,6 +1384,9 @@ def test_openai_compatible_chat_is_not_inherited_by_generic_client() -> None:
     assert not hasattr(GenericLLMClient, "_chat_anthropic_messages_stream")
     assert not hasattr(GenericLLMClient, "_chat_gemini_generate_content")
     assert not hasattr(GenericLLMClient, "_chat_gemini_generate_content_stream")
+    assert not hasattr(GenericLLMClient, "_image_openai_generate")
+    assert not hasattr(GenericLLMClient, "_image_azure_generate")
+    assert not hasattr(GenericLLMClient, "_image_gemini_generate")
 
 
 @pytest.mark.asyncio
@@ -1485,6 +1489,16 @@ async def test_gemini_image_generation_survives_chat_adapter_extraction() -> Non
     assert fake_http.last_url == (
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-image-test:generateContent"
     )
+
+
+def test_image_runtime_registry_matches_advertised_operations() -> None:
+    advertised = {
+        adapter_id
+        for adapter_id, descriptor in ENDPOINT_ADAPTERS.items()
+        if "image_generation" in descriptor.implemented_operations
+    }
+
+    assert registered_image_adapter_ids() == advertised
 
 
 @pytest.mark.asyncio

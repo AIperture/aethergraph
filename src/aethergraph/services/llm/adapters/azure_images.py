@@ -1,4 +1,4 @@
-"""Azure image-generation compatibility mixin."""
+"""Physical Azure OpenAI Images adapter."""
 
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ from aethergraph.services.llm.utils import (
 )
 
 
-class _AzureMixin:
-    """Retain the public client's Azure image-generation implementation."""
+class AzureImagesAdapter:
+    """Physical adapter for the Azure OpenAI Images endpoint."""
 
-    async def _image_azure_generate(
-        self,
+    @staticmethod
+    async def invoke(
+        host: Any,
         prompt: str,
         *,
         model: str,
@@ -42,7 +43,8 @@ class _AzureMixin:
         Examples:
             Generate one image:
                 ```python
-                result = await client._image_azure_generate(
+                result = await AzureImagesAdapter.invoke(
+                    client,
                     "A quiet observatory",
                     model="image-deployment",
                     n=1,
@@ -58,7 +60,8 @@ class _AzureMixin:
 
             Generate a transparent PNG:
                 ```python
-                result = await client._image_azure_generate(
+                result = await AzureImagesAdapter.invoke(
+                    client,
                     "A glass compass",
                     model="image-deployment",
                     n=1,
@@ -73,7 +76,7 @@ class _AzureMixin:
                 ```
 
         Args:
-            self: Bound generic client owning the Azure transport.
+            host: Bound generic client owning the Azure transport.
             prompt: Text description of the requested image.
             model: Exact configured image deployment identity.
             n: Number of images requested.
@@ -95,16 +98,16 @@ class _AzureMixin:
             image-generation facade. The adapter performs one physical attempt.
         """
 
-        assert self._client is not None
-        if not self.base_url or not self.azure_deployment:
+        assert host._client is not None
+        if not host.base_url or not host.azure_deployment:
             raise RuntimeError(
                 "Azure generate_image requires base_url=<resource endpoint> and "
                 "azure_deployment=<deployment name>"
             )
 
         api_version = azure_api_version or "2025-04-01-preview"
-        url = _azure_images_generations_url(self.base_url, self.azure_deployment, api_version)
-        headers = {"api-key": self.api_key, "Content-Type": "application/json"}
+        url = _azure_images_generations_url(host.base_url, host.azure_deployment, api_version)
+        headers = {"api-key": host.api_key, "Content-Type": "application/json"}
         body: dict[str, Any] = {"prompt": prompt, "n": n}
         if model:
             body["model"] = model
@@ -121,7 +124,7 @@ class _AzureMixin:
         if background is not None:
             body["background"] = background
 
-        response = await self._client.post(url, headers=headers, json=body)
+        response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata("azure", model, "image", response)
         data = response.json()
         images = [

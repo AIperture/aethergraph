@@ -1,4 +1,4 @@
-"""Gemini image-generation compatibility mixin."""
+"""Physical Gemini image-generation adapter."""
 
 from __future__ import annotations
 
@@ -16,11 +16,12 @@ from aethergraph.services.llm.utils import (
 )
 
 
-class _GeminiMixin:
-    """Retain the public client's Gemini image-generation implementation."""
+class GeminiImagesAdapter:
+    """Physical adapter for Gemini image generation."""
 
-    async def _image_gemini_generate(
-        self,
+    @staticmethod
+    async def invoke(
+        host: Any,
         prompt: str,
         *,
         model: str,
@@ -36,7 +37,8 @@ class _GeminiMixin:
         Examples:
             Generate an image from text:
                 ```python
-                result = await client._image_gemini_generate(
+                result = await GeminiImagesAdapter.invoke(
+                    client,
                     "A quiet observatory",
                     model="gemini-image-test",
                     input_images=None,
@@ -45,7 +47,8 @@ class _GeminiMixin:
 
             Edit an inline source image:
                 ```python
-                result = await client._image_gemini_generate(
+                result = await GeminiImagesAdapter.invoke(
+                    client,
                     "Make the sky violet",
                     model="gemini-image-test",
                     input_images=["data:image/png;base64,aW1hZ2U="],
@@ -53,7 +56,7 @@ class _GeminiMixin:
                 ```
 
         Args:
-            self: Bound generic client owning the Gemini transport.
+            host: Bound generic client owning the Gemini transport.
             prompt: Text description of the requested image.
             model: Exact configured Gemini image model identity.
             input_images: Optional base64 data URLs for image-conditioned generation.
@@ -68,9 +71,9 @@ class _GeminiMixin:
             image-generation facade. The adapter performs one physical attempt.
         """
 
-        assert self._client is not None
+        assert host._client is not None
         base = (
-            _normalize_base_url_no_trailing_slash(self.base_url)
+            _normalize_base_url_no_trailing_slash(host.base_url)
             or "https://generativelanguage.googleapis.com"
         )
         url = f"{base}/v1beta/models/{model}:generateContent"
@@ -84,9 +87,9 @@ class _GeminiMixin:
                 parts.append({"inline_data": {"mime_type": mime, "data": b64}})
         parts.append({"text": prompt})
 
-        response = await self._client.post(
+        response = await host._client.post(
             url,
-            headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
+            headers={"x-goog-api-key": host.api_key, "Content-Type": "application/json"},
             json={"contents": [{"parts": parts}]},
         )
         metadata = checked_response_metadata("google", model, "image", response)

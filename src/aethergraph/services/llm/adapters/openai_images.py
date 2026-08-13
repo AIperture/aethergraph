@@ -1,4 +1,4 @@
-"""OpenAI image-generation compatibility mixin."""
+"""Physical OpenAI Images adapter."""
 
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ from aethergraph.services.llm.utils import (
 )
 
 
-class _OpenAIMixin:
-    """Retain the public client's OpenAI image-generation implementation."""
+class OpenAIImagesAdapter:
+    """Physical adapter for the OpenAI Images endpoint."""
 
-    async def _image_openai_generate(
-        self,
+    @staticmethod
+    async def invoke(
+        host: Any,
         prompt: str,
         *,
         model: str,
@@ -41,7 +42,8 @@ class _OpenAIMixin:
         Examples:
             Generate one default image:
                 ```python
-                result = await client._image_openai_generate(
+                result = await OpenAIImagesAdapter.invoke(
+                    client,
                     "A quiet observatory",
                     model="gpt-image-1",
                     n=1,
@@ -56,7 +58,8 @@ class _OpenAIMixin:
 
             Generate a transparent PNG:
                 ```python
-                result = await client._image_openai_generate(
+                result = await OpenAIImagesAdapter.invoke(
+                    client,
                     "A glass compass",
                     model="gpt-image-1",
                     n=1,
@@ -70,7 +73,7 @@ class _OpenAIMixin:
                 ```
 
         Args:
-            self: Bound generic client owning the OpenAI transport.
+            host: Bound generic client owning the OpenAI transport.
             prompt: Text description of the requested image.
             model: Exact configured image model identity.
             n: Number of images requested.
@@ -91,10 +94,10 @@ class _OpenAIMixin:
             image-generation facade. The adapter performs one physical attempt.
         """
 
-        assert self._client is not None
+        assert host._client is not None
 
-        url = f"{_normalize_base_url_no_trailing_slash(self.base_url)}/images/generations"
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        url = f"{_normalize_base_url_no_trailing_slash(host.base_url)}/images/generations"
+        headers = {"Authorization": f"Bearer {host.api_key}", "Content-Type": "application/json"}
         body: dict[str, Any] = {"model": model, "prompt": prompt, "n": n}
         if size is not None:
             body["size"] = size
@@ -109,7 +112,7 @@ class _OpenAIMixin:
         if response_format is not None:
             body["response_format"] = response_format
 
-        response = await self._client.post(url, headers=headers, json=body)
+        response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata("openai", model, "image", response)
         data = response.json()
         images = [

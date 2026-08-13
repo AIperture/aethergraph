@@ -21,16 +21,13 @@ from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.core.schema_validation import first_schema_issue
-from aethergraph.services.llm._azure_mixin import _AzureMixin
-from aethergraph.services.llm._gemini_mixin import _GeminiMixin
-
-# Provider mixins (chat, streaming, image generation)
-from aethergraph.services.llm._openai_mixin import _OpenAIMixin
 from aethergraph.services.llm.adapters import (
     ChatAdapterInvocation,
     ChatStreamInvocation,
+    ImageAdapterInvocation,
     invoke_chat_adapter,
     invoke_chat_stream_adapter,
+    invoke_image_adapter,
 )
 from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
 from aethergraph.services.llm.contracts import ModelRequest
@@ -199,12 +196,7 @@ def _record_structured_output_failure(
 
 
 # ---- Generic client -------------------------------------------------------
-class GenericLLMClient(
-    _OpenAIMixin,
-    _AzureMixin,
-    _GeminiMixin,
-    LLMClientProtocol,
-):
+class GenericLLMClient(LLMClientProtocol):
     """
     provider: one of {"openai","azure","anthropic","google","deepseek","openrouter","lmstudio","ollama","openai_compatible"}
     Configuration (read from env by default, but you can pass in):
@@ -3543,6 +3535,15 @@ class GenericLLMClient(
         """
         await self._ensure_client()
         model = model or self.model
+        try:
+            image_adapter = resolve_endpoint_adapter(self.provider, "image_generation")
+        except ValueError as exc:
+            detail = (
+                "Anthropic does not support image generation via Claude API (vision is input-only)."
+                if self.provider == "anthropic"
+                else f"provider '{self.provider}' does not support generate_image() in this client."
+            )
+            raise LLMUnsupportedFeatureError(detail) from exc
         tracer = resolve_tracer()
         span = await tracer.start_span(
             service="llm",
@@ -3553,6 +3554,7 @@ class GenericLLMClient(
                 "prompt": prompt,
                 "n": n,
                 "size": size,
+                "endpoint_id": image_adapter.adapter_id,
             },
             tags=["llm", "image"],
             metadata=self._current_dimensions(),
@@ -3564,6 +3566,7 @@ class GenericLLMClient(
             provider_result = await self._provider_retry.execute(
                 lambda: self._image_dispatch(
                     prompt,
+                    adapter_id=image_adapter.adapter_id,
                     model=model,
                     n=n,
                     size=size,
@@ -3607,6 +3610,7 @@ class GenericLLMClient(
         self,
         prompt: str,
         *,
+        adapter_id: str,
         model: str,
         n: int,
         size: str | None,
@@ -3619,9 +3623,11 @@ class GenericLLMClient(
         azure_api_version: str | None,
         **kw: Any,
     ) -> ProviderCallResult[ImageGenerationResult]:
-        if self.provider == "openai":
-            return await self._image_openai_generate(
-                prompt,
+        return await invoke_image_adapter(
+            self,
+            adapter_id=adapter_id,
+            invocation=ImageAdapterInvocation(
+                prompt=prompt,
                 model=model,
                 n=n,
                 size=size,
@@ -3630,40 +3636,10 @@ class GenericLLMClient(
                 output_format=output_format,
                 response_format=response_format,
                 background=background,
-                **kw,
-            )
-
-        if self.provider == "azure":
-            return await self._image_azure_generate(
-                prompt,
-                model=model,
-                n=n,
-                size=size,
-                quality=quality,
-                style=style,
-                output_format=output_format,
-                response_format=response_format,
-                background=background,
+                input_images=tuple(input_images or ()),
                 azure_api_version=azure_api_version,
-                **kw,
-            )
-
-        if self.provider == "google":
-            return await self._image_gemini_generate(
-                prompt,
-                model=model,
-                input_images=input_images,
-                **kw,
-            )
-
-        if self.provider == "anthropic":
-            raise LLMUnsupportedFeatureError(
-                "Anthropic does not support image generation via Claude API (vision is input-only)."
-            )
-
-        # openrouter/lmstudio/ollama: no single standard image endpoint
-        raise LLMUnsupportedFeatureError(
-            f"provider '{self.provider}' does not support generate_image() in this client."
+                options=kw,
+            ),
         )
 
     # ================================================================
