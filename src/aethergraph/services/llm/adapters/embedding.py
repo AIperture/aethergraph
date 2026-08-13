@@ -47,6 +47,7 @@ class EmbeddingAdapterInvocation:
     Args:
         texts: Detached ordered input texts for one batch.
         model: Exact configured embedding model identity.
+        dimensions: Optional requested output-vector dimensionality.
         azure_deployment: Optional Azure deployment identity.
         azure_api_version: Optional Azure Embeddings API version.
         extra_body: Detached provider-compatible request body extensions.
@@ -61,6 +62,7 @@ class EmbeddingAdapterInvocation:
 
     texts: tuple[str, ...]
     model: str
+    dimensions: int | None = None
     azure_deployment: str | None = None
     azure_api_version: str | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
@@ -108,6 +110,8 @@ class EmbeddingAdapterInvocation:
             raise TypeError("embedding adapter invocation expects text inputs")
         if not model:
             raise ValueError("embedding adapter invocation requires a model")
+        if self.dimensions is not None and self.dimensions < 1:
+            raise ValueError("embedding dimensions must be positive")
         object.__setattr__(self, "texts", texts)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "extra_body", copy.deepcopy(self.extra_body))
@@ -158,6 +162,7 @@ async def _invoke_openai_embeddings(
         host,
         invocation.texts,
         model=invocation.model,
+        dimensions=invocation.dimensions,
         extra_body=invocation.extra_body_dict(),
     )
 
@@ -169,6 +174,7 @@ async def _invoke_azure_embeddings(
         host,
         invocation.texts,
         model=invocation.model,
+        dimensions=invocation.dimensions,
         azure_deployment=invocation.azure_deployment,
         azure_api_version=invocation.azure_api_version,
         extra_body=invocation.extra_body_dict(),
@@ -178,7 +184,12 @@ async def _invoke_azure_embeddings(
 async def _invoke_gemini_embeddings(
     host: Any, invocation: EmbeddingAdapterInvocation
 ) -> EmbeddingAdapterResult:
-    return await GeminiEmbeddingsAdapter.invoke(host, invocation.texts, model=invocation.model)
+    return await GeminiEmbeddingsAdapter.invoke(
+        host,
+        invocation.texts,
+        model=invocation.model,
+        dimensions=invocation.dimensions,
+    )
 
 
 async def _invoke_dummy_embeddings(

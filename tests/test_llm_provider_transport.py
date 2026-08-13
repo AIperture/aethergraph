@@ -625,6 +625,71 @@ async def test_embedding_result_retains_provider_usage_before_vector_projection(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "model", "expected_key"),
+    [
+        ("openai", "text-embedding-3-large", "dimensions"),
+        ("google", "gemini-embedding-001", "outputDimensionality"),
+    ],
+)
+async def test_embedding_dimensions_use_canonical_adapter_projection(
+    provider: str,
+    model: str,
+    expected_key: str,
+) -> None:
+    bodies: list[dict[str, Any]] = []
+
+    class _FakeEmbeddingHttp:
+        async def post(self, url, *, headers, json):
+            bodies.append(json)
+            if provider == "google":
+                return _response(200, json={"embeddings": [{"values": [0.1, 0.2]}]})
+            return _response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+    client = GenericEmbeddingClient(provider=provider, model=model, api_key="test")
+    client._client = _FakeEmbeddingHttp()  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    result = await client.embed_result(["hello"], dimensions=256)
+
+    assert result.vectors == [[0.1, 0.2]]
+    if provider == "google":
+        assert bodies[0]["requests"][0][expected_key] == 256
+    else:
+        assert bodies[0][expected_key] == 256
+
+
+@pytest.mark.asyncio
+async def test_embedding_profile_default_and_per_call_dimensions_have_one_precedence() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    class _FakeEmbeddingHttp:
+        async def post(self, url, *, headers, json):
+            bodies.append(json)
+            return _response(200, json={"data": [{"embedding": [0.1, 0.2]}]})
+
+    client = GenericEmbeddingClient(
+        provider="openai",
+        model="text-embedding-3-large",
+        api_key="test",
+        default_dimensions=1024,
+    )
+    client._client = _FakeEmbeddingHttp()  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    await client.embed_result(["default"])
+    await client.embed_result(["override"], dimensions=256)
+
+    assert [body["dimensions"] for body in bodies] == [1024, 256]
+    with pytest.raises(ValueError, match="canonical dimensions argument"):
+        await client.embed_result(
+            ["ambiguous"],
+            dimensions=256,
+            extra_body={"dimensions": 128},
+        )
+
+
+@pytest.mark.asyncio
 async def test_rate_gate_wait_propagates_cancellation_without_retaining_a_waiter() -> None:
     sleep_started = asyncio.Event()
 

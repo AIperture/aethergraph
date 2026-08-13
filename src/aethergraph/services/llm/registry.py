@@ -111,13 +111,22 @@ _ENDPOINTS = (
         ("image_input", "streaming", "native_tools", "structured_output"),
     ),
     EndpointAdapterDescriptor(
-        "openai_embeddings", "openai.embeddings", ("embeddings",), ("text_embeddings",)
+        "openai_embeddings",
+        "openai.embeddings",
+        ("embeddings",),
+        ("text_embeddings", "dimensions"),
     ),
     EndpointAdapterDescriptor(
-        "azure_embeddings", "azure.embeddings", ("embeddings",), ("text_embeddings",)
+        "azure_embeddings",
+        "azure.embeddings",
+        ("embeddings",),
+        ("text_embeddings", "dimensions"),
     ),
     EndpointAdapterDescriptor(
-        "gemini_embeddings", "google.embeddings", ("embeddings",), ("text_embeddings",)
+        "gemini_embeddings",
+        "google.embeddings",
+        ("embeddings",),
+        ("text_embeddings", "dimensions"),
     ),
     EndpointAdapterDescriptor(
         "dummy_embeddings", "dummy.embeddings", ("embeddings",), ("text_embeddings",)

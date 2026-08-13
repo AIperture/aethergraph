@@ -21,6 +21,7 @@ class GeminiEmbeddingsAdapter:
         texts: Sequence[str],
         *,
         model: str,
+        dimensions: int | None,
     ) -> ProviderCallResult[EmbeddingResult]:
         """Embed one text batch through Gemini `batchEmbedContents`.
 
@@ -32,7 +33,10 @@ class GeminiEmbeddingsAdapter:
             Embed one text:
                 ```python
                 result = await GeminiEmbeddingsAdapter.invoke(
-                    client, ("hello",), model="text-embedding-004"
+                    client,
+                    ("hello",),
+                    model="text-embedding-004",
+                    dimensions=None,
                 )
                 ```
 
@@ -42,6 +46,7 @@ class GeminiEmbeddingsAdapter:
                     client,
                     ("hello", "world"),
                     model="text-embedding-004",
+                    dimensions=256,
                 )
                 ```
 
@@ -49,6 +54,7 @@ class GeminiEmbeddingsAdapter:
             host: Bound embedding client owning the HTTP transport and connection.
             texts: Ordered text inputs for one batch.
             model: Exact configured Gemini embedding model identity.
+            dimensions: Optional requested output-vector dimensionality.
 
         Returns:
             ProviderCallResult[list[list[float]]]: Ordered vectors and sanitized
@@ -64,7 +70,11 @@ class GeminiEmbeddingsAdapter:
         api_key = host.api_key or ""
         url = f"{base}/v1/models/{model}:batchEmbedContents?key={api_key}"
         headers = {"Content-Type": "application/json"}
-        body = {"requests": [{"content": {"parts": [{"text": text}]}} for text in texts]}
+        requests = [{"content": {"parts": [{"text": text}]}} for text in texts]
+        if dimensions is not None:
+            for request in requests:
+                request["outputDimensionality"] = dimensions
+        body = {"requests": requests}
 
         response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata("google", model, "embedding", response)

@@ -140,6 +140,7 @@ def embed_client_from_profile(
         metering=metering,
         operation_quota_cfg=operation_quota_cfg,
         endpoint_id=p.connection.endpoint_id,
+        default_dimensions=p.defaults.dimensions,
     )
 
 

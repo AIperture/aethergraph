@@ -328,7 +328,7 @@ def test_override_is_clamped_when_adapter_explicitly_lacks_feature() -> None:
     assert capability.provenance[-1].source == "adapter"
 
 
-def test_embedding_resolution_clamps_unprojected_dimensions() -> None:
+def test_embedding_resolution_accepts_projected_dimensions() -> None:
     profile = EmbeddingProfileSpec(
         connection=ProviderConnection(
             provider_id="openai",
@@ -339,16 +339,14 @@ def test_embedding_resolution_clamps_unprojected_dimensions() -> None:
 
     binding = resolve_embedding_profile(profile, required=("text_embeddings", "dimensions"))
 
-    assert not binding.valid
+    assert binding.valid
     assert binding.catalog_key == "openai/text-embedding-3/v3"
     assert binding.capabilities.text_embeddings.state == "supported"
-    assert binding.capabilities.dimensions.state == "unsupported"
+    assert binding.capabilities.dimensions.state == "supported"
     assert binding.capabilities.dimensions.provenance[0].source == "catalog"
-    assert binding.capabilities.dimensions.provenance[-1].source == "adapter"
-    assert binding.diagnostics[0].capability == "dimensions"
 
 
-def test_embedding_override_cannot_bypass_adapter_implementation() -> None:
+def test_embedding_override_supplies_unknown_model_fact_when_adapter_implements() -> None:
     profile = EmbeddingProfileSpec(
         connection=ProviderConnection(
             provider_id="openai",
@@ -363,14 +361,13 @@ def test_embedding_override_cannot_bypass_adapter_implementation() -> None:
 
     binding = resolve_embedding_profile(profile, required=("text_embeddings", "dimensions"))
 
-    assert not binding.valid
+    assert binding.valid
     assert binding.catalog_key is None
     assert binding.capabilities.text_embeddings.state == "supported"
-    assert binding.capabilities.dimensions.state == "unsupported"
+    assert binding.capabilities.dimensions.state == "supported"
     assert [item.source for item in binding.capabilities.dimensions.provenance] == [
         "unknown",
         "override",
-        "adapter",
     ]
 
 

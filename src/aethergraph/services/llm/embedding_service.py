@@ -198,6 +198,7 @@ class EmbeddingService:
                 rate_gate=getattr(getattr(template, "_provider_retry", None), "rate_gate", None),
                 metering=getattr(template, "metering", None),
                 operation_quota_cfg=getattr(template, "operation_quota_cfg", None),
+                default_dimensions=getattr(template, "default_dimensions", None),
             )
             self._clients[name] = client
             return client

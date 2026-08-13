@@ -21,6 +21,7 @@ class OpenAIEmbeddingsAdapter:
         texts: Sequence[str],
         *,
         model: str,
+        dimensions: int | None,
         extra_body: dict[str, Any],
     ) -> ProviderCallResult[EmbeddingResult]:
         """Embed one text batch through an OpenAI-compatible endpoint.
@@ -36,6 +37,7 @@ class OpenAIEmbeddingsAdapter:
                     client,
                     ("hello",),
                     model="text-embedding-3-small",
+                    dimensions=None,
                     extra_body={},
                 )
                 ```
@@ -46,7 +48,8 @@ class OpenAIEmbeddingsAdapter:
                     client,
                     ("hello", "world"),
                     model="text-embedding-3-large",
-                    extra_body={"dimensions": 256},
+                    dimensions=256,
+                    extra_body={},
                 )
                 ```
 
@@ -54,6 +57,7 @@ class OpenAIEmbeddingsAdapter:
             host: Bound embedding client owning the HTTP transport and connection.
             texts: Ordered text inputs for one batch.
             model: Exact configured embedding model identity.
+            dimensions: Optional requested output-vector dimensionality.
             extra_body: Provider-compatible request body extensions.
 
         Returns:
@@ -72,6 +76,8 @@ class OpenAIEmbeddingsAdapter:
             headers["Authorization"] = f"Bearer {host.api_key}"
         body: dict[str, Any] = {"model": model, "input": list(texts)}
         body.update(extra_body)
+        if dimensions is not None:
+            body["dimensions"] = dimensions
 
         response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata(host.provider, model, "embedding", response)

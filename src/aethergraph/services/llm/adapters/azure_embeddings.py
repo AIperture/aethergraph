@@ -21,6 +21,7 @@ class AzureEmbeddingsAdapter:
         texts: Sequence[str],
         *,
         model: str,
+        dimensions: int | None,
         azure_deployment: str | None,
         azure_api_version: str | None,
         extra_body: dict[str, Any],
@@ -38,6 +39,7 @@ class AzureEmbeddingsAdapter:
                     client,
                     ("hello",),
                     model="embedding-model",
+                    dimensions=None,
                     azure_deployment="embedding-prod",
                     azure_api_version=None,
                     extra_body={},
@@ -50,9 +52,10 @@ class AzureEmbeddingsAdapter:
                     client,
                     ("hello", "world"),
                     model="embedding-model",
+                    dimensions=256,
                     azure_deployment="embedding-prod",
                     azure_api_version="2024-08-01-preview",
-                    extra_body={"dimensions": 256},
+                    extra_body={},
                 )
                 ```
 
@@ -60,6 +63,7 @@ class AzureEmbeddingsAdapter:
             host: Bound embedding client owning the HTTP transport and connection.
             texts: Ordered text inputs for one batch.
             model: Exact configured embedding model identity.
+            dimensions: Optional requested output-vector dimensionality.
             azure_deployment: Required Azure deployment identity.
             azure_api_version: Optional Azure Embeddings API version.
             extra_body: Provider-compatible request body extensions.
@@ -88,6 +92,8 @@ class AzureEmbeddingsAdapter:
         if model:
             body["model"] = model
         body.update(extra_body)
+        if dimensions is not None:
+            body["dimensions"] = dimensions
 
         response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata("azure", model, "embedding", response)

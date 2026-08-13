@@ -68,8 +68,11 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
     metering: MeteringService | None = None
     endpoint_id: str | None = None
     operation_quota_cfg: EmbeddingUsageQuotaSettings | None = None
+    default_dimensions: int | None = None
 
     def __post_init__(self) -> None:
+        if self.default_dimensions is not None and self.default_dimensions < 1:
+            raise ValueError("default embedding dimensions must be positive")
         resolved_provider = (
             self.provider or os.getenv("EMBED_PROVIDER") or os.getenv("LLM_PROVIDER") or "openai"
         ).lower()
@@ -296,6 +299,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         texts: Sequence[str],
         *,
         model: str | None = None,
+        dimensions: int | None = None,
         **kw: Any,
     ) -> EmbeddingResult:
         """Embed one ordered batch and retain typed provider usage.
@@ -312,18 +316,17 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 result = await client.embed_result(["hello"])
                 ```
 
-            Override the configured model:
+            Request a smaller output vector:
                 ```python
-                client = GenericEmbeddingClient(provider="dummy", model="default")
-                result = await client.embed_result(
-                    ["hello", "world"], model="test"
-                )
+                result = await client.embed_result(["hello"], dimensions=256)
                 ```
 
         Args:
             self: Configured provider-neutral embedding client.
             texts: Ordered text inputs. An empty sequence returns immediately.
             model: Optional per-call model override.
+            dimensions: Optional output-vector dimensionality overriding the
+                canonical profile default.
             **kw: Metering context plus bounded provider request options such as
                 `extra_body` and `azure_api_version`.
 
@@ -341,6 +344,15 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
 
         # Resolve model (override > configured)
         model = model or self.model or "text-embedding-3-small"
+        requested_dimensions = dimensions if dimensions is not None else self.default_dimensions
+        if requested_dimensions is not None and requested_dimensions < 1:
+            raise ValueError("embedding dimensions must be positive")
+        extra_body = dict(kw.get("extra_body") or {})
+        if requested_dimensions is not None and "dimensions" in extra_body:
+            raise ValueError(
+                "embedding dimensions must use the canonical dimensions argument, not both "
+                "dimensions and extra_body['dimensions']"
+            )
 
         if self.provider == "anthropic":
             raise NotImplementedError("Embeddings not supported for anthropic")
@@ -354,9 +366,10 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         invocation = EmbeddingAdapterInvocation(
             texts=tuple(texts),
             model=model,
+            dimensions=requested_dimensions,
             azure_deployment=self.azure_deployment,
             azure_api_version=kw.get("azure_api_version"),
-            extra_body=kw.get("extra_body") or {},
+            extra_body=extra_body,
         )
         reservation = self._operation_quota.reserve({"calls": 1, "texts": len(invocation.texts)})
 
@@ -368,7 +381,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             )
 
         context = current_meter_context.get()
-        dimensions = {
+        meter_dimensions = {
             "user_id": kw.get("user_id", context.get("user_id")),
             "org_id": kw.get("org_id", context.get("org_id")),
             "run_id": kw.get("run_id", context.get("run_id")),
@@ -388,9 +401,10 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                     "model": model,
                     "endpoint_id": adapter.adapter_id,
                     "num_texts": len(texts),
+                    "output_dimensions": requested_dimensions,
                 },
                 tags=["model", "embedding"],
-                metadata=dimensions,
+                metadata=meter_dimensions,
             )
             provider_result = await self._provider_retry.execute(
                 _attempt,
@@ -417,7 +431,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 usage=result.usage,
                 num_texts=len(texts),
                 latency_ms=latency_ms,
-                dimensions=dimensions,
+                dimensions=meter_dimensions,
                 logger=logging.getLogger(__name__),
             )
             if quota_error is not None:
@@ -427,7 +441,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                     "num_vectors": len(result.vectors),
                     "usage": result.usage.to_dict(),
                 },
-                metadata=dimensions,
+                metadata=meter_dimensions,
                 metrics={
                     "num_texts": len(texts),
                     "num_vectors": len(result.vectors),
@@ -441,7 +455,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             if span is not None:
                 await span.fail(
                     exc,
-                    metadata=dimensions,
+                    metadata=meter_dimensions,
                     metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
                 )
             raise
@@ -451,6 +465,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         texts: Sequence[str],
         *,
         model: str | None = None,
+        dimensions: int | None = None,
         **kw: Any,
     ) -> list[list[float]]:
         """Embed one ordered batch through the compatibility vector facade.
@@ -476,6 +491,8 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             self: Configured provider-neutral embedding client.
             texts: Ordered text inputs. An empty sequence returns immediately.
             model: Optional per-call model override.
+            dimensions: Optional output-vector dimensionality overriding the
+                canonical profile default.
             **kw: Metering context plus bounded provider request options.
 
         Returns:
@@ -486,13 +503,21 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             after the operation-specific meter has consumed it.
         """
 
-        return (await self.embed_result(texts, model=model, **kw)).vectors
+        return (
+            await self.embed_result(
+                texts,
+                model=model,
+                dimensions=dimensions,
+                **kw,
+            )
+        ).vectors
 
     async def embed_one(
         self,
         text: str,
         *,
         model: str | None = None,
+        dimensions: int | None = None,
         **kw: Any,
     ) -> list[float]:
         """Embed one text through the configured exact endpoint.
@@ -518,6 +543,8 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             self: Configured provider-neutral embedding client.
             text: Single text input.
             model: Optional per-call model override.
+            dimensions: Optional output-vector dimensionality overriding the
+                canonical profile default.
             **kw: Metering context and bounded provider request options forwarded
                 to `embed`.
 
@@ -529,5 +556,10 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             introduce a separate provider path.
         """
 
-        res = await self.embed([text], model=model, **kw)
+        res = await self.embed(
+            [text],
+            model=model,
+            dimensions=dimensions,
+            **kw,
+        )
         return res[0]

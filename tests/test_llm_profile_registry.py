@@ -17,6 +17,7 @@ from aethergraph.services.llm import (
     ENDPOINT_ADAPTERS,
     PROVIDERS,
     ChatProfile,
+    EmbeddingDefaults,
     get_provider_descriptor,
     provider_default_base_url,
     resolve_endpoint_adapter,
@@ -30,6 +31,7 @@ from aethergraph.services.llm.compat import (
 )
 from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.embed_factory import embed_client_from_profile
+from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients, client_from_profile
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
@@ -279,6 +281,30 @@ def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:
     assert canonical.connection.endpoint_id == "gemini_embeddings"
     assert canonical.model.model_id == "text-embedding-004"
     assert embed_client_from_profile(canonical, _Secrets()).endpoint_id == "gemini_embeddings"
+
+
+def test_embedding_factory_preserves_canonical_dimension_default() -> None:
+    canonical = embedding_profile_from_legacy(
+        EmbeddingProfile(provider="google", model="gemini-embedding-001")
+    ).model_copy(update={"defaults": EmbeddingDefaults(dimensions=256)})
+
+    client = embed_client_from_profile(canonical, _Secrets())
+
+    assert client.default_dimensions == 256
+
+
+def test_named_embedding_profile_inherits_dimension_default() -> None:
+    template = GenericEmbeddingClient(
+        provider="dummy",
+        model="default",
+        default_dimensions=64,
+    )
+    service = EmbeddingService({"default": template})
+
+    named = service.configure_profile(name="search", provider="dummy", model="search")
+
+    assert isinstance(named, GenericEmbeddingClient)
+    assert named.default_dimensions == 64
 
 
 def test_image_profile_projection_and_client_are_independent_from_chat() -> None:

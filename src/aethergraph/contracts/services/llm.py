@@ -52,6 +52,7 @@ class EmbeddingClientProtocol(Protocol):
         texts: Sequence[str],
         *,
         model: str | None = None,
+        dimensions: int | None = None,
         **kwargs: Any,
     ) -> EmbeddingResult:
         """Embed a batch and retain typed provider usage.
@@ -77,6 +78,7 @@ class EmbeddingClientProtocol(Protocol):
             self: Configured embedding client.
             texts: Ordered text inputs.
             model: Optional per-call model override.
+            dimensions: Optional requested output-vector dimensionality.
             **kwargs: Bounded provider options and metering dimensions.
 
         Returns:
@@ -94,6 +96,7 @@ class EmbeddingClientProtocol(Protocol):
         texts: Sequence[str],
         *,
         model: str | None = None,
+        dimensions: int | None = None,
         **kwargs,
     ) -> list[list[float]]: ...
 
@@ -102,6 +105,7 @@ class EmbeddingClientProtocol(Protocol):
         text: str,
         *,
         model: str | None = None,
+        dimensions: int | None = None,
         **kwargs,
     ) -> list[float]: ...
 
