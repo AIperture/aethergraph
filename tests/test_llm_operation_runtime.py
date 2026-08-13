@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 
-from aethergraph.services.llm import generic_embed_client, image_runtime
+from aethergraph.services.llm import generic_client, generic_embed_client, image_runtime
 from aethergraph.services.llm.operation_runtime import model_operation_dimensions
 
 
@@ -36,3 +36,10 @@ def test_common_operation_dimensions_prefer_explicit_non_sensitive_values() -> N
     assert "prompt" not in dimensions
     assert "texts" not in dimensions
     assert "images" not in dimensions
+
+
+def test_chat_uses_the_same_common_dimension_projection() -> None:
+    source = inspect.getsource(generic_client.GenericLLMClient._current_dimensions)
+
+    assert "model_operation_dimensions(" in source
+    assert "current_meter_context.get()" not in source

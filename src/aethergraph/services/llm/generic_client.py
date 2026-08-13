@@ -42,6 +42,7 @@ from aethergraph.services.llm.observability import (
     LLMObservationRecord,
     LLMObservationSink,
 )
+from aethergraph.services.llm.operation_runtime import model_operation_dimensions
 from aethergraph.services.llm.profiles import PromptCachePolicy
 from aethergraph.services.llm.prompt_cache import (
     PreparedPromptCache,
@@ -1925,19 +1926,7 @@ class GenericLLMClient(LLMClientProtocol):
         return normalized
 
     def _current_dimensions(self) -> dict[str, Any]:
-        ctx = current_meter_context.get()
-        return {
-            "user_id": ctx.get("user_id"),
-            "org_id": ctx.get("org_id"),
-            "run_id": ctx.get("run_id"),
-            "graph_id": ctx.get("graph_id"),
-            "session_id": ctx.get("session_id"),
-            "app_id": ctx.get("app_id"),
-            "agent_id": ctx.get("agent_id"),
-            "node_id": ctx.get("node_id"),
-            "trace_id": ctx.get("trace_id"),
-            "span_id": ctx.get("span_id"),
-        }
+        return model_operation_dimensions(profile_name=self.profile_name)
 
     async def _record_llm_usage(
         self,
