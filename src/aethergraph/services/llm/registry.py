@@ -110,16 +110,35 @@ _ENDPOINTS = (
         ("chat",),
         ("image_input", "streaming", "native_tools", "structured_output"),
     ),
-    EndpointAdapterDescriptor("openai_embeddings", "openai.embeddings", ("embeddings",)),
-    EndpointAdapterDescriptor("azure_embeddings", "azure.embeddings", ("embeddings",)),
-    EndpointAdapterDescriptor("gemini_embeddings", "google.embeddings", ("embeddings",)),
-    EndpointAdapterDescriptor("dummy_embeddings", "dummy.embeddings", ("embeddings",)),
-    EndpointAdapterDescriptor("openai_images", "openai.images", ("image_generation",)),
-    EndpointAdapterDescriptor("azure_images", "azure.images", ("image_generation",)),
+    EndpointAdapterDescriptor(
+        "openai_embeddings", "openai.embeddings", ("embeddings",), ("text_embeddings",)
+    ),
+    EndpointAdapterDescriptor(
+        "azure_embeddings", "azure.embeddings", ("embeddings",), ("text_embeddings",)
+    ),
+    EndpointAdapterDescriptor(
+        "gemini_embeddings", "google.embeddings", ("embeddings",), ("text_embeddings",)
+    ),
+    EndpointAdapterDescriptor(
+        "dummy_embeddings", "dummy.embeddings", ("embeddings",), ("text_embeddings",)
+    ),
+    EndpointAdapterDescriptor(
+        "openai_images",
+        "openai.images",
+        ("image_generation",),
+        ("text_to_image", "multiple_outputs"),
+    ),
+    EndpointAdapterDescriptor(
+        "azure_images",
+        "azure.images",
+        ("image_generation",),
+        ("text_to_image", "multiple_outputs"),
+    ),
     EndpointAdapterDescriptor(
         "gemini_image_generation",
         "google.image_generation",
         ("image_generation",),
+        ("text_to_image", "image_editing"),
     ),
     EndpointAdapterDescriptor("dummy_chat", "dummy.chat", ("chat",)),
 )

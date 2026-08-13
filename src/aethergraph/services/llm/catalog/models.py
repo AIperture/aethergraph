@@ -11,7 +11,14 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, mod
 from ..registry import ModelOperation
 
 CatalogEvidenceStatus = Literal["verified", "conservative", "unknown"]
-CatalogCapability = Literal["native_tool_search", "structured_output", "prompt_cache"]
+CatalogCapabilityState = Literal["supported", "unsupported", "unknown"]
+CatalogCapability = Literal[
+    "native_tool_search",
+    "structured_output",
+    "prompt_cache",
+    "embeddings",
+    "image_generation",
+]
 
 
 class CatalogContract(BaseModel):
@@ -53,6 +60,21 @@ class CatalogPromptCache(CatalogContract):
     max_new_writes_per_request: int | None = Field(default=None, ge=1, le=64)
 
 
+class CatalogEmbeddingCapabilities(CatalogContract):
+    """Evidence-backed embedding capabilities for one model binding."""
+
+    text_embeddings: CatalogCapabilityState
+    dimensions: CatalogCapabilityState
+
+
+class CatalogImageGenerationCapabilities(CatalogContract):
+    """Evidence-backed image-generation capabilities for one model binding."""
+
+    text_to_image: CatalogCapabilityState
+    image_editing: CatalogCapabilityState
+    multiple_outputs: CatalogCapabilityState
+
+
 class ModelCatalogEntry(CatalogContract):
     """One exact or narrowly matched model-operation capability record."""
 
@@ -65,6 +87,8 @@ class ModelCatalogEntry(CatalogContract):
     native_tool_search: tuple[CatalogNativeToolSearchMode, ...] = ()
     structured_output: CatalogStructuredOutput | None = None
     prompt_cache: CatalogPromptCache | None = None
+    embeddings: CatalogEmbeddingCapabilities | None = None
+    image_generation: CatalogImageGenerationCapabilities | None = None
     sources: tuple[HttpUrl, ...]
     verified_at: date
     catalog_revision: int = Field(ge=1)
@@ -159,10 +183,21 @@ class ModelCatalogEntry(CatalogContract):
                 bool(self.native_tool_search),
                 self.structured_output is not None,
                 self.prompt_cache is not None,
+                self.embeddings is not None,
+                self.image_generation is not None,
             )
         )
         if capability_count != 1:
             raise ValueError("catalog entry must declare exactly one capability domain")
+        declared_operation = (
+            "embeddings"
+            if self.embeddings is not None
+            else "image_generation"
+            if self.image_generation is not None
+            else "chat"
+        )
+        if self.operation != declared_operation:
+            raise ValueError("catalog capability domain does not match operation")
         positive_capability = bool(self.native_tool_search)
         if self.structured_output is not None:
             positive_capability = positive_capability or any(
@@ -174,6 +209,17 @@ class ModelCatalogEntry(CatalogContract):
             )
         if self.prompt_cache is not None:
             positive_capability = positive_capability or self.prompt_cache.mode != "unavailable"
+        if self.embeddings is not None:
+            positive_capability = positive_capability or "supported" in {
+                self.embeddings.text_embeddings,
+                self.embeddings.dimensions,
+            }
+        if self.image_generation is not None:
+            positive_capability = positive_capability or "supported" in {
+                self.image_generation.text_to_image,
+                self.image_generation.image_editing,
+                self.image_generation.multiple_outputs,
+            }
         if positive_capability and (self.evidence_status != "verified" or not self.sources):
             raise ValueError("positive capability facts require verified URL evidence")
         if self.stale_after is not None and self.stale_after < self.verified_at:
@@ -297,7 +343,10 @@ class ModelCatalog(CatalogContract):
 __all__ = [
     "CatalogContract",
     "CatalogCapability",
+    "CatalogCapabilityState",
+    "CatalogEmbeddingCapabilities",
     "CatalogEvidenceStatus",
+    "CatalogImageGenerationCapabilities",
     "CatalogNativeToolSearchMode",
     "CatalogPromptCache",
     "CatalogStructuredOutput",

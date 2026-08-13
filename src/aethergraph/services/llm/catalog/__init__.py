@@ -9,7 +9,10 @@ from .loader import (
 from .maintenance import catalog_report, validate_catalog
 from .models import (
     CatalogCapability,
+    CatalogCapabilityState,
+    CatalogEmbeddingCapabilities,
     CatalogEvidenceStatus,
+    CatalogImageGenerationCapabilities,
     CatalogNativeToolSearchMode,
     CatalogPromptCache,
     CatalogStructuredOutput,
@@ -19,7 +22,10 @@ from .models import (
 
 __all__ = [
     "CatalogCapability",
+    "CatalogCapabilityState",
+    "CatalogEmbeddingCapabilities",
     "CatalogEvidenceStatus",
+    "CatalogImageGenerationCapabilities",
     "CatalogNativeToolSearchMode",
     "CatalogPromptCache",
     "CatalogStructuredOutput",

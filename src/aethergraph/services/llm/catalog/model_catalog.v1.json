@@ -1,6 +1,6 @@
 {
   "schema_version": "aethergraph.model-catalog/v1",
-  "catalog_revision": 2,
+  "catalog_revision": 3,
   "entries": [
     {
       "catalog_key": "openai/gpt-5.4-5.6-native-tool-search/v1",
@@ -415,6 +415,88 @@
       "sources": ["https://ai.google.dev/gemini-api/docs/caching"],
       "verified_at": "2026-08-12",
       "catalog_revision": 2,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/text-embedding-3/v3",
+      "provider_id": "openai",
+      "operation": "embeddings",
+      "endpoint_ids": ["openai_embeddings"],
+      "model_pattern": "text-embedding-3-(?:small|large)",
+      "embeddings": {
+        "text_embeddings": "supported",
+        "dimensions": "supported"
+      },
+      "sources": ["https://developers.openai.com/api/docs/guides/embeddings"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 3,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "google/gemini-embedding-current/v3",
+      "provider_id": "google",
+      "operation": "embeddings",
+      "endpoint_ids": ["gemini_embeddings"],
+      "model_pattern": "gemini-embedding-(?:001|2)",
+      "embeddings": {
+        "text_embeddings": "supported",
+        "dimensions": "supported"
+      },
+      "sources": ["https://ai.google.dev/gemini-api/docs/embeddings"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 3,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "google/text-embedding-004/v3",
+      "provider_id": "google",
+      "operation": "embeddings",
+      "endpoint_ids": ["gemini_embeddings"],
+      "model_id": "text-embedding-004",
+      "embeddings": {
+        "text_embeddings": "supported",
+        "dimensions": "unsupported"
+      },
+      "sources": ["https://ai.google.dev/gemini-api/docs/models/gemini"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 3,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/gpt-image-current/v3",
+      "provider_id": "openai",
+      "operation": "image_generation",
+      "endpoint_ids": ["openai_images"],
+      "model_pattern": "gpt-image-1(?:\\.5|-mini)?",
+      "image_generation": {
+        "text_to_image": "supported",
+        "image_editing": "supported",
+        "multiple_outputs": "supported"
+      },
+      "sources": ["https://developers.openai.com/api/docs/guides/image-generation"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 3,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "google/gemini-image-current/v3",
+      "provider_id": "google",
+      "operation": "image_generation",
+      "endpoint_ids": ["gemini_image_generation"],
+      "model_pattern": "gemini-(?:2\\.5-flash-image|3-pro-image|3\\.1-flash(?:-lite)?-image)",
+      "image_generation": {
+        "text_to_image": "supported",
+        "image_editing": "supported",
+        "multiple_outputs": "unknown"
+      },
+      "sources": ["https://ai.google.dev/gemini-api/docs/image-generation"],
+      "verified_at": "2026-08-12",
+      "catalog_revision": 3,
       "evidence_status": "verified",
       "priority": 100
     }

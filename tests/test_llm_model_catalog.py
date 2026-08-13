@@ -8,10 +8,18 @@ import pytest
 
 from aethergraph.config.llm import LLMProfile
 from aethergraph.services.llm import (
+    EmbeddingCapabilityOverrides,
+    EmbeddingProfileSpec,
+    ImageGenerationCapabilityOverrides,
+    ImageGenerationProfile,
     ModelRequest,
+    ModelSelection,
+    ProviderConnection,
     ToolDefinition,
     ToolDiscoveryRequest,
     message_from_text,
+    resolve_embedding_profile,
+    resolve_image_generation_profile,
     resolve_model_request,
 )
 from aethergraph.services.llm.capabilities import resolve_chat_profile
@@ -50,6 +58,39 @@ def test_catalog_maintenance_command_uses_production_loader(capsys) -> None:
     report = catalog_report(load_model_catalog())
     assert report["digest"] == catalog_digest()
     assert report["entry_count"] == len(load_model_catalog().entries)
+    assert report["operations"] == ["chat", "embeddings", "image_generation"]
+
+
+def test_catalog_resolves_operation_capabilities_without_manufacturing_unknowns() -> None:
+    embedding = resolve_model_catalog_capability_entry(
+        "openai",
+        "text-embedding-3-large",
+        "embeddings",
+        "openai_embeddings",
+        capability="embeddings",
+    )
+    image = resolve_model_catalog_capability_entry(
+        "google",
+        "gemini-3.1-flash-image",
+        "image_generation",
+        "gemini_image_generation",
+        capability="image_generation",
+    )
+
+    assert embedding is not None and embedding.embeddings is not None
+    assert embedding.embeddings.dimensions == "supported"
+    assert image is not None and image.image_generation is not None
+    assert image.image_generation.multiple_outputs == "unknown"
+    assert (
+        resolve_model_catalog_capability_entry(
+            "openai",
+            "future-embedding-model",
+            "embeddings",
+            "openai_embeddings",
+            capability="embeddings",
+        )
+        is None
+    )
 
 
 def test_catalog_contains_only_provider_native_tool_search_modes() -> None:
@@ -153,6 +194,31 @@ def test_positive_native_search_entry_requires_verified_evidence() -> None:
                 "evidence_status": "unknown",
             }
         )
+
+
+def test_catalog_entry_rejects_multiple_capability_domains() -> None:
+    entry = resolve_model_catalog_capability_entry(
+        "openai",
+        "text-embedding-3-small",
+        "embeddings",
+        "openai_embeddings",
+        capability="embeddings",
+    )
+    assert entry is not None
+    payload = entry.model_dump(mode="json")
+    payload["image_generation"] = {
+        "text_to_image": "supported",
+        "image_editing": "unknown",
+        "multiple_outputs": "unknown",
+    }
+
+    with pytest.raises(ValidationError, match="exactly one capability domain"):
+        ModelCatalogEntry.model_validate(payload)
+
+    payload.pop("image_generation")
+    payload["operation"] = "chat"
+    with pytest.raises(ValidationError, match="domain does not match operation"):
+        ModelCatalogEntry.model_validate(payload)
 
 
 def test_equal_priority_catalog_matches_fail_closed() -> None:
@@ -260,6 +326,123 @@ def test_override_is_clamped_when_adapter_explicitly_lacks_feature() -> None:
     capability = binding.capabilities.native_tool_search_client
     assert capability.state == "unsupported"
     assert capability.provenance[-1].source == "adapter"
+
+
+def test_embedding_resolution_clamps_unprojected_dimensions() -> None:
+    profile = EmbeddingProfileSpec(
+        connection=ProviderConnection(
+            provider_id="openai",
+            endpoint_id="openai_embeddings",
+        ),
+        model=ModelSelection(model_id="text-embedding-3-large"),
+    )
+
+    binding = resolve_embedding_profile(profile, required=("text_embeddings", "dimensions"))
+
+    assert not binding.valid
+    assert binding.catalog_key == "openai/text-embedding-3/v3"
+    assert binding.capabilities.text_embeddings.state == "supported"
+    assert binding.capabilities.dimensions.state == "unsupported"
+    assert binding.capabilities.dimensions.provenance[0].source == "catalog"
+    assert binding.capabilities.dimensions.provenance[-1].source == "adapter"
+    assert binding.diagnostics[0].capability == "dimensions"
+
+
+def test_embedding_override_cannot_bypass_adapter_implementation() -> None:
+    profile = EmbeddingProfileSpec(
+        connection=ProviderConnection(
+            provider_id="openai",
+            endpoint_id="openai_embeddings",
+        ),
+        model=ModelSelection(model_id="future-embedding-model"),
+        capability_overrides=EmbeddingCapabilityOverrides(
+            text_embeddings="supported",
+            dimensions="supported",
+        ),
+    )
+
+    binding = resolve_embedding_profile(profile, required=("text_embeddings", "dimensions"))
+
+    assert not binding.valid
+    assert binding.catalog_key is None
+    assert binding.capabilities.text_embeddings.state == "supported"
+    assert binding.capabilities.dimensions.state == "unsupported"
+    assert [item.source for item in binding.capabilities.dimensions.provenance] == [
+        "unknown",
+        "override",
+        "adapter",
+    ]
+
+
+def test_image_resolution_exposes_catalog_truth_and_adapter_clamps() -> None:
+    openai = ImageGenerationProfile(
+        connection=ProviderConnection(
+            provider_id="openai",
+            endpoint_id="openai_images",
+        ),
+        model=ModelSelection(model_id="gpt-image-1.5"),
+    )
+    google = ImageGenerationProfile(
+        connection=ProviderConnection(
+            provider_id="google",
+            endpoint_id="gemini_image_generation",
+        ),
+        model=ModelSelection(model_id="gemini-3.1-flash-image"),
+    )
+
+    openai_binding = resolve_image_generation_profile(
+        openai,
+        required=("text_to_image", "image_editing", "multiple_outputs"),
+    )
+    google_binding = resolve_image_generation_profile(
+        google,
+        required=("text_to_image", "image_editing", "multiple_outputs"),
+    )
+
+    assert openai_binding.capabilities.text_to_image.state == "supported"
+    assert openai_binding.capabilities.multiple_outputs.state == "supported"
+    assert openai_binding.capabilities.image_editing.state == "unsupported"
+    assert openai_binding.capabilities.image_editing.provenance[-1].source == "adapter"
+    assert not openai_binding.valid
+    assert google_binding.capabilities.text_to_image.state == "supported"
+    assert google_binding.capabilities.image_editing.state == "supported"
+    assert google_binding.capabilities.multiple_outputs.state == "unsupported"
+    assert google_binding.capabilities.multiple_outputs.provenance[0].state == "unknown"
+    assert google_binding.capabilities.multiple_outputs.provenance[-1].source == "adapter"
+    assert not google_binding.valid
+
+
+def test_operation_resolution_preserves_unknown_and_validates_endpoint_operation() -> None:
+    profile = ImageGenerationProfile(
+        connection=ProviderConnection(
+            provider_id="openai",
+            endpoint_id="openai_images",
+        ),
+        model=ModelSelection(model_id="future-image-model"),
+        capability_overrides=ImageGenerationCapabilityOverrides(text_to_image="supported"),
+    )
+
+    binding = resolve_image_generation_profile(profile, required=("text_to_image",))
+
+    assert binding.valid
+    assert binding.catalog_key is None
+    assert binding.capabilities.image_editing.state == "unsupported"
+    assert binding.capabilities.image_editing.provenance[0].source == "unknown"
+
+    without_override = resolve_image_generation_profile(
+        profile.model_copy(update={"capability_overrides": ImageGenerationCapabilityOverrides()})
+    )
+    assert without_override.capabilities.text_to_image.state == "unknown"
+
+    invalid_endpoint = EmbeddingProfileSpec(
+        connection=ProviderConnection(
+            provider_id="openai",
+            endpoint_id="openai_responses",
+        ),
+        model=ModelSelection(model_id="text-embedding-3-small"),
+    )
+    with pytest.raises(ValueError, match="does not implement embeddings"):
+        resolve_embedding_profile(invalid_endpoint)
 
 
 def test_complete_request_resolution_combines_adapter_and_model_requirements() -> None:

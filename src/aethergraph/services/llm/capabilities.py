@@ -13,7 +13,12 @@ from .catalog import (
     resolve_model_catalog_entry,
 )
 from .contracts import ModelRequest
-from .profiles import CapabilityState, ChatProfile
+from .profiles import (
+    CapabilityState,
+    ChatProfile,
+    EmbeddingProfileSpec,
+    ImageGenerationProfile,
+)
 from .registry import get_endpoint_adapter, get_provider_descriptor
 from .request_validation import RequestCompatibilityReport, validate_model_request
 
@@ -28,6 +33,9 @@ ChatCapabilityName = Literal[
     "native_tool_search_hosted",
     "native_tool_search_client",
 ]
+EmbeddingCapabilityName = Literal["text_embeddings", "dimensions"]
+ImageGenerationCapabilityName = Literal["text_to_image", "image_editing", "multiple_outputs"]
+ModelCapabilityName = ChatCapabilityName | EmbeddingCapabilityName | ImageGenerationCapabilityName
 
 
 class CapabilityContract(BaseModel):
@@ -55,7 +63,7 @@ class CapabilityDiagnostic(CapabilityContract):
     """One deterministic capability-resolution or requirement diagnostic."""
 
     code: str
-    capability: ChatCapabilityName
+    capability: ModelCapabilityName
     message: str
 
 
@@ -73,17 +81,31 @@ class ResolvedChatCapabilities(CapabilityContract):
     native_tool_search_client: EffectiveCapability
 
 
-class ResolvedModelBinding(CapabilityContract):
-    """Pinned model binding, effective Chat facts, and preflight diagnostics."""
+class ResolvedEmbeddingCapabilities(CapabilityContract):
+    """Effective Embedding capabilities for one exact model and adapter binding."""
 
-    operation: Literal["chat"] = "chat"
+    text_embeddings: EffectiveCapability
+    dimensions: EffectiveCapability
+
+
+class ResolvedImageGenerationCapabilities(CapabilityContract):
+    """Effective Image Generation capabilities for one exact binding."""
+
+    text_to_image: EffectiveCapability
+    image_editing: EffectiveCapability
+    multiple_outputs: EffectiveCapability
+
+
+class ResolvedOperationBinding(CapabilityContract):
+    """Common pinned identity and diagnostics for one exact model operation."""
+
+    operation: Literal["chat", "embeddings", "image_generation"]
     provider_id: str
     endpoint_id: str
     model_id: str
     catalog_key: str | None
     catalog_keys: tuple[str, ...] = ()
     catalog_digest: str
-    capabilities: ResolvedChatCapabilities
     diagnostics: tuple[CapabilityDiagnostic, ...] = ()
 
     @property
@@ -119,6 +141,27 @@ class ResolvedModelBinding(CapabilityContract):
         return not self.diagnostics
 
 
+class ResolvedModelBinding(ResolvedOperationBinding):
+    """Pinned model binding, effective Chat facts, and preflight diagnostics."""
+
+    operation: Literal["chat"] = "chat"
+    capabilities: ResolvedChatCapabilities
+
+
+class ResolvedEmbeddingBinding(ResolvedOperationBinding):
+    """Pinned embedding binding, effective facts, and preflight diagnostics."""
+
+    operation: Literal["embeddings"] = "embeddings"
+    capabilities: ResolvedEmbeddingCapabilities
+
+
+class ResolvedImageGenerationBinding(ResolvedOperationBinding):
+    """Pinned image binding, effective facts, and preflight diagnostics."""
+
+    operation: Literal["image_generation"] = "image_generation"
+    capabilities: ResolvedImageGenerationCapabilities
+
+
 @dataclass(frozen=True)
 class ResolvedModelRequest:
     """Carry one pinned model binding and complete request-validation report."""
@@ -150,6 +193,97 @@ _ADAPTER_FLAGS: dict[ChatCapabilityName, str] = {
     "native_tool_search_hosted": "native_tool_search",
     "native_tool_search_client": "native_tool_search",
 }
+
+_EMBEDDING_CAPABILITY_NAMES: tuple[EmbeddingCapabilityName, ...] = (
+    "text_embeddings",
+    "dimensions",
+)
+_IMAGE_GENERATION_CAPABILITY_NAMES: tuple[ImageGenerationCapabilityName, ...] = (
+    "text_to_image",
+    "image_editing",
+    "multiple_outputs",
+)
+
+
+def _resolve_operation_capabilities(
+    profile: EmbeddingProfileSpec | ImageGenerationProfile,
+    *,
+    operation: Literal["embeddings", "image_generation"],
+    capability_names: tuple[EmbeddingCapabilityName, ...]
+    | tuple[ImageGenerationCapabilityName, ...],
+    required: tuple[EmbeddingCapabilityName, ...] | tuple[ImageGenerationCapabilityName, ...],
+) -> tuple[
+    dict[str, EffectiveCapability],
+    tuple[CapabilityDiagnostic, ...],
+    str | None,
+]:
+    if len(required) != len(set(required)):
+        raise ValueError(f"required {operation} capabilities must be unique")
+    if any(name not in capability_names for name in required):
+        raise ValueError(f"required capability does not belong to {operation}")
+    adapter = get_endpoint_adapter(profile.connection.endpoint_id)
+    provider = get_provider_descriptor(profile.connection.provider_id)
+    if profile.connection.endpoint_id not in provider.endpoint_ids:
+        raise ValueError(f"{operation} profile endpoint is not registered for its provider")
+    if operation not in adapter.implemented_operations:
+        raise ValueError(f"profile endpoint does not implement {operation}")
+    entry = resolve_model_catalog_capability_entry(
+        profile.connection.provider_id,
+        profile.model.model_id,
+        operation,
+        profile.connection.endpoint_id,
+        capability=operation,
+    )
+    catalog_capabilities = getattr(entry, operation, None) if entry is not None else None
+    overrides = profile.capability_overrides.model_dump()
+    effective: dict[str, EffectiveCapability] = {}
+    for name in capability_names:
+        state: CapabilityState = (
+            getattr(catalog_capabilities, name) if catalog_capabilities is not None else "unknown"
+        )
+        evidence = [
+            CapabilityEvidence(
+                source="catalog" if entry is not None else "unknown",
+                reference=entry.catalog_key if entry is not None else "no_catalog_match",
+                state=state,
+            )
+        ]
+        override = overrides[name]
+        if override != "unknown":
+            state = override
+            evidence.append(
+                CapabilityEvidence(
+                    source="override",
+                    reference=f"profile.capability_overrides.{name}",
+                    state=override,
+                )
+            )
+        if name not in adapter.implementation_capabilities:
+            state = "unsupported"
+            evidence.append(
+                CapabilityEvidence(
+                    source="adapter",
+                    reference=f"{adapter.adapter_id}:{name}:unimplemented",
+                    state="unsupported",
+                )
+            )
+        effective[name] = EffectiveCapability(state=state, provenance=tuple(evidence))
+    diagnostics = tuple(
+        CapabilityDiagnostic(
+            code=(
+                "required_capability_unknown"
+                if effective[name].state == "unknown"
+                else "required_capability_unsupported"
+            ),
+            capability=name,
+            message=(
+                f"Required {operation} capability {name!r} resolved to {effective[name].state!r}."
+            ),
+        )
+        for name in required
+        if effective[name].state != "supported"
+    )
+    return effective, diagnostics, entry.catalog_key if entry is not None else None
 
 
 def resolve_chat_profile(
@@ -318,6 +452,127 @@ def resolve_chat_profile(
     )
 
 
+def resolve_embedding_profile(
+    profile: EmbeddingProfileSpec,
+    *,
+    required: tuple[EmbeddingCapabilityName, ...] = (),
+) -> ResolvedEmbeddingBinding:
+    """Resolve effective Embedding capabilities for one canonical profile.
+
+    Intro:
+        Combines one operation-scoped catalog record, explicit profile
+        overrides, and the exact selected endpoint implementation. Unknown
+        model facts remain unknown, while an unimplemented adapter feature
+        always clamps a positive catalog or override assertion.
+
+    Examples:
+        Resolve a cataloged embedding model:
+            ```python
+            binding = resolve_embedding_profile(profile)
+            assert binding.operation == "embeddings"
+            ```
+
+        Require configurable dimensions:
+            ```python
+            binding = resolve_embedding_profile(
+                profile,
+                required=("dimensions",),
+            )
+            ```
+
+    Args:
+        profile: Canonical immutable Embedding profile.
+        required: Embedding capabilities that must resolve to `supported`.
+
+    Returns:
+        ResolvedEmbeddingBinding: Pinned identity, effective capability
+        provenance, catalog identity, and fail-closed diagnostics.
+
+    Notes:
+        Resolution performs no provider I/O and never infers facts from a
+        provider name or discovered model list.
+    """
+
+    if not isinstance(profile, EmbeddingProfileSpec):
+        raise TypeError("Embedding capability resolution requires EmbeddingProfileSpec")
+    effective, diagnostics, catalog_key = _resolve_operation_capabilities(
+        profile,
+        operation="embeddings",
+        capability_names=_EMBEDDING_CAPABILITY_NAMES,
+        required=required,
+    )
+    return ResolvedEmbeddingBinding(
+        provider_id=profile.connection.provider_id,
+        endpoint_id=profile.connection.endpoint_id,
+        model_id=profile.model.model_id,
+        catalog_key=catalog_key,
+        catalog_keys=(catalog_key,) if catalog_key is not None else (),
+        catalog_digest=catalog_digest(),
+        capabilities=ResolvedEmbeddingCapabilities(**effective),
+        diagnostics=diagnostics,
+    )
+
+
+def resolve_image_generation_profile(
+    profile: ImageGenerationProfile,
+    *,
+    required: tuple[ImageGenerationCapabilityName, ...] = (),
+) -> ResolvedImageGenerationBinding:
+    """Resolve effective Image Generation capabilities for one profile.
+
+    Intro:
+        Combines image-model catalog facts, explicit profile overrides, and the
+        exact selected endpoint implementation without changing the requested
+        provider, model, or adapter.
+
+    Examples:
+        Resolve a cataloged image model:
+            ```python
+            binding = resolve_image_generation_profile(profile)
+            assert binding.operation == "image_generation"
+            ```
+
+        Require image-conditioned editing:
+            ```python
+            binding = resolve_image_generation_profile(
+                profile,
+                required=("image_editing",),
+            )
+            ```
+
+    Args:
+        profile: Canonical immutable Image Generation profile.
+        required: Image capabilities that must resolve to `supported`.
+
+    Returns:
+        ResolvedImageGenerationBinding: Pinned identity, effective capability
+        provenance, catalog identity, and fail-closed diagnostics.
+
+    Notes:
+        Adapter clamping exposes incomplete request projection as unsupported;
+        it does not retry through another endpoint.
+    """
+
+    if not isinstance(profile, ImageGenerationProfile):
+        raise TypeError("Image capability resolution requires ImageGenerationProfile")
+    effective, diagnostics, catalog_key = _resolve_operation_capabilities(
+        profile,
+        operation="image_generation",
+        capability_names=_IMAGE_GENERATION_CAPABILITY_NAMES,
+        required=required,
+    )
+    return ResolvedImageGenerationBinding(
+        provider_id=profile.connection.provider_id,
+        endpoint_id=profile.connection.endpoint_id,
+        model_id=profile.model.model_id,
+        catalog_key=catalog_key,
+        catalog_keys=(catalog_key,) if catalog_key is not None else (),
+        catalog_digest=catalog_digest(),
+        capabilities=ResolvedImageGenerationCapabilities(**effective),
+        diagnostics=diagnostics,
+    )
+
+
 def resolve_model_request(
     profile: ChatProfile,
     request: ModelRequest,
@@ -397,10 +652,20 @@ __all__ = [
     "CapabilityDiagnostic",
     "CapabilityEvidence",
     "ChatCapabilityName",
+    "EmbeddingCapabilityName",
     "EffectiveCapability",
+    "ImageGenerationCapabilityName",
+    "ModelCapabilityName",
     "ResolvedChatCapabilities",
+    "ResolvedEmbeddingBinding",
+    "ResolvedEmbeddingCapabilities",
+    "ResolvedImageGenerationBinding",
+    "ResolvedImageGenerationCapabilities",
     "ResolvedModelBinding",
     "ResolvedModelRequest",
+    "ResolvedOperationBinding",
     "resolve_chat_profile",
+    "resolve_embedding_profile",
+    "resolve_image_generation_profile",
     "resolve_model_request",
 ]
