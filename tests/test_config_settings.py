@@ -8,8 +8,16 @@ import pytest
 from aethergraph.api.v1.schemas.settings import SlackPayload, SlackView
 from aethergraph.config.config import AppSettings, SlackSettings, TelegramSettings
 from aethergraph.config.dotenv_writer import read_dotenv, replace_dotenv
-from aethergraph.config.llm import LLMProfile
-from aethergraph.config.llm_env import encode_llm_profiles_env
+from aethergraph.config.llm import (
+    EmbeddingProfile,
+    ImageGenerationProfileSettings,
+    LLMProfile,
+)
+from aethergraph.config.llm_env import (
+    encode_embedding_profiles_env,
+    encode_image_generation_profiles_env,
+    encode_llm_profiles_env,
+)
 from aethergraph.config.loader import load_settings
 from aethergraph.services.channel import factory as channel_factory
 
@@ -70,6 +78,69 @@ def test_encode_llm_profiles_env_is_deterministic_and_complete() -> None:
     assert (
         rows["AETHERGRAPH_LLM__PROFILES__SUMMARIZER__VISION_ACCEPTED_MIME_TYPES"] == '["image/png"]'
     )
+
+
+def test_operation_profile_environment_writers_round_trip_independently(
+    tmp_path: Path,
+) -> None:
+    rows = encode_llm_profiles_env({"default": LLMProfile(provider="openai", model="gpt-test")})
+    rows.update(
+        encode_embedding_profiles_env(
+            {
+                "default": EmbeddingProfile(
+                    provider="openai",
+                    model="text-embedding-3-small",
+                ),
+                "search": EmbeddingProfile(
+                    provider="google",
+                    model="gemini-embedding-001",
+                ),
+            }
+        )
+    )
+    rows.update(
+        encode_image_generation_profiles_env(
+            {
+                "default": ImageGenerationProfileSettings(
+                    provider="openai",
+                    model="gpt-image-1",
+                    endpoint_id="openai_images",
+                ),
+                "design": ImageGenerationProfileSettings(
+                    provider="google",
+                    model="imagen-4.0-generate-001",
+                    endpoint_id="gemini_images",
+                    count=2,
+                ),
+            }
+        )
+    )
+    target = tmp_path / "operation-profiles.env"
+    replace_dotenv(target, rows)
+
+    settings = load_settings(env_file=target)
+
+    assert settings.llm.default.model == "gpt-test"
+    assert settings.embed.default.model == "text-embedding-3-small"
+    assert settings.embed.profiles["search"].model == "gemini-embedding-001"
+    assert settings.image_generation.default.endpoint_id == "openai_images"
+    assert settings.image_generation.profiles["design"].count == 2
+
+
+@pytest.mark.parametrize(
+    ("encoder", "unexpected_field", "label"),
+    [
+        (encode_embedding_profiles_env, "vision_enabled", "Embedding"),
+        (encode_image_generation_profiles_env, "prompt_cache_policy", "Image Generation"),
+    ],
+)
+def test_operation_profile_environment_writers_reject_cross_operation_fields(
+    encoder,
+    unexpected_field: str,
+    label: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"Unknown {label} profile fields"):
+        encoder({"default": {unexpected_field: True}})
 
 
 def test_provider_settings_expose_only_supported_transport_configuration() -> None:
