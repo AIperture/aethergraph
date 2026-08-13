@@ -94,6 +94,7 @@ def test_operation_profile_environment_writers_round_trip_independently(
                 "search": EmbeddingProfile(
                     provider="google",
                     model="gemini-embedding-001",
+                    endpoint_id="gemini_embeddings",
                 ),
             }
         )
@@ -123,6 +124,7 @@ def test_operation_profile_environment_writers_round_trip_independently(
     assert settings.llm.default.model == "gpt-test"
     assert settings.embed.default.model == "text-embedding-3-small"
     assert settings.embed.profiles["search"].model == "gemini-embedding-001"
+    assert settings.embed.profiles["search"].endpoint_id == "gemini_embeddings"
     assert settings.image_generation.default.endpoint_id == "openai_images"
     assert settings.image_generation.profiles["design"].count == 2
 

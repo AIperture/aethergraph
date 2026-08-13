@@ -290,6 +290,18 @@ def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:
     assert embed_client_from_profile(canonical, _Secrets()).endpoint_id == "gemini_embeddings"
 
 
+def test_embedding_profile_preserves_explicit_endpoint_selection() -> None:
+    canonical = embedding_profile_from_legacy(
+        EmbeddingProfile(
+            provider="openai",
+            model="text-embedding-3-small",
+            endpoint_id="openai_embeddings",
+        )
+    )
+
+    assert canonical.connection.endpoint_id == "openai_embeddings"
+
+
 def test_embedding_factory_preserves_canonical_dimension_default() -> None:
     canonical = embedding_profile_from_legacy(
         EmbeddingProfile(provider="google", model="gemini-embedding-001")

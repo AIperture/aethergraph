@@ -132,6 +132,7 @@ class LLMSettings(BaseModel):
 class EmbeddingProfile(BaseModel):
     provider: Provider = "openai"
     model: str = "text-embedding-3-small"
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = None
     timeout: float = 60.0
     retry: ProviderRetrySettings = Field(default_factory=ProviderRetrySettings)

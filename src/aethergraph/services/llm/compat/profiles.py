@@ -153,7 +153,11 @@ def embedding_profile_from_legacy(
         This codec performs no secret-store or environment resolution.
     """
 
-    adapter = resolve_endpoint_adapter(profile.provider, "embeddings", endpoint_id=endpoint_id)
+    adapter = resolve_endpoint_adapter(
+        profile.provider,
+        "embeddings",
+        endpoint_id=endpoint_id or profile.endpoint_id,
+    )
     credentials = (
         CredentialSelection(inline_secret=profile.api_key)
         if profile.api_key is not None
