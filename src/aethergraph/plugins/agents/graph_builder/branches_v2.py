@@ -285,14 +285,40 @@ def _extract_plan_json(markdown_text: str) -> dict[str, Any] | None:
     return None
 
 
-async def _resolve_codegen_llm(*, context: NodeContext) -> GenericLLMClient:
-    try:
-        return context.llm("coding")
-    except Exception:
-        context.logger().warning(
-            "graph_builder_v2: context.llm('coding') unavailable; fallback to default"
-        )
-        return context.llm()
+def _resolve_codegen_llm(*, context: NodeContext) -> GenericLLMClient:
+    """Resolve the explicitly configured Graph Builder coding profile.
+
+    Intro:
+        Code generation requires the named `coding` profile and propagates its
+        exact lookup or construction failure without selecting another model.
+
+    Examples:
+        Resolve the configured client:
+            ```python
+            client = _resolve_codegen_llm(context=context)
+            assert client is context.llm("coding")
+            ```
+
+        Observe a missing profile:
+            ```python
+            try:
+                _resolve_codegen_llm(context=context_without_coding)
+            except KeyError:
+                pass
+            ```
+
+    Args:
+        context: Current node context containing named model services.
+
+    Returns:
+        GenericLLMClient: Exact client assigned to the `coding` profile.
+
+    Notes:
+        There is no default-profile fallback. Applications using Graph Builder
+        must configure or explicitly select the `coding` profile.
+    """
+
+    return context.llm("coding")
 
 
 async def _handle_plan_v2(
@@ -433,7 +459,7 @@ async def _handle_generate_v2(
             None,
         )
 
-    llm = await _resolve_codegen_llm(context=context)
+    llm = _resolve_codegen_llm(context=context)
     system_prompt = _compile_branch_prompt(context=context, branch=GraphBuilderBranch.GENERATE)
     history = await _recent_chat_for_llm(context=context, limit=16)
 
