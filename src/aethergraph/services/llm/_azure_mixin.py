@@ -5,17 +5,17 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from aethergraph.services.llm._openai_like_mixin import (
-    _openai_like_continuation_messages,
-    _openai_like_tool_call_response,
-    _openai_like_tool_definitions,
-    _stream_openai_like_chat_completions,
-)
 from aethergraph.services.llm._openai_mixin import (
     _openai_checkpoint_payload,
     _openai_function_tool,
     _openai_request_tools,
     _openai_tool_call_response,
+)
+from aethergraph.services.llm.adapters.openai_compatible import (
+    _openai_like_continuation_messages,
+    _openai_like_tool_call_response,
+    _openai_like_tool_definitions,
+    _stream_openai_like_chat_completions,
 )
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,

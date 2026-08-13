@@ -1,4 +1,4 @@
-"""OpenAI-compatible chat completions (OpenRouter, LMStudio, Ollama)."""
+"""Physical OpenAI-compatible Chat Completions adapter."""
 
 from __future__ import annotations
 
@@ -641,11 +641,12 @@ def _openai_like_tool_definitions(tool_request: ToolCallRequest) -> list[dict[st
     ]
 
 
-class _OpenAILikeMixin:
-    """Provider methods for OpenRouter, LMStudio, Ollama (OpenAI-compatible endpoints)."""
+class OpenAICompatibleChatAdapter:
+    """Physical adapter for OpenAI-compatible Chat Completions endpoints."""
 
-    async def _chat_openai_like_chat_completions(
-        self,
+    @staticmethod
+    async def invoke(
+        host: Any,
         messages: list[dict[str, Any]],
         *,
         model: str,
@@ -668,7 +669,8 @@ class _OpenAILikeMixin:
         Examples:
             Send a direct request:
                 ```python
-                result = await client._chat_openai_like_chat_completions(
+                result = await OpenAICompatibleChatAdapter.invoke(
+                    client,
                     messages,
                     model="local-model",
                     output_format="text",
@@ -679,7 +681,8 @@ class _OpenAILikeMixin:
 
             Continue a Tool request:
                 ```python
-                result = await client._chat_openai_like_chat_completions(
+                result = await OpenAICompatibleChatAdapter.invoke(
+                    client,
                     messages,
                     model="local-model",
                     output_format="text",
@@ -690,6 +693,7 @@ class _OpenAILikeMixin:
                 ```
 
         Args:
+            host: Bound generic client owning compatible transport primitives.
             messages: Provider-projected stable conversation messages.
             model: Exact configured model identity.
             reasoning_effort: Optional provider reasoning control.
@@ -711,8 +715,8 @@ class _OpenAILikeMixin:
             retry, rate gating, accounting, and observations remain caller-owned.
         """
 
-        await self._ensure_client()
-        assert self._client is not None
+        await host._ensure_client()
+        assert host._client is not None
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
@@ -723,7 +727,7 @@ class _OpenAILikeMixin:
             msg_for_provider, replay_messages = _openai_like_continuation_messages(
                 messages,
                 tool_request=tool_request,
-                provider=self.provider,
+                provider=host.provider,
                 model=model,
             )
         response_format = None
@@ -732,7 +736,7 @@ class _OpenAILikeMixin:
         if structured_output_fields:
             response_format = structured_output_fields.get("response_format")
         elif output_format == "json_object":
-            if self.provider == "lmstudio":
+            if host.provider == "lmstudio":
                 if fail_on_unsupported:
                     raise RuntimeError(
                         "LM Studio does not support response_format.type='json_object'; "
@@ -743,7 +747,7 @@ class _OpenAILikeMixin:
                 response_format = {"type": "json_object"}
             msg_for_provider = _ensure_system_json_directive(messages, schema=None)
         elif output_format == "json_schema":
-            if self.provider == "lmstudio":
+            if host.provider == "lmstudio":
                 if json_schema is None:
                     raise ValueError("output_format='json_schema' requires json_schema")
                 response_format = {
@@ -755,7 +759,7 @@ class _OpenAILikeMixin:
                     },
                 }
             elif fail_on_unsupported:
-                raise RuntimeError(f"provider {self.provider} does not support native json_schema")
+                raise RuntimeError(f"provider {host.provider} does not support native json_schema")
             msg_for_provider = _ensure_system_json_directive(messages, schema=json_schema)
 
         async def _call():
@@ -767,10 +771,10 @@ class _OpenAILikeMixin:
             }
             if max_output_tokens is not None:
                 body["max_tokens"] = max_output_tokens
-            if reasoning_effort is not None and self.provider == "deepseek":
-                body["reasoning_effort"] = self._map_deepseek_reasoning_effort(reasoning_effort)
-            if self.provider == "deepseek":
-                body.update(self._deepseek_thinking_body(**kw))
+            if reasoning_effort is not None and host.provider == "deepseek":
+                body["reasoning_effort"] = host._map_deepseek_reasoning_effort(reasoning_effort)
+            if host.provider == "deepseek":
+                body.update(host._deepseek_thinking_body(**kw))
             if response_format is not None:
                 body["response_format"] = response_format
             if tool_request is not None:
@@ -782,12 +786,12 @@ class _OpenAILikeMixin:
             if tool_request is None and tool_choice is not None:
                 body["tool_choice"] = tool_choice
 
-            r = await self._client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers_openai_like(),
+            r = await host._client.post(
+                f"{host.base_url}/chat/completions",
+                headers=host._headers_openai_like(),
                 json=body,
             )
-            metadata = checked_response_metadata(self.provider, model, "chat", r)
+            metadata = checked_response_metadata(host.provider, model, "chat", r)
 
             data = r.json()
             usage = data.get("usage", {}) or {}
@@ -800,7 +804,7 @@ class _OpenAILikeMixin:
                 response = _openai_like_tool_call_response(
                     data,
                     tool_request=tool_request,
-                    provider=self.provider,
+                    provider=host.provider,
                     model=model,
                     stable_messages=messages,
                     replay_messages=replay_messages,
@@ -812,8 +816,9 @@ class _OpenAILikeMixin:
 
         return await _call()
 
-    async def _chat_openai_like_chat_completions_stream(
-        self,
+    @staticmethod
+    async def stream(
+        host: Any,
         messages: list[dict[str, Any]],
         *,
         model: str,
@@ -832,7 +837,8 @@ class _OpenAILikeMixin:
         Examples:
             Stream default text:
                 ```python
-                result = await client._chat_openai_like_chat_completions_stream(
+                result = await OpenAICompatibleChatAdapter.stream(
+                    client,
                     messages,
                     model="local-model",
                 )
@@ -840,7 +846,8 @@ class _OpenAILikeMixin:
 
             Stream with a token ceiling:
                 ```python
-                result = await client._chat_openai_like_chat_completions_stream(
+                result = await OpenAICompatibleChatAdapter.stream(
+                    client,
                     messages,
                     model="local-model",
                     max_output_tokens=256,
@@ -850,6 +857,7 @@ class _OpenAILikeMixin:
                 ```
 
         Args:
+            host: Bound generic client owning compatible transport primitives.
             messages: Provider-projected stable conversation messages.
             model: Exact configured model identity.
             reasoning_effort: Optional compatible reasoning-depth override.
@@ -867,8 +875,8 @@ class _OpenAILikeMixin:
             the shared invocation lifecycle.
         """
 
-        await self._ensure_client()
-        assert self._client is not None
+        await host._ensure_client()
+        assert host._client is not None
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
@@ -881,17 +889,17 @@ class _OpenAILikeMixin:
         }
         if max_output_tokens is not None:
             body["max_tokens"] = max_output_tokens
-        if reasoning_effort is not None and self.provider == "deepseek":
-            body["reasoning_effort"] = self._map_deepseek_reasoning_effort(reasoning_effort)
-        if self.provider == "deepseek":
-            body.update(self._deepseek_thinking_body(**kw))
+        if reasoning_effort is not None and host.provider == "deepseek":
+            body["reasoning_effort"] = host._map_deepseek_reasoning_effort(reasoning_effort)
+        if host.provider == "deepseek":
+            body.update(host._deepseek_thinking_body(**kw))
 
         return await _stream_openai_like_chat_completions(
-            http_client=self._client,
-            provider=self.provider,
+            http_client=host._client,
+            provider=host.provider,
             model=model,
-            url=f"{self.base_url}/chat/completions",
-            headers=self._headers_openai_like(),
+            url=f"{host.base_url}/chat/completions",
+            headers=host._headers_openai_like(),
             body=body,
             on_delta=on_delta,
             on_usage_update=on_usage_update,

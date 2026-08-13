@@ -24,11 +24,14 @@ from aethergraph.core.schema_validation import first_schema_issue
 from aethergraph.services.llm._anthropic_mixin import _AnthropicMixin
 from aethergraph.services.llm._azure_mixin import _AzureMixin
 from aethergraph.services.llm._gemini_mixin import _GeminiMixin
-from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
-from aethergraph.services.llm.adapters import ChatAdapterInvocation, invoke_chat_adapter
+from aethergraph.services.llm.adapters import (
+    ChatAdapterInvocation,
+    OpenAICompatibleChatAdapter,
+    invoke_chat_adapter,
+)
 from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
@@ -201,7 +204,6 @@ class GenericLLMClient(
     _AnthropicMixin,
     _AzureMixin,
     _GeminiMixin,
-    _OpenAILikeMixin,
     LLMClientProtocol,
 ):
     """
@@ -3290,7 +3292,8 @@ class GenericLLMClient(
                     )
                 else:
                     provider_result = await self._provider_retry.execute(
-                        lambda: self._chat_openai_like_chat_completions_stream(
+                        lambda: OpenAICompatibleChatAdapter.stream(
+                            self,
                             messages,
                             model=model,
                             reasoning_effort=reasoning_effort,

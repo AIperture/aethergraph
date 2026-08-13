@@ -22,6 +22,7 @@ from aethergraph.services.llm import (
     ToolDefinition,
     message_from_text,
 )
+from aethergraph.services.llm.adapters import OpenAICompatibleChatAdapter
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
@@ -1111,7 +1112,9 @@ async def test_chat_stream_rejects_structured_output_modes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_explicit_openai_chat_completions_stream_never_switches_to_responses() -> None:
+async def test_explicit_openai_chat_completions_stream_never_switches_to_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
@@ -1119,15 +1122,17 @@ async def test_explicit_openai_chat_completions_stream_never_switches_to_respons
     )
     calls: list[str] = []
 
-    async def fake_chat_completions_stream(messages, **kwargs):
+    async def fake_chat_completions_stream(host, messages, **kwargs):
         calls.append("chat.completions")
         return ProviderCallResult(("streamed", {}))
 
     async def fail_responses_stream(messages, **kwargs):
         raise AssertionError("pinned Chat Completions endpoint switched to Responses")
 
-    client._chat_openai_like_chat_completions_stream = (  # type: ignore[method-assign]
-        fake_chat_completions_stream
+    monkeypatch.setattr(
+        OpenAICompatibleChatAdapter,
+        "stream",
+        fake_chat_completions_stream,
     )
     client._chat_openai_responses_stream = fail_responses_stream  # type: ignore[method-assign]
 
@@ -1298,7 +1303,8 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
 
-    result = await client._chat_openai_like_chat_completions(  # type: ignore[misc]
+    result = await OpenAICompatibleChatAdapter.invoke(
+        client,
         [{"role": "user", "content": "hello"}],
         model="deepseek-v4-pro",
         reasoning_effort="xhigh",
@@ -1316,6 +1322,11 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     assert fake_http.last_json["max_tokens"] == 256
     assert fake_http.last_json["reasoning_effort"] == "max"
     assert fake_http.last_json["thinking"] == {"type": "enabled"}
+
+
+def test_openai_compatible_chat_is_not_inherited_by_generic_client() -> None:
+    assert not hasattr(GenericLLMClient, "_chat_openai_like_chat_completions")
+    assert not hasattr(GenericLLMClient, "_chat_openai_like_chat_completions_stream")
 
 
 @pytest.mark.asyncio
