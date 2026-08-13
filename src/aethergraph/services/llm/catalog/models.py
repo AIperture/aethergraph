@@ -13,6 +13,7 @@ from ..registry import ModelOperation
 CatalogEvidenceStatus = Literal["verified", "conservative", "unknown"]
 CatalogCapabilityState = Literal["supported", "unsupported", "unknown"]
 CatalogCapability = Literal[
+    "chat_tools",
     "native_tool_search",
     "structured_output",
     "prompt_cache",
@@ -39,6 +40,52 @@ class CatalogNativeToolSearchMode(CatalogContract):
     tool_representation: Literal["full_definitions", "search_schema_manifest"]
     inventory_timing: Literal["request", "search", "preloaded"]
     path_transport: Literal["native_group", "metadata", "manifest", "none"]
+
+
+class CatalogChatToolCapabilities(CatalogContract):
+    """Evidence-backed Chat tool-loop capabilities for one model binding.
+
+    Intro:
+        Tool calling, returning Tool results, and multiple calls in one model
+        turn are independent model facts. Keeping them together in one domain
+        prevents endpoint adapter support from manufacturing model support.
+
+    Examples:
+        Declare a complete Tool loop:
+            ```python
+            facts = CatalogChatToolCapabilities(
+                native_tool_calling="supported",
+                tool_result_continuation="supported",
+                parallel_tool_calls="supported",
+            )
+            ```
+
+        Preserve an unverified parallel-call fact:
+            ```python
+            facts = CatalogChatToolCapabilities(
+                native_tool_calling="supported",
+                tool_result_continuation="supported",
+                parallel_tool_calls="unknown",
+            )
+            ```
+
+    Args:
+        native_tool_calling: Whether the model can emit structured Tool calls.
+        tool_result_continuation: Whether a Tool result can be returned for the
+            model to continue the same logical turn.
+        parallel_tool_calls: Whether one model turn may emit multiple Tool calls.
+
+    Returns:
+        CatalogChatToolCapabilities: Immutable validated Chat Tool facts.
+
+    Notes:
+        `unknown` is intentional and does not satisfy fail-closed requirements.
+        Engine-projected Tool discovery is outside this model capability domain.
+    """
+
+    native_tool_calling: CatalogCapabilityState
+    tool_result_continuation: CatalogCapabilityState
+    parallel_tool_calls: CatalogCapabilityState
 
 
 class CatalogStructuredOutput(CatalogContract):
@@ -84,6 +131,7 @@ class ModelCatalogEntry(CatalogContract):
     endpoint_ids: tuple[str, ...]
     model_id: str | None = Field(default=None, min_length=1, max_length=512)
     model_pattern: str | None = Field(default=None, min_length=1, max_length=1024)
+    chat_tools: CatalogChatToolCapabilities | None = None
     native_tool_search: tuple[CatalogNativeToolSearchMode, ...] = ()
     structured_output: CatalogStructuredOutput | None = None
     prompt_cache: CatalogPromptCache | None = None
@@ -181,6 +229,7 @@ class ModelCatalogEntry(CatalogContract):
         capability_count = sum(
             (
                 bool(self.native_tool_search),
+                self.chat_tools is not None,
                 self.structured_output is not None,
                 self.prompt_cache is not None,
                 self.embeddings is not None,
@@ -199,6 +248,12 @@ class ModelCatalogEntry(CatalogContract):
         if self.operation != declared_operation:
             raise ValueError("catalog capability domain does not match operation")
         positive_capability = bool(self.native_tool_search)
+        if self.chat_tools is not None:
+            positive_capability = positive_capability or "supported" in {
+                self.chat_tools.native_tool_calling,
+                self.chat_tools.tool_result_continuation,
+                self.chat_tools.parallel_tool_calls,
+            }
         if self.structured_output is not None:
             positive_capability = positive_capability or any(
                 (
@@ -344,6 +399,7 @@ __all__ = [
     "CatalogContract",
     "CatalogCapability",
     "CatalogCapabilityState",
+    "CatalogChatToolCapabilities",
     "CatalogEmbeddingCapabilities",
     "CatalogEvidenceStatus",
     "CatalogImageGenerationCapabilities",

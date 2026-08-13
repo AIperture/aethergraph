@@ -343,6 +343,13 @@ def resolve_chat_profile(
         "chat",
         profile.connection.endpoint_id,
     )
+    chat_tools_entry = resolve_model_catalog_capability_entry(
+        profile.connection.provider_id,
+        profile.model.model_id,
+        "chat",
+        profile.connection.endpoint_id,
+        capability="chat_tools",
+    )
     structured_entry = resolve_model_catalog_capability_entry(
         profile.connection.provider_id,
         profile.model.model_id,
@@ -368,6 +375,11 @@ def resolve_chat_profile(
         catalog_states["native_tool_search_client"] = (
             "supported" if "native_client" in native_modes else "unsupported"
         )
+    if chat_tools_entry is not None and chat_tools_entry.chat_tools is not None:
+        chat_tools = chat_tools_entry.chat_tools
+        catalog_states["native_tool_calling"] = chat_tools.native_tool_calling
+        catalog_states["tool_result_continuation"] = chat_tools.tool_result_continuation
+        catalog_states["parallel_tool_calls"] = chat_tools.parallel_tool_calls
     if structured_entry is not None and structured_entry.structured_output is not None:
         structured = structured_entry.structured_output
         catalog_states["structured_output"] = (
@@ -378,6 +390,9 @@ def resolve_chat_profile(
             "supported" if prompt_cache_entry.prompt_cache.mode != "unavailable" else "unsupported"
         )
     capability_entries = {
+        "native_tool_calling": chat_tools_entry,
+        "tool_result_continuation": chat_tools_entry,
+        "parallel_tool_calls": chat_tools_entry,
         "structured_output": structured_entry,
         "prompt_cache": prompt_cache_entry,
         "native_tool_search_hosted": native_entry,
@@ -436,7 +451,7 @@ def resolve_chat_profile(
     catalog_entries = tuple(
         dict.fromkeys(
             item.catalog_key
-            for item in (native_entry, structured_entry, prompt_cache_entry)
+            for item in (native_entry, chat_tools_entry, structured_entry, prompt_cache_entry)
             if item is not None
         )
     )

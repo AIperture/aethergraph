@@ -47,6 +47,7 @@ def test_production_catalog_is_valid_and_digest_is_deterministic() -> None:
     assert catalog_digest(catalog) == catalog_digest(catalog)
     assert len(catalog_digest(catalog)) == 64
     assert all(entry.sources for entry in catalog.entries if entry.native_tool_search)
+    assert all(entry.sources for entry in catalog.entries if entry.chat_tools is not None)
     assert validate_catalog(catalog) == ()
 
 
@@ -88,6 +89,41 @@ def test_catalog_resolves_operation_capabilities_without_manufacturing_unknowns(
             "embeddings",
             "openai_embeddings",
             capability="embeddings",
+        )
+        is None
+    )
+
+
+def test_catalog_resolves_chat_tool_facts_conservatively() -> None:
+    openai = resolve_model_catalog_capability_entry(
+        "openai",
+        "gpt-5-mini",
+        "chat",
+        "openai_responses",
+        capability="chat_tools",
+    )
+    deepseek = resolve_model_catalog_capability_entry(
+        "deepseek",
+        "deepseek-v4-pro",
+        "chat",
+        "openai_chat_completions",
+        capability="chat_tools",
+    )
+
+    assert openai is not None and openai.chat_tools is not None
+    assert openai.chat_tools.native_tool_calling == "supported"
+    assert openai.chat_tools.tool_result_continuation == "supported"
+    assert openai.chat_tools.parallel_tool_calls == "supported"
+    assert deepseek is not None and deepseek.chat_tools is not None
+    assert deepseek.chat_tools.native_tool_calling == "supported"
+    assert deepseek.chat_tools.parallel_tool_calls == "unknown"
+    assert (
+        resolve_model_catalog_capability_entry(
+            "openai_compatible",
+            "gpt-5-mini",
+            "chat",
+            "openai_chat_completions",
+            capability="chat_tools",
         )
         is None
     )
@@ -137,12 +173,21 @@ def test_catalog_resolves_overlapping_facts_within_capability_domain() -> None:
         "openai_responses",
         capability="prompt_cache",
     )
+    chat_tools = resolve_model_catalog_capability_entry(
+        "openai",
+        "gpt-5.6",
+        "chat",
+        "openai_responses",
+        capability="chat_tools",
+    )
 
     assert tool_search is not None and tool_search.native_tool_search
     assert structured is not None and structured.structured_output is not None
     assert structured.structured_output.native_strict_schema
     assert prompt_cache is not None and prompt_cache.prompt_cache is not None
     assert prompt_cache.prompt_cache.mode == "explicit"
+    assert chat_tools is not None and chat_tools.chat_tools is not None
+    assert chat_tools.chat_tools.native_tool_calling == "supported"
 
 
 def test_tool_discovery_resolution_reads_production_catalog() -> None:
@@ -222,7 +267,9 @@ def test_catalog_entry_rejects_multiple_capability_domains() -> None:
 
 
 def test_equal_priority_catalog_matches_fail_closed() -> None:
-    payload = load_model_catalog().entries[0].model_dump(mode="json")
+    payload = next(
+        entry for entry in load_model_catalog().entries if entry.native_tool_search
+    ).model_dump(mode="json")
     payload["catalog_key"] = "test/duplicate-one/v1"
     payload["model_pattern"] = "gpt-5\\.6"
     first = ModelCatalogEntry.model_validate(payload)
@@ -230,7 +277,7 @@ def test_equal_priority_catalog_matches_fail_closed() -> None:
     second = ModelCatalogEntry.model_validate(payload)
     catalog = ModelCatalog(
         schema_version="aethergraph.model-catalog/v1",
-        catalog_revision=1,
+        catalog_revision=first.catalog_revision,
         entries=(first, second),
     )
 
@@ -278,6 +325,22 @@ def test_resolver_uses_structured_output_and_prompt_cache_catalog_domains() -> N
     assert binding.capabilities.prompt_cache.state == "supported"
     assert "openai/current-structured-output/v2" in binding.catalog_keys
     assert "openai/gpt-5.6-plus-explicit-prompt-cache/v2" in binding.catalog_keys
+
+
+def test_resolver_uses_chat_tool_catalog_domain_with_provenance() -> None:
+    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="gpt-5-mini"))
+
+    binding = resolve_chat_profile(
+        profile,
+        required=("native_tool_calling", "tool_result_continuation", "parallel_tool_calls"),
+    )
+
+    assert binding.valid
+    assert binding.capabilities.native_tool_calling.state == "supported"
+    assert binding.capabilities.tool_result_continuation.state == "supported"
+    assert binding.capabilities.parallel_tool_calls.state == "supported"
+    assert binding.capabilities.native_tool_calling.provenance[0].source == "catalog"
+    assert "openai/gpt-5-chat-tools/v4" in binding.catalog_keys
 
 
 def test_resolver_unknown_does_not_satisfy_required_capability() -> None:
@@ -443,9 +506,7 @@ def test_operation_resolution_preserves_unknown_and_validates_endpoint_operation
 
 
 def test_complete_request_resolution_combines_adapter_and_model_requirements() -> None:
-    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="gpt-5.6")).model_copy(
-        update={"capability_overrides": ChatCapabilityOverrides(native_tool_calling="supported")}
-    )
+    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="gpt-5.6"))
     request = ModelRequest(
         messages=(message_from_text("user", "Look up"),),
         tools=(

@@ -10,6 +10,7 @@ from .maintenance import catalog_report, validate_catalog
 from .models import (
     CatalogCapability,
     CatalogCapabilityState,
+    CatalogChatToolCapabilities,
     CatalogEmbeddingCapabilities,
     CatalogEvidenceStatus,
     CatalogImageGenerationCapabilities,
@@ -23,6 +24,7 @@ from .models import (
 __all__ = [
     "CatalogCapability",
     "CatalogCapabilityState",
+    "CatalogChatToolCapabilities",
     "CatalogEmbeddingCapabilities",
     "CatalogEvidenceStatus",
     "CatalogImageGenerationCapabilities",

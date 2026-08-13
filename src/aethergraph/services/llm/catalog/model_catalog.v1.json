@@ -1,7 +1,81 @@
 {
   "schema_version": "aethergraph.model-catalog/v1",
-  "catalog_revision": 3,
+  "catalog_revision": 4,
   "entries": [
+    {
+      "catalog_key": "openai/gpt-5-chat-tools/v4",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses", "openai_chat_completions"],
+      "model_pattern": "(?:gpt-5-mini(?:-2025-08-07)?|gpt-5\\.[456](?:-[a-z0-9.-]+)?)",
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5-mini",
+        "https://developers.openai.com/api/docs/guides/function-calling"
+      ],
+      "verified_at": "2026-08-13",
+      "catalog_revision": 4,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "anthropic/claude-sonnet-4-5-chat-tools/v4",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": ["anthropic_messages"],
+      "model_id": "claude-sonnet-4-5-20250929",
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "supported"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview",
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls"
+      ],
+      "verified_at": "2026-08-13",
+      "catalog_revision": 4,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "google/gemini-chat-tools/v4",
+      "provider_id": "google",
+      "operation": "chat",
+      "endpoint_ids": ["gemini_generate_content"],
+      "model_pattern": "gemini-(?:2\\.5-(?:flash|pro)|3(?:\\.[0-9]+)?-(?:flash|pro))(?:-[a-z0-9.-]+)?",
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "supported"
+      },
+      "sources": ["https://ai.google.dev/gemini-api/docs/function-calling"],
+      "verified_at": "2026-08-13",
+      "catalog_revision": 4,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "deepseek/current-chat-tools/v4",
+      "provider_id": "deepseek",
+      "operation": "chat",
+      "endpoint_ids": ["openai_chat_completions"],
+      "model_pattern": "(?:deepseek-v4-(?:flash|pro)|deepseek-chat)",
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "unknown"
+      },
+      "sources": ["https://api-docs.deepseek.com/guides/tool_calls"],
+      "verified_at": "2026-08-13",
+      "catalog_revision": 4,
+      "evidence_status": "verified",
+      "priority": 100
+    },
     {
       "catalog_key": "openai/gpt-5.4-5.6-native-tool-search/v1",
       "provider_id": "openai",
