@@ -26,7 +26,8 @@ wiring.
 |---|---|---|
 | A0 baseline and isolation | Complete | Dedicated worktree at base `6aa355f`. |
 | A1 legacy agents and skills | Complete | Commit `1758fa3`; only `default_chat_agent` remains; focused gate `18 passed`; full AG gate `721 passed, 2 skipped, 2 deselected`. |
-| A2-A10 | Pending | Not started; A1 external causality gate is complete. |
+| A2 dead leaf services | Complete | Commit `a9f847d`; full AG gate `726 passed, 2 skipped, 2 deselected`; Engine `770 passed`; no causal Studio failure. |
+| A3-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -69,5 +70,27 @@ wiring.
   causality gate.
 - Engine and Studio were tested without bytecode or pytest caches; all temp output
   was directed into this AG worktree. No external source mutation was made.
+
+### A2 - dead leaf services
+
+- Deleted `services/features`, `services/eventbus`, the obsolete `services/kv`,
+  `services/redactor`, the unused EventBus contract, and stray `services/__init__.pu`.
+- Removed the dead `event_bus` and `redactor` container fields and wiring.
+- Preserved `NodeContext.kv()` and its canonical `aethergraph.storage.kv` providers;
+  boundary tests assert that the deleted service-level KV package is absent.
+- Centralized the existing persistence sanitizer under observability and applied it
+  to observation summaries/attributes, prompt captures, agent events, and runtime
+  output. Its contract is deliberately narrow: embedded data URLs are redacted and
+  binary values become bounded metadata; it does not claim generic secret or PII
+  detection.
+- Focused AG gate: 69 existing tests passed; 7 clean-cut and persistence-boundary
+  tests passed.
+- Full AG gate: 730 collected, 726 passed, 2 skipped, and the same 2 non-causal Host
+  tests deselected.
+- External causal gate: Engine `770 passed`; the 117-test Studio slice produced 111
+  passes and exactly the same 6 baseline-proven environment failures. Neither
+  external repository imports an A2-removed surface.
+- No model adapter, model profile, capability, quota, provider transport, or LLM
+  service-construction implementation changed.
 
 No compatibility alias or fallback is accepted as completion evidence.
