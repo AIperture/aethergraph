@@ -61,6 +61,26 @@ def test_catalog_api_uses_runtime_catalog_loader_and_digest() -> None:
     assert len(payload["entries"]) == len(catalog.entries)
 
 
+def test_model_discovery_api_reports_missing_environment_credential(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with _client() as client:
+        response = client.post(
+            "/api/v1/llm/discovery/models",
+            json={"provider_id": "openai", "limit": 50},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "aethergraph.model-discovery/v1"
+    assert payload["provider_id"] == "openai"
+    assert payload["status"] == "unavailable"
+    assert payload["diagnostics"][0]["code"] == (
+        "model_discovery_credential_required"
+    )
+
+
 def test_chat_resolve_api_distinguishes_azure_endpoint_capabilities() -> None:
     body = {
         "provider_id": "azure",

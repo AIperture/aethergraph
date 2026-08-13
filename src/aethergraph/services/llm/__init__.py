@@ -41,6 +41,16 @@ from .media import (
     prepare_image_bytes,
     prepare_image_inputs,
 )
+from .model_discovery import (
+    MODEL_DISCOVERY_ADAPTERS,
+    DiscoveredModel,
+    ModelDiscoveryAdapterDescriptor,
+    ModelDiscoveryDiagnostic,
+    ModelDiscoveryError,
+    ModelDiscoveryResult,
+    ModelDiscoveryStatus,
+    discover_provider_models,
+)
 from .profiles import (
     CapabilityState,
     ChatCapabilityOverrides,
@@ -231,6 +241,14 @@ __all__ = [
     "MODEL_REQUEST_CONTRACT_VERSION",
     "MessageRole",
     "MediaPreparationError",
+    "DiscoveredModel",
+    "MODEL_DISCOVERY_ADAPTERS",
+    "ModelDiscoveryAdapterDescriptor",
+    "ModelDiscoveryDiagnostic",
+    "ModelDiscoveryError",
+    "ModelDiscoveryResult",
+    "ModelDiscoveryStatus",
+    "discover_provider_models",
     "ModelContinuation",
     "ModelEvent",
     "ModelReasoningDelta",

@@ -15,6 +15,7 @@ from aethergraph.config.llm import (
 )
 from aethergraph.services.llm import (
     ENDPOINT_ADAPTERS,
+    MODEL_DISCOVERY_ADAPTERS,
     PROVIDERS,
     ChatProfile,
     EmbeddingDefaults,
@@ -58,6 +59,12 @@ def test_registry_endpoints_exist_and_support_declared_defaults() -> None:
         for operation, endpoint_id in provider.default_endpoints.items():
             assert endpoint_id in provider.endpoint_ids
             assert operation in ENDPOINT_ADAPTERS[endpoint_id].implemented_operations
+
+
+def test_registry_model_discovery_adapters_have_one_implementation_owner() -> None:
+    for provider in PROVIDERS.values():
+        if provider.model_discovery_adapter_id is not None:
+            assert provider.model_discovery_adapter_id in MODEL_DISCOVERY_ADAPTERS
 
 
 def test_endpoint_adapter_revision_must_be_positive() -> None:

@@ -15,6 +15,7 @@ from aethergraph.services.llm.capabilities import (
     ResolvedModelBinding,
 )
 from aethergraph.services.llm.catalog import ModelCatalogEntry
+from aethergraph.services.llm.model_discovery import ModelDiscoveryResult
 from aethergraph.services.llm.profiles import (
     ChatCapabilityOverrides,
     EmbeddingCapabilityOverrides,
@@ -105,6 +106,16 @@ class LLMModelCatalogResponse(LLMApiContract):
     catalog_revision: int = Field(ge=1)
     digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     entries: tuple[ModelCatalogEntry, ...]
+
+
+class LLMModelDiscoveryRequest(LLMApiContract):
+    """Request one bounded refresh through a provider's registered adapter."""
+
+    schema_version: Literal["aethergraph.model-discovery-request/v1"] = (
+        "aethergraph.model-discovery-request/v1"
+    )
+    provider_id: str = Field(min_length=1, max_length=128)
+    limit: int = Field(default=200, ge=1, le=1000)
 
 
 class LLMChatResolveRequest(LLMApiContract):
@@ -320,6 +331,8 @@ __all__ = [
     "LLMEmbeddingResolveResponse",
     "LLMEndpointAdapterView",
     "LLMModelCatalogResponse",
+    "LLMModelDiscoveryRequest",
+    "ModelDiscoveryResult",
     "LLMImageGenerationResolveRequest",
     "LLMImageGenerationResolveResponse",
     "LLMProviderView",

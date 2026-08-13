@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+import httpx
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.schemas.llm import (
@@ -16,6 +17,7 @@ from aethergraph.api.v1.schemas.llm import (
     LLMImageGenerationResolveRequest,
     LLMImageGenerationResolveResponse,
     LLMModelCatalogResponse,
+    LLMModelDiscoveryRequest,
     LLMProviderView,
     LLMRegistryResponse,
 )
@@ -25,6 +27,12 @@ from aethergraph.services.llm.capabilities import (
     resolve_image_generation_profile,
 )
 from aethergraph.services.llm.catalog import catalog_digest, load_model_catalog
+from aethergraph.services.llm.credentials import resolve_provider_credential
+from aethergraph.services.llm.model_discovery import (
+    ModelDiscoveryError,
+    ModelDiscoveryResult,
+    discover_provider_models,
+)
 from aethergraph.services.llm.profiles import (
     ChatProfile,
     EmbeddingProfileSpec,
@@ -129,6 +137,67 @@ def build_llm_model_catalog_response() -> LLMModelCatalogResponse:
         catalog_revision=catalog.catalog_revision,
         digest=catalog_digest(catalog),
         entries=catalog.entries,
+    )
+
+
+async def build_llm_model_discovery_response(
+    body: LLMModelDiscoveryRequest,
+    *,
+    credential: str | None = None,
+    base_url: str | None = None,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> ModelDiscoveryResult:
+    """Refresh one provider's model list through its registered AG adapter.
+
+    Intro:
+        Embedded hosts can supply their already-resolved profile connection,
+        while the AG HTTP route uses only registry and environment configuration.
+
+    Examples:
+        Discover from AG registry configuration:
+            ```python
+            result = await build_llm_model_discovery_response(request)
+            ```
+
+        Discover for an embedded settings profile:
+            ```python
+            result = await build_llm_model_discovery_response(
+                request,
+                credential=resolved_key,
+                base_url=profile.base_url,
+            )
+            ```
+
+    Args:
+        body: Provider identity and bounded result limit.
+        credential: Optional already-resolved provider inference credential.
+        base_url: Optional embedded-host profile base URL.
+        transport: Optional injected HTTP transport for deterministic tests.
+
+    Returns:
+        ModelDiscoveryResult: Provider-reported models or explicit unavailability.
+
+    Notes:
+        When no credential is supplied, AG resolves only registry-declared
+        environment variables. Secret values never enter the response.
+    """
+
+    resolved_credential = (
+        credential
+        if credential is not None
+        else resolve_provider_credential(
+            provider_id=body.provider_id,
+            direct=None,
+            secret_ref=None,
+            secrets=None,
+        ).value
+    )
+    return await discover_provider_models(
+        body.provider_id,
+        credential=resolved_credential,
+        base_url=base_url,
+        limit=body.limit,
+        transport=transport,
     )
 
 
@@ -343,6 +412,52 @@ async def get_llm_model_catalog(
     return build_llm_model_catalog_response()
 
 
+@router.post("/discovery/models", response_model=ModelDiscoveryResult)
+async def discover_llm_models(
+    body: LLMModelDiscoveryRequest,
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
+) -> ModelDiscoveryResult:
+    """Refresh one provider-native model list without fallback or caching.
+
+    Intro:
+        The route selects the provider registry's exact discovery adapter and
+        uses only server-owned environment configuration for its connection.
+
+    Examples:
+        Refresh OpenAI models:
+            ```python
+            response = client.post(
+                "/api/v1/llm/discovery/models",
+                json={"provider_id": "openai"},
+            )
+            ```
+
+        Inspect unavailable discovery:
+            ```python
+            assert response.json()["status"] in {"success", "unavailable"}
+            ```
+
+    Args:
+        body: Provider identity and bounded result limit.
+        identity: Authenticated request identity.
+
+    Returns:
+        ModelDiscoveryResult: Provider-reported models or explicit unavailability.
+
+    Notes:
+        Custom base URLs and credentials are not accepted at the HTTP boundary.
+        Sanitized provider transport failures return HTTP 502.
+    """
+
+    del identity
+    try:
+        return await build_llm_model_discovery_response(body)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ModelDiscoveryError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/resolve/chat", response_model=LLMChatResolveResponse)
 async def resolve_llm_chat_binding(
     body: LLMChatResolveRequest,
@@ -484,6 +599,7 @@ __all__ = [
     "build_llm_embedding_resolve_response",
     "build_llm_image_generation_resolve_response",
     "build_llm_model_catalog_response",
+    "build_llm_model_discovery_response",
     "build_llm_registry_response",
     "router",
 ]
