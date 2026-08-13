@@ -27,7 +27,7 @@ wiring.
 | A0 baseline and isolation | Complete | Dedicated worktree at base `6aa355f`. |
 | A1 legacy agents and skills | Complete | Commit `1758fa3`; only `default_chat_agent` remains; focused gate `18 passed`; full AG gate `721 passed, 2 skipped, 2 deselected`. |
 | A2-A10 | Paused | Not started; stopped at the external compatibility gate. |
-| B1-B5 external reconciliation | Blocked for decision | Engine passes, but Studio expects worker protocol `9` while Engine reports `10`; no external repository mutation is authorized. |
+| B1-B5 external reconciliation | Blocked for decision | Engine passes, but a Studio test expects worker protocol `9` while Studio's own `BRIDGE_VERSION` is `10`; no external repository mutation is authorized. |
 
 ## Checkpoints
 
@@ -56,7 +56,8 @@ wiring.
   implementation paths.
 - `ag-studio` backend: the first-failure diagnostic stopped after `120 passed` at
   `tests/test_context_api.py::test_compatibility_reports_product_and_protocol_contracts`.
-  Studio expects worker protocol `9`; the checked-out Engine reports `10`.
+  Studio's test expects worker protocol `9`; Studio's own
+  `execution.worker.bridge.BRIDGE_VERSION` is `10`.
 - The broader Studio backend run reached 50% and displayed multiple failures before
   its 10-minute cap. Further AG phases are paused pending an explicit Engine/Studio
   reconciliation decision.
