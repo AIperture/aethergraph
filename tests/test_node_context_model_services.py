@@ -19,7 +19,15 @@ class _EmbeddingService:
         return self.clients[name]
 
 
-def _context(*, embedding: object | None) -> NodeContext:
+class _ImageService:
+    def __init__(self, clients: dict[str, object]) -> None:
+        self.clients = clients
+
+    def get(self, name: str = "default") -> object:
+        return self.clients[name]
+
+
+def _context(*, embedding: object | None, image_model: object | None = None) -> NodeContext:
     return NodeContext(
         run_id="run",
         session_id="session",
@@ -30,6 +38,7 @@ def _context(*, embedding: object | None) -> NodeContext:
             continuation_store=SimpleNamespace(),
             artifact_store=SimpleNamespace(),
             embedding=embedding,  # type: ignore[arg-type]
+            image_model=image_model,  # type: ignore[arg-type]
         ),
     )
 
@@ -58,6 +67,37 @@ def test_runtime_env_projects_the_container_embedding_service() -> None:
     )
 
     assert env.embedding_service is service
+
+
+def test_node_context_image_model_returns_exact_named_client_without_fallback() -> None:
+    default = SimpleNamespace(name="default")
+    design = SimpleNamespace(name="design")
+    context = _context(
+        embedding=None,
+        image_model=_ImageService({"default": default, "design": design}),
+    )
+
+    assert context.image_model() is default
+    assert context.image_model("design") is design
+    with pytest.raises(KeyError):
+        context.image_model("missing")
+
+
+def test_node_context_image_model_fails_when_service_is_not_configured() -> None:
+    context = _context(embedding=None)
+
+    with pytest.raises(RuntimeError, match="Image generation service not available"):
+        context.image_model()
+
+
+def test_runtime_env_projects_the_container_image_service() -> None:
+    service = _ImageService({"default": SimpleNamespace()})
+    env = RuntimeEnv(
+        run_id="run",
+        container=SimpleNamespace(image_service=service),  # type: ignore[arg-type]
+    )
+
+    assert env.image_model_service is service
 
 
 def test_embedding_hot_reload_replaces_all_connection_derived_state(

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from aethergraph.config.llm import EmbeddingProfile, LLMProfile
+from aethergraph.config.llm import (
+    EmbeddingProfile,
+    ImageGenerationProfileSettings,
+    LLMProfile,
+)
 
 from ..profiles import (
     ChatCapabilityOverrides,
@@ -10,6 +14,8 @@ from ..profiles import (
     ChatProfile,
     CredentialSelection,
     EmbeddingProfileSpec,
+    ImageGenerationDefaults,
+    ImageGenerationProfile,
     ModelSelection,
     MultimodalInputPolicy,
     ProviderConnection,
@@ -169,4 +175,86 @@ def embedding_profile_from_legacy(
     )
 
 
-__all__ = ["chat_profile_from_legacy", "embedding_profile_from_legacy"]
+def image_generation_profile_from_settings(
+    profile: ImageGenerationProfileSettings,
+    *,
+    endpoint_id: str | None = None,
+) -> ImageGenerationProfile:
+    """Project one public image profile into its canonical contract.
+
+    Intro:
+        Selects one exact image endpoint and separates image defaults from Chat
+        configuration before runtime client construction.
+
+    Examples:
+        Convert the default image profile:
+            ```python
+            canonical = image_generation_profile_from_settings(
+                ImageGenerationProfileSettings()
+            )
+            assert canonical.operation == "image_generation"
+            ```
+
+        Convert an Azure deployment:
+            ```python
+            canonical = image_generation_profile_from_settings(
+                ImageGenerationProfileSettings(
+                    provider="azure",
+                    model="image-deployment",
+                    azure_deployment="image-deployment",
+                )
+            )
+            ```
+
+    Args:
+        profile: Public image-generation profile settings.
+        endpoint_id: Optional explicit endpoint adapter overriding the profile.
+
+    Returns:
+        ImageGenerationProfile: Immutable canonical image-generation profile.
+
+    Notes:
+        This codec performs no secret-store or environment resolution and never
+        reads a Chat profile.
+    """
+
+    adapter = resolve_endpoint_adapter(
+        profile.provider,
+        "image_generation",
+        endpoint_id=endpoint_id or profile.endpoint_id,
+    )
+    credentials = (
+        CredentialSelection(inline_secret=profile.api_key)
+        if profile.api_key is not None
+        else CredentialSelection(secret_ref=profile.api_key_ref)
+    )
+    return ImageGenerationProfile(
+        connection=ProviderConnection(
+            provider_id=profile.provider,
+            endpoint_id=adapter.adapter_id,
+            base_url=profile.base_url,
+            deployment=profile.azure_deployment,
+        ),
+        model=ModelSelection(model_id=profile.model),
+        credentials=credentials,
+        transport=TransportPolicy(
+            timeout_s=profile.timeout,
+            retry=profile.retry,
+            rate_limit_group=profile.rate_limit_group,
+        ),
+        defaults=ImageGenerationDefaults(
+            count=profile.count,
+            size=profile.size,
+            quality=profile.quality,
+            output_format=profile.output_format,
+            response_format=profile.response_format,
+            background=profile.background,
+        ),
+    )
+
+
+__all__ = [
+    "chat_profile_from_legacy",
+    "embedding_profile_from_legacy",
+    "image_generation_profile_from_settings",
+]

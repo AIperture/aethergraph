@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import asyncio
+
+import httpx
+import pytest
+
+from aethergraph.config.llm import ImageGenerationProfileSettings, ImageGenerationSettings
+from aethergraph.services.llm.generic_image_client import GenericImageGenerationClient
+from aethergraph.services.llm.image_factory import build_image_generation_clients
+from aethergraph.services.llm.image_service import ImageGenerationService
+
+
+class _Secrets:
+    def get(self, name: str) -> str | None:
+        return None
+
+
+class _FakeHttp:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+        self.last_url: str | None = None
+        self.last_json: dict | None = None
+
+    async def post(self, url: str, *, headers: dict, json: dict) -> httpx.Response:
+        self.last_url = url
+        self.last_json = json
+        return httpx.Response(
+            200,
+            json=self.payload,
+            request=httpx.Request("POST", url, headers=headers),
+        )
+
+
+@pytest.mark.asyncio
+async def test_independent_image_client_applies_profile_defaults_and_exact_endpoint() -> None:
+    client = GenericImageGenerationClient(
+        provider="openai",
+        model="gpt-image-test",
+        endpoint_id="openai_images",
+        api_key="test",
+        default_count=2,
+        default_size="1024x1024",
+        default_output_format="png",
+        default_response_format="b64_json",
+    )
+    fake_http = _FakeHttp(
+        {
+            "data": [{"b64_json": "aW1hZ2U="}, {"b64_json": "aW1hZ2Uy"}],
+            "usage": {"input_tokens": 4, "output_tokens": 6},
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    result = await client.generate_image("A glass compass")
+
+    assert len(result.images) == 2
+    assert fake_http.last_url == "https://api.openai.com/v1/images/generations"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["n"] == 2
+    assert fake_http.last_json["size"] == "1024x1024"
+    assert fake_http.last_json["output_format"] == "png"
+    assert fake_http.last_json["response_format"] == "b64_json"
+
+
+def test_image_factory_builds_named_profiles_without_chat_configuration() -> None:
+    clients = build_image_generation_clients(
+        ImageGenerationSettings(
+            default=ImageGenerationProfileSettings(model="gpt-image-default"),
+            profiles={
+                "design": ImageGenerationProfileSettings(
+                    provider="google",
+                    model="gemini-image-test",
+                    count=2,
+                )
+            },
+        ),
+        _Secrets(),
+    )
+
+    assert clients["default"].endpoint_id == "openai_images"
+    assert clients["design"].endpoint_id == "gemini_image_generation"
+    assert clients["design"].default_count == 2
+
+
+def test_image_factory_respects_disabled_operation() -> None:
+    clients = build_image_generation_clients(
+        ImageGenerationSettings(enabled=False),
+        _Secrets(),
+    )
+
+    assert clients == {}
+
+
+@pytest.mark.asyncio
+async def test_image_service_selects_exact_profile_and_closes_alias_once() -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.close_count = 0
+
+        async def generate_image(self, prompt: str, **kwargs):
+            self.prompts.append(prompt)
+            return kwargs
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    client = _Client()
+    service = ImageGenerationService(  # type: ignore[arg-type]
+        {"default": client, "design": client}
+    )
+
+    result = await service.generate_image("A compass", profile="design", n=2)
+    await service.aclose()
+
+    assert result["n"] == 2
+    assert client.prompts == ["A compass"]
+    assert client.close_count == 1

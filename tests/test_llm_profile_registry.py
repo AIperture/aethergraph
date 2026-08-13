@@ -7,7 +7,12 @@ from typing import get_args
 from pydantic import SecretStr, ValidationError
 import pytest
 
-from aethergraph.config.llm import EmbeddingProfile, LLMProfile, LLMSettings
+from aethergraph.config.llm import (
+    EmbeddingProfile,
+    ImageGenerationProfileSettings,
+    LLMProfile,
+    LLMSettings,
+)
 from aethergraph.services.llm import (
     ENDPOINT_ADAPTERS,
     PROVIDERS,
@@ -20,6 +25,7 @@ from aethergraph.services.llm.adapters.embedding import registered_embedding_ada
 from aethergraph.services.llm.compat import (
     chat_profile_from_legacy,
     embedding_profile_from_legacy,
+    image_generation_profile_from_settings,
     resolve_legacy_chat_adapter,
 )
 from aethergraph.services.llm.credentials import resolve_provider_credential
@@ -27,6 +33,7 @@ from aethergraph.services.llm.embed_factory import embed_client_from_profile
 from aethergraph.services.llm.factory import build_llm_clients, client_from_profile
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
+from aethergraph.services.llm.image_factory import image_client_from_profile
 from aethergraph.services.llm.providers import Provider
 
 
@@ -272,6 +279,24 @@ def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:
     assert canonical.connection.endpoint_id == "gemini_embeddings"
     assert canonical.model.model_id == "text-embedding-004"
     assert embed_client_from_profile(canonical, _Secrets()).endpoint_id == "gemini_embeddings"
+
+
+def test_image_profile_projection_and_client_are_independent_from_chat() -> None:
+    canonical = image_generation_profile_from_settings(
+        ImageGenerationProfileSettings(
+            provider="google",
+            model="gemini-image-test",
+            count=2,
+            output_format="png",
+        )
+    )
+    client = image_client_from_profile(canonical, _Secrets(), profile_name="design")
+
+    assert canonical.operation == "image_generation"
+    assert canonical.connection.endpoint_id == "gemini_image_generation"
+    assert canonical.defaults.count == 2
+    assert client.endpoint_id == "gemini_image_generation"
+    assert client.profile_name == "design"
 
 
 def test_embedding_runtime_registry_matches_advertised_operations() -> None:

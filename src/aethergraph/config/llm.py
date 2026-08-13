@@ -156,3 +156,30 @@ class EmbeddingSettings(BaseModel):
     enabled: bool = True
     default: EmbeddingProfile = EmbeddingProfile()
     profiles: dict[str, EmbeddingProfile] = Field(default_factory=dict)
+
+
+class ImageGenerationProfileSettings(BaseModel):
+    provider: Provider = "openai"
+    model: str = "gpt-image-1"
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
+    base_url: str | None = None
+    timeout: float = 60.0
+    retry: ProviderRetrySettings = Field(default_factory=ProviderRetrySettings)
+    rate_limit_group: str | None = Field(default=None, min_length=1, max_length=256)
+    azure_deployment: str | None = None
+    api_key: SecretStr | None = None
+    api_key_ref: str | None = Field(
+        default=None, description="Name in secret store, e.g. 'OPENAI_API_KEY'"
+    )
+    count: int = Field(default=1, ge=1)
+    size: str | None = None
+    quality: str | None = None
+    output_format: Literal["png", "jpeg", "webp"] | None = None
+    response_format: Literal["b64_json", "url"] | None = None
+    background: str | None = None
+
+
+class ImageGenerationSettings(BaseModel):
+    enabled: bool = True
+    default: ImageGenerationProfileSettings = ImageGenerationProfileSettings()
+    profiles: dict[str, ImageGenerationProfileSettings] = Field(default_factory=dict)

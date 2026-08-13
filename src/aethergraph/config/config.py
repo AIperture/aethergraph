@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .llm import EmbeddingSettings, LLMSettings
+from .llm import EmbeddingSettings, ImageGenerationSettings, LLMSettings
 from .observability import ObservabilitySettings
 from .search import KnowledgeSettings, SearchBackendSettings
 from .storage import StorageSettings
@@ -158,6 +158,7 @@ class AppSettings(BaseSettings):
     llm: LLMSettings = LLMSettings()
     observability: ObservabilitySettings = ObservabilitySettings()
     embed: EmbeddingSettings = EmbeddingSettings()
+    image_generation: ImageGenerationSettings = ImageGenerationSettings()
     cont: ContinuationStoreSettings = ContinuationStoreSettings()
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()

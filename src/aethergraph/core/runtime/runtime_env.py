@@ -115,6 +115,10 @@ class RuntimeEnv:
         return self.container.embed_service
 
     @property
+    def image_model_service(self):
+        return self.container.image_service
+
+    @property
     def mcp_service(self):
         return self.container.mcp
 
@@ -259,6 +263,7 @@ class RuntimeEnv:
             viz=vis_facade,
             llm=self.llm_service,  # LLMService
             embedding=self.embedding_service,  # EmbeddingService
+            image_model=self.image_model_service,  # ImageGenerationService
             mcp=self.mcp_service,  # MCPService
             runner=runner,  # RunFacade
             indices=indices,  # ScopedIndices for this node

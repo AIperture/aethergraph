@@ -11,7 +11,10 @@ from aethergraph.contracts.services.execution import (
     ExecutionService,
     Language,
 )
-from aethergraph.contracts.services.llm import EmbeddingClientProtocol
+from aethergraph.contracts.services.llm import (
+    EmbeddingClientProtocol,
+    ImageGenerationClientProtocol,
+)
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
@@ -617,6 +620,44 @@ class NodeContext:
         service = self.services.embedding
         if service is None:
             raise RuntimeError("Embedding service not available")
+        return service.get(profile)
+
+    def image_model(self, profile: str = "default") -> ImageGenerationClientProtocol:
+        """Return a configured image-generation client for this node context.
+
+        Intro:
+            Resolves a named client from the container-owned image service so
+            graph code does not reuse Chat model identity or connection state.
+
+        Examples:
+            Generate with the default image profile:
+                ```python
+                result = await context.image_model().generate_image(
+                    "A quiet observatory"
+                )
+                ```
+
+            Select a named design profile:
+                ```python
+                client = context.image_model("design")
+                result = await client.generate_image("A glass compass")
+                ```
+
+        Args:
+            self: Active node context with container-bound services.
+            profile: Configured image-generation profile name.
+
+        Returns:
+            ImageGenerationClientProtocol: Exact configured image client.
+
+        Notes:
+            AG owns this service boundary and does not require or import AG Engine.
+            Missing services and profiles fail without a Chat-client fallback.
+        """
+
+        service = self.services.image_model
+        if service is None:
+            raise RuntimeError("Image generation service not available")
         return service.get(profile)
 
     def llm_set_key(self, provider: str, model: str, api_key: str, profile: str = "default"):

@@ -27,7 +27,6 @@ from aethergraph.services.llm.adapters import (
     ImageAdapterInvocation,
     invoke_chat_adapter,
     invoke_chat_stream_adapter,
-    invoke_image_adapter,
 )
 from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
 from aethergraph.services.llm.contracts import ModelRequest
@@ -37,6 +36,7 @@ from aethergraph.services.llm.http_lifecycle import (
     _close_http_clients,
     _ensure_loop_http_client,
 )
+from aethergraph.services.llm.image_runtime import _execute_image_generation
 from aethergraph.services.llm.observability import (
     CaptureMode,
     LLMObservationRecord,
@@ -115,6 +115,7 @@ from aethergraph.services.llm.usage import (
     normalize_llm_usage,
     normalized_usage_metrics,
 )
+from aethergraph.services.llm.usage_metering import _record_model_metering
 from aethergraph.services.llm.utils import (
     _ensure_system_json_directive,
     _extract_json_text,
@@ -1869,28 +1870,16 @@ class GenericLLMClient(LLMClientProtocol):
         latency_ms: int | None = None,
     ) -> None:
         self.metering = self.metering or current_metering()
-        prompt_tokens, completion_tokens = self._normalize_usage(usage)
-        normalized_metrics = normalized_usage_metrics(normalize_llm_usage(usage))
         dims = self._current_dimensions()
-
-        try:
-            await self.metering.record_llm(
-                user_id=dims.get("user_id"),
-                org_id=dims.get("org_id"),
-                run_id=dims.get("run_id"),
-                model=model,
-                provider=self.provider,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cache_read_tokens=normalized_metrics["cache_read_tokens"],
-                cache_write_tokens=normalized_metrics["cache_write_tokens"],
-                uncached_input_tokens=normalized_metrics["uncached_input_tokens"],
-                latency_ms=latency_ms,
-            )
-        except Exception as e:
-            # Never fail the LLM call due to metering issues
-            logger = logging.getLogger("aethergraph.services.llm.generic_client")
-            logger.warning(f"llm_metering_failed: {e}")
+        await _record_model_metering(
+            self.metering,
+            provider=self.provider,
+            model=model,
+            usage=usage,
+            latency_ms=latency_ms,
+            dimensions=dims,
+            logger=logging.getLogger("aethergraph.services.llm.generic_client"),
+        )
 
     def _build_observation_record(
         self,
@@ -3501,34 +3490,53 @@ class GenericLLMClient(LLMClientProtocol):
         azure_api_version: str | None = None,
         **kw: Any,
     ) -> ImageGenerationResult:
-        """
-        Generate images from a text prompt using the configured LLM provider.
+        """Generate images through the public Chat-client compatibility facade.
 
-        This method supports provider-agnostic image generation, including OpenAI, Azure, and Google Gemini.
-        It automatically handles rate limiting, usage metering, and provider-specific options.
+        Intro:
+            Preserves the existing method while projecting its arguments into the
+            same centralized image lifecycle used by independent image clients.
+
+        Examples:
+            Generate one image:
+                ```python
+                result = await client.generate_image("A quiet observatory")
+                ```
+
+            Generate a transparent PNG:
+                ```python
+                result = await client.generate_image(
+                    "A glass compass",
+                    size="1024x1024",
+                    output_format="png",
+                    response_format="b64_json",
+                    background="transparent",
+                )
+                ```
 
         Args:
-            prompt: The text prompt describing the desired image(s).
-            model: Optional model name to override the default.
-            n: Number of images to generate (default: 1).
-            size: Image size, e.g., "1024x1024".
-            quality: Image quality setting (provider-specific).
-            style: Artistic style (provider-specific).
-            output_format: Desired image format, e.g., "png", "jpeg".
-            response_format: Response format, e.g., "url" or "b64_json".
-            background: Background setting, e.g., "transparent".
-            input_images: List of input images (as data URLs) for edit-style generation.
-            azure_api_version: Azure-specific API version override.
-            **kw: Additional provider-specific keyword arguments.
+            self: Existing provider-neutral Chat client.
+            prompt: Text description of the requested output.
+            model: Optional per-call image model override.
+            n: Number of images to generate.
+            size: Optional image dimensions.
+            quality: Optional provider quality mode.
+            style: Optional provider style mode.
+            output_format: Optional encoded image format.
+            response_format: Optional response transport format.
+            background: Optional provider background mode.
+            input_images: Optional source-image data URLs.
+            azure_api_version: Optional Azure Images API version.
+            **kw: Bounded adapter-private options.
 
         Returns:
-            ImageGenerationResult: An object containing generated images, usage statistics, and raw response data.
+            ImageGenerationResult: Normalized images, provider usage, and raw data.
 
-        Raises:
-            LLMUnsupportedFeatureError: If the provider does not support image generation.
-            RuntimeError: For provider-specific errors or invalid configuration.
+        Notes:
+            New graph code should select an independent configured client through
+            `context.image_model()`. This compatibility path remains provider-
+            bound to the Chat client's provider but does not reuse Chat endpoint
+            selection or physical adapter dispatch.
         """
-        await self._ensure_client()
         model = model or self.model
         try:
             image_adapter = resolve_endpoint_adapter(self.provider, "image_generation")
@@ -3539,102 +3547,38 @@ class GenericLLMClient(LLMClientProtocol):
                 else f"provider '{self.provider}' does not support generate_image() in this client."
             )
             raise LLMUnsupportedFeatureError(detail) from exc
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
-            service="llm",
-            operation="generate_image",
-            request={
-                "provider": self.provider,
-                "model": model,
-                "prompt": prompt,
-                "n": n,
-                "size": size,
-                "endpoint_id": image_adapter.adapter_id,
-            },
-            tags=["llm", "image"],
-            metadata=self._current_dimensions(),
+        invocation = ImageAdapterInvocation(
+            prompt=prompt,
+            model=model,
+            n=n,
+            size=size,
+            quality=quality,
+            style=style,
+            output_format=output_format,
+            response_format=response_format,
+            background=background,
+            input_images=tuple(input_images or ()),
+            azure_api_version=azure_api_version,
+            options=kw,
         )
 
-        start = time.perf_counter()
-
-        try:
-            provider_result = await self._provider_retry.execute(
-                lambda: self._image_dispatch(
-                    prompt,
-                    adapter_id=image_adapter.adapter_id,
-                    model=model,
-                    n=n,
-                    size=size,
-                    quality=quality,
-                    style=style,
-                    output_format=output_format,
-                    response_format=response_format,
-                    background=background,
-                    input_images=input_images,
-                    azure_api_version=azure_api_version,
-                    **kw,
-                ),
-                provider=self.provider,
-                model=model,
-                operation="image",
-                rate_limit_group=self.rate_limit_group,
-            )
-            result = provider_result.value
-
-            latency_ms = int((time.perf_counter() - start) * 1000)
+        async def account_usage(
+            selected_model: str,
+            usage: dict[str, Any],
+            latency_ms: int,
+        ) -> None:
             await self._account_llm_usage(
-                model=model,
-                usage=result.usage or {},
+                model=selected_model,
+                usage=usage,
                 latency_ms=latency_ms,
             )
-            await span.finish(
-                response={"usage": result.usage or {}, "images_count": len(result.images or [])},
-                metadata=self._current_dimensions(),
-                metrics={**(result.usage or {}), "latency_ms": latency_ms},
-            )
-            return result
-        except Exception as exc:
-            await span.fail(
-                exc,
-                metadata=self._current_dimensions(),
-                metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
-            )
-            raise
 
-    async def _image_dispatch(
-        self,
-        prompt: str,
-        *,
-        adapter_id: str,
-        model: str,
-        n: int,
-        size: str | None,
-        quality: str | None,
-        style: str | None,
-        output_format: ImageFormat | None,
-        response_format: ImageResponseFormat | None,
-        background: str | None,
-        input_images: list[str] | None,
-        azure_api_version: str | None,
-        **kw: Any,
-    ) -> ProviderCallResult[ImageGenerationResult]:
-        return await invoke_image_adapter(
+        return await _execute_image_generation(
             self,
-            adapter_id=adapter_id,
-            invocation=ImageAdapterInvocation(
-                prompt=prompt,
-                model=model,
-                n=n,
-                size=size,
-                quality=quality,
-                style=style,
-                output_format=output_format,
-                response_format=response_format,
-                background=background,
-                input_images=tuple(input_images or ()),
-                azure_api_version=azure_api_version,
-                options=kw,
-            ),
+            adapter_id=image_adapter.adapter_id,
+            invocation=invocation,
+            account_usage=account_usage,
+            dimensions=self._current_dimensions(),
         )
 
     # ================================================================

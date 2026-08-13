@@ -57,6 +57,8 @@ from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBack
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
+from aethergraph.services.llm.image_factory import build_image_generation_clients
+from aethergraph.services.llm.image_service import ImageGenerationService
 from aethergraph.services.llm.provider_transport import ProviderRateGate
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
@@ -210,6 +212,7 @@ class DefaultContainer:
     retention_janitor: RetentionJanitor | None = None
     mcp: MCPService | None = None
     embed_service: EmbeddingService | None = None
+    image_service: ImageGenerationService | None = None
     web_search: WebSearchService | None = None
 
     # run controls -- for http endpoints and run manager
@@ -447,6 +450,14 @@ def build_default_container(
     embed_service = EmbeddingService(clients=embed_clients) if embed_clients else None
     embed_client = embed_clients["default"] if embed_clients else None
 
+    image_clients = build_image_generation_clients(
+        cfg.image_generation,
+        secrets,
+        metering=metering,
+        rate_gate=provider_rate_gate,
+    )
+    image_service = ImageGenerationService(image_clients) if image_clients else None
+
     mcp = MCPService()  # empty MCP service; users can register clients as needed
 
     # web search service uses a provider-agnostic default no-op provider.
@@ -615,6 +626,7 @@ def build_default_container(
         observability=observability,
         retention_janitor=retention_janitor,
         embed_service=embed_service,
+        image_service=image_service,
         web_search=web_search,
         mcp=mcp,
         run_store=run_store,

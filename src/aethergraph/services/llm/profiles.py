@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from .provider_transport import ProviderRetrySettings
+from .types import ImageFormat, ImageResponseFormat
 
 CapabilityState = Literal["supported", "unsupported", "unknown"]
 PromptCachePolicy = Literal["disabled", "auto", "required"]
@@ -218,7 +219,8 @@ class ImageGenerationDefaults(ProfileContract):
     count: int = Field(default=1, ge=1)
     size: str | None = None
     quality: str | None = None
-    output_format: str | None = None
+    output_format: ImageFormat | None = None
+    response_format: ImageResponseFormat | None = None
     background: str | None = None
 
 

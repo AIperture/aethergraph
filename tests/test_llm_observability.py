@@ -435,7 +435,9 @@ async def test_default_container_uses_sqlite_and_no_jsonl_or_persisted_tracer(
     )
     container = build_default_container(root=str(tmp_path), cfg=settings)
     assert container.llm is not None
+    assert container.image_service is not None
     client = container.llm.get()
+    assert container.image_service.get() is not client
 
     async def fake_chat_dispatch(messages, **kwargs):
         return ProviderCallResult(
