@@ -30,6 +30,11 @@ def _stable_id(parts: Mapping[str, Any]) -> str:
     return hashlib.sha256(blob).hexdigest()[:24]
 
 
+def _embedding_model_id(client: EmbeddingClientProtocol) -> str | None:
+    model = getattr(client, "model", None)
+    return str(model) if model is not None else None
+
+
 @dataclass
 class LocalFSKnowledgeBackend(KnowledgeBackend):
     """
@@ -729,7 +734,7 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
         cdir = self._cdir(corpus_id)
         chunks_jl = os.path.join(cdir, "chunks.jsonl")
         if not os.path.exists(chunks_jl):
-            return {"reembedded": 0, "model": getattr(self.embed_client, "embed_model", None)}
+            return {"reembedded": 0, "model": _embedding_model_id(self.embed_client)}
 
         targets: list[dict[str, Any]] = []
         doc_set = set(doc_ids) if doc_ids is not None else None
@@ -757,7 +762,7 @@ class LocalFSKnowledgeBackend(KnowledgeBackend):
                 )
                 added += 1
 
-        return {"reembedded": added, "model": getattr(self.embed_client, "embed_model", None)}
+        return {"reembedded": added, "model": _embedding_model_id(self.embed_client)}
 
     async def stats(
         self,

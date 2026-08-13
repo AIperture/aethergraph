@@ -4,6 +4,7 @@ from contextvars import ContextVar
 from pathlib import Path
 from threading import RLock
 from typing import Any
+import warnings
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.base_service import Service
@@ -155,17 +156,81 @@ def register_llm_client(
     base_url: str | None = None,
     api_key: str | None = None,
     timeout: float | None = None,
-) -> None:
+) -> LLMClientProtocol | None:
+    """Register Chat and optional legacy embedding profiles independently.
+
+    Intro:
+        Configures the named Chat client immediately when services are installed,
+        or defers the same operation until installation. A supplied legacy
+        `embed_model` is routed to the separate embedding service.
+
+    Examples:
+        Register one Chat profile:
+            ```python
+            register_llm_client("default", "openai", "gpt-5-mini")
+            ```
+
+        Preserve a legacy combined registration:
+            ```python
+            register_llm_client(
+                "search",
+                "openai",
+                "gpt-5-mini",
+                embed_model="text-embedding-3-small",
+            )
+            ```
+
+    Args:
+        profile: Exact Chat and optional embedding profile name.
+        provider: Registered provider identity.
+        model: Chat model identity.
+        embed_model: Deprecated embedding model compatibility input.
+        base_url: Optional provider base URL override.
+        api_key: Optional in-memory provider credential.
+        timeout: Optional HTTP timeout in seconds.
+
+    Returns:
+        LLMClientProtocol | None: Configured Chat client when services are
+            installed, otherwise `None` after deferring registration.
+
+    Notes:
+        `embed_model` remains only as a public migration boundary. New code must
+        configure embeddings through `NodeContext.embedding()` settings or the
+        embedding service. Missing embedding services fail before Chat mutation.
+    """
+
+    normalized_embed_model = str(embed_model or "").strip() or None
+    if normalized_embed_model is not None:
+        warnings.warn(
+            "register_llm_client(embed_model=...) is deprecated; configure an "
+            "independent embedding profile instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     def _op(svc: Any) -> LLMClientProtocol:
+        embed_service = getattr(svc, "embed_service", None)
+        if normalized_embed_model is not None and embed_service is None:
+            raise RuntimeError(
+                "Legacy embed_model registration requires an enabled embedding service."
+            )
         client = svc.llm.configure_profile(
             profile=profile,
             provider=provider,
             model=model,
-            embed_model=embed_model,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
         )
+        if normalized_embed_model is not None:
+            embed_service.configure_profile(
+                name=profile,
+                provider=provider,
+                model=normalized_embed_model,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+            )
         return client
 
     key = f"llm_client:profile={profile}:provider={provider}:model={model}"
