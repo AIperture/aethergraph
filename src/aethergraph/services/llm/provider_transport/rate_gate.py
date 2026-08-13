@@ -14,6 +14,10 @@ RandomUnit = Callable[[], float]
 _DEFAULT_COHORT_SPREAD_S = 0.05
 
 
+class ProviderRateGateDeadlineExceededError(TimeoutError):
+    """Reject a shared rate-gate wait that would cross a logical-call deadline."""
+
+
 class ProviderRateGate:
     """Coordinate provider-advised waits across clients in one container."""
 
@@ -99,7 +103,12 @@ class ProviderRateGate:
             self._blocked_until[key] = effective
             return effective
 
-    async def wait(self, key: str) -> float:
+    async def wait(
+        self,
+        key: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> float:
         """
         Wait until the current blocked interval for a key has elapsed.
 
@@ -117,8 +126,19 @@ class ProviderRateGate:
                 assert waited >= 0.0
                 ```
 
+            Reject a wait beyond the caller deadline:
+                ```python
+                await gate.defer("openai:model", 10.0)
+                try:
+                    await gate.wait("openai:model", deadline_monotonic=1.0)
+                except ProviderRateGateDeadlineExceededError:
+                    pass
+                ```
+
         Args:
             key: Stable provider/model or explicit rate-limit group key.
+            deadline_monotonic: Optional logical-call deadline that the gate
+                must not sleep beyond.
 
         Returns:
             float: Total requested wait duration for this invocation.
@@ -144,8 +164,12 @@ class ProviderRateGate:
                     jitter_unit = min(1.0, max(0.0, float(self._random_unit())))
                     release_gap_s = self._cohort_spread_s * (0.5 + 0.5 * jitter_unit)
                     release_at = release_cursor + release_gap_s
-                self._release_cursor[key] = release_at
                 remaining_s = release_at - now
+                if deadline_monotonic is not None and release_at > deadline_monotonic:
+                    raise ProviderRateGateDeadlineExceededError(
+                        "provider rate-gate wait would exceed the logical-call deadline"
+                    )
+                self._release_cursor[key] = release_at
             if remaining_s <= 0.0:
                 return total_wait_s
             total_wait_s += remaining_s

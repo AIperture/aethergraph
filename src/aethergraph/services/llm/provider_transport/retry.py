@@ -18,7 +18,7 @@ from .models import (
     ProviderRetrySettings,
     ProviderTransportAttempt,
 )
-from .rate_gate import ProviderRateGate
+from .rate_gate import ProviderRateGate, ProviderRateGateDeadlineExceededError
 
 ResultT = TypeVar("ResultT")
 Clock = Callable[[], float]
@@ -142,9 +142,25 @@ class ProviderRetryExecutor:
         )
         settings = self.settings
         max_attempts = settings.max_attempts if settings.enabled else 1
+        policy_deadline = start + settings.max_elapsed_s if settings.enabled else None
+        effective_deadline = _earliest_deadline(policy_deadline, deadline_monotonic)
 
         for attempt_number in range(1, max_attempts + 1):
-            await self.rate_gate.wait(key)
+            try:
+                await self.rate_gate.wait(
+                    key,
+                    deadline_monotonic=effective_deadline,
+                )
+            except ProviderRateGateDeadlineExceededError as exc:
+                raise LLMProviderRequestError(
+                    provider=provider,
+                    model=model,
+                    operation=operation,
+                    code="provider_rate_gate_deadline_exceeded",
+                    message=str(exc),
+                    retryable=False,
+                    attempts=tuple(attempts),
+                ) from exc
             try:
                 result = await call()
             except LLMProviderRequestError as error:
@@ -185,7 +201,7 @@ class ProviderRetryExecutor:
                     start=start,
                     delay_s=scheduled_delay_s,
                     provider_delay_s=provider_delay_s,
-                    deadline_monotonic=deadline_monotonic,
+                    deadline_monotonic=effective_deadline,
                 )
             )
             attempts.append(
@@ -237,6 +253,11 @@ def _provider_delay_s(error: LLMProviderRequestError) -> float:
     candidates = [error.metadata.retry_after_s or 0.0]
     candidates.extend(snapshot.reset_after_s or 0.0 for snapshot in error.metadata.rate_limits)
     return max(candidates, default=0.0)
+
+
+def _earliest_deadline(*deadlines: float | None) -> float | None:
+    present = tuple(float(value) for value in deadlines if value is not None)
+    return min(present) if present else None
 
 
 def _rate_gate_key(

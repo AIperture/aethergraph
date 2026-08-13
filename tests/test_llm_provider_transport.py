@@ -224,9 +224,48 @@ class _RecordingRateGate(ProviderRateGate):
         super().__init__()
         self.keys: list[str] = []
 
-    async def wait(self, key: str) -> float:
+    async def wait(
+        self,
+        key: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> float:
+        del deadline_monotonic
         self.keys.append(key)
         return 0.0
+
+
+@pytest.mark.asyncio
+async def test_existing_rate_gate_block_cannot_escape_logical_call_budget() -> None:
+    fake_time = _FakeTime()
+    gate = ProviderRateGate(clock=fake_time.clock, sleep=fake_time.sleep)
+    executor = ProviderRetryExecutor(
+        ProviderRetrySettings(max_elapsed_s=2.0),
+        rate_gate=gate,
+        clock=fake_time.clock,
+    )
+    await gate.defer(f"openai:{executor._rate_limit_scope}:test", 5.0)
+    calls = 0
+
+    async def call() -> ProviderCallResult[str]:
+        nonlocal calls
+        calls += 1
+        return ProviderCallResult("unexpected")
+
+    with pytest.raises(LLMProviderRequestError) as captured:
+        await executor.execute(
+            call,
+            provider="openai",
+            model="test",
+            operation="chat",
+            rate_limit_group="test",
+        )
+
+    assert captured.value.code == "provider_rate_gate_deadline_exceeded"
+    assert captured.value.retryable is False
+    assert captured.value.attempts == ()
+    assert calls == 0
+    assert fake_time.sleeps == []
 
 
 @pytest.mark.asyncio
