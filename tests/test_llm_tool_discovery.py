@@ -25,7 +25,7 @@ from aethergraph.services.llm import (
     ToolTransportCheckpoint,
     resolve_tool_discovery_capabilities,
 )
-from aethergraph.services.llm._openai_mixin import (
+from aethergraph.services.llm.adapters.openai_responses import (
     _openai_appended_prompt_input,
     _openai_checkpoint,
     _openai_prompt_prefix_digest,

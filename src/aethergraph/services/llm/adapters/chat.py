@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aethergraph.services.llm.adapters.openai_compatible import OpenAICompatibleChatAdapter
+from aethergraph.services.llm.adapters.openai_responses import OpenAIResponsesAdapter
 from aethergraph.services.llm.provider_transport import ProviderCallResult
 from aethergraph.services.llm.tool_calling import ToolCallRequest, ToolCallResponse
 from aethergraph.services.llm.types import ChatOutputFormat, LLMUnsupportedFeatureError
@@ -245,7 +246,8 @@ async def _invoke_openai_responses(host: Any, call: ChatAdapterInvocation) -> Ad
     options = call.option_dict()
     tools = options.pop("tools", None)
     tool_choice = options.pop("tool_choice", None)
-    return await host._chat_openai_responses(
+    return await OpenAIResponsesAdapter.invoke(
+        host,
         call.message_list(),
         model=call.model,
         reasoning_effort=call.reasoning_effort,

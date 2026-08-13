@@ -30,6 +30,7 @@ from aethergraph.services.llm._openai_mixin import _OpenAIMixin
 from aethergraph.services.llm.adapters import (
     ChatAdapterInvocation,
     OpenAICompatibleChatAdapter,
+    OpenAIResponsesAdapter,
     invoke_chat_adapter,
 )
 from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
@@ -3229,7 +3230,8 @@ class GenericLLMClient(
             quota_reservation = self._preflight_llm_request(request_estimate)
             if self.provider == "openai" and self.endpoint_id != "openai_chat_completions":
                 provider_result = await self._provider_retry.execute(
-                    lambda: self._chat_openai_responses_stream(
+                    lambda: OpenAIResponsesAdapter.stream(
+                        self,
                         messages,
                         model=model,
                         reasoning_effort=reasoning_effort,

@@ -22,7 +22,10 @@ from aethergraph.services.llm import (
     ToolDefinition,
     message_from_text,
 )
-from aethergraph.services.llm.adapters import OpenAICompatibleChatAdapter
+from aethergraph.services.llm.adapters import (
+    OpenAICompatibleChatAdapter,
+    OpenAIResponsesAdapter,
+)
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
@@ -1126,7 +1129,7 @@ async def test_explicit_openai_chat_completions_stream_never_switches_to_respons
         calls.append("chat.completions")
         return ProviderCallResult(("streamed", {}))
 
-    async def fail_responses_stream(messages, **kwargs):
+    async def fail_responses_stream(host, messages, **kwargs):
         raise AssertionError("pinned Chat Completions endpoint switched to Responses")
 
     monkeypatch.setattr(
@@ -1134,7 +1137,7 @@ async def test_explicit_openai_chat_completions_stream_never_switches_to_respons
         "stream",
         fake_chat_completions_stream,
     )
-    client._chat_openai_responses_stream = fail_responses_stream  # type: ignore[method-assign]
+    monkeypatch.setattr(OpenAIResponsesAdapter, "stream", fail_responses_stream)
 
     text, usage = await client.chat_stream([{"role": "user", "content": "hello"}])
 
@@ -1327,6 +1330,37 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
 def test_openai_compatible_chat_is_not_inherited_by_generic_client() -> None:
     assert not hasattr(GenericLLMClient, "_chat_openai_like_chat_completions")
     assert not hasattr(GenericLLMClient, "_chat_openai_like_chat_completions_stream")
+    assert not hasattr(GenericLLMClient, "_chat_openai_responses")
+    assert not hasattr(GenericLLMClient, "_chat_openai_responses_stream")
+
+
+@pytest.mark.asyncio
+async def test_openai_image_generation_survives_responses_chat_extraction() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-image-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(
+        {
+            "data": [{"b64_json": "aW1hZ2U=", "revised_prompt": "revised"}],
+            "usage": {"input_tokens": 4, "output_tokens": 6},
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    result = await client.generate_image(
+        "A glass compass",
+        output_format="png",
+        response_format="b64_json",
+        background="transparent",
+    )
+
+    assert result.images[0].b64 == "aW1hZ2U="
+    assert result.images[0].mime_type == "image/png"
+    assert result.usage == {"input_tokens": 4, "output_tokens": 6}
+    assert fake_http.last_url == "https://api.openai.com/v1/images/generations"
 
 
 @pytest.mark.asyncio
