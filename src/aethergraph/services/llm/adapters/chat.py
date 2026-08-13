@@ -7,6 +7,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any
 
+from aethergraph.services.llm.adapters.azure import AzureChatAdapter
 from aethergraph.services.llm.adapters.openai_compatible import OpenAICompatibleChatAdapter
 from aethergraph.services.llm.adapters.openai_responses import OpenAIResponsesAdapter
 from aethergraph.services.llm.provider_transport import ProviderCallResult
@@ -355,7 +356,8 @@ async def _invoke_azure_responses(host: Any, call: ChatAdapterInvocation) -> Ada
             "direct_chat",
             "the pinned Azure Responses adapter currently requires a Tool request",
         )
-    return await host._chat_azure_responses(
+    return await AzureChatAdapter.invoke_responses(
+        host,
         call.message_list(),
         model=call.model,
         reasoning_effort=call.reasoning_effort,
@@ -401,7 +403,8 @@ async def _invoke_azure_chat_completions(
     options = call.option_dict()
     tools = options.pop("tools", None)
     tool_choice = options.pop("tool_choice", None)
-    return await host._chat_azure_chat_completions(
+    return await AzureChatAdapter.invoke_chat_completions(
+        host,
         call.message_list(),
         model=call.model,
         max_output_tokens=call.max_output_tokens,

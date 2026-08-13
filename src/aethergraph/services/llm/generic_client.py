@@ -28,6 +28,7 @@ from aethergraph.services.llm._gemini_mixin import _GeminiMixin
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
 from aethergraph.services.llm.adapters import (
+    AzureChatAdapter,
     ChatAdapterInvocation,
     OpenAICompatibleChatAdapter,
     OpenAIResponsesAdapter,
@@ -3278,7 +3279,8 @@ class GenericLLMClient(
             elif stream_adapter.protocol_family == "chat.completions":
                 if self.provider == "azure":
                     provider_result = await self._provider_retry.execute(
-                        lambda: self._chat_azure_chat_completions_stream(
+                        lambda: AzureChatAdapter.stream_chat_completions(
+                            self,
                             messages,
                             model=model,
                             reasoning_effort=reasoning_effort,
