@@ -7,6 +7,8 @@ import pytest
 from aethergraph.core.runtime.node_context import NodeContext
 from aethergraph.core.runtime.node_services import NodeServices
 from aethergraph.core.runtime.runtime_env import RuntimeEnv
+from aethergraph.services.llm.embedding_service import EmbeddingService
+from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 
 
 class _EmbeddingService:
@@ -56,3 +58,48 @@ def test_runtime_env_projects_the_container_embedding_service() -> None:
     )
 
     assert env.embedding_service is service
+
+
+def test_embedding_hot_reload_replaces_all_connection_derived_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-secret")
+    original_transport = SimpleNamespace()
+    client = GenericEmbeddingClient(
+        provider="openai",
+        model="embed-old",
+        api_key="openai-secret",
+    )
+    client._client = original_transport  # type: ignore[assignment]
+    client._bound_loop = object()
+    service = EmbeddingService({"default": client})
+
+    updated = service.configure_profile(
+        provider="google",
+        model="text-embedding-004",
+    )
+
+    assert updated is client
+    assert client.provider == "google"
+    assert client.endpoint_id == "gemini_embeddings"
+    assert client.base_url == "https://generativelanguage.googleapis.com"
+    assert client.api_key == "google-secret"
+    assert client._client is None
+    assert client._retired_http_clients == [original_transport]
+
+
+@pytest.mark.asyncio
+async def test_embedding_service_closes_each_distinct_client_once() -> None:
+    class _Closeable:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    client = _Closeable()
+    service = EmbeddingService({"default": client, "alias": client})  # type: ignore[dict-item]
+
+    await service.aclose()
+
+    assert client.close_count == 1

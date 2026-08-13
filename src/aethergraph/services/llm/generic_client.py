@@ -33,6 +33,10 @@ from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_ch
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.credentials import resolve_provider_credential
+from aethergraph.services.llm.http_lifecycle import (
+    _close_http_clients,
+    _ensure_loop_http_client,
+)
 from aethergraph.services.llm.observability import (
     CaptureMode,
     LLMObservationRecord,
@@ -1945,22 +1949,13 @@ class GenericLLMClient(LLMClientProtocol):
             logger.warning(f"llm_observability_failed: {exc}")
 
     async def _ensure_client(self):
-        loop = asyncio.get_running_loop()
-
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
-            self._bound_loop = loop
-            return
-
-        if self._bound_loop is None:
-            self._bound_loop = loop
-            return
-
-        if self._bound_loop is not loop:
-            # Don't attempt to close the old client here; it belongs to the old loop.
-            self._retired_http_clients.append(self._client)
-            self._client = httpx.AsyncClient(timeout=self._timeout)
-            self._bound_loop = loop
+        self._client, self._bound_loop, retired = _ensure_loop_http_client(
+            self._client,
+            self._bound_loop,
+            timeout=self._timeout,
+        )
+        if retired is not None:
+            self._retired_http_clients.append(retired)
 
     # ================================================================
     # generate() — canonical non-streaming request
@@ -3683,15 +3678,11 @@ class GenericLLMClient(LLMClientProtocol):
         """
         clients = [self._client, *self._retired_http_clients]
         self._retired_http_clients = []
-        seen: set[int] = set()
-        for client in clients:
-            if client is None or id(client) in seen:
-                continue
-            seen.add(id(client))
-            try:
-                await client.aclose()
-            except RuntimeError as exc:
-                self._logger.warning("llm_http_client_close_failed: %s", exc)
+        await _close_http_clients(
+            clients,
+            logger=self._logger,
+            warning_key="llm_http_client_close_failed",
+        )
 
     def _default_headers_for_raw(self) -> dict[str, str]:
         hdr = {"Content-Type": "application/json"}

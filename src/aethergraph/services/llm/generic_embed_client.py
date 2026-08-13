@@ -1,9 +1,9 @@
 # aethergraph/services/llm/embedding_client.py
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
+import logging
 import os
 from typing import Any
 
@@ -17,6 +17,10 @@ from aethergraph.services.llm.adapters.embedding import (
     invoke_embedding_adapter,
 )
 from aethergraph.services.llm.credentials import resolve_provider_credential
+from aethergraph.services.llm.http_lifecycle import (
+    _close_http_clients,
+    _ensure_loop_http_client,
+)
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     ProviderRateGate,
@@ -59,42 +63,169 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
     endpoint_id: str | None = None
 
     def __post_init__(self) -> None:
-        self.provider = (
+        resolved_provider = (
             self.provider or os.getenv("EMBED_PROVIDER") or os.getenv("LLM_PROVIDER") or "openai"
-        ).lower()  # type: ignore[assignment]
-        self.model = (
+        ).lower()
+        resolved_model = (
             self.model
             or os.getenv("EMBED_MODEL")
             or os.getenv("LLM_EMBED_MODEL")
             or "text-embedding-3-small"
         )
+        self._apply_connection_state(
+            provider=resolved_provider,
+            model=resolved_model,
+            base_url=self.base_url,
+            api_key=self.api_key,
+            azure_deployment=self.azure_deployment,
+            timeout=self.timeout,
+            retry_settings=self.retry_settings,
+            rate_limit_group=self.rate_limit_group,
+            endpoint_id=self.endpoint_id,
+            rate_gate=self.rate_gate,
+            retire_current=False,
+        )
+        self._client: httpx.AsyncClient | None = None
+        self._retired_http_clients: list[httpx.AsyncClient] = []
+        self._bound_loop = None
 
-        self.api_key = resolve_provider_credential(
-            provider_id=self.provider,
-            direct=self.api_key,
+    def _apply_connection_state(
+        self,
+        *,
+        provider: str,
+        model: str,
+        base_url: str | None,
+        api_key: str | None,
+        azure_deployment: str | None,
+        timeout: float,
+        retry_settings: ProviderRetrySettings | None,
+        rate_limit_group: str | None,
+        endpoint_id: str | None,
+        rate_gate: ProviderRateGate | None,
+        retire_current: bool,
+    ) -> None:
+        resolved_provider = str(provider or "").strip().lower()
+        try:
+            resolved_endpoint = resolve_endpoint_adapter(
+                resolved_provider,
+                "embeddings",
+                endpoint_id=endpoint_id,
+            ).adapter_id
+        except ValueError:
+            if endpoint_id is not None:
+                raise
+            resolved_endpoint = None
+        resolved_api_key = resolve_provider_credential(
+            provider_id=resolved_provider,
+            direct=api_key,
             secret_ref=None,
             secrets=None,
         ).value
-        self.base_url = self.base_url or provider_default_base_url(self.provider) or ""
-
-        if self.endpoint_id is not None:
-            self.endpoint_id = resolve_endpoint_adapter(
-                self.provider,
-                "embeddings",
-                endpoint_id=self.endpoint_id,
-            ).adapter_id
-
-        # Azure deployment (for /deployments/{name}/embeddings)
-        if self.provider == "azure" and self.azure_deployment is None:
-            self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-
-        self._provider_retry = ProviderRetryExecutor(
-            self.retry_settings,
-            rate_gate=self.rate_gate,
-            base_url=self.base_url,
-            credential=self.api_key,
+        resolved_base_url = base_url or provider_default_base_url(resolved_provider) or ""
+        resolved_deployment = azure_deployment or (
+            os.getenv("AZURE_OPENAI_DEPLOYMENT") if resolved_provider == "azure" else None
         )
-        self._client: httpx.AsyncClient | None = None
+        retry_executor = ProviderRetryExecutor(
+            retry_settings,
+            rate_gate=rate_gate,
+            base_url=resolved_base_url,
+            credential=resolved_api_key,
+        )
+        current_client = getattr(self, "_client", None)
+        self.provider = resolved_provider
+        self.model = str(model or "").strip()
+        self.endpoint_id = resolved_endpoint
+        self.base_url = resolved_base_url
+        self.api_key = resolved_api_key
+        self.azure_deployment = resolved_deployment
+        self.timeout = float(timeout)
+        self.retry_settings = retry_settings
+        self.rate_limit_group = rate_limit_group
+        self.rate_gate = rate_gate
+        self._provider_retry = retry_executor
+        if retire_current and current_client is not None:
+            self._retired_http_clients.append(current_client)
+            self._client = None
+            self._bound_loop = None
+
+    def reconfigure_connection(
+        self,
+        *,
+        provider: str,
+        model: str,
+        base_url: str | None,
+        api_key: str | None,
+        azure_deployment: str | None,
+        timeout: float,
+        retry_settings: ProviderRetrySettings | None = None,
+        rate_limit_group: str | None = None,
+        endpoint_id: str | None = None,
+    ) -> None:
+        """Replace the complete embedding connection while preserving identity.
+
+        Intro:
+            Validates one canonical endpoint and rebuilds retry/rate connection
+            state before swapping the live binding used by future calls.
+
+        Examples:
+            Switch an OpenAI model:
+                ```python
+                client.reconfigure_connection(
+                    provider="openai",
+                    model="text-embedding-3-large",
+                    base_url=None,
+                    api_key=None,
+                    azure_deployment=None,
+                    timeout=60.0,
+                )
+                ```
+
+            Pin an Azure embedding endpoint:
+                ```python
+                client.reconfigure_connection(
+                    provider="azure",
+                    model="embedding-model",
+                    endpoint_id="azure_embeddings",
+                    base_url="https://example.openai.azure.com",
+                    api_key="secret",
+                    azure_deployment="embedding-prod",
+                    timeout=90.0,
+                )
+                ```
+
+        Args:
+            self: Configured embedding client retained by dependent services.
+            provider: Registered provider identity.
+            model: Provider embedding model identity.
+            base_url: Optional provider API base URL override.
+            api_key: Optional already-resolved provider credential.
+            azure_deployment: Optional Azure deployment identity.
+            timeout: HTTP request timeout in seconds.
+            retry_settings: Optional bounded provider retry policy.
+            rate_limit_group: Optional shared provider quota bucket.
+            endpoint_id: Optional exact embedding endpoint adapter.
+
+        Returns:
+            None: Replaces connection-derived state atomically for future calls.
+
+        Notes:
+            Retired transports remain reachable until `aclose()` so in-flight
+            operations are not forcibly interrupted.
+        """
+
+        self._apply_connection_state(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            azure_deployment=azure_deployment,
+            timeout=timeout,
+            retry_settings=retry_settings,
+            rate_limit_group=rate_limit_group,
+            endpoint_id=endpoint_id,
+            rate_gate=self._provider_retry.rate_gate,
+            retire_current=True,
+        )
 
     # ------------ client management -----------------
 
@@ -105,20 +236,50 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         IMPORTANT: We do NOT try to aclose() a client created on a different loop,
         because httpx/anyio expects it to be closed on the same loop it was created on.
         """
-        loop = asyncio.get_running_loop()
+        self._client, self._bound_loop, retired = _ensure_loop_http_client(
+            self._client,
+            self._bound_loop,
+            timeout=self.timeout,
+        )
+        if retired is not None:
+            self._retired_http_clients.append(retired)
 
-        if self._client is None:
-            # first-time init
-            self._client = httpx.AsyncClient(timeout=self.timeout)
-            self._bound_loop = loop
-            return
+    async def aclose(self) -> None:
+        """Close active and safely retired embedding HTTP clients.
 
-        if self._bound_loop is not loop:
-            # We're now in a different loop -> do not reuse the old client.
-            # We also do NOT call aclose() here, because that tends to explode
-            # if the old loop is already closed.
-            self._client = httpx.AsyncClient(timeout=self.timeout)
-            self._bound_loop = loop
+        Intro:
+            Owns cleanup for transports retained across event-loop changes and
+            atomic connection hot reloads.
+
+        Examples:
+            Close one embedding client:
+                ```python
+                await client.aclose()
+                ```
+
+            Close through the embedding service:
+                ```python
+                await service.aclose()
+                ```
+
+        Args:
+            self: Embedding client owning transport resources.
+
+        Returns:
+            None: Closes every distinct reachable HTTP transport.
+
+        Notes:
+            Cross-loop close failures are logged and do not prevent remaining
+            transports from being processed.
+        """
+
+        clients = [self._client, *self._retired_http_clients]
+        self._retired_http_clients = []
+        await _close_http_clients(
+            clients,
+            logger=logging.getLogger(__name__),
+            warning_key="embedding_http_client_close_failed",
+        )
 
     # ------------ public API ------------------------
 
