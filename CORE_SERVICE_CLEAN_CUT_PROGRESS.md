@@ -26,8 +26,8 @@ wiring.
 |---|---|---|
 | A0 baseline and isolation | Complete | Dedicated worktree at base `6aa355f`. |
 | A1 legacy agents and skills | Complete | Commit `1758fa3`; only `default_chat_agent` remains; focused gate `18 passed`; full AG gate `721 passed, 2 skipped, 2 deselected`. |
-| A2-A10 | Paused | Not started; stopped at the external compatibility gate. |
-| B1-B5 external reconciliation | Blocked for decision | Engine passes, but a Studio test expects worker protocol `9` while Studio's own `BRIDGE_VERSION` is `10`; no external repository mutation is authorized. |
+| A2-A10 | Pending | Not started; A1 external causality gate is complete. |
+| B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
 
@@ -48,19 +48,25 @@ wiring.
 - No LLM implementation file changed. The container edit removes only legacy skill
   import, field, construction, and assignment.
 
-### External A1 compatibility gate
+### External A1 causality gate
 
 - `ag-engine`: full read-only suite against the AG worktree passed: `770 passed in
   43.91s`.
 - Neither `ag-engine` nor `ag-studio` references the removed skill or bundled-agent
   implementation paths.
-- `ag-studio` backend: the first-failure diagnostic stopped after `120 passed` at
-  `tests/test_context_api.py::test_compatibility_reports_product_and_protocol_contracts`.
-  Studio's test expects worker protocol `9`; Studio's own
-  `execution.worker.bridge.BRIDGE_VERSION` is `10`.
-- The broader Studio backend run reached 50% and displayed multiple failures before
-  its 10-minute cap. Further AG phases are paused pending an explicit Engine/Studio
-  reconciliation decision.
+- The Studio slice covering AG container construction, worker/supervisor execution,
+  Studio-AI hosting, release gates, LLM settings, observability, inspection, and
+  deployment collected 117 tests against A1: 111 passed and 6 failed.
+- Exactly those 6 tests fail in the same way against the unchanged pre-A1 AG
+  baseline. Four terminate while Studio resolves a sandbox-inaccessible Windows
+  user path; the local-host and deployment cases are likewise environment/process
+  failures. They are not A1 regressions.
+- Studio contains no reference to the removed skill registry, runtime skill helper,
+  Graph Builder, or explored-agent implementation path. Direct AG container
+  consumers passed against A1.
+- The stale Studio worker-bridge assertion (`9` expected while Studio defines `10`)
+  is an internal pre-existing Studio issue and is excluded from the AG refactor
+  causality gate.
 - Engine and Studio were tested without bytecode or pytest caches; all temp output
   was directed into this AG worktree. No external source mutation was made.
 
