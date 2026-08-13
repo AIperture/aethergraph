@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from aethergraph.config.config import EmbeddingUsageQuotaSettings
 from aethergraph.contracts.services.llm import EmbeddingClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
@@ -22,6 +23,7 @@ from aethergraph.services.llm.http_lifecycle import (
     _close_http_clients,
     _ensure_loop_http_client,
 )
+from aethergraph.services.llm.operation_quota import embedding_quota_ledger
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     ProviderRateGate,
@@ -65,6 +67,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
     # metering (optional, can be None)
     metering: MeteringService | None = None
     endpoint_id: str | None = None
+    operation_quota_cfg: EmbeddingUsageQuotaSettings | None = None
 
     def __post_init__(self) -> None:
         resolved_provider = (
@@ -92,6 +95,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         self._client: httpx.AsyncClient | None = None
         self._retired_http_clients: list[httpx.AsyncClient] = []
         self._bound_loop = None
+        self._operation_quota = embedding_quota_ledger(self.operation_quota_cfg)
 
     def _apply_connection_state(
         self,
@@ -335,9 +339,6 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         if len(texts) == 0:
             return EmbeddingResult(vectors=[], usage=EmbeddingUsage.from_provider_usage(None))
 
-        await self._ensure_client()
-        assert self._client is not None
-
         # Resolve model (override > configured)
         model = model or self.model or "text-embedding-3-small"
 
@@ -357,6 +358,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             azure_api_version=kw.get("azure_api_version"),
             extra_body=kw.get("extra_body") or {},
         )
+        reservation = self._operation_quota.reserve({"calls": 1, "texts": len(invocation.texts)})
 
         async def _attempt() -> ProviderCallResult[EmbeddingResult]:
             return await invoke_embedding_adapter(
@@ -372,21 +374,24 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             "run_id": kw.get("run_id", context.get("run_id")),
             "graph_id": kw.get("graph_id", context.get("graph_id")),
         }
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
-            service="embedding",
-            operation="embed",
-            request={
-                "provider": self.provider,
-                "model": model,
-                "endpoint_id": adapter.adapter_id,
-                "num_texts": len(texts),
-            },
-            tags=["model", "embedding"],
-            metadata=dimensions,
-        )
         start = time.perf_counter()
+        span = None
         try:
+            await self._ensure_client()
+            assert self._client is not None
+            tracer = resolve_tracer()
+            span = await tracer.start_span(
+                service="embedding",
+                operation="embed",
+                request={
+                    "provider": self.provider,
+                    "model": model,
+                    "endpoint_id": adapter.adapter_id,
+                    "num_texts": len(texts),
+                },
+                tags=["model", "embedding"],
+                metadata=dimensions,
+            )
             provider_result = await self._provider_retry.execute(
                 _attempt,
                 provider=self.provider,
@@ -396,6 +401,15 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             )
             result = provider_result.value
             latency_ms = int((time.perf_counter() - start) * 1000)
+            quota_error = self._operation_quota.reconcile(
+                reservation,
+                {
+                    "calls": 1,
+                    "texts": len(invocation.texts),
+                    "input_tokens": result.usage.input_tokens,
+                },
+                usage=result.usage.to_dict(),
+            )
             await _record_embedding_metering(
                 self.metering or current_metering(),
                 provider=self.provider,
@@ -406,6 +420,8 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 dimensions=dimensions,
                 logger=logging.getLogger(__name__),
             )
+            if quota_error is not None:
+                raise quota_error
             await span.finish(
                 response={
                     "num_vectors": len(result.vectors),
@@ -420,12 +436,14 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 },
             )
             return result
-        except Exception as exc:
-            await span.fail(
-                exc,
-                metadata=dimensions,
-                metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
-            )
+        except BaseException as exc:
+            self._operation_quota.release(reservation)
+            if span is not None:
+                await span.fail(
+                    exc,
+                    metadata=dimensions,
+                    metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+                )
             raise
 
     async def embed(

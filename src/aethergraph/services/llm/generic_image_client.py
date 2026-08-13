@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from aethergraph.config.config import ImageGenerationUsageQuotaSettings
 from aethergraph.contracts.services.llm import ImageGenerationClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
@@ -17,6 +18,7 @@ from aethergraph.services.llm.http_lifecycle import (
     _ensure_loop_http_client,
 )
 from aethergraph.services.llm.image_runtime import _execute_image_generation
+from aethergraph.services.llm.operation_quota import image_generation_quota_ledger
 from aethergraph.services.llm.provider_transport import (
     ProviderRateGate,
     ProviderRetryExecutor,
@@ -49,6 +51,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         rate_limit_group: str | None = None,
         rate_gate: ProviderRateGate | None = None,
         metering: MeteringService | None = None,
+        operation_quota_cfg: ImageGenerationUsageQuotaSettings | None = None,
         default_count: int = 1,
         default_size: str | None = None,
         default_quality: str | None = None,
@@ -98,6 +101,8 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
             rate_limit_group: Optional shared provider quota bucket.
             rate_gate: Optional container-shared rate gate.
             metering: Optional shared model metering service.
+            operation_quota_cfg: Optional infrastructure-owned per-run image
+                quota policy.
             default_count: Default number of generated images.
             default_size: Optional default image dimensions.
             default_quality: Optional default provider quality mode.
@@ -133,6 +138,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         self.timeout = float(timeout)
         self.rate_limit_group = rate_limit_group
         self.metering = metering
+        self.operation_quota_cfg = operation_quota_cfg
         self.default_count = int(default_count)
         self.default_size = default_size
         self.default_quality = default_quality
@@ -150,6 +156,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
         self._retired_http_clients: list[httpx.AsyncClient] = []
         self._bound_loop = None
         self._logger = logging.getLogger(__name__)
+        self._operation_quota = image_generation_quota_ledger(operation_quota_cfg)
 
     async def _ensure_client(self) -> None:
         self._client, self._bound_loop, retired = _ensure_loop_http_client(

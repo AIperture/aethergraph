@@ -446,6 +446,7 @@ def build_default_container(
         secrets,
         metering=metering,
         rate_gate=provider_rate_gate,
+        operation_quota_cfg=cfg.model_operation_usage_quota.embedding,
     )  # return {profile: GenericEmbeddingClient}
     embed_service = EmbeddingService(clients=embed_clients) if embed_clients else None
     embed_client = embed_clients["default"] if embed_clients else None
@@ -455,6 +456,7 @@ def build_default_container(
         secrets,
         metering=metering,
         rate_gate=provider_rate_gate,
+        operation_quota_cfg=cfg.model_operation_usage_quota.image_generation,
     )
     image_service = ImageGenerationService(image_clients) if image_clients else None
     if llm_service is not None and image_service is not None:

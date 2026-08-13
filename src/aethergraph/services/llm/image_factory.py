@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from aethergraph.config.config import ImageGenerationUsageQuotaSettings
 from aethergraph.config.llm import ImageGenerationSettings
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.services.llm.compat import image_generation_profile_from_settings
@@ -19,6 +20,7 @@ def image_client_from_profile(
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
     profile_name: str | None = None,
+    operation_quota_cfg: ImageGenerationUsageQuotaSettings | None = None,
 ) -> GenericImageGenerationClient:
     """Build one image client from a canonical operation profile.
 
@@ -49,6 +51,8 @@ def image_client_from_profile(
         metering: Optional shared model metering service.
         rate_gate: Optional container-shared provider rate gate.
         profile_name: Optional configured profile identity.
+        operation_quota_cfg: Optional infrastructure-owned per-run image quota
+            policy.
 
     Returns:
         GenericImageGenerationClient: Exact-bound independent image client.
@@ -75,6 +79,7 @@ def image_client_from_profile(
         rate_limit_group=profile.transport.rate_limit_group,
         rate_gate=rate_gate,
         metering=metering,
+        operation_quota_cfg=operation_quota_cfg,
         default_count=profile.defaults.count,
         default_size=profile.defaults.size,
         default_quality=profile.defaults.quality,
@@ -91,6 +96,7 @@ def build_image_generation_clients(
     *,
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
+    operation_quota_cfg: ImageGenerationUsageQuotaSettings | None = None,
 ) -> dict[str, GenericImageGenerationClient]:
     """Build every enabled image client through the canonical profile boundary.
 
@@ -116,6 +122,8 @@ def build_image_generation_clients(
         secrets: Secret store for configured credential references.
         metering: Optional shared model metering service.
         rate_gate: Optional container-shared provider rate gate.
+        operation_quota_cfg: Optional infrastructure-owned per-run image quota
+            policy shared by every profile.
 
     Returns:
         dict[str, GenericImageGenerationClient]: Clients keyed by profile name.
@@ -135,6 +143,7 @@ def build_image_generation_clients(
             metering=metering,
             rate_gate=shared_rate_gate,
             profile_name=name,
+            operation_quota_cfg=operation_quota_cfg,
         )
         for name, profile in profiles.items()
     }

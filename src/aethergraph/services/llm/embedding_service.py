@@ -197,6 +197,7 @@ class EmbeddingService:
                 rate_limit_group=getattr(template, "rate_limit_group", None),
                 rate_gate=getattr(getattr(template, "_provider_retry", None), "rate_gate", None),
                 metering=getattr(template, "metering", None),
+                operation_quota_cfg=getattr(template, "operation_quota_cfg", None),
             )
             self._clients[name] = client
             return client
@@ -210,9 +211,11 @@ class EmbeddingService:
             model=model or c.model,
             base_url=(None if provider_changed else c.base_url) if base_url is None else base_url,
             api_key=(None if provider_changed else c.api_key) if api_key is None else api_key,
-            azure_deployment=(None if provider_changed else c.azure_deployment)
-            if azure_deployment is None
-            else azure_deployment,
+            azure_deployment=(
+                (None if provider_changed else c.azure_deployment)
+                if azure_deployment is None
+                else azure_deployment
+            ),
             timeout=timeout if timeout is not None else c.timeout,
             retry_settings=c.retry_settings,
             rate_limit_group=c.rate_limit_group,

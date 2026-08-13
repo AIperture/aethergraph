@@ -38,6 +38,43 @@ class LLMUsageQuotaSettings(BaseSettings):
     max_total_tokens_per_run: int | None = Field(default=None, ge=0)
 
 
+class EmbeddingUsageQuotaSettings(BaseModel):
+    """Configure optional per-run embedding-operation quotas.
+
+    Exact call and text counts are reserved before provider dispatch. Token
+    totals are reconciled only when the provider returns a usable receipt.
+    Every limit is disabled when its value is `None`.
+    """
+
+    max_calls_per_run: int | None = Field(default=None, ge=0)
+    max_texts_per_run: int | None = Field(default=None, ge=0)
+    max_input_tokens_per_run: int | None = Field(default=None, ge=0)
+
+
+class ImageGenerationUsageQuotaSettings(BaseModel):
+    """Configure optional per-run image-generation quotas.
+
+    Exact call and requested-image counts are reserved before provider
+    dispatch. Token totals are reconciled only from provider usage receipts.
+    Every limit is disabled when its value is `None`.
+    """
+
+    max_calls_per_run: int | None = Field(default=None, ge=0)
+    max_images_per_run: int | None = Field(default=None, ge=0)
+    max_input_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_output_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_total_tokens_per_run: int | None = Field(default=None, ge=0)
+
+
+class ModelOperationUsageQuotaSettings(BaseModel):
+    """Group non-Chat model-operation quotas under one host policy boundary."""
+
+    embedding: EmbeddingUsageQuotaSettings = Field(default_factory=EmbeddingUsageQuotaSettings)
+    image_generation: ImageGenerationUsageQuotaSettings = Field(
+        default_factory=ImageGenerationUsageQuotaSettings
+    )
+
+
 class LoggingSettings(BaseModel):
     nspace: str = Field("aethergraph", description="Root logger namespace")
     level: str = Field("INFO", description="Root log level")
@@ -152,6 +189,9 @@ class AppSettings(BaseSettings):
 
     rate_limit: RateLimitSettings = RateLimitSettings()
     llm_usage_quota: LLMUsageQuotaSettings = LLMUsageQuotaSettings()
+    model_operation_usage_quota: ModelOperationUsageQuotaSettings = Field(
+        default_factory=ModelOperationUsageQuotaSettings
+    )
     logging: LoggingSettings = LoggingSettings()
     slack: SlackSettings = SlackSettings()
     telegram: TelegramSettings = TelegramSettings()

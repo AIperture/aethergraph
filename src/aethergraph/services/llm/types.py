@@ -423,6 +423,102 @@ class LLMRunQuotaExceededError(LLMRunQuotaError):
     """Report actual provider usage that crossed an AG quota."""
 
 
+class ModelOperationRunQuotaError(LLMError):
+    """Describe one infrastructure-owned non-Chat model quota failure.
+
+    Intro:
+        Retains the operation, metric, run identity, requested amount, projected
+        consumption, configured limit, and optional provider usage receipt so
+        callers can distinguish admission rejection from post-response overage.
+
+    Examples:
+        Inspect a preflight embedding rejection:
+            ```python
+            error = ModelOperationRunQuotaError(
+                operation="embedding",
+                run_id="run-1",
+                quota="texts",
+                consumed=2,
+                requested=2,
+                projected=4,
+                limit=3,
+                phase="would be exceeded before provider dispatch",
+            )
+            assert error.operation == "embedding"
+            ```
+
+        Retain a post-response image receipt:
+            ```python
+            error = ModelOperationRunQuotaError(
+                operation="image_generation",
+                run_id="run-2",
+                quota="total_tokens",
+                consumed=0,
+                requested=8,
+                projected=8,
+                limit=4,
+                phase="was exceeded by actual provider usage",
+                usage={"total_tokens": 8},
+            )
+            assert error.usage == {"total_tokens": 8}
+            ```
+
+    Args:
+        self: Newly allocated typed quota error.
+        operation: Stable model operation identity.
+        run_id: Runtime run whose shared ledger rejected or exceeded the quota.
+        quota: Stable operation-specific metric name.
+        consumed: Committed plus concurrently reserved units before this request.
+        requested: Units requested or reported by this provider call.
+        projected: Resulting units compared with the configured limit.
+        limit: Configured inclusive maximum for the metric.
+        phase: Human-readable admission or reconciliation phase.
+        usage: Optional detached provider usage receipt.
+
+    Returns:
+        None: Initializes the exception and stable inspection fields.
+
+    Notes:
+        Agent-loop budgets remain outside this infrastructure exception family.
+    """
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        run_id: str,
+        quota: str,
+        consumed: int,
+        requested: int,
+        projected: int,
+        limit: int,
+        phase: str,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            f"Model operation '{operation}' infrastructure quota '{quota}' {phase} "
+            f"(consumed={consumed}, requested={requested}, "
+            f"projected={projected}, limit={limit}, run_id='{run_id}')."
+        )
+        self.operation = operation
+        self.run_id = run_id
+        self.quota = quota
+        self.consumed = consumed
+        self.requested = requested
+        self.projected = projected
+        self.limit = limit
+        self.phase = phase
+        self.usage = copy.deepcopy(usage) if usage is not None else None
+
+
+class ModelOperationRunQuotaWouldExceedError(ModelOperationRunQuotaError):
+    """Reject a non-Chat model call before transport when it crosses a quota."""
+
+
+class ModelOperationRunQuotaExceededError(ModelOperationRunQuotaError):
+    """Report actual non-Chat provider usage that crossed a quota."""
+
+
 UsageAvailability = Literal["complete", "partial", "unavailable"]
 
 

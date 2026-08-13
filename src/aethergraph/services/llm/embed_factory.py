@@ -6,6 +6,7 @@ import os
 
 from pydantic import SecretStr
 
+from aethergraph.config.config import EmbeddingUsageQuotaSettings
 from aethergraph.config.llm import EmbeddingProfile, EmbeddingSettings
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.provider_transport import ProviderRateGate
@@ -83,6 +84,7 @@ def embed_client_from_profile(
     *,
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
+    operation_quota_cfg: EmbeddingUsageQuotaSettings | None = None,
 ) -> GenericEmbeddingClient:
     """Build one embedding client from a canonical embedding profile.
 
@@ -108,6 +110,8 @@ def embed_client_from_profile(
         secrets: Secret store used for an exact configured reference.
         metering: Optional shared embedding metering service.
         rate_gate: Optional shared provider quota gate.
+        operation_quota_cfg: Optional infrastructure-owned per-run embedding
+            quota policy.
 
     Returns:
         GenericEmbeddingClient: Configured provider-neutral embedding client.
@@ -134,6 +138,7 @@ def embed_client_from_profile(
         rate_limit_group=p.transport.rate_limit_group,
         rate_gate=rate_gate,
         metering=metering,
+        operation_quota_cfg=operation_quota_cfg,
         endpoint_id=p.connection.endpoint_id,
     )
 
@@ -144,6 +149,7 @@ def build_embedding_clients(
     *,
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
+    operation_quota_cfg: EmbeddingUsageQuotaSettings | None = None,
 ) -> dict[str, GenericEmbeddingClient]:
     """Build all enabled embedding clients through their canonical boundary.
 
@@ -169,6 +175,8 @@ def build_embedding_clients(
         secrets: Secret store for configured credential references.
         metering: Optional shared embedding metering service.
         rate_gate: Optional shared provider quota gate.
+        operation_quota_cfg: Optional infrastructure-owned per-run embedding
+            quota policy shared by every profile.
 
     Returns:
         dict[str, GenericEmbeddingClient]: Clients keyed by profile name.
@@ -195,6 +203,7 @@ def build_embedding_clients(
             secrets,
             metering=metering,
             rate_gate=shared_rate_gate,
+            operation_quota_cfg=operation_quota_cfg,
         )
     }
 
@@ -211,6 +220,7 @@ def build_embedding_clients(
             secrets,
             metering=metering,
             rate_gate=shared_rate_gate,
+            operation_quota_cfg=operation_quota_cfg,
         )
 
     return clients
