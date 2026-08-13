@@ -6,11 +6,13 @@ from PIL import Image
 import pytest
 
 from aethergraph.services.llm import (
+    ImagePart,
     ImagePreparationPolicy,
     MediaPreparationError,
     MultimodalInputPolicy,
     is_accepted_image_mime,
     prepare_image_bytes,
+    prepare_image_inputs,
 )
 
 
@@ -29,6 +31,8 @@ def _image_bytes(
 def test_multimodal_policy_projects_once_into_media_preparation() -> None:
     policy = ImagePreparationPolicy.from_multimodal_input(
         MultimodalInputPolicy(
+            image_input_enabled=True,
+            allow_remote_urls=True,
             max_images=2,
             max_image_bytes=100_000,
             accepted_mime_types=("image/png",),
@@ -40,6 +44,8 @@ def test_multimodal_policy_projects_once_into_media_preparation() -> None:
     )
 
     assert policy.max_images == 2
+    assert policy.image_input_enabled is True
+    assert policy.allow_remote_urls is True
     assert policy.max_total_bytes == 200_000
     assert policy.target_bytes == 100_000
     assert policy.max_dimension == 512
@@ -47,6 +53,56 @@ def test_multimodal_policy_projects_once_into_media_preparation() -> None:
     assert policy.jpeg_quality == 82
     assert policy.min_jpeg_quality == 68
     assert is_accepted_image_mime("IMAGE/PNG; charset=binary", policy)
+
+
+def test_whole_request_media_policy_rejects_disabled_and_remote_images() -> None:
+    remote = (ImagePart(url="https://example.test/image.png"),)
+
+    with pytest.raises(MediaPreparationError, match="disabled"):
+        prepare_image_inputs(
+            remote,
+            policy=ImagePreparationPolicy(image_input_enabled=False),
+        )
+    with pytest.raises(MediaPreparationError, match="remote image URLs"):
+        prepare_image_inputs(remote, policy=ImagePreparationPolicy())
+
+    assert (
+        prepare_image_inputs(
+            remote,
+            policy=ImagePreparationPolicy(allow_remote_urls=True),
+        )
+        == remote
+    )
+
+
+def test_whole_request_media_policy_normalizes_inline_images_and_count() -> None:
+    original = _image_bytes()
+    policy = ImagePreparationPolicy(max_images=1, max_image_bytes=100_000)
+
+    prepared = prepare_image_inputs(
+        (ImagePart(data=original, mime_type="image/png"),),
+        policy=policy,
+    )
+
+    assert prepared[0].data == original
+    assert prepared[0].mime_type == "image/png"
+    with pytest.raises(MediaPreparationError, match="image count"):
+        prepare_image_inputs(
+            (
+                ImagePart(data=original, mime_type="image/png"),
+                ImagePart(data=original, mime_type="image/png"),
+            ),
+            policy=policy,
+        )
+
+
+def test_canonical_quality_range_projects_without_narrowing() -> None:
+    policy = ImagePreparationPolicy.from_multimodal_input(
+        MultimodalInputPolicy(jpeg_quality=100, min_jpeg_quality=96)
+    )
+
+    assert policy.jpeg_quality == 100
+    assert policy.min_jpeg_quality == 96
 
 
 def test_small_safe_png_is_preserved_and_encoded_only_on_projection() -> None:

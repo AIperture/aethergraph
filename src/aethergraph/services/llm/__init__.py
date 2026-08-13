@@ -39,6 +39,7 @@ from .media import (
     PreparedImage,
     is_accepted_image_mime,
     prepare_image_bytes,
+    prepare_image_inputs,
 )
 from .profiles import (
     CapabilityState,
@@ -309,6 +310,7 @@ __all__ = [
     "is_accepted_image_mime",
     "prepare_structured_output",
     "prepare_image_bytes",
+    "prepare_image_inputs",
     "provider_default_base_url",
     "resolve_endpoint_adapter",
     "resolve_endpoint_family",

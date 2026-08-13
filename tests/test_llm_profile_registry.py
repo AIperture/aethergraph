@@ -190,6 +190,7 @@ def test_legacy_chat_profile_projection_separates_operation_concerns() -> None:
     assert canonical.defaults.prompt_cache_policy == "required"
     assert canonical.defaults.context_window_tokens == 128_000
     assert canonical.input_policy.max_images == 3
+    assert canonical.input_policy.allow_remote_urls is True
     assert canonical.capability_overrides.image_input == "supported"
     assert "embed_model" not in canonical.model_dump()
     assert legacy.embed_model == "text-embedding-3-large"
@@ -204,6 +205,8 @@ def test_chat_factory_consumes_canonical_profile_without_losing_policy() -> None
             structured_output_policy="native_required",
             prompt_cache_policy="disabled",
             context_window_tokens=128_000,
+            vision_enabled=True,
+            vision_max_images=2,
         )
     )
 
@@ -216,6 +219,10 @@ def test_chat_factory_consumes_canonical_profile_without_losing_policy() -> None
     assert client.structured_output_policy == "native_required"
     assert client.prompt_cache_policy == "disabled"
     assert client.context_window_tokens == 128_000
+    assert client.image_preparation_policy is not None
+    assert client.image_preparation_policy.image_input_enabled is True
+    assert client.image_preparation_policy.allow_remote_urls is True
+    assert client.image_preparation_policy.max_images == 2
 
 
 def test_legacy_profile_preserves_explicit_endpoint_selection() -> None:

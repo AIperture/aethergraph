@@ -6,8 +6,10 @@ from pydantic import SecretStr
 from aethergraph.config.llm import LLMProfile
 
 from ..secrets.base import Secrets
+from .compat import chat_profile_from_legacy
 from .credentials import resolve_provider_credential
 from .generic_client import GenericLLMClient
+from .media import ImagePreparationPolicy
 from .profiles import PromptCachePolicy
 from .providers import Provider
 from .structured_output import StructuredOutputPolicy
@@ -282,6 +284,9 @@ class LLMService:
             vision_accepted_mime_prefixes=vision_accepted_mime_prefixes,
             vision_accepted_mime_types=vision_accepted_mime_types,
         )
+        image_preparation_policy = ImagePreparationPolicy.from_multimodal_input(
+            chat_profile_from_legacy(updated_profile).input_policy
+        )
         connection_changed = profile not in self._clients or any(
             value is not None
             for value in (
@@ -328,6 +333,7 @@ class LLMService:
                 structured_output_policy=updated_profile.structured_output_policy,
                 prompt_cache_policy=updated_profile.prompt_cache_policy,
                 context_window_tokens=updated_profile.context_window_tokens,
+                image_preparation_policy=image_preparation_policy,
                 observation_sink=getattr(template, "observation_sink", None),
                 observation_capture_mode=getattr(template, "observation_capture_mode", "manifest"),
                 profile_name=profile,
@@ -363,6 +369,7 @@ class LLMService:
             c.reasoning_effort = reasoning_effort
         if thinking_mode is not None:
             c.thinking_mode = thinking_mode
+        c.image_preparation_policy = image_preparation_policy
         self._profiles[profile] = updated_profile
         return c
 

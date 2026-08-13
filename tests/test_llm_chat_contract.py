@@ -2492,6 +2492,12 @@ def test_llm_service_configure_profile_updates_runtime_metadata() -> None:
     assert profile.vision_resize_jpeg_quality == 78
     assert profile.vision_resize_min_jpeg_quality == 62
     assert profile.vision_accepted_mime_types == ["image/png"]
+    assert client.image_preparation_policy is not None
+    assert client.image_preparation_policy.image_input_enabled is True
+    assert client.image_preparation_policy.max_images == 1
+    assert client.image_preparation_policy.max_image_bytes == 1024
+    assert client.image_preparation_policy.resize_enabled is False
+    assert client.image_preparation_policy.accepted_mime_types == ("image/png",)
 
 
 def test_settings_profile_view_includes_structured_output_policy() -> None:

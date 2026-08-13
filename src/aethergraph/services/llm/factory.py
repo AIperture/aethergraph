@@ -9,6 +9,7 @@ from ..secrets.base import Secrets
 from .compat import chat_profile_from_legacy
 from .credentials import resolve_provider_credential
 from .generic_client import GenericLLMClient
+from .media import ImagePreparationPolicy
 from .observability import CaptureMode, LLMObservationSink
 from .profiles import ChatProfile
 from .provider_transport import ProviderRateGate
@@ -163,6 +164,7 @@ def client_from_profile(
         structured_output_policy=p.defaults.structured_output_policy,
         prompt_cache_policy=p.defaults.prompt_cache_policy,
         context_window_tokens=p.defaults.context_window_tokens,
+        image_preparation_policy=ImagePreparationPolicy.from_multimodal_input(p.input_policy),
         thinking_budget=p.defaults.thinking_budget,
         reasoning_summary=p.defaults.reasoning_summary,
         observation_sink=observation_sink,

@@ -100,6 +100,7 @@ def chat_profile_from_legacy(
         ),
         input_policy=MultimodalInputPolicy(
             image_input_enabled=profile.vision_enabled,
+            allow_remote_urls=profile.vision_enabled,
             max_images=profile.vision_max_images,
             max_image_bytes=profile.vision_max_image_bytes,
             accepted_mime_prefixes=tuple(profile.vision_accepted_mime_prefixes),

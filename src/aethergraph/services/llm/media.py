@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import base64
+import binascii
 from dataclasses import dataclass, field
 import io
 import math
 from typing import Any
+from urllib.parse import urlsplit
 
 from .profiles import MultimodalInputPolicy
+from .types import ImageInput
 
 _PRESERVE_MIME_TYPES = {"image/jpeg", "image/png"}
 _SUPPORTED_RASTER_MIME_TYPES = {
@@ -29,6 +32,8 @@ class MediaPreparationError(ValueError):
 class ImagePreparationPolicy:
     """Central image admission, byte, and raster normalization policy."""
 
+    image_input_enabled: bool = True
+    allow_remote_urls: bool = False
     max_images: int = 4
     max_total_bytes: int = 8_000_000
     max_image_bytes: int | None = None
@@ -89,9 +94,9 @@ class ImagePreparationPolicy:
             raise MediaPreparationError("image preparation max_image_bytes must be at least 1")
         if self.target_bytes is not None and self.target_bytes < 1:
             raise MediaPreparationError("image preparation target_bytes must be at least 1")
-        if not (1 <= self.min_jpeg_quality <= self.jpeg_quality <= 95):
+        if not (1 <= self.min_jpeg_quality <= self.jpeg_quality <= 100):
             raise MediaPreparationError(
-                "image preparation JPEG quality must satisfy 1 <= min <= quality <= 95"
+                "image preparation JPEG quality must satisfy 1 <= min <= quality <= 100"
             )
         if not (0 < self.shrink_factor < 1):
             raise MediaPreparationError("image preparation shrink_factor must be between 0 and 1")
@@ -157,6 +162,8 @@ class ImagePreparationPolicy:
             policy.max_image_bytes * max_images if policy.max_image_bytes is not None else 8_000_000
         )
         return cls(
+            image_input_enabled=policy.image_input_enabled,
+            allow_remote_urls=policy.allow_remote_urls,
             max_images=max_images,
             max_total_bytes=max_total_bytes,
             max_image_bytes=policy.max_image_bytes,
@@ -169,6 +176,152 @@ class ImagePreparationPolicy:
             jpeg_quality=policy.jpeg_quality,
             min_jpeg_quality=policy.min_jpeg_quality,
         )
+
+
+def prepare_image_inputs(
+    images: tuple[ImageInput, ...],
+    *,
+    policy: ImagePreparationPolicy,
+) -> tuple[ImageInput, ...]:
+    """Admit and normalize one complete model-request image collection.
+
+    Intro:
+        Applies enablement, count, representation, URL, MIME, per-image byte,
+        aggregate byte, and raster preparation rules once before adapter wire
+        projection.
+
+    Examples:
+        Preserve an explicitly allowed remote image:
+            ```python
+            policy = ImagePreparationPolicy(allow_remote_urls=True)
+            images = prepare_image_inputs(
+                (ImageInput(url="https://example.test/image.png"),),
+                policy=policy,
+            )
+            assert images[0].url.startswith("https://")
+            ```
+
+        Reject images when the profile disables image input:
+            ```python
+            try:
+                prepare_image_inputs(
+                    (ImageInput(url="https://example.test/image.png"),),
+                    policy=ImagePreparationPolicy(image_input_enabled=False),
+                )
+            except MediaPreparationError:
+                pass
+            ```
+
+    Args:
+        images: Ordered canonical image inputs from one complete request.
+        policy: Validated application-owned image preparation policy.
+
+    Returns:
+        tuple[ImageInput, ...]: Ordered detached inputs with inline rasters
+            normalized to validated bytes and remote references preserved only
+            when explicitly allowed.
+
+    Notes:
+        Remote and provider file references are never fetched by AG, so byte
+        limits apply only to inline payloads. Provider file references require
+        the caller to set `is_file_uri=True` explicitly.
+    """
+
+    if not isinstance(policy, ImagePreparationPolicy):
+        raise TypeError("image preparation requires ImagePreparationPolicy")
+    if not images:
+        return ()
+    if not policy.image_input_enabled:
+        raise MediaPreparationError("image input is disabled by the active profile")
+    if len(images) > policy.max_images:
+        raise MediaPreparationError(
+            f"image count exceeds profile limit: {len(images)} > {policy.max_images}"
+        )
+
+    prepared: list[ImageInput] = []
+    total_bytes = 0
+    for image in images:
+        if not isinstance(image, ImageInput):
+            raise TypeError("image collection must contain ImageInput values")
+        normalized = _prepare_image_input(image, policy=policy)
+        if normalized.data is not None:
+            total_bytes += len(normalized.data)
+            if total_bytes > policy.max_total_bytes:
+                raise MediaPreparationError(
+                    "prepared image bytes exceed profile total: "
+                    f"{total_bytes} > {policy.max_total_bytes}"
+                )
+        prepared.append(normalized)
+    return tuple(prepared)
+
+
+def _prepare_image_input(
+    image: ImageInput,
+    *,
+    policy: ImagePreparationPolicy,
+) -> ImageInput:
+    representations = sum(value is not None for value in (image.data, image.b64, image.url))
+    if representations != 1:
+        raise MediaPreparationError("image input requires exactly one of data, b64, or url")
+    if image.is_file_uri:
+        if not image.url:
+            raise MediaPreparationError("provider file image requires a url")
+        return ImageInput(url=image.url, is_file_uri=True)
+    if image.url is not None:
+        if image.url.lower().startswith("data:"):
+            data, mime_type = _decode_image_data_url(image.url)
+            return _prepare_inline_image(data, mime_type=mime_type, policy=policy)
+        scheme = urlsplit(image.url).scheme.lower()
+        if scheme not in {"http", "https"}:
+            raise MediaPreparationError(
+                "image url must be an http(s), data, or explicit provider file URI"
+            )
+        if not policy.allow_remote_urls:
+            raise MediaPreparationError("remote image URLs are disabled by the active profile")
+        return ImageInput(url=image.url)
+
+    if not image.mime_type:
+        raise MediaPreparationError("inline image input requires a MIME type")
+    if image.data is not None:
+        data = bytes(image.data)
+    else:
+        try:
+            data = base64.b64decode(str(image.b64), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise MediaPreparationError("image input contains invalid base64 data") from exc
+    return _prepare_inline_image(data, mime_type=image.mime_type, policy=policy)
+
+
+def _prepare_inline_image(
+    data: bytes,
+    *,
+    mime_type: str,
+    policy: ImagePreparationPolicy,
+) -> ImageInput:
+    if not is_accepted_image_mime(mime_type, policy):
+        raise MediaPreparationError(f"image MIME type is not accepted: {mime_type}")
+    byte_limit = policy.max_image_bytes or policy.max_total_bytes
+    prepared = prepare_image_bytes(
+        data,
+        declared_mime=mime_type,
+        byte_limit=byte_limit,
+        policy=policy,
+    )
+    return ImageInput(data=prepared.data, mime_type=prepared.mime_type)
+
+
+def _decode_image_data_url(value: str) -> tuple[bytes, str]:
+    header, separator, encoded = value.partition(",")
+    if not separator or not header.lower().startswith("data:"):
+        raise MediaPreparationError("image input contains an invalid data URL")
+    metadata = header[5:].split(";")
+    mime_type = metadata[0]
+    if "base64" not in {item.lower() for item in metadata[1:]}:
+        raise MediaPreparationError("image data URL must use base64 encoding")
+    try:
+        return base64.b64decode(encoded, validate=True), mime_type
+    except (ValueError, binascii.Error) as exc:
+        raise MediaPreparationError("image data URL contains invalid base64 data") from exc
 
 
 @dataclass(frozen=True)
@@ -509,4 +662,5 @@ __all__ = [
     "PreparedImage",
     "is_accepted_image_mime",
     "prepare_image_bytes",
+    "prepare_image_inputs",
 ]

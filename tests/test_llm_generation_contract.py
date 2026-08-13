@@ -9,7 +9,9 @@ from aethergraph.services.llm import (
     ChatMessage,
     GenerationOptions,
     ImagePart,
+    ImagePreparationPolicy,
     LLMRequestCompatibilityError,
+    MediaPreparationError,
     ModelContinuation,
     ModelReasoningDelta,
     ModelRequest,
@@ -32,7 +34,10 @@ from aethergraph.services.llm import (
     validate_model_request,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
-from aethergraph.services.llm.request_preparation import prepare_model_request
+from aethergraph.services.llm.request_preparation import (
+    prepare_chat_messages,
+    prepare_model_request,
+)
 from aethergraph.services.llm.tool_calling import tool_call_request_fingerprint
 from aethergraph.services.llm.types import LLMUnsupportedFeatureError
 
@@ -139,6 +144,75 @@ def test_canonical_request_preparation_preserves_multimodal_and_tool_messages() 
     ]
     assert messages[0]["content"][2]["source"]["data"] == "aW1hZ2U="
     assert messages[1]["tool_call_id"] == "call_1"
+
+
+def test_legacy_chat_media_preparation_preserves_block_metadata_and_input() -> None:
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://example.test/image.png",
+                        "detail": "high",
+                    },
+                },
+            ],
+        }
+    ]
+
+    prepared = prepare_chat_messages(
+        messages,
+        image_policy=ImagePreparationPolicy(allow_remote_urls=True),
+    )
+
+    assert prepared is not messages
+    assert prepared[0]["content"][1]["image_url"]["detail"] == "high"
+    assert messages[0]["content"][1]["image_url"]["url"].startswith("https://")
+    assert prepare_chat_messages(messages, image_policy=None) is messages
+
+
+@pytest.mark.asyncio
+async def test_managed_media_policy_rejects_every_generation_entry_before_io() -> None:
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        image_preparation_policy=ImagePreparationPolicy(image_input_enabled=False),
+    )
+    request = ModelRequest(
+        messages=(
+            ChatMessage(
+                "user",
+                (ImagePart(url="https://example.test/image.png"),),
+            ),
+        )
+    )
+    legacy_messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.test/image.png"},
+                }
+            ],
+        }
+    ]
+
+    with pytest.raises(MediaPreparationError, match="disabled"):
+        client.estimate(request)
+    with pytest.raises(MediaPreparationError, match="disabled"):
+        await client.generate(request)
+    with pytest.raises(MediaPreparationError, match="disabled"):
+        async for _event in client.generate_stream(request):
+            pass
+    with pytest.raises(MediaPreparationError, match="disabled"):
+        await client.chat(legacy_messages)
+    with pytest.raises(MediaPreparationError, match="disabled"):
+        await client.chat_stream(legacy_messages)
+    await client.aclose()
 
 
 def test_model_request_requires_continuation_for_tool_outputs() -> None:

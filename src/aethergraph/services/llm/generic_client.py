@@ -36,6 +36,7 @@ from aethergraph.services.llm.http_lifecycle import (
     _close_http_clients,
     _ensure_loop_http_client,
 )
+from aethergraph.services.llm.media import ImagePreparationPolicy
 from aethergraph.services.llm.observability import (
     CaptureMode,
     LLMObservationRecord,
@@ -55,7 +56,10 @@ from aethergraph.services.llm.provider_transport import (
     checked_response_metadata,
 )
 from aethergraph.services.llm.registry import provider_default_base_url, resolve_endpoint_adapter
-from aethergraph.services.llm.request_preparation import prepare_model_request
+from aethergraph.services.llm.request_preparation import (
+    prepare_chat_messages,
+    prepare_model_request,
+)
 from aethergraph.services.llm.request_validation import (
     LLMRequestCompatibilityError,
     validate_model_request,
@@ -236,6 +240,7 @@ class GenericLLMClient(LLMClientProtocol):
         structured_output_policy: StructuredOutputPolicy = "best_available",
         prompt_cache_policy: PromptCachePolicy = "auto",
         context_window_tokens: int | None = None,
+        image_preparation_policy: ImagePreparationPolicy | None = None,
         retry_settings: ProviderRetrySettings | None = None,
         rate_limit_group: str | None = None,
         rate_gate: ProviderRateGate | None = None,
@@ -285,6 +290,8 @@ class GenericLLMClient(LLMClientProtocol):
             structured_output_policy: Structured-output capability requirement.
             prompt_cache_policy: Stable-prefix cache requirement policy.
             context_window_tokens: Optional context-window override.
+            image_preparation_policy: Optional managed whole-request image
+                admission and normalization policy.
             retry_settings: Provider transport retry configuration.
             rate_limit_group: Optional shared provider rate-limit group.
             rate_gate: Optional shared provider rate gate.
@@ -336,6 +343,12 @@ class GenericLLMClient(LLMClientProtocol):
         self.context_window_tokens = (
             int(context_window_tokens) if context_window_tokens is not None else None
         )
+        if image_preparation_policy is not None and not isinstance(
+            image_preparation_policy,
+            ImagePreparationPolicy,
+        ):
+            raise TypeError("image_preparation_policy must be ImagePreparationPolicy")
+        self.image_preparation_policy = image_preparation_policy
         self.observation_sink = observation_sink
         self.observation_capture_mode = observation_capture_mode
         self.profile_name = profile_name
@@ -1692,7 +1705,10 @@ class GenericLLMClient(LLMClientProtocol):
         """
 
         self._require_compatible_model_request(request)
-        messages, tool_request = prepare_model_request(request)
+        messages, tool_request = prepare_model_request(
+            request,
+            image_policy=self.image_preparation_policy,
+        )
         return self.estimate_chat_request(
             messages,
             max_output_tokens=request.generation.max_output_tokens,
@@ -2042,7 +2058,10 @@ class GenericLLMClient(LLMClientProtocol):
         """
 
         self._require_compatible_model_request(request)
-        messages, tool_request = prepare_model_request(request)
+        messages, tool_request = prepare_model_request(
+            request,
+            image_policy=self.image_preparation_policy,
+        )
         generation_params: dict[str, Any] = {}
         if request.generation.temperature is not None:
             generation_params["temperature"] = request.generation.temperature
@@ -2139,8 +2158,12 @@ class GenericLLMClient(LLMClientProtocol):
             Deprecated structured-output parameters remain operational through `0.1.x`,
             emit `DeprecationWarning`, and cannot be mixed with `structured_output`.
         """
-        response = await self._invoke_generation_runtime(
+        prepared_messages = prepare_chat_messages(
             messages,
+            image_policy=self.image_preparation_policy,
+        )
+        response = await self._invoke_generation_runtime(
+            prepared_messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,
@@ -2762,7 +2785,10 @@ class GenericLLMClient(LLMClientProtocol):
                 "generate_stream() does not silently drop cache boundaries",
             )
 
-        messages, _tool_request = prepare_model_request(request)
+        messages, _tool_request = prepare_model_request(
+            request,
+            image_policy=self.image_preparation_policy,
+        )
         queue: asyncio.Queue[ModelEvent | None] = asyncio.Queue(maxsize=64)
         failure: BaseException | None = None
         text_index = 0
@@ -3030,8 +3056,12 @@ class GenericLLMClient(LLMClientProtocol):
             public `0.1.x` boundary. New code should consume `generate_stream()`.
         """
 
-        return await self._invoke_stream_runtime(
+        prepared_messages = prepare_chat_messages(
             messages,
+            image_policy=self.image_preparation_policy,
+        )
+        return await self._invoke_stream_runtime(
+            prepared_messages,
             reasoning_effort=reasoning_effort,
             thinking_budget=thinking_budget,
             reasoning_summary=reasoning_summary,
