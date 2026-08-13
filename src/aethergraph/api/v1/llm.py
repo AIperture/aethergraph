@@ -10,15 +10,25 @@ from aethergraph.api.v1.deps import RequestIdentity, get_identity
 from aethergraph.api.v1.schemas.llm import (
     LLMChatResolveRequest,
     LLMChatResolveResponse,
+    LLMEmbeddingResolveRequest,
+    LLMEmbeddingResolveResponse,
     LLMEndpointAdapterView,
+    LLMImageGenerationResolveRequest,
+    LLMImageGenerationResolveResponse,
     LLMModelCatalogResponse,
     LLMProviderView,
     LLMRegistryResponse,
 )
-from aethergraph.services.llm.capabilities import resolve_chat_profile
+from aethergraph.services.llm.capabilities import (
+    resolve_chat_profile,
+    resolve_embedding_profile,
+    resolve_image_generation_profile,
+)
 from aethergraph.services.llm.catalog import catalog_digest, load_model_catalog
 from aethergraph.services.llm.profiles import (
     ChatProfile,
+    EmbeddingProfileSpec,
+    ImageGenerationProfile,
     ModelSelection,
     ProviderConnection,
 )
@@ -169,6 +179,93 @@ def build_llm_chat_resolve_response(
     return LLMChatResolveResponse(valid=binding.valid, binding=binding)
 
 
+def build_llm_embedding_resolve_response(
+    body: LLMEmbeddingResolveRequest,
+) -> LLMEmbeddingResolveResponse:
+    """Build one side-effect-free explicit Embedding binding resolution.
+
+    Intro:
+        Embedded hosts and HTTP routes share exact endpoint membership,
+        capability provenance, overrides, and fail-closed requirements.
+
+    Examples:
+        Resolve a known model:
+            ```python
+            response = build_llm_embedding_resolve_response(request)
+            ```
+
+        Inspect a failed requirement:
+            ```python
+            assert response.valid or response.binding.diagnostics
+            ```
+
+    Args:
+        body: Explicit Embedding binding, overrides, and requirements.
+
+    Returns:
+        LLMEmbeddingResolveResponse: Pinned effective binding and validity.
+
+    Notes:
+        Resolution performs no provider request and selects no fallback endpoint.
+    """
+
+    profile = EmbeddingProfileSpec(
+        connection=ProviderConnection(
+            provider_id=body.provider_id,
+            endpoint_id=body.endpoint_id,
+        ),
+        model=ModelSelection(model_id=body.model_id),
+        capability_overrides=body.capability_overrides,
+    )
+    binding = resolve_embedding_profile(profile, required=body.required_capabilities)
+    return LLMEmbeddingResolveResponse(valid=binding.valid, binding=binding)
+
+
+def build_llm_image_generation_resolve_response(
+    body: LLMImageGenerationResolveRequest,
+) -> LLMImageGenerationResolveResponse:
+    """Build one side-effect-free explicit Image Generation resolution.
+
+    Intro:
+        Embedded hosts and HTTP routes share exact endpoint membership,
+        capability provenance, overrides, and fail-closed requirements.
+
+    Examples:
+        Resolve a known model:
+            ```python
+            response = build_llm_image_generation_resolve_response(request)
+            ```
+
+        Inspect a failed requirement:
+            ```python
+            assert response.valid or response.binding.diagnostics
+            ```
+
+    Args:
+        body: Explicit Image Generation binding, overrides, and requirements.
+
+    Returns:
+        LLMImageGenerationResolveResponse: Pinned effective binding and validity.
+
+    Notes:
+        Resolution performs no provider request and selects no fallback endpoint.
+    """
+
+    profile = ImageGenerationProfile(
+        connection=ProviderConnection(
+            provider_id=body.provider_id,
+            endpoint_id=body.endpoint_id,
+        ),
+        model=ModelSelection(model_id=body.model_id),
+        capability_overrides=body.capability_overrides,
+    )
+    binding = resolve_image_generation_profile(
+        profile,
+        required=body.required_capabilities,
+    )
+    return LLMImageGenerationResolveResponse(valid=binding.valid, binding=binding)
+
+
 @router.get("/registry", response_model=LLMRegistryResponse)
 async def list_llm_registry(
     identity: Annotated[RequestIdentity, Depends(get_identity)],
@@ -302,8 +399,90 @@ async def resolve_llm_chat_binding(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/resolve/embeddings", response_model=LLMEmbeddingResolveResponse)
+async def resolve_llm_embedding_binding(
+    body: LLMEmbeddingResolveRequest,
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
+) -> LLMEmbeddingResolveResponse:
+    """Resolve one caller-selected Embedding endpoint binding.
+
+    Intro:
+        The route applies AG catalog facts, explicit overrides, and adapter
+        implementation clamps to an exact provider/endpoint/model identity.
+
+    Examples:
+        Resolve an OpenAI embedding model:
+            ```python
+            response = client.post("/api/v1/llm/resolve/embeddings", json=request)
+            ```
+
+        Inspect adjustable-dimension support:
+            ```python
+            state = response.json()["binding"]["capabilities"]["dimensions"]["state"]
+            ```
+
+    Args:
+        body: Explicit Embedding binding, overrides, and required capabilities.
+        identity: Authenticated request identity.
+
+    Returns:
+        LLMEmbeddingResolveResponse: Pinned effective binding and validity.
+
+    Notes:
+        Invalid provider/endpoint combinations return HTTP 400 without fallback.
+    """
+
+    del identity
+    try:
+        return build_llm_embedding_resolve_response(body)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/resolve/image-generation", response_model=LLMImageGenerationResolveResponse)
+async def resolve_llm_image_generation_binding(
+    body: LLMImageGenerationResolveRequest,
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
+) -> LLMImageGenerationResolveResponse:
+    """Resolve one caller-selected Image Generation endpoint binding.
+
+    Intro:
+        The route applies AG catalog facts, explicit overrides, and adapter
+        implementation clamps to an exact provider/endpoint/model identity.
+
+    Examples:
+        Resolve an OpenAI image model:
+            ```python
+            response = client.post("/api/v1/llm/resolve/image-generation", json=request)
+            ```
+
+        Inspect image-editing support:
+            ```python
+            state = response.json()["binding"]["capabilities"]["image_editing"]["state"]
+            ```
+
+    Args:
+        body: Explicit Image Generation binding, overrides, and requirements.
+        identity: Authenticated request identity.
+
+    Returns:
+        LLMImageGenerationResolveResponse: Pinned effective binding and validity.
+
+    Notes:
+        Invalid provider/endpoint combinations return HTTP 400 without fallback.
+    """
+
+    del identity
+    try:
+        return build_llm_image_generation_resolve_response(body)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 __all__ = [
     "build_llm_chat_resolve_response",
+    "build_llm_embedding_resolve_response",
+    "build_llm_image_generation_resolve_response",
     "build_llm_model_catalog_response",
     "build_llm_registry_response",
     "router",

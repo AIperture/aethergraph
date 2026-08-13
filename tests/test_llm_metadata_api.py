@@ -90,6 +90,61 @@ def test_chat_resolve_api_distinguishes_azure_endpoint_capabilities() -> None:
     assert diagnostics[0]["code"] == "required_capability_unsupported"
 
 
+def test_embedding_resolve_api_returns_exact_capability_binding() -> None:
+    with _client() as client:
+        response = client.post(
+            "/api/v1/llm/resolve/embeddings",
+            json={
+                "provider_id": "openai",
+                "endpoint_id": "openai_embeddings",
+                "model_id": "text-embedding-3-small",
+                "required_capabilities": ["text_embeddings", "dimensions"],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "aethergraph.embedding-resolve-response/v1"
+    assert payload["valid"] is True
+    assert payload["binding"]["endpoint_id"] == "openai_embeddings"
+    assert payload["binding"]["capabilities"]["dimensions"]["state"] == "supported"
+
+
+def test_image_resolve_api_reports_adapter_clamped_capability() -> None:
+    with _client() as client:
+        response = client.post(
+            "/api/v1/llm/resolve/image-generation",
+            json={
+                "provider_id": "openai",
+                "endpoint_id": "openai_images",
+                "model_id": "gpt-image-1",
+                "required_capabilities": ["image_editing"],
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "aethergraph.image-resolve-response/v1"
+    assert payload["valid"] is False
+    assert payload["binding"]["endpoint_id"] == "openai_images"
+    assert payload["binding"]["capabilities"]["image_editing"]["state"] == "unsupported"
+
+
+def test_operation_resolve_apis_reject_cross_operation_endpoints() -> None:
+    with _client() as client:
+        response = client.post(
+            "/api/v1/llm/resolve/embeddings",
+            json={
+                "provider_id": "openai",
+                "endpoint_id": "openai_images",
+                "model_id": "text-embedding-3-small",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "does not implement embeddings" in response.json()["detail"]
+
+
 def test_chat_resolve_api_rejects_cross_provider_endpoint_without_fallback() -> None:
     with _client() as client:
         response = client.post(

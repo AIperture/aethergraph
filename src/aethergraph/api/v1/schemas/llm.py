@@ -8,10 +8,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aethergraph.services.llm.capabilities import (
     ChatCapabilityName,
+    EmbeddingCapabilityName,
+    ImageGenerationCapabilityName,
+    ResolvedEmbeddingBinding,
+    ResolvedImageGenerationBinding,
     ResolvedModelBinding,
 )
 from aethergraph.services.llm.catalog import ModelCatalogEntry
-from aethergraph.services.llm.profiles import ChatCapabilityOverrides
+from aethergraph.services.llm.profiles import (
+    ChatCapabilityOverrides,
+    EmbeddingCapabilityOverrides,
+    ImageGenerationCapabilityOverrides,
+)
 from aethergraph.services.llm.registry import ModelOperation
 
 
@@ -19,6 +27,43 @@ class LLMApiContract(BaseModel):
     """Reject undeclared fields across the public model-metadata API."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+def _require_unique_capabilities(
+    capabilities: tuple[str, ...],
+    *,
+    operation: str,
+) -> None:
+    """Reject duplicate ordered capability requirements.
+
+    Intro:
+        All operation-specific resolution requests share one deterministic
+        uniqueness rule while retaining their narrower public literal types.
+
+    Examples:
+        Accept distinct requirements:
+            ```python
+            _require_unique_capabilities(("streaming", "prompt_cache"), operation="Chat")
+            ```
+
+        Reject a duplicate requirement:
+            ```python
+            _require_unique_capabilities(("dimensions", "dimensions"), operation="Embedding")
+            ```
+
+    Args:
+        capabilities: Ordered requested capability names.
+        operation: User-facing operation label for validation errors.
+
+    Returns:
+        None: The requirements are unique.
+
+    Notes:
+        Literal membership is enforced separately by each Pydantic field.
+    """
+
+    if len(capabilities) != len(set(capabilities)):
+        raise ValueError(f"required {operation} capabilities must be unique")
 
 
 class LLMEndpointAdapterView(LLMApiContract):
@@ -117,8 +162,7 @@ class LLMChatResolveRequest(LLMApiContract):
             order when more than one capability fails.
         """
 
-        if len(self.required_capabilities) != len(set(self.required_capabilities)):
-            raise ValueError("required Chat capabilities must be unique")
+        _require_unique_capabilities(self.required_capabilities, operation="Chat")
         return self
 
 
@@ -132,11 +176,152 @@ class LLMChatResolveResponse(LLMApiContract):
     binding: ResolvedModelBinding
 
 
+class LLMEmbeddingResolveRequest(LLMApiContract):
+    """Request capability resolution for one explicit Embedding binding."""
+
+    schema_version: Literal["aethergraph.embedding-resolve-request/v1"] = (
+        "aethergraph.embedding-resolve-request/v1"
+    )
+    provider_id: str = Field(min_length=1, max_length=128)
+    endpoint_id: str = Field(min_length=1, max_length=128)
+    model_id: str = Field(min_length=1, max_length=512)
+    required_capabilities: tuple[EmbeddingCapabilityName, ...] = ()
+    capability_overrides: EmbeddingCapabilityOverrides = Field(
+        default_factory=EmbeddingCapabilityOverrides
+    )
+
+    @model_validator(mode="after")
+    def validate_required_capabilities(self) -> LLMEmbeddingResolveRequest:
+        """Require unique Embedding capability requirements.
+
+        Intro:
+            Duplicate requirements create redundant diagnostics and are rejected
+            before canonical binding resolution.
+
+        Examples:
+            Require adjustable dimensions:
+                ```python
+                request = LLMEmbeddingResolveRequest(
+                    provider_id="openai",
+                    endpoint_id="openai_embeddings",
+                    model_id="text-embedding-3-small",
+                    required_capabilities=("dimensions",),
+                )
+                ```
+
+            Reject duplicate requirements:
+                ```python
+                LLMEmbeddingResolveRequest(
+                    provider_id="openai",
+                    endpoint_id="openai_embeddings",
+                    model_id="text-embedding-3-small",
+                    required_capabilities=("dimensions", "dimensions"),
+                )
+                ```
+
+        Args:
+            self: Fully parsed Embedding binding request.
+
+        Returns:
+            LLMEmbeddingResolveRequest: Unchanged request with unique requirements.
+
+        Notes:
+            Caller order remains the deterministic diagnostic order.
+        """
+
+        _require_unique_capabilities(self.required_capabilities, operation="Embedding")
+        return self
+
+
+class LLMEmbeddingResolveResponse(LLMApiContract):
+    """Return one pinned Embedding binding and capability diagnostics."""
+
+    schema_version: Literal["aethergraph.embedding-resolve-response/v1"] = (
+        "aethergraph.embedding-resolve-response/v1"
+    )
+    valid: bool
+    binding: ResolvedEmbeddingBinding
+
+
+class LLMImageGenerationResolveRequest(LLMApiContract):
+    """Request capability resolution for one explicit Image Generation binding."""
+
+    schema_version: Literal["aethergraph.image-resolve-request/v1"] = (
+        "aethergraph.image-resolve-request/v1"
+    )
+    provider_id: str = Field(min_length=1, max_length=128)
+    endpoint_id: str = Field(min_length=1, max_length=128)
+    model_id: str = Field(min_length=1, max_length=512)
+    required_capabilities: tuple[ImageGenerationCapabilityName, ...] = ()
+    capability_overrides: ImageGenerationCapabilityOverrides = Field(
+        default_factory=ImageGenerationCapabilityOverrides
+    )
+
+    @model_validator(mode="after")
+    def validate_required_capabilities(self) -> LLMImageGenerationResolveRequest:
+        """Require unique Image Generation capability requirements.
+
+        Intro:
+            Duplicate requirements create redundant diagnostics and are rejected
+            before canonical binding resolution.
+
+        Examples:
+            Require text-to-image support:
+                ```python
+                request = LLMImageGenerationResolveRequest(
+                    provider_id="openai",
+                    endpoint_id="openai_images",
+                    model_id="gpt-image-1",
+                    required_capabilities=("text_to_image",),
+                )
+                ```
+
+            Reject duplicate requirements:
+                ```python
+                LLMImageGenerationResolveRequest(
+                    provider_id="openai",
+                    endpoint_id="openai_images",
+                    model_id="gpt-image-1",
+                    required_capabilities=("text_to_image", "text_to_image"),
+                )
+                ```
+
+        Args:
+            self: Fully parsed Image Generation binding request.
+
+        Returns:
+            LLMImageGenerationResolveRequest: Unchanged request with unique requirements.
+
+        Notes:
+            Caller order remains the deterministic diagnostic order.
+        """
+
+        _require_unique_capabilities(
+            self.required_capabilities,
+            operation="Image Generation",
+        )
+        return self
+
+
+class LLMImageGenerationResolveResponse(LLMApiContract):
+    """Return one pinned Image Generation binding and diagnostics."""
+
+    schema_version: Literal["aethergraph.image-resolve-response/v1"] = (
+        "aethergraph.image-resolve-response/v1"
+    )
+    valid: bool
+    binding: ResolvedImageGenerationBinding
+
+
 __all__ = [
     "LLMChatResolveRequest",
     "LLMChatResolveResponse",
+    "LLMEmbeddingResolveRequest",
+    "LLMEmbeddingResolveResponse",
     "LLMEndpointAdapterView",
     "LLMModelCatalogResponse",
+    "LLMImageGenerationResolveRequest",
+    "LLMImageGenerationResolveResponse",
     "LLMProviderView",
     "LLMRegistryResponse",
 ]
