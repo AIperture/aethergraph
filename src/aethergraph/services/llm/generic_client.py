@@ -28,6 +28,7 @@ from aethergraph.services.llm._openai_like_mixin import _OpenAILikeMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
+from aethergraph.services.llm.adapters import ChatAdapterInvocation, invoke_chat_adapter
 from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
@@ -2500,10 +2501,10 @@ class GenericLLMClient(
         quota_reservation: _LLMQuotaReservation | None = None
         try:
             quota_reservation = self._preflight_llm_request(request_estimate)
-            # Provider-specific call (now symmetric)
             provider_result = await self._provider_retry.execute(
                 lambda: self._chat_dispatch(
                     provider_messages,
+                    adapter_id=effective_endpoint_id,
                     model=model,
                     reasoning_effort=reasoning_effort,
                     max_output_tokens=max_output_tokens,
@@ -3385,13 +3386,11 @@ class GenericLLMClient(
                         metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
                     )
 
-    # ================================================================
-    # Dispatch + postprocessing
-    # ================================================================
     async def _chat_dispatch(
         self,
         messages: list[dict[str, Any]],
         *,
+        adapter_id: str,
         model: str,
         reasoning_effort: str | None,
         max_output_tokens: int | None,
@@ -3407,40 +3406,80 @@ class GenericLLMClient(
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
-        # Extract cross-provider extras if any
-        tools = kw.pop("tools", None)
-        tool_choice = kw.pop("tool_choice", None)
-        selected_adapter = self._resolve_chat_adapter(
-            has_tool_request=tool_request is not None,
-        )
-        endpoint_family = selected_adapter.protocol_family
-        if tool_request is not None and not endpoint_family:
-            raise LLMToolCallCapabilityError(
-                provider=self.provider,
-                model=model,
-            )
+        """Invoke one exact endpoint adapter without provider-name dispatch.
 
-        # OpenAI is now symmetric too
-        if self.provider == "openai":
-            if selected_adapter.adapter_id == "openai_chat_completions":
-                return await self._chat_openai_like_chat_completions(
+        Intro:
+            Freezes lifecycle-prepared state into one adapter invocation and
+            delegates exactly one physical attempt through the runtime registry.
+
+        Examples:
+            Invoke direct Chat:
+                ```python
+                result = await client._chat_dispatch(
                     messages,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    max_output_tokens=max_output_tokens,
-                    output_format=output_format,
-                    json_schema=json_schema,
-                    fail_on_unsupported=fail_on_unsupported,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    tool_request=tool_request,
-                    schema_name=schema_name,
-                    strict_schema=strict_schema,
-                    structured_output_fields=structured_output_fields,
-                    **kw,
+                    adapter_id="openai_responses",
+                    model="gpt-test",
+                    reasoning_effort=None,
+                    max_output_tokens=128,
+                    output_format="text",
+                    json_schema=None,
+                    schema_name="Response",
+                    strict_schema=True,
+                    validate_json=True,
+                    fail_on_unsupported=True,
                 )
-            return await self._chat_openai_responses(
-                messages,
+                ```
+
+            Invoke native Tools:
+                ```python
+                result = await client._chat_dispatch(
+                    messages,
+                    adapter_id="anthropic_messages",
+                    model="claude-test",
+                    reasoning_effort=None,
+                    max_output_tokens=128,
+                    output_format="text",
+                    json_schema=None,
+                    schema_name="Response",
+                    strict_schema=True,
+                    validate_json=True,
+                    fail_on_unsupported=True,
+                    tool_request=tool_request,
+                )
+                ```
+
+        Args:
+            messages: Lifecycle-prepared stable conversation messages.
+            adapter_id: Exact selected endpoint-adapter identity.
+            model: Exact configured model or deployment identity.
+            reasoning_effort: Optional normalized reasoning-depth override.
+            max_output_tokens: Optional maximum generated tokens.
+            output_format: Prepared text, JSON, schema, or raw mode.
+            json_schema: Optional prepared provider JSON schema.
+            schema_name: Stable provider schema name.
+            strict_schema: Whether native schema enforcement is strict.
+            validate_json: Whether shared postprocessing validates JSON locally.
+            fail_on_unsupported: Whether unsupported native fields must fail.
+            structured_output_fields: Optional prepared native structured fields.
+            prompt_cache_fields: Optional prepared native cache fields.
+            prompt_cache_stable_message_count: Optional stable prefix length.
+            tool_request: Optional canonical native Tool request.
+            **kw: Additional bounded adapter-private options.
+
+        Returns:
+            ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
+                Raw single-attempt adapter value and transport metadata.
+
+        Notes:
+            This method is the injectable physical-attempt seam used by transport
+            tests. It contains no provider selection, retry, or fallback logic.
+        """
+
+        return await invoke_chat_adapter(
+            self,
+            adapter_id=adapter_id,
+            invocation=ChatAdapterInvocation(
+                messages=tuple(messages),
                 model=model,
                 reasoning_effort=reasoning_effort,
                 max_output_tokens=max_output_tokens,
@@ -3448,107 +3487,15 @@ class GenericLLMClient(
                 json_schema=json_schema,
                 schema_name=schema_name,
                 strict_schema=strict_schema,
-                tools=tools,
-                tool_choice=tool_choice,
-                tool_request=tool_request,
+                validate_json=validate_json,
+                fail_on_unsupported=fail_on_unsupported,
                 structured_output_fields=structured_output_fields,
                 prompt_cache_fields=prompt_cache_fields,
                 prompt_cache_stable_message_count=prompt_cache_stable_message_count,
-                **kw,
-            )
-
-        # Everyone else
-        if self.provider in {
-            "deepseek",
-            "openrouter",
-            "lmstudio",
-            "ollama",
-            "openai_compatible",
-        }:
-            return await self._chat_openai_like_chat_completions(
-                messages,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                max_output_tokens=max_output_tokens,
-                output_format=output_format,
-                json_schema=json_schema,
-                fail_on_unsupported=fail_on_unsupported,
-                tools=tools,
-                tool_choice=tool_choice,
                 tool_request=tool_request,
-                schema_name=schema_name,
-                strict_schema=strict_schema,
-                structured_output_fields=structured_output_fields,
-                **kw,
-            )
-
-        if self.provider == "azure":
-            if selected_adapter.adapter_id == "azure_responses":
-                if tool_request is None:
-                    raise LLMUnsupportedFeatureError(
-                        self.provider,
-                        model,
-                        "direct_chat",
-                        "the pinned Azure Responses adapter currently requires a Tool request",
-                    )
-                return await self._chat_azure_responses(
-                    messages,
-                    model=model,
-                    reasoning_effort=reasoning_effort,
-                    max_output_tokens=max_output_tokens,
-                    tool_request=tool_request,
-                    prompt_cache_fields=prompt_cache_fields,
-                    **kw,
-                )
-            return await self._chat_azure_chat_completions(
-                messages,
-                model=model,
-                max_output_tokens=max_output_tokens,
-                output_format=output_format,
-                json_schema=json_schema,
-                fail_on_unsupported=fail_on_unsupported,
-                tools=tools,
-                tool_choice=tool_choice,
-                tool_request=tool_request,
-                structured_output_fields=structured_output_fields,
-                **kw,
-            )
-
-        if self.provider == "anthropic":
-            return await self._chat_anthropic_messages(
-                messages,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                max_output_tokens=max_output_tokens,
-                thinking_budget=kw.pop("thinking_budget", None),
-                thinking_mode=kw.pop("thinking_mode", None),
-                output_format=output_format,
-                json_schema=json_schema,
-                fail_on_unsupported=fail_on_unsupported,
-                tools=tools,
-                tool_request=tool_request,
-                schema_name=schema_name,
-                structured_output_fields=structured_output_fields,
-                **kw,
-            )
-
-        if self.provider == "google":
-            return await self._chat_gemini_generate_content(
-                messages,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                thinking_mode=kw.get("thinking_mode"),
-                max_output_tokens=max_output_tokens,
-                output_format=output_format,
-                json_schema=json_schema,
-                fail_on_unsupported=fail_on_unsupported,
-                tools=tools,
-                tool_request=tool_request,
-                structured_output_fields=structured_output_fields,
-                **kw,
-            )
-
-        raise NotImplementedError(f"provider {self.provider}")
+                options=kw,
+            ),
+        )
 
     def _postprocess_structured_output(
         self,

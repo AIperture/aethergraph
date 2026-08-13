@@ -468,6 +468,34 @@ async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() 
     assert function_config["allowedFunctionNames"] == ["lookup", "finish"]
 
 
+@pytest.mark.asyncio
+async def test_gemini_profile_thinking_mode_is_projected_once() -> None:
+    client = GenericLLMClient(
+        provider="google",
+        model="gemini-2.5-flash",
+        api_key="google-key",
+        thinking_mode="off",
+    )
+    fake_http = _FakeHttpClient(
+        {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": "done"}]},
+                }
+            ]
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, _usage = await client.chat([{"role": "user", "content": "Hello"}])
+
+    assert text == "done"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
+
+
 def test_structured_output_request_detaches_caller_schema() -> None:
     schema = {"type": "object", "properties": {}}
 

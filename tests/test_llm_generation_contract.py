@@ -308,6 +308,18 @@ async def test_chat_facade_projects_canonical_runtime_response_and_raw_usage(
     assert usage == {"input_tokens": 3, "output_tokens": 1, "provider_extension": 7}
 
 
+@pytest.mark.asyncio
+async def test_registered_descriptor_without_runtime_adapter_fails_closed() -> None:
+    client = GenericLLMClient(
+        provider="dummy",
+        model="dummy-model",
+        endpoint_id="dummy_chat",
+    )
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="no non-streaming implementation"):
+        await client.generate(ModelRequest(messages=(message_from_text("user", "Hello"),)))
+
+
 def test_canonical_estimate_counts_tool_schema_and_output_reservation() -> None:
     client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
     direct = ModelRequest(
