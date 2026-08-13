@@ -35,7 +35,6 @@ from aethergraph.services.planning.node_planner import NodePlanner
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.scope.scope import Scope
-from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.websearch.facade import WebSearchFacade
@@ -374,11 +373,6 @@ class NodeContext:
         if not self.services.triggers:
             raise RuntimeError("NodeContext.services.triggers is not configured")
         return self.services.triggers
-
-    def skills(self) -> SkillRegistry:
-        if not self.services.skills:
-            raise RuntimeError("NodeContext.services.skills is not configured")
-        return self.services.skills
 
     def registry(self) -> RegistryFacade:
         if not self.services.registry:

@@ -14,6 +14,15 @@ from aethergraph.services.host import build_release_compatibility
 _DIGEST = "a" * 64
 
 
+def suite_repository_path(name: str) -> Path:
+    """Resolve a sibling repository from either the main checkout or a worktree."""
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / name
+        if candidate.is_dir():
+            return candidate
+    raise AssertionError(f"Suite repository not found: {name}")
+
+
 def contract_compatibility() -> ReleaseCompatibility:
     return ReleaseCompatibility(
         aethergraph_version=AETHERGRAPH_VERSION,

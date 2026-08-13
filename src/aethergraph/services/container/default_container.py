@@ -91,7 +91,6 @@ from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
-from aethergraph.services.skills.skill_registry import SkillRegistry
 from aethergraph.services.tracing import NoopTracer
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
@@ -224,9 +223,6 @@ class DefaultContainer:
 
     # planner
     planner_service: PlannerService | None = None
-
-    # skills
-    skills_registry: SkillRegistry | None = None
 
     # optional services (not used by default)
     execution: ExecutionService | None = None
@@ -565,8 +561,6 @@ def build_default_container(
         run_manager=run_manager,
     )
 
-    # skills registry
-    skills_registry = SkillRegistry()
     agent_event_registry = register_default_agent_event_types(AgentEventTypeRegistry())
 
     # trigger services
@@ -602,7 +596,6 @@ def build_default_container(
         logger=logger_factory,
         clock=clock,
         channels=channels,
-        skills_registry=skills_registry,
         cont_store=cont_store,
         sched_registry=sched_registry,
         wait_registry=wait_registry,

@@ -22,10 +22,14 @@ from aethergraph.contracts.integration import (
     SemanticEventKind,
 )
 from aethergraph.services.host import seal_host_manifest
-from tests._integration_fixtures import runtime_compatibility, runtime_identity_payload
+from tests._integration_fixtures import (
+    runtime_compatibility,
+    runtime_identity_payload,
+    suite_repository_path,
+)
 
 _FIXTURE = (
-    Path(__file__).parents[2] / "ag-engine" / "tests" / "fixtures" / "authoring" / "plain_react_v1"
+    suite_repository_path("ag-engine") / "tests" / "fixtures" / "authoring" / "plain_react_v1"
 )
 _DIGEST = "a" * 64
 _TOKEN = "host-process-control-token-with-32-characters"

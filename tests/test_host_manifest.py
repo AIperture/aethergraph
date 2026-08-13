@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from aethergraph_engine.compiler import compile_system_project
 import pytest
@@ -23,11 +22,12 @@ from tests._integration_fixtures import (
     contract_compatibility,
     runtime_compatibility,
     runtime_identity_payload,
+    suite_repository_path,
 )
 
 _DIGEST = "a" * 64
 _FIXTURE = (
-    Path(__file__).parents[2] / "ag-engine" / "tests" / "fixtures" / "authoring" / "plain_react_v1"
+    suite_repository_path("ag-engine") / "tests" / "fixtures" / "authoring" / "plain_react_v1"
 )
 
 

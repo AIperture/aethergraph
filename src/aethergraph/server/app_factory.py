@@ -18,21 +18,13 @@ from aethergraph.api.v1.router import router as api_v1_router
 from aethergraph.config.config import AppSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-from aethergraph.core.runtime.runtime_services import (
-    install_services,
-    register_skills_from_path,
-)
+from aethergraph.core.runtime.runtime_services import install_services
 
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec, emit_load_errors
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.integration import IntegrationManager
 from aethergraph.services.triggers.engine import TriggerEngine
-
-builtin_agent_skills_path = (
-    Path(__file__).parent.parent / "plugins" / "agents" / "graph_builder" / "skills"
-)
-
 
 logger = logging.getLogger(__name__)
 
@@ -122,12 +114,6 @@ def create_app(
             await integration_manager.start()
 
         if development_container:
-            logger.info(
-                "Registering skills from %s for builtin agent...",
-                builtin_agent_skills_path,
-            )
-            register_skills_from_path(builtin_agent_skills_path, overwrite=True)
-
             # Developer sidecars may replay mutable source registrations.
             replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (
                 "1",
