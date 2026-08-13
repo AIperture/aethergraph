@@ -216,7 +216,7 @@ def assistant_output_identity(
 
 
 @dataclass(frozen=True)
-class ToolDefinition:
+class ModelToolSpec:
     """Declare one provider-neutral Tool available to an LLM."""
 
     name: str
@@ -235,7 +235,7 @@ class ToolDefinition:
         Examples:
             Define a Tool:
                 ```python
-                tool = ToolDefinition(
+                tool = ModelToolSpec(
                     name="lookup",
                     description="Look up one record.",
                     input_schema={"type": "object", "properties": {}},
@@ -246,7 +246,7 @@ class ToolDefinition:
             Reject a provider-unsafe name:
                 ```python
                 try:
-                    ToolDefinition("workspace.read", "Read.", {"type": "object"})
+                    ModelToolSpec("workspace.read", "Read.", {"type": "object"})
                 except ValueError:
                     pass
                 ```
@@ -334,7 +334,7 @@ class ToolCallOutput:
 class ToolCallRequest:
     """Request native provider Tool selection for one model decision."""
 
-    tools: tuple[ToolDefinition, ...]
+    tools: tuple[ModelToolSpec, ...]
     choice: ToolChoice = "required"
     max_calls: int = 1
     discovery: ToolDiscoveryRequest | None = None
@@ -355,7 +355,7 @@ class ToolCallRequest:
             Require exactly one available Tool selection:
                 ```python
                 request = ToolCallRequest(
-                    tools=(ToolDefinition("finish", "Finish.", {"type": "object"}),),
+                    tools=(ModelToolSpec("finish", "Finish.", {"type": "object"}),),
                     max_calls=1,
                 )
                 assert request.choice == "required"
@@ -364,7 +364,7 @@ class ToolCallRequest:
             Permit an ordered multi-call proposal:
                 ```python
                 request = ToolCallRequest(
-                    tools=(ToolDefinition("read", "Read.", {"type": "object"}),),
+                    tools=(ModelToolSpec("read", "Read.", {"type": "object"}),),
                     max_calls=4,
                     discovery=ToolDiscoveryRequest("native_client"),
                     turn_id="turn-1",
@@ -389,8 +389,8 @@ class ToolCallRequest:
         tools = tuple(self.tools)
         if not tools:
             raise ValueError("Tool-call request must contain at least one Tool")
-        if not all(isinstance(tool, ToolDefinition) for tool in tools):
-            raise TypeError("Tool-call request tools must be ToolDefinition values")
+        if not all(isinstance(tool, ModelToolSpec) for tool in tools):
+            raise TypeError("Tool-call request tools must be ModelToolSpec values")
         names = [tool.name for tool in tools]
         if len(set(names)) != len(names):
             raise ValueError("Tool-call request Tool names must be unique")
@@ -932,7 +932,9 @@ class ToolCallResponse:
 # published compatibility name and is the exact same runtime class.
 AssistantOutputPart = AssistantOutput
 ModelToolCall = ToolCall
-ModelToolSpec = ToolDefinition
+# Compatibility alias for callers that imported the pre-cutover LLM contract.
+# This is intentionally distinct from aethergraph.core.tools.ToolDefinition.
+ToolDefinition = ModelToolSpec
 ModelResponse = ToolCallResponse
 ModelResponseItem = ToolResponseItem
 

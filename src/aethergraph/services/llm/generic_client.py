@@ -921,14 +921,14 @@ class GenericLLMClient(LLMClientProtocol):
                 from aethergraph.services.llm import (
                     LLMToolCallCapabilityError,
                     ToolCallRequest,
-                    ToolDefinition,
+                    ModelToolSpec,
                     ToolDiscoveryRequest,
                 )
                 from aethergraph.services.llm.generic_client import GenericLLMClient
 
                 client = GenericLLMClient("openai", "example-model")
                 request = ToolCallRequest(
-                    tools=(ToolDefinition("finish", "Finish.", {"type": "object"}),),
+                    tools=(ModelToolSpec("finish", "Finish.", {"type": "object"}),),
                     discovery=ToolDiscoveryRequest("engine_projected"),
                     turn_id="turn-1",
                 )

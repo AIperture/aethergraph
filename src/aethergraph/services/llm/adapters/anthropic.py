@@ -18,10 +18,10 @@ from aethergraph.services.llm.tool_calling import (
     AssistantOutput,
     LLMToolCallCapabilityError,
     LLMToolCallResponseError,
+    ModelToolSpec,
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
-    ToolDefinition,
     assistant_output_identity,
 )
 from aethergraph.services.llm.tool_discovery import (
@@ -36,7 +36,7 @@ DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 
 
-def _anthropic_function_tool(tool: ToolDefinition) -> dict[str, Any]:
+def _anthropic_function_tool(tool: ModelToolSpec) -> dict[str, Any]:
     """Encode one shared Tool definition for Anthropic Messages.
 
     Deferred Tools retain their complete schema in the physical request while

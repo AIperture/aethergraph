@@ -18,6 +18,7 @@ from aethergraph.services.llm import (
     ModelResponse,
     ModelStreamCompleted,
     ModelTextDelta,
+    ModelToolSpec,
     ModelUsage,
     ModelUsageUpdate,
     StructuredOutputRequest,
@@ -55,13 +56,18 @@ def _continuation() -> ModelContinuation:
     )
 
 
-def _tool() -> ToolDefinition:
-    return ToolDefinition(
+def _tool() -> ModelToolSpec:
+    return ModelToolSpec(
         name="lookup",
         description="Look up one value.",
         input_schema={"type": "object", "properties": {}},
         exposure="deferred",
     )
+
+
+def test_legacy_llm_tool_definition_is_a_compatibility_alias() -> None:
+    assert ToolDefinition is ModelToolSpec
+    assert _tool().__class__.__name__ == "ModelToolSpec"
 
 
 def test_model_request_supports_direct_completion_without_tools() -> None:

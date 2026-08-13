@@ -17,10 +17,10 @@ from aethergraph.services.llm.provider_transport import (
 from aethergraph.services.llm.tool_calling import (
     AssistantOutput,
     LLMToolCallResponseError,
+    ModelToolSpec,
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
-    ToolDefinition,
     assistant_output_identity,
 )
 from aethergraph.services.llm.tool_discovery import (
@@ -41,7 +41,7 @@ ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 
 
 def _openai_function_tool(
-    tool: ToolDefinition,
+    tool: ModelToolSpec,
     *,
     defer_loading: bool | None = None,
 ) -> dict[str, Any]:

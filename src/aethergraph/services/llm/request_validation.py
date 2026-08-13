@@ -135,7 +135,7 @@ def validate_model_request(
 
             Check an already-selected adapter:
             ```python
-            tool = ToolDefinition(
+            tool = ModelToolSpec(
                 name="lookup",
                 description="Look up a value.",
                 input_schema={"type": "object", "properties": {}},

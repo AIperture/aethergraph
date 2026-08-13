@@ -618,7 +618,7 @@ def resolve_model_request(
 
         Inspect a rejected Tool request:
         ```python
-        tool = ToolDefinition(
+        tool = ModelToolSpec(
             name="lookup",
             description="Look up one value.",
             input_schema={"type": "object", "properties": {}},
