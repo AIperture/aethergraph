@@ -41,7 +41,6 @@ from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.stores.fs_store import (
     FSContinuationStore,  # AsyncContinuationStore
 )
-from aethergraph.services.eventbus.inmem import InMemoryEventBus
 from aethergraph.services.execution.local_python import LocalPythonExecutionService
 
 # ---- Global Indices ----
@@ -83,7 +82,6 @@ from aethergraph.services.planning.planner_service import PlannerService
 
 # ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
-from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
 from aethergraph.services.registry.registration_service import RegistrationService
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
@@ -145,11 +143,9 @@ SERVICE_KEYS = [
     "memory_factory",
     # optional
     "llm",
-    "event_bus",
     "prompts",
     "authn",
     "authz",
-    "redactor",
     "metering",
     "observability",
     "tracer",
@@ -226,10 +222,8 @@ class DefaultContainer:
 
     # optional services (not used by default)
     execution: ExecutionService | None = None
-    event_bus: InMemoryEventBus | None = None
     authn: AuthnService | None = None
     authz: AllowAllAuthz | None = None
-    redactor: RegexRedactor | None = None
 
     metering: MeteringService | None = None
     rate_limiter: SimpleRateLimiter | None = None
@@ -632,10 +626,8 @@ def build_default_container(
         run_cancellation_registry=run_cancellation_registry,
         session_store=session_store,
         secrets=secrets,
-        event_bus=None,
         authn=authn,
         authz=authz,
-        redactor=None,
         metering=metering,
         rate_limiter=rate_limiter,
         tracer=NoopTracer(),

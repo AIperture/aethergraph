@@ -1,40 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 import uuid
 
 from aethergraph.core.runtime.runtime_metering import current_meter_context
+from aethergraph.services.observability.redaction import sanitize_content, sanitize_text
 
 
 def _utc_ts() -> float:
-    return datetime.now(timezone.utc).timestamp()
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(v) for v in value]
-    if hasattr(value, "model_dump"):
-        try:
-            return _json_safe(value.model_dump())
-        except Exception:
-            return repr(value)
-    if hasattr(value, "dict"):
-        try:
-            return _json_safe(value.dict())
-        except Exception:
-            return repr(value)
-    if hasattr(value, "__dict__"):
-        try:
-            return _json_safe(vars(value))
-        except Exception:
-            return repr(value)
-    return repr(value)
+    return datetime.now(UTC).timestamp()
 
 
 @dataclass(frozen=True)
@@ -163,9 +139,9 @@ async def emit_agent_event(
         },
         "scope": {k: v for k, v in scope.items() if v is not None},
         "status": status,
-        "summary": summary,
-        "tags": list(tags or []),
-        "payload": _json_safe(payload or {}),
+        "summary": sanitize_text(summary),
+        "tags": sanitize_content(list(tags or [])),
+        "payload": sanitize_content(payload or {}),
         "payload_schema": {
             "name": payload_schema_name or event_type,
             "version": payload_schema_version,

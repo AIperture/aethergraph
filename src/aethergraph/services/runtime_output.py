@@ -14,6 +14,7 @@ from aethergraph.contracts.services.runtime_output import (
     RuntimeOutputFrame,
     RuntimeOutputSink,
 )
+from aethergraph.services.observability.redaction import sanitize_text
 
 _capture_state: ContextVar[_CaptureState | None] = ContextVar(
     "aethergraph_runtime_output_capture",
@@ -150,7 +151,7 @@ class EventLogRuntimeOutputSink:
                 "schema_version": "ag.runtime-console-output/v1",
                 "execution_id": frame.execution_id,
                 "stream": frame.stream,
-                "text": frame.text,
+                "text": sanitize_text(frame.text),
                 "sequence": frame.sequence,
                 "partial": frame.partial,
                 "truncated": frame.truncated,

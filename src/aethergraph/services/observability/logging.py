@@ -8,7 +8,7 @@ from typing import Any
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 
 from .models import ObservationRecord, ObservationScope
-from .prompt_store import sanitize_content
+from .redaction import sanitize_content
 
 _STANDARD_LOG_RECORD_ATTRS = {
     "args",

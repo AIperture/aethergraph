@@ -2,16 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-import json
-from pathlib import Path
-import re
-from typing import Any
 import uuid
 
 from .models import CaptureMode, LLMObservationRecord
 from .policy import ObservationPolicy
+from .redaction import canonical_json, sanitize_content
 
-_DATA_URL_RE = re.compile(r"data:([^;,]+)(?:;[^,]*)?,[^\s\"']+")
 _SEMANTIC_KINDS = {
     "frozen_header",
     "ledger_entry",
@@ -21,41 +17,6 @@ _SEMANTIC_KINDS = {
     "repair_instruction",
     "direct_message",
 }
-
-
-def sanitize_content(value: Any) -> Any:
-    if value is None or isinstance(value, (int, float, bool)):
-        return value
-    if isinstance(value, str):
-        return _DATA_URL_RE.sub(lambda match: f"[redacted data URL: {match.group(1)}]", value)
-    if isinstance(value, bytes):
-        return {
-            "binary_bytes": len(value),
-            "sha256": sha256(value).hexdigest(),
-        }
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): sanitize_content(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [sanitize_content(item) for item in value]
-    if isinstance(value, set):
-        normalized = [sanitize_content(item) for item in value]
-        return sorted(normalized, key=canonical_json)
-    if hasattr(value, "model_dump"):
-        return sanitize_content(value.model_dump())
-    if hasattr(value, "dict"):
-        return sanitize_content(value.dict())
-    return repr(value)
-
-
-def canonical_json(value: Any) -> str:
-    return json.dumps(
-        sanitize_content(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
 
 
 def content_hash(*, content_kind: str, body: str) -> str:

@@ -18,7 +18,8 @@ from .models import (
     utc_now_iso,
 )
 from .policy import ObservationPolicy
-from .prompt_store import PreparedPromptCapture, PromptStore, canonical_json
+from .prompt_store import PreparedPromptCapture, PromptStore
+from .redaction import canonical_json, sanitize_text
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -1146,7 +1147,7 @@ class SQLiteObservationStore:
                 record.caused_by_observation_id,
                 record.source_event_id,
                 record.llm_call_id,
-                self._clip(record.summary, self.policy.max_summary_chars),
+                self._clip(sanitize_text(record.summary), self.policy.max_summary_chars),
                 attributes_json,
                 record.payload_fragment_id,
                 record.retention_class,
@@ -1231,7 +1232,7 @@ class SQLiteObservationStore:
 
     def _llm_attempt_aggregate_projection(self) -> str:
         if not self._has_llm_call_attempts:
-            return "0 AS attempt_count, 0 AS retry_count, " "0 AS total_retry_wait_ms"
+            return "0 AS attempt_count, 0 AS retry_count, 0 AS total_retry_wait_ms"
         return """
             (SELECT COUNT(*) FROM llm_call_attempts a
              WHERE a.llm_call_id = c.llm_call_id) AS attempt_count,

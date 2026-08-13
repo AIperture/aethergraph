@@ -31,7 +31,7 @@ from aethergraph.services.observability import (
     ObservationPolicy,
     SQLiteObservationStore,
 )
-from aethergraph.services.observability.prompt_store import canonical_json
+from aethergraph.services.observability.redaction import canonical_json
 
 
 def _record(
