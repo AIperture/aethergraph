@@ -199,6 +199,7 @@ class EmbeddingService:
                 metering=getattr(template, "metering", None),
                 operation_quota_cfg=getattr(template, "operation_quota_cfg", None),
                 default_dimensions=getattr(template, "default_dimensions", None),
+                profile_name=name,
             )
             self._clients[name] = client
             return client

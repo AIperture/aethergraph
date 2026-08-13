@@ -295,9 +295,10 @@ def test_embedding_factory_preserves_canonical_dimension_default() -> None:
         EmbeddingProfile(provider="google", model="gemini-embedding-001")
     ).model_copy(update={"defaults": EmbeddingDefaults(dimensions=256)})
 
-    client = embed_client_from_profile(canonical, _Secrets())
+    client = embed_client_from_profile(canonical, _Secrets(), profile_name="compact")
 
     assert client.default_dimensions == 256
+    assert client.profile_name == "compact"
 
 
 def test_named_embedding_profile_inherits_dimension_default() -> None:

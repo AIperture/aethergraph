@@ -10,7 +10,7 @@ import httpx
 from aethergraph.config.config import ImageGenerationUsageQuotaSettings
 from aethergraph.contracts.services.llm import ImageGenerationClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
-from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.services.llm.adapters import ImageAdapterInvocation
 from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.http_lifecycle import (
@@ -19,6 +19,7 @@ from aethergraph.services.llm.http_lifecycle import (
 )
 from aethergraph.services.llm.image_runtime import _execute_image_generation
 from aethergraph.services.llm.operation_quota import image_generation_quota_ledger
+from aethergraph.services.llm.operation_runtime import model_operation_dimensions
 from aethergraph.services.llm.provider_transport import (
     ProviderRateGate,
     ProviderRetryExecutor,
@@ -168,20 +169,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
             self._retired_http_clients.append(retired)
 
     def _current_dimensions(self) -> dict[str, Any]:
-        context = current_meter_context.get()
-        return {
-            "user_id": context.get("user_id"),
-            "org_id": context.get("org_id"),
-            "run_id": context.get("run_id"),
-            "graph_id": context.get("graph_id"),
-            "session_id": context.get("session_id"),
-            "app_id": context.get("app_id"),
-            "agent_id": context.get("agent_id"),
-            "node_id": context.get("node_id"),
-            "trace_id": context.get("trace_id"),
-            "span_id": context.get("span_id"),
-            "profile_name": self.profile_name,
-        }
+        return model_operation_dimensions(profile_name=self.profile_name)
 
     async def _account_usage(
         self,

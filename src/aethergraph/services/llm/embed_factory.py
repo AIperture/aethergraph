@@ -85,6 +85,7 @@ def embed_client_from_profile(
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
     operation_quota_cfg: EmbeddingUsageQuotaSettings | None = None,
+    profile_name: str | None = None,
 ) -> GenericEmbeddingClient:
     """Build one embedding client from a canonical embedding profile.
 
@@ -112,6 +113,7 @@ def embed_client_from_profile(
         rate_gate: Optional shared provider quota gate.
         operation_quota_cfg: Optional infrastructure-owned per-run embedding
             quota policy.
+        profile_name: Optional configured profile identity for observations.
 
     Returns:
         GenericEmbeddingClient: Configured provider-neutral embedding client.
@@ -141,6 +143,7 @@ def embed_client_from_profile(
         operation_quota_cfg=operation_quota_cfg,
         endpoint_id=p.connection.endpoint_id,
         default_dimensions=p.defaults.dimensions,
+        profile_name=profile_name,
     )
 
 
@@ -205,6 +208,7 @@ def build_embedding_clients(
             metering=metering,
             rate_gate=shared_rate_gate,
             operation_quota_cfg=operation_quota_cfg,
+            profile_name="default",
         )
     }
 
@@ -222,6 +226,7 @@ def build_embedding_clients(
             metering=metering,
             rate_gate=shared_rate_gate,
             operation_quota_cfg=operation_quota_cfg,
+            profile_name=name,
         )
 
     return clients
