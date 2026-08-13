@@ -7,7 +7,7 @@
       "provider_id": "openai",
       "operation": "chat",
       "endpoint_ids": ["openai_responses", "openai_chat_completions"],
-      "model_pattern": "(?:gpt-5-mini(?:-2025-08-07)?|gpt-5\\.[456](?:-[a-z0-9.-]+)?)",
+      "model_pattern": "(?:gpt-5(?:-2025-08-07)?|gpt-5-(?:mini|nano)(?:-2025-08-07)?|gpt-5\\.[456](?:-[a-z0-9.-]+)?)",
       "chat_tools": {
         "native_tool_calling": "supported",
         "tool_result_continuation": "supported",
@@ -15,6 +15,7 @@
       },
       "sources": [
         "https://developers.openai.com/api/docs/models/gpt-5-mini",
+        "https://developers.openai.com/api/docs/models/gpt-5-nano",
         "https://developers.openai.com/api/docs/guides/function-calling"
       ],
       "verified_at": "2026-08-13",

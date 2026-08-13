@@ -114,6 +114,16 @@ def test_catalog_resolves_chat_tool_facts_conservatively() -> None:
     assert openai.chat_tools.native_tool_calling == "supported"
     assert openai.chat_tools.tool_result_continuation == "supported"
     assert openai.chat_tools.parallel_tool_calls == "supported"
+    assert (
+        resolve_model_catalog_capability_entry(
+            "openai",
+            "gpt-5-nano",
+            "chat",
+            "openai_responses",
+            capability="chat_tools",
+        )
+        is not None
+    )
     assert deepseek is not None and deepseek.chat_tools is not None
     assert deepseek.chat_tools.native_tool_calling == "supported"
     assert deepseek.chat_tools.parallel_tool_calls == "unknown"
