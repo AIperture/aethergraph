@@ -2011,7 +2011,7 @@ class GenericLLMClient(
             generation_params["thinking_budget"] = request.generation.reasoning_budget
         if request.generation.reasoning_summary is not None:
             generation_params["reasoning_summary"] = request.generation.reasoning_summary
-        value, usage = await self._invoke_chat_runtime(
+        return await self._invoke_generation_runtime(
             messages,
             call_name=request.call_name,
             reasoning_effort=request.generation.reasoning_effort,
@@ -2029,30 +2029,6 @@ class GenericLLMClient(
             tool_request=tool_request,
             prompt_cache=request.prompt_cache,
             **generation_params,
-        )
-        if isinstance(value, ToolCallResponse):
-            return value
-        assistant_output = AssistantOutput(
-            output_id=assistant_output_identity(
-                provider=self.provider,
-                item_index=0,
-                content_index=0,
-                text=value,
-            ),
-            text=value,
-        )
-        return ModelResponse(
-            items=(assistant_output,),
-            finish_reason="stop",
-            provider_metadata={
-                "provider": self.provider,
-                "model": self.model,
-                "endpoint_id": self.endpoint_id or "legacy_compat",
-                "effective_endpoint_id": self._resolve_chat_adapter(
-                    has_tool_request=tool_request is not None,
-                ).adapter_id,
-            },
-            usage=ModelUsage.from_provider_usage(usage),
         )
 
     # ================================================================
@@ -2075,26 +2051,31 @@ class GenericLLMClient(
         fail_on_unsupported: bool | None | object = _UNSET,
         **kw: Any,
     ) -> tuple[str | ToolCallResponse, dict[str, int]]:
-        """Send a provider-neutral chat request and return normalized output and usage.
+        """Project one legacy Chat call over the canonical generation lifecycle.
+
+        Intro:
+            Preserves dictionary messages, raw usage, and the conditional
+            text-versus-Tool response return while the runtime itself returns only
+            canonical `ModelResponse` values.
 
         Examples:
             Send a basic text request:
-            ```python
-            response, usage = await context.llm().chat(
-                [{"role": "user", "content": "Hello, assistant!"}]
-            )
-            ```
+                ```python
+                response, usage = await context.llm().chat(
+                    [{"role": "user", "content": "Hello, assistant!"}]
+                )
+                ```
 
             Request a cacheable stable prefix:
-            ```python
-            response, usage = await context.llm().chat(
-                messages,
-                prompt_cache=PromptCacheRequest(
-                    stable_message_indexes=(0, 4),
-                    prefix_family="research-agent.v2",
-                ),
-            )
-            ```
+                ```python
+                response, usage = await context.llm().chat(
+                    messages,
+                    prompt_cache=PromptCacheRequest(
+                        stable_message_indexes=(0, 4),
+                        prefix_family="research-agent.v2",
+                    ),
+                )
+                ```
 
         Args:
             messages: Conversation messages with role and content fields.
@@ -2112,13 +2093,14 @@ class GenericLLMClient(
             **kw: Additional provider-specific request arguments.
 
         Returns:
-            Normalized text or tool-call response paired with provider usage statistics.
+            tuple[str | ToolCallResponse, dict[str, int]]: Normalized assistant
+                text or canonical Tool response paired with exact raw provider usage.
 
         Notes:
             Deprecated structured-output parameters remain operational through `0.1.x`,
             emit `DeprecationWarning`, and cannot be mixed with `structured_output`.
         """
-        return await self._invoke_chat_runtime(
+        response = await self._invoke_generation_runtime(
             messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
@@ -2133,8 +2115,12 @@ class GenericLLMClient(
             fail_on_unsupported=fail_on_unsupported,
             **kw,
         )
+        raw_usage = dict(response.usage.provider_usage_raw)
+        if tool_request is not None or response.calls or response.discovery_events:
+            return response, raw_usage
+        return response.text, raw_usage
 
-    async def _invoke_chat_runtime(
+    async def _invoke_generation_runtime(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -2150,8 +2136,8 @@ class GenericLLMClient(
         validate_json: bool | object = _UNSET,
         fail_on_unsupported: bool | None | object = _UNSET,
         **kw: Any,
-    ) -> tuple[str | ToolCallResponse, dict[str, int]]:
-        """Execute the shared non-streaming provider lifecycle.
+    ) -> ModelResponse:
+        """Execute the shared non-streaming canonical generation lifecycle.
 
         Intro:
             Normalizes policy, validates provider-neutral contracts, prepares
@@ -2160,12 +2146,12 @@ class GenericLLMClient(
         Examples:
             Execute a projected text request:
                 ```python
-                text, usage = await client._invoke_chat_runtime(messages)
+                response = await client._invoke_generation_runtime(messages)
                 ```
 
             Continue a native Tool turn:
                 ```python
-                response, usage = await client._invoke_chat_runtime(
+                response = await client._invoke_generation_runtime(
                     messages,
                     tool_request=continued_request,
                 )
@@ -2187,8 +2173,8 @@ class GenericLLMClient(
             **kw: Additional bounded generation and observation options.
 
         Returns:
-            tuple[str | ToolCallResponse, dict[str, int]]: Normalized provider
-                response and canonical token usage.
+            ModelResponse: Ordered normalized response with typed usage and exact
+                effective adapter metadata.
 
         Notes:
             Transport checkpoints are valid for ordinary Tool continuation and
@@ -2581,9 +2567,8 @@ class GenericLLMClient(
 
             # Canonical parsing/validation happens only after response evidence
             # and provider usage have been retained and accounted.
-            value: str | ToolCallResponse
             if isinstance(provider_value, ToolCallResponse):
-                value = provider_value
+                response = provider_value
             else:
                 value = self._postprocess_structured_output(
                     text=observation_record.raw_text,
@@ -2591,6 +2576,27 @@ class GenericLLMClient(
                     json_schema=canonical_json_schema,
                     strict_schema=canonical_strict_validation,
                     validate_json=validate_json,
+                )
+                response = ModelResponse(
+                    items=(
+                        AssistantOutput(
+                            output_id=assistant_output_identity(
+                                provider=self.provider,
+                                item_index=0,
+                                content_index=0,
+                                text=value,
+                            ),
+                            text=value,
+                        ),
+                    ),
+                    finish_reason="stop",
+                    provider_metadata={
+                        "provider": self.provider,
+                        "model": model,
+                        "endpoint_id": self.endpoint_id or "legacy_compat",
+                        "effective_endpoint_id": effective_endpoint_id,
+                    },
+                    usage=ModelUsage.from_provider_usage(usage),
                 )
             if prepared_structured_output is not None:
                 if canonical_validation_owner == "caller":
@@ -2615,7 +2621,7 @@ class GenericLLMClient(
                     "latency_ms": observation_record.latency_ms,
                 },
             )
-            return value, usage
+            return response
         except Exception as exc:
             if isinstance(exc, LLMProviderRequestError):
                 observation_record.attempts = exc.attempts

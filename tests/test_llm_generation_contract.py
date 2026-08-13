@@ -247,7 +247,7 @@ async def test_generate_rejects_invalid_whole_request_before_runtime(
     async def reject_runtime(*args, **kwargs):
         raise AssertionError("invalid request reached provider runtime")
 
-    monkeypatch.setattr(client, "_invoke_chat_runtime", reject_runtime)
+    monkeypatch.setattr(client, "_invoke_generation_runtime", reject_runtime)
 
     with pytest.raises(LLMRequestCompatibilityError) as exc_info:
         await client.generate(request)
@@ -271,9 +271,9 @@ async def test_canonical_request_versions_fingerprint_without_rotating_legacy_di
 
     async def capture_runtime(messages, **kwargs):
         captured.update(kwargs)
-        return "done", {}
+        return ModelResponse(items=(AssistantOutput("output_1", "done"),))
 
-    monkeypatch.setattr(client, "_invoke_chat_runtime", capture_runtime)
+    monkeypatch.setattr(client, "_invoke_generation_runtime", capture_runtime)
     await client.generate(canonical_request)
     projected = captured["tool_request"]
 
@@ -283,6 +283,29 @@ async def test_canonical_request_versions_fingerprint_without_rotating_legacy_di
     assert projected.fingerprint_version == "model_request/v1"
     assert captured["call_name"] == "engine.select_action"
     assert tool_call_request_fingerprint(projected) != tool_call_request_fingerprint(legacy)
+
+
+@pytest.mark.asyncio
+async def test_chat_facade_projects_canonical_runtime_response_and_raw_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test", api_key="test")
+    response = ModelResponse(
+        items=(AssistantOutput("output_1", "done"),),
+        usage=ModelUsage.from_provider_usage(
+            {"input_tokens": 3, "output_tokens": 1, "provider_extension": 7}
+        ),
+    )
+
+    async def typed_runtime(messages, **kwargs):
+        return response
+
+    monkeypatch.setattr(client, "_invoke_generation_runtime", typed_runtime)
+
+    text, usage = await client.chat([{"role": "user", "content": "Hello"}])
+
+    assert text == "done"
+    assert usage == {"input_tokens": 3, "output_tokens": 1, "provider_extension": 7}
 
 
 def test_canonical_estimate_counts_tool_schema_and_output_reservation() -> None:
