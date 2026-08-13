@@ -519,6 +519,72 @@ class ModelOperationRunQuotaExceededError(ModelOperationRunQuotaError):
     """Report actual non-Chat provider usage that crossed a quota."""
 
 
+class ModelOperationRunQuotaUnverifiableError(LLMError):
+    """Report configured quotas that a provider usage receipt cannot verify.
+
+    Intro:
+        Fails closed after a completed provider response when one or more
+        configured token metrics are absent, while retaining the typed usage
+        receipt and exact non-token counters already committed for the run.
+
+    Examples:
+        Inspect one unavailable embedding-token quota:
+            ```python
+            error = ModelOperationRunQuotaUnverifiableError(
+                operation="embedding",
+                run_id="run-1",
+                quotas=("input_tokens",),
+                usage={"availability": "unavailable"},
+            )
+            assert error.quotas == ("input_tokens",)
+            ```
+
+        Inspect a partial image receipt:
+            ```python
+            error = ModelOperationRunQuotaUnverifiableError(
+                operation="image_generation",
+                run_id="run-2",
+                quotas=("output_tokens", "total_tokens"),
+                usage={"availability": "partial", "input_tokens": 4},
+            )
+            assert error.operation == "image_generation"
+            ```
+
+    Args:
+        self: Newly allocated typed quota-verification error.
+        operation: Stable model operation identity.
+        run_id: Runtime run whose configured quota could not be verified.
+        quotas: Configured metric names missing from the provider receipt.
+        usage: Optional detached typed provider usage receipt.
+
+    Returns:
+        None: Initializes the exception and stable inspection fields.
+
+    Notes:
+        This error is raised only for explicitly configured metrics. Unbounded
+        operations retain their existing unavailable-usage behavior.
+    """
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        run_id: str,
+        quotas: tuple[str, ...],
+        usage: dict[str, Any] | None = None,
+    ) -> None:
+        normalized_quotas = tuple(str(quota) for quota in quotas)
+        super().__init__(
+            f"Model operation '{operation}' infrastructure quotas "
+            f"{normalized_quotas!r} could not be verified from provider usage "
+            f"(run_id='{run_id}')."
+        )
+        self.operation = operation
+        self.run_id = run_id
+        self.quotas = normalized_quotas
+        self.usage = copy.deepcopy(usage) if usage is not None else None
+
+
 UsageAvailability = Literal["complete", "partial", "unavailable"]
 
 

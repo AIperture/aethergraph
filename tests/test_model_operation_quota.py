@@ -16,6 +16,7 @@ from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.generic_image_client import GenericImageGenerationClient
 from aethergraph.services.llm.types import (
     ModelOperationRunQuotaExceededError,
+    ModelOperationRunQuotaUnverifiableError,
     ModelOperationRunQuotaWouldExceedError,
 )
 
@@ -149,6 +150,46 @@ async def test_embedding_actual_tokens_are_metered_before_typed_quota_error() ->
     assert exc_info.value.usage["input_tokens"] == 3
     assert len(meter.records) == 1
     assert meter.records[0]["tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_unavailable_embedding_tokens_fail_closed_after_metering() -> None:
+    class _Http:
+        async def post(self, url, *, headers, json):
+            return _response({"data": [{"embedding": [0.1]}]})
+
+    class _Meter:
+        def __init__(self) -> None:
+            self.records: list[dict[str, Any]] = []
+
+        async def record_embedding(self, **record: Any) -> None:
+            self.records.append(record)
+
+    meter = _Meter()
+    client = GenericEmbeddingClient(
+        provider="openai",
+        model="embed-test",
+        api_key="test",
+        metering=meter,  # type: ignore[arg-type]
+        operation_quota_cfg=EmbeddingUsageQuotaSettings(max_input_tokens_per_run=10),
+    )
+    client._client = _Http()  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    context: dict[str, Any] = {"run_id": "run-embedding-unavailable"}
+    token = current_meter_context.set(context)
+    try:
+        with pytest.raises(ModelOperationRunQuotaUnverifiableError) as exc_info:
+            await client.embed_result(["hello"])
+    finally:
+        current_meter_context.reset(token)
+
+    assert exc_info.value.quotas == ("input_tokens",)
+    assert exc_info.value.usage is not None
+    assert exc_info.value.usage["availability"] == "unavailable"
+    assert meter.records[0]["usage_availability"] == "unavailable"
+    state = context["_model_operation_usage_quota_state"]["embedding"]
+    assert state["consumed"]["calls"] == 1
+    assert state["consumed"]["texts"] == 1
 
 
 @pytest.mark.asyncio

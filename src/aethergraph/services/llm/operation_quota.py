@@ -10,6 +10,7 @@ from typing import Any
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.services.llm.types import (
     ModelOperationRunQuotaExceededError,
+    ModelOperationRunQuotaUnverifiableError,
     ModelOperationRunQuotaWouldExceedError,
 )
 
@@ -149,7 +150,7 @@ class OperationQuotaLedger:
         actual: Mapping[str, int | None],
         *,
         usage: dict[str, Any] | None = None,
-    ) -> ModelOperationRunQuotaExceededError | None:
+    ) -> ModelOperationRunQuotaExceededError | ModelOperationRunQuotaUnverifiableError | None:
         if reservation is None:
             return None
         if reservation.operation != self.operation:
@@ -164,6 +165,8 @@ class OperationQuotaLedger:
             for metric, amount in actual_usage.items():
                 consumed[metric] = int(consumed.get(metric, 0)) + amount
             for metric, limit in self._limits.items():
+                if metric not in actual_usage:
+                    continue
                 amount = actual_usage.get(metric, 0)
                 projected = int(consumed.get(metric, 0)) + int(reserved.get(metric, 0))
                 if projected > limit:
@@ -178,6 +181,14 @@ class OperationQuotaLedger:
                         phase="was exceeded by actual provider usage",
                         usage=usage,
                     )
+            missing_metrics = tuple(metric for metric in self._limits if metric not in actual_usage)
+            if missing_metrics:
+                return ModelOperationRunQuotaUnverifiableError(
+                    operation=self.operation,
+                    run_id=reservation.run_id,
+                    quotas=missing_metrics,
+                    usage=usage,
+                )
         return None
 
 
