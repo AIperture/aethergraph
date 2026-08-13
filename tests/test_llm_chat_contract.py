@@ -1402,8 +1402,9 @@ async def test_openai_image_generation_survives_responses_chat_extraction() -> N
             "usage": {"input_tokens": 4, "output_tokens": 6},
         }
     )
-    client._client = fake_http  # type: ignore[assignment]
-    client._bound_loop = asyncio.get_running_loop()
+    image_client = client._image_client_for_compatibility()
+    image_client._client = fake_http  # type: ignore[attr-defined,assignment]
+    image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
     result = await client.generate_image(
         "A glass compass",
@@ -1433,8 +1434,9 @@ async def test_azure_image_generation_survives_chat_adapter_extraction() -> None
             "usage": {"input_tokens": 4, "output_tokens": 6},
         }
     )
-    client._client = fake_http  # type: ignore[assignment]
-    client._bound_loop = asyncio.get_running_loop()
+    image_client = client._image_client_for_compatibility()
+    image_client._client = fake_http  # type: ignore[attr-defined,assignment]
+    image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
     result = await client.generate_image(
         "A glass compass",
@@ -1478,8 +1480,9 @@ async def test_gemini_image_generation_survives_chat_adapter_extraction() -> Non
             "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 6},
         }
     )
-    client._client = fake_http  # type: ignore[assignment]
-    client._bound_loop = asyncio.get_running_loop()
+    image_client = client._image_client_for_compatibility()
+    image_client._client = fake_http  # type: ignore[attr-defined,assignment]
+    image_client._bound_loop = asyncio.get_running_loop()  # type: ignore[attr-defined]
 
     result = await client.generate_image("A glass compass")
 

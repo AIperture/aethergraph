@@ -6,9 +6,12 @@ import httpx
 import pytest
 
 from aethergraph.config.llm import ImageGenerationProfileSettings, ImageGenerationSettings
+from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.generic_image_client import GenericImageGenerationClient
 from aethergraph.services.llm.image_factory import build_image_generation_clients
 from aethergraph.services.llm.image_service import ImageGenerationService
+from aethergraph.services.llm.service import LLMService
+from aethergraph.services.llm.types import ImageGenerationResult, LLMUnsupportedFeatureError
 
 
 class _Secrets:
@@ -154,3 +157,55 @@ async def test_image_service_selects_exact_profile_and_closes_alias_once() -> No
     assert result["n"] == 2
     assert client.prompts == ["A compass"]
     assert client.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_facade_uses_explicit_image_assignment_without_provider_inference() -> None:
+    class _ImageClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+            self.close_count = 0
+
+        async def generate_image(self, prompt: str, **kwargs) -> ImageGenerationResult:
+            self.calls.append((prompt, kwargs))
+            return ImageGenerationResult(images=[], usage={})
+
+        async def aclose(self) -> None:
+            self.close_count += 1
+
+    chat_client = GenericLLMClient(provider="anthropic", model="claude-test", api_key="test")
+    llm_service = LLMService({"default": chat_client})
+    image_client = _ImageClient()
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="disabled or no default"):
+        await chat_client.generate_image("Before assignment")
+
+    llm_service.bind_image_service(
+        ImageGenerationService({"default": image_client})  # type: ignore[dict-item]
+    )
+    result = await chat_client.generate_image(
+        "After assignment",
+        model="image-model",
+        n=2,
+    )
+    await llm_service.aclose()
+
+    assert result.images == []
+    assert image_client.calls == [
+        (
+            "After assignment",
+            {
+                "model": "image-model",
+                "n": 2,
+                "size": None,
+                "quality": None,
+                "style": None,
+                "output_format": None,
+                "response_format": None,
+                "background": None,
+                "input_images": None,
+                "azure_api_version": None,
+            },
+        )
+    ]
+    assert image_client.close_count == 1

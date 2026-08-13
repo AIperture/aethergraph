@@ -1,4 +1,5 @@
 import logging
+from typing import TYPE_CHECKING
 
 from pydantic import SecretStr
 
@@ -12,6 +13,9 @@ from .providers import Provider
 from .structured_output import StructuredOutputPolicy
 
 logger = logging.getLogger("aethergraph.services.llm")
+
+if TYPE_CHECKING:
+    from .image_service import ImageGenerationService
 
 
 class LLMService:
@@ -58,6 +62,55 @@ class LLMService:
         self._clients = clients
         self._secrets = secrets
         self._profiles = dict(profiles or {})
+        self._image_service: ImageGenerationService | None = None
+        self._retired_image_services: list[ImageGenerationService] = []
+        for client in self._clients.values():
+            mark_managed = getattr(client, "_require_managed_image_assignment", None)
+            if mark_managed is not None:
+                mark_managed()
+
+    def bind_image_service(self, service: "ImageGenerationService") -> None:
+        """Assign one explicit default image profile to every Chat facade.
+
+        Intro:
+            Container composition connects the published `generate_image()`
+            method to the independently configured image operation service.
+
+        Examples:
+            Bind during container startup:
+                ```python
+                llm_service.bind_image_service(image_service)
+                ```
+
+            Rebind after replacing image settings:
+                ```python
+                llm_service.bind_image_service(reloaded_image_service)
+                ```
+
+        Args:
+            self: Container-owned Chat service.
+            service: Exact configured image-generation service.
+
+        Returns:
+            None: Binds the service's default client to current and future Chat
+                clients.
+
+        Notes:
+            The assignment is explicit and does not attempt same-name or provider
+            fallback. Named image profiles remain available through
+            `NodeContext.image_model(name)`.
+        """
+
+        image_client = service.get("default")
+        if self._image_service is not None and self._image_service is not service:
+            self._retired_image_services.append(self._image_service)
+        self._image_service = service
+        for client in self._clients.values():
+            client.bind_image_client(image_client)
+
+    def _bind_image_client(self, client: GenericLLMClient) -> None:
+        if self._image_service is not None:
+            client.bind_image_client(self._image_service.get("default"))
 
     def get(self, name: str = "default") -> GenericLLMClient:
         return self._clients[name]
@@ -68,9 +121,54 @@ class LLMService:
     def profile(self, name: str = "default") -> LLMProfile | None:
         return self._profiles.get(name)
 
-    async def aclose(self):
-        for c in self._clients.values():
-            await c.aclose()
+    async def aclose(self) -> None:
+        """Close distinct Chat clients and bound image services.
+
+        Intro:
+            Coordinates shutdown across current and retired operation services
+            without asking Chat clients to close image transports they do not own.
+
+        Examples:
+            Close the service at host shutdown:
+                ```python
+                await service.aclose()
+                ```
+
+            Close safely after image-service reload:
+                ```python
+                service.bind_image_service(reloaded_images)
+                await service.aclose()
+                ```
+
+        Args:
+            self: Container-owned Chat service and compatibility coordinator.
+
+        Returns:
+            None: Closes each distinct reachable client or service once.
+
+        Notes:
+            Retired image services remain reachable until shutdown so an in-flight
+            compatibility call is not forcibly interrupted during rebinding.
+        """
+
+        seen_clients: set[int] = set()
+        for client in self._clients.values():
+            if id(client) in seen_clients:
+                continue
+            seen_clients.add(id(client))
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                await close()
+
+        image_services = [self._image_service, *self._retired_image_services]
+        self._image_service = None
+        self._retired_image_services = []
+        seen_services: set[int] = set()
+        for image_service in image_services:
+            if image_service is None or id(image_service) in seen_services:
+                continue
+            seen_services.add(id(image_service))
+            await image_service.aclose()
 
     # --- Runtime profile helpers ---------------------------------
     def configure_profile(
@@ -236,6 +334,8 @@ class LLMService:
             )
             self._clients[profile] = client
             self._profiles[profile] = updated_profile
+            client._require_managed_image_assignment()
+            self._bind_image_client(client)
             return client
 
         c = self._clients[profile]

@@ -457,6 +457,8 @@ def build_default_container(
         rate_gate=provider_rate_gate,
     )
     image_service = ImageGenerationService(image_clients) if image_clients else None
+    if llm_service is not None and image_service is not None:
+        llm_service.bind_image_service(image_service)
 
     mcp = MCPService()  # empty MCP service; users can register clients as needed
 

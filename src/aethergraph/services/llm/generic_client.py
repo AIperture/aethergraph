@@ -17,18 +17,18 @@ import warnings
 import httpx
 
 from aethergraph.config.config import LLMUsageQuotaSettings
-from aethergraph.contracts.services.llm import LLMClientProtocol
+from aethergraph.contracts.services.llm import ImageGenerationClientProtocol, LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.core.schema_validation import first_schema_issue
 from aethergraph.services.llm.adapters import (
     ChatAdapterInvocation,
     ChatStreamInvocation,
-    ImageAdapterInvocation,
     invoke_chat_adapter,
     invoke_chat_stream_adapter,
 )
 from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
+from aethergraph.services.llm.compat.image_generation import image_client_from_legacy_chat
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.credentials import resolve_provider_credential
@@ -36,7 +36,6 @@ from aethergraph.services.llm.http_lifecycle import (
     _close_http_clients,
     _ensure_loop_http_client,
 )
-from aethergraph.services.llm.image_runtime import _execute_image_generation
 from aethergraph.services.llm.observability import (
     CaptureMode,
     LLMObservationRecord,
@@ -95,7 +94,6 @@ from aethergraph.services.llm.types import (
     ChatOutputFormat,
     ImageFormat,
     ImageGenerationResult,
-    ImageGenerationUsage,
     ImageResponseFormat,
     LLMContextWindowExceededError,
     LLMRequestEstimate,
@@ -116,10 +114,7 @@ from aethergraph.services.llm.usage import (
     normalize_llm_usage,
     normalized_usage_metrics,
 )
-from aethergraph.services.llm.usage_metering import (
-    _record_image_generation_metering,
-    _record_model_metering,
-)
+from aethergraph.services.llm.usage_metering import _record_model_metering
 from aethergraph.services.llm.utils import (
     _ensure_system_json_directive,
     _extract_json_text,
@@ -346,6 +341,10 @@ class GenericLLMClient(LLMClientProtocol):
         self.profile_name = profile_name
         self._tool_transport_checkpoints: dict[str, ToolTransportCheckpoint] = {}
         self._latest_tool_checkpoint_refs: dict[tuple[str, str, str], str] = {}
+        self._assigned_image_client: ImageGenerationClientProtocol | None = None
+        self._compat_image_client: ImageGenerationClientProtocol | None = None
+        self._retired_compat_image_clients: list[ImageGenerationClientProtocol] = []
+        self._image_assignment_managed = False
         self._logger = logging.getLogger("aethergraph.services.llm")
 
     def _resolve_chat_adapter(self, *, has_tool_request: bool):
@@ -548,6 +547,64 @@ class GenericLLMClient(LLMClientProtocol):
         self._apply_connection_state(state, retire_current=True)
         self._tool_transport_checkpoints.clear()
         self._latest_tool_checkpoint_refs.clear()
+        if self._compat_image_client is not None:
+            self._retired_compat_image_clients.append(self._compat_image_client)
+            self._compat_image_client = None
+
+    def bind_image_client(self, client: ImageGenerationClientProtocol) -> None:
+        """Assign the exact image client used by the public compatibility facade.
+
+        Intro:
+            Container composition binds an operation-specific client once so
+            `generate_image()` delegates without inspecting Chat provider state.
+
+        Examples:
+            Bind the default image profile:
+                ```python
+                chat_client.bind_image_client(image_service.get("default"))
+                ```
+
+            Bind a matching named profile:
+                ```python
+                chat_client.bind_image_client(image_service.get("design"))
+                ```
+
+        Args:
+            self: Existing public Chat client facade.
+            client: Exact configured image-generation client.
+
+        Returns:
+            None: Replaces the facade assignment for future image calls.
+
+        Notes:
+            The Chat client does not own or close assigned clients; their image
+            service owns lifecycle. Any prior standalone compatibility client is
+            retained only for safe shutdown.
+        """
+
+        if not callable(getattr(client, "generate_image", None)):
+            raise TypeError("client must implement ImageGenerationClientProtocol")
+        if self._compat_image_client is not None:
+            self._retired_compat_image_clients.append(self._compat_image_client)
+            self._compat_image_client = None
+        self._assigned_image_client = client
+
+    def _image_client_for_compatibility(self) -> ImageGenerationClientProtocol:
+        if self._assigned_image_client is not None:
+            return self._assigned_image_client
+        if self._image_assignment_managed:
+            raise LLMUnsupportedFeatureError(
+                self.provider,
+                self.model,
+                "image generation",
+                "Image generation is disabled or no default image profile is assigned.",
+            )
+        if self._compat_image_client is None:
+            self._compat_image_client = image_client_from_legacy_chat(self)
+        return self._compat_image_client
+
+    def _require_managed_image_assignment(self) -> None:
+        self._image_assignment_managed = True
 
     def pin_tool_transport_checkpoint(
         self,
@@ -3537,22 +3594,13 @@ class GenericLLMClient(LLMClientProtocol):
 
         Notes:
             New graph code should select an independent configured client through
-            `context.image_model()`. This compatibility path remains provider-
-            bound to the Chat client's provider but does not reuse Chat endpoint
-            selection or physical adapter dispatch.
+            `context.image_model()`. Container-managed Chat clients delegate to
+            their exact assigned image client. Direct legacy construction uses
+            one explicitly named compatibility codec to create the same client
+            type once; neither path executes image transport in this class.
         """
-        model = model or self.model
-        try:
-            image_adapter = resolve_endpoint_adapter(self.provider, "image_generation")
-        except ValueError as exc:
-            detail = (
-                "Anthropic does not support image generation via Claude API (vision is input-only)."
-                if self.provider == "anthropic"
-                else f"provider '{self.provider}' does not support generate_image() in this client."
-            )
-            raise LLMUnsupportedFeatureError(detail) from exc
-        invocation = ImageAdapterInvocation(
-            prompt=prompt,
+        return await self._image_client_for_compatibility().generate_image(
+            prompt,
             model=model,
             n=n,
             size=size,
@@ -3561,38 +3609,9 @@ class GenericLLMClient(LLMClientProtocol):
             output_format=output_format,
             response_format=response_format,
             background=background,
-            input_images=tuple(input_images or ()),
+            input_images=input_images,
             azure_api_version=azure_api_version,
-            options=kw,
-        )
-
-        async def account_usage(
-            selected_model: str,
-            usage: ImageGenerationUsage,
-            image_count: int,
-            selected_size: str | None,
-            selected_quality: str | None,
-            latency_ms: int,
-        ) -> None:
-            await _record_image_generation_metering(
-                self.metering or current_metering(),
-                provider=self.provider,
-                model=selected_model,
-                usage=usage,
-                image_count=image_count,
-                size=selected_size,
-                quality=selected_quality,
-                latency_ms=latency_ms,
-                dimensions=self._current_dimensions(),
-                logger=self._logger,
-            )
-
-        return await _execute_image_generation(
-            self,
-            adapter_id=image_adapter.adapter_id,
-            invocation=invocation,
-            account_usage=account_usage,
-            dimensions=self._current_dimensions(),
+            **kw,
         )
 
     # ================================================================
@@ -3633,6 +3652,8 @@ class GenericLLMClient(LLMClientProtocol):
         Notes:
             A transport bound to an already-closed event loop is logged and
             skipped so one retired connection cannot block remaining cleanup.
+            Assigned image clients remain service-owned and are not closed here;
+            standalone compatibility image clients are closed exactly once.
         """
         clients = [self._client, *self._retired_http_clients]
         self._retired_http_clients = []
@@ -3641,6 +3662,20 @@ class GenericLLMClient(LLMClientProtocol):
             logger=self._logger,
             warning_key="llm_http_client_close_failed",
         )
+        seen: set[int] = set()
+        owned_image_clients = [
+            self._compat_image_client,
+            *self._retired_compat_image_clients,
+        ]
+        self._compat_image_client = None
+        self._retired_compat_image_clients = []
+        for image_client in owned_image_clients:
+            if image_client is None or id(image_client) in seen:
+                continue
+            seen.add(id(image_client))
+            close = getattr(image_client, "aclose", None)
+            if close is not None:
+                await close()
 
     def _default_headers_for_raw(self) -> dict[str, str]:
         hdr = {"Content-Type": "application/json"}
