@@ -9,7 +9,6 @@ from aethergraph.config.llm import (
 )
 
 from ..profiles import (
-    ChatCapabilityOverrides,
     ChatDefaults,
     ChatProfile,
     CredentialSelection,
@@ -74,6 +73,11 @@ def chat_profile_from_legacy(
         if profile.api_key is not None
         else CredentialSelection(secret_ref=profile.api_key_ref)
     )
+    capability_overrides = profile.capability_overrides
+    if profile.vision_enabled and capability_overrides.image_input == "unknown":
+        capability_overrides = capability_overrides.model_copy(
+            update={"image_input": "supported"}
+        )
     return ChatProfile(
         connection=ProviderConnection(
             provider_id=profile.provider,
@@ -111,9 +115,7 @@ def chat_profile_from_legacy(
             jpeg_quality=profile.vision_resize_jpeg_quality,
             min_jpeg_quality=profile.vision_resize_min_jpeg_quality,
         ),
-        capability_overrides=ChatCapabilityOverrides(
-            image_input="supported" if profile.vision_enabled else "unknown"
-        ),
+        capability_overrides=capability_overrides,
     )
 
 
@@ -177,6 +179,7 @@ def embedding_profile_from_legacy(
             retry=profile.retry,
             rate_limit_group=profile.rate_limit_group,
         ),
+        capability_overrides=profile.capability_overrides,
     )
 
 
@@ -255,6 +258,7 @@ def image_generation_profile_from_settings(
             response_format=profile.response_format,
             background=profile.background,
         ),
+        capability_overrides=profile.capability_overrides,
     )
 
 

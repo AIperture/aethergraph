@@ -17,8 +17,11 @@ from aethergraph.services.llm import (
     ENDPOINT_ADAPTERS,
     MODEL_DISCOVERY_ADAPTERS,
     PROVIDERS,
+    ChatCapabilityOverrides,
     ChatProfile,
+    EmbeddingCapabilityOverrides,
     EmbeddingDefaults,
+    ImageGenerationCapabilityOverrides,
     get_provider_descriptor,
     provider_default_base_url,
     resolve_endpoint_adapter,
@@ -195,6 +198,9 @@ def test_legacy_chat_profile_projection_separates_operation_concerns() -> None:
         context_window_tokens=128_000,
         vision_enabled=True,
         vision_max_images=3,
+        capability_overrides=ChatCapabilityOverrides(
+            native_tool_calling="unsupported"
+        ),
     )
 
     canonical = chat_profile_from_legacy(legacy)
@@ -210,6 +216,7 @@ def test_legacy_chat_profile_projection_separates_operation_concerns() -> None:
     assert canonical.input_policy.max_images == 3
     assert canonical.input_policy.allow_remote_urls is True
     assert canonical.capability_overrides.image_input == "supported"
+    assert canonical.capability_overrides.native_tool_calling == "unsupported"
     assert "embed_model" not in canonical.model_dump()
     assert legacy.embed_model == "text-embedding-3-large"
 
@@ -241,6 +248,20 @@ def test_chat_factory_consumes_canonical_profile_without_losing_policy() -> None
     assert client.image_preparation_policy.image_input_enabled is True
     assert client.image_preparation_policy.allow_remote_urls is True
     assert client.image_preparation_policy.max_images == 2
+
+
+def test_explicit_image_capability_override_wins_over_legacy_vision_projection() -> None:
+    canonical = chat_profile_from_legacy(
+        LLMProfile(
+            vision_enabled=True,
+            capability_overrides=ChatCapabilityOverrides(
+                image_input="unsupported"
+            ),
+        )
+    )
+
+    assert canonical.input_policy.image_input_enabled is True
+    assert canonical.capability_overrides.image_input == "unsupported"
 
 
 def test_legacy_profile_preserves_explicit_endpoint_selection() -> None:
@@ -299,12 +320,19 @@ def test_endpointless_azure_compatibility_selection_is_explicit_and_bounded() ->
 
 def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:
     canonical = embedding_profile_from_legacy(
-        EmbeddingProfile(provider="google", model="text-embedding-004")
+        EmbeddingProfile(
+            provider="google",
+            model="text-embedding-004",
+            capability_overrides=EmbeddingCapabilityOverrides(
+                dimensions="unsupported"
+            ),
+        )
     )
 
     assert canonical.operation == "embeddings"
     assert canonical.connection.endpoint_id == "gemini_embeddings"
     assert canonical.model.model_id == "text-embedding-004"
+    assert canonical.capability_overrides.dimensions == "unsupported"
     assert embed_client_from_profile(canonical, _Secrets()).endpoint_id == "gemini_embeddings"
 
 
@@ -352,6 +380,9 @@ def test_image_profile_projection_and_client_are_independent_from_chat() -> None
             model="gemini-image-test",
             count=2,
             output_format="png",
+            capability_overrides=ImageGenerationCapabilityOverrides(
+                image_editing="supported"
+            ),
         )
     )
     client = image_client_from_profile(canonical, _Secrets(), profile_name="design")
@@ -359,6 +390,7 @@ def test_image_profile_projection_and_client_are_independent_from_chat() -> None
     assert canonical.operation == "image_generation"
     assert canonical.connection.endpoint_id == "gemini_image_generation"
     assert canonical.defaults.count == 2
+    assert canonical.capability_overrides.image_editing == "supported"
     assert client.endpoint_id == "gemini_image_generation"
     assert client.profile_name == "design"
 

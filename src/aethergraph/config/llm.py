@@ -2,6 +2,11 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
+from aethergraph.services.llm.profiles import (
+    ChatCapabilityOverrides,
+    EmbeddingCapabilityOverrides,
+    ImageGenerationCapabilityOverrides,
+)
 from aethergraph.services.llm.provider_transport import ProviderRetrySettings
 from aethergraph.services.llm.providers import Provider
 
@@ -54,6 +59,9 @@ class LLMProfile(BaseModel):
             "Explicit model context-window capacity. When omitted, AG records "
             "request estimates but leaves context admission to the provider."
         ),
+    )
+    capability_overrides: ChatCapabilityOverrides = Field(
+        default_factory=ChatCapabilityOverrides
     )
 
     # provider-specific
@@ -142,6 +150,9 @@ class EmbeddingProfile(BaseModel):
         max_length=256,
         description="Optional shared provider quota bucket used by the container rate gate.",
     )
+    capability_overrides: EmbeddingCapabilityOverrides = Field(
+        default_factory=EmbeddingCapabilityOverrides
+    )
 
     # provider-specific
     azure_deployment: str | None = None
@@ -167,6 +178,9 @@ class ImageGenerationProfileSettings(BaseModel):
     timeout: float = 60.0
     retry: ProviderRetrySettings = Field(default_factory=ProviderRetrySettings)
     rate_limit_group: str | None = Field(default=None, min_length=1, max_length=256)
+    capability_overrides: ImageGenerationCapabilityOverrides = Field(
+        default_factory=ImageGenerationCapabilityOverrides
+    )
     azure_deployment: str | None = None
     api_key: SecretStr | None = None
     api_key_ref: str | None = Field(

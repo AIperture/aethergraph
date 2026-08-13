@@ -20,6 +20,11 @@ from aethergraph.config.llm_env import (
 )
 from aethergraph.config.loader import load_settings
 from aethergraph.services.channel import factory as channel_factory
+from aethergraph.services.llm.profiles import (
+    ChatCapabilityOverrides,
+    EmbeddingCapabilityOverrides,
+    ImageGenerationCapabilityOverrides,
+)
 
 
 def test_explicit_settings_file_does_not_use_discovered_files(
@@ -83,7 +88,17 @@ def test_encode_llm_profiles_env_is_deterministic_and_complete() -> None:
 def test_operation_profile_environment_writers_round_trip_independently(
     tmp_path: Path,
 ) -> None:
-    rows = encode_llm_profiles_env({"default": LLMProfile(provider="openai", model="gpt-test")})
+    rows = encode_llm_profiles_env(
+        {
+            "default": LLMProfile(
+                provider="openai",
+                model="gpt-test",
+                capability_overrides=ChatCapabilityOverrides(
+                    structured_output="supported"
+                ),
+            )
+        }
+    )
     rows.update(
         encode_embedding_profiles_env(
             {
@@ -95,6 +110,9 @@ def test_operation_profile_environment_writers_round_trip_independently(
                     provider="google",
                     model="gemini-embedding-001",
                     endpoint_id="gemini_embeddings",
+                    capability_overrides=EmbeddingCapabilityOverrides(
+                        dimensions="unsupported"
+                    ),
                 ),
             }
         )
@@ -112,6 +130,9 @@ def test_operation_profile_environment_writers_round_trip_independently(
                     model="imagen-4.0-generate-001",
                     endpoint_id="gemini_images",
                     count=2,
+                    capability_overrides=ImageGenerationCapabilityOverrides(
+                        image_editing="supported"
+                    ),
                 ),
             }
         )
@@ -122,11 +143,17 @@ def test_operation_profile_environment_writers_round_trip_independently(
     settings = load_settings(env_file=target)
 
     assert settings.llm.default.model == "gpt-test"
+    assert settings.llm.default.capability_overrides.structured_output == "supported"
     assert settings.embed.default.model == "text-embedding-3-small"
     assert settings.embed.profiles["search"].model == "gemini-embedding-001"
     assert settings.embed.profiles["search"].endpoint_id == "gemini_embeddings"
+    assert settings.embed.profiles["search"].capability_overrides.dimensions == "unsupported"
     assert settings.image_generation.default.endpoint_id == "openai_images"
     assert settings.image_generation.profiles["design"].count == 2
+    assert (
+        settings.image_generation.profiles["design"].capability_overrides.image_editing
+        == "supported"
+    )
 
 
 @pytest.mark.parametrize(
