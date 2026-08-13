@@ -27,13 +27,10 @@ from aethergraph.services.llm._gemini_mixin import _GeminiMixin
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
 from aethergraph.services.llm.adapters import (
-    AnthropicMessagesAdapter,
-    AzureChatAdapter,
     ChatAdapterInvocation,
-    GeminiGenerateContentAdapter,
-    OpenAICompatibleChatAdapter,
-    OpenAIResponsesAdapter,
+    ChatStreamInvocation,
     invoke_chat_adapter,
+    invoke_chat_stream_adapter,
 )
 from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
 from aethergraph.services.llm.contracts import ModelRequest
@@ -3229,121 +3226,36 @@ class GenericLLMClient(
         quota_reservation: _LLMQuotaReservation | None = None
         try:
             quota_reservation = self._preflight_llm_request(request_estimate)
-            if self.provider == "openai" and self.endpoint_id != "openai_chat_completions":
-                provider_result = await self._provider_retry.execute(
-                    lambda: OpenAIResponsesAdapter.stream(
-                        self,
-                        messages,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        reasoning_summary=_reasoning_summary,
-                        max_output_tokens=max_output_tokens,
-                        output_format=output_format,
-                        json_schema=json_schema,
-                        schema_name=schema_name,
-                        strict_schema=strict_schema,
-                        fail_on_unsupported=fail_on_unsupported,
-                        on_delta=on_delta,
-                        on_thinking_delta=on_thinking_delta,
-                        on_usage_update=on_usage_update,
-                        **kw,
-                    ),
-                    provider=self.provider,
-                    model=model,
-                    operation="chat_stream",
-                    rate_limit_group=self.rate_limit_group,
-                )
-                text, usage = provider_result.value
-            elif self.provider == "anthropic":
-                provider_result = await self._provider_retry.execute(
-                    lambda: AnthropicMessagesAdapter.stream(
-                        self,
-                        messages,
-                        model=model,
-                        thinking_budget=_thinking_budget,
-                        max_output_tokens=max_output_tokens,
-                        output_format=output_format,
-                        json_schema=json_schema,
-                        fail_on_unsupported=fail_on_unsupported,
-                        on_delta=on_delta,
-                        on_thinking_delta=on_thinking_delta,
-                        on_usage_update=on_usage_update,
-                        reasoning_effort=reasoning_effort,
-                        **kw,
-                    ),
-                    provider=self.provider,
-                    model=model,
-                    operation="chat_stream",
-                    rate_limit_group=self.rate_limit_group,
-                )
-                text, usage = provider_result.value
-            elif stream_adapter.protocol_family == "chat.completions":
-                if self.provider == "azure":
-                    provider_result = await self._provider_retry.execute(
-                        lambda: AzureChatAdapter.stream_chat_completions(
-                            self,
-                            messages,
-                            model=model,
-                            reasoning_effort=reasoning_effort,
-                            max_output_tokens=max_output_tokens,
-                            on_delta=on_delta,
-                            on_usage_update=on_usage_update,
-                            **kw,
-                        ),
-                        provider=self.provider,
-                        model=model,
-                        operation="chat_stream",
-                        rate_limit_group=self.rate_limit_group,
-                    )
-                else:
-                    provider_result = await self._provider_retry.execute(
-                        lambda: OpenAICompatibleChatAdapter.stream(
-                            self,
-                            messages,
-                            model=model,
-                            reasoning_effort=reasoning_effort,
-                            max_output_tokens=max_output_tokens,
-                            on_delta=on_delta,
-                            on_usage_update=on_usage_update,
-                            **kw,
-                        ),
-                        provider=self.provider,
-                        model=model,
-                        operation="chat_stream",
-                        rate_limit_group=self.rate_limit_group,
-                    )
-                text, usage = provider_result.value
-            elif self.provider == "google" and stream_adapter.protocol_family == "generateContent":
-                provider_result = await self._provider_retry.execute(
-                    lambda: GeminiGenerateContentAdapter.stream(
-                        self,
-                        messages,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        reasoning_summary=_reasoning_summary,
-                        thinking_mode=kw.get("thinking_mode"),
-                        max_output_tokens=max_output_tokens,
-                        on_delta=on_delta,
-                        on_thinking_delta=on_thinking_delta,
-                        on_usage_update=on_usage_update,
-                        **{key: value for key, value in kw.items() if key != "thinking_mode"},
-                    ),
-                    provider=self.provider,
-                    model=model,
-                    operation="chat_stream",
-                    rate_limit_group=self.rate_limit_group,
-                )
-                text, usage = provider_result.value
-            else:
-                raise LLMUnsupportedFeatureError(
-                    provider=self.provider,
-                    model=model,
-                    feature="streaming",
-                    detail=(
-                        f"endpoint adapter {stream_adapter.adapter_id!r} "
-                        "has no native streaming adapter"
-                    ),
-                )
+            stream_invocation = ChatStreamInvocation(
+                messages=tuple(messages),
+                model=model,
+                reasoning_effort=reasoning_effort,
+                reasoning_summary=_reasoning_summary,
+                thinking_budget=_thinking_budget,
+                thinking_mode=kw.get("thinking_mode"),
+                max_output_tokens=max_output_tokens,
+                output_format=output_format,
+                json_schema=json_schema,
+                schema_name=schema_name,
+                strict_schema=strict_schema,
+                fail_on_unsupported=fail_on_unsupported,
+                on_delta=on_delta,
+                on_thinking_delta=on_thinking_delta,
+                on_usage_update=on_usage_update,
+                options=kw,
+            )
+            provider_result = await self._provider_retry.execute(
+                lambda: invoke_chat_stream_adapter(
+                    self,
+                    adapter_id=stream_adapter.adapter_id,
+                    invocation=stream_invocation,
+                ),
+                provider=self.provider,
+                model=model,
+                operation="chat_stream",
+                rate_limit_group=self.rate_limit_group,
+            )
+            text, usage = provider_result.value
 
             observation_record.attempts = provider_result.attempts
 

@@ -25,15 +25,19 @@ from aethergraph.services.llm import (
 from aethergraph.services.llm.adapters import (
     AnthropicMessagesAdapter,
     AzureChatAdapter,
+    ChatStreamInvocation,
     GeminiGenerateContentAdapter,
     OpenAICompatibleChatAdapter,
     OpenAIResponsesAdapter,
+    invoke_chat_stream_adapter,
+    registered_chat_stream_adapter_ids,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
     ProviderCallResult,
 )
+from aethergraph.services.llm.registry import ENDPOINT_ADAPTERS
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.llm.structured_output import (
     prepare_structured_output,
@@ -1115,6 +1119,43 @@ async def test_chat_stream_rejects_structured_output_modes() -> None:
             [{"role": "user", "content": "hello"}],
             output_format="json_object",
         )
+
+
+@pytest.mark.asyncio
+async def test_stream_adapter_registry_fails_closed_for_unknown_adapter() -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-test")
+    invocation = ChatStreamInvocation(
+        messages=({"role": "user", "content": "hello"},),
+        model="gpt-test",
+        reasoning_effort=None,
+        reasoning_summary=None,
+        thinking_budget=None,
+        thinking_mode=None,
+        max_output_tokens=128,
+        output_format="text",
+        json_schema=None,
+        schema_name="Response",
+        strict_schema=True,
+        fail_on_unsupported=True,
+    )
+
+    with pytest.raises(LLMUnsupportedFeatureError, match="no native streaming adapter"):
+        await invoke_chat_stream_adapter(
+            client,
+            adapter_id="unregistered_stream_adapter",
+            invocation=invocation,
+        )
+
+
+def test_stream_runtime_registry_matches_advertised_capabilities() -> None:
+    advertised = {
+        adapter_id
+        for adapter_id, descriptor in ENDPOINT_ADAPTERS.items()
+        if "chat" in descriptor.implemented_operations
+        and "streaming" in descriptor.implementation_capabilities
+    }
+
+    assert registered_chat_stream_adapter_ids() == advertised
 
 
 @pytest.mark.asyncio
