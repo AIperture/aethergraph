@@ -27,7 +27,8 @@ wiring.
 | A0 baseline and isolation | Complete | Dedicated worktree at base `6aa355f`. |
 | A1 legacy agents and skills | Complete | Commit `1758fa3`; only `default_chat_agent` remains; focused gate `18 passed`; full AG gate `721 passed, 2 skipped, 2 deselected`. |
 | A2 dead leaf services | Complete | Commit `a9f847d`; full AG gate `726 passed, 2 skipped, 2 deselected`; Engine `770 passed`; no causal Studio failure. |
-| A3-A10 | Pending | Not started. |
+| A3 legacy planning | Complete | Commit `7f6bffc`; full AG gate `729 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio container gate `35 passed`. |
+| A4-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -92,5 +93,23 @@ wiring.
   external repository imports an A2-removed surface.
 - No model adapter, model profile, capability, quota, provider transport, or LLM
   service-construction implementation changed.
+
+### A3 - legacy planning
+
+- Moved `graph_io_to_slots` from the planning service tree into
+  `aethergraph.core.graph.io_schema`, the graph schema layer consumed by the input
+  schema API.
+- Deleted the AG planning service tree and its unused planning contract.
+- Removed planner construction and `planner_service` from the container,
+  `NodeServices`, and runtime projection; removed `NodeContext.planner()` with no
+  compatibility facade or Engine bridge.
+- Added graph I/O projection coverage and a negative boundary test proving that the
+  legacy planner package and runtime surfaces are absent.
+- Focused AG gate: `26 passed`. Full AG gate: 733 collected, 729 passed, 2 skipped,
+  and the same 2 non-causal Host tests deselected.
+- External causal gate: neither Engine nor Studio imports AG planning; Engine
+  `770 passed`, and all 35 Studio suites that directly construct or consume AG
+  containers passed.
+- No LLM implementation file changed.
 
 No compatibility alias or fallback is accepted as completion evidence.
