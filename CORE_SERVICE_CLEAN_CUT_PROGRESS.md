@@ -28,7 +28,8 @@ wiring.
 | A1 legacy agents and skills | Complete | Commit `1758fa3`; only `default_chat_agent` remains; focused gate `18 passed`; full AG gate `721 passed, 2 skipped, 2 deselected`. |
 | A2 dead leaf services | Complete | Commit `a9f847d`; full AG gate `726 passed, 2 skipped, 2 deselected`; Engine `770 passed`; no causal Studio failure. |
 | A3 legacy planning | Complete | Commit `7f6bffc`; full AG gate `729 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio container gate `35 passed`. |
-| A4-A10 | Pending | Not started. |
+| A4 optional capabilities | Complete | Commit `2a89e35`; full AG gate `739 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio causal gate `148 passed`; wheel residue clean. |
+| A5-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -111,5 +112,34 @@ wiring.
   `770 passed`, and all 35 Studio suites that directly construct or consume AG
   containers passed.
 - No LLM implementation file changed.
+
+### A4 - optional capabilities
+
+- Deleted AG's web-search/page-fetch, local code-execution, MCP, Knowledge/KB, and
+  evaluation-harness implementation trees, their dedicated contracts, and tests.
+- Deleted the duplicate `plugins/mcp` servers and orphaned
+  `plugins/utils/data_io.py`; removed mandatory `pypdf` from AG packaging.
+- Removed all corresponding `DefaultContainer`, `RuntimeEnv`, `NodeServices`,
+  `NodeContext`, runtime-helper, package-export, configuration, search-factory, and
+  Knowledge-specific scope wiring.
+- Removed the production `RuntimeEnv` harness override hook instead of retaining a
+  no-op or optional compatibility path.
+- Reserved the removed first-class capability names in the explicit external-service
+  registry so `NodeContext.__getattr__` cannot silently recreate them.
+- Added a boundary suite proving the implementations, contracts, fields, accessors,
+  runtime helpers, settings, and dynamic extension aliases are absent.
+- Added reference-only future-capability blueprints under
+  `others/ag-capability-blueprints/`; they define Engine Tool/plugin and Host-provider
+  ownership without copied source, stubs, or runtime imports.
+- Focused AG gate: `30 passed`. Full AG collection: `743` tests; clean gate `739
+  passed`, `2 skipped`, and the same `2` non-causal Host tests deselected.
+- Ruff, formatting hooks, `git diff --check`, source forbidden-residue scan, import
+  smoke test, and wheel forbidden-residue inspection passed. The built wheel contains
+  433 entries and none of the removed paths.
+- External causal gate: Engine full suite `770 passed`; Studio's AG-facing runtime,
+  Host, Tool-result, and release slice `148 passed`. Neither external source tree
+  imports the removed implementations, and neither repository was modified.
+- No LLM adapter, model profile, capability-resolution, usage/quota, provider
+  transport, or unrelated model-service construction implementation changed.
 
 No compatibility alias or fallback is accepted as completion evidence.
