@@ -26,9 +26,10 @@ from aethergraph.services.llm.registry import provider_default_base_url, resolve
 from aethergraph.services.llm.types import (
     ImageFormat,
     ImageGenerationResult,
+    ImageGenerationUsage,
     ImageResponseFormat,
 )
-from aethergraph.services.llm.usage_metering import _record_model_metering
+from aethergraph.services.llm.usage_metering import _record_image_generation_metering
 
 
 class GenericImageGenerationClient(ImageGenerationClientProtocol):
@@ -175,12 +176,23 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
             "profile_name": self.profile_name,
         }
 
-    async def _account_usage(self, model: str, usage: dict[str, Any], latency_ms: int) -> None:
-        await _record_model_metering(
+    async def _account_usage(
+        self,
+        model: str,
+        usage: ImageGenerationUsage,
+        image_count: int,
+        size: str | None,
+        quality: str | None,
+        latency_ms: int,
+    ) -> None:
+        await _record_image_generation_metering(
             self.metering or current_metering(),
             provider=self.provider,
             model=model,
             usage=usage,
+            image_count=image_count,
+            size=size,
+            quality=quality,
             latency_ms=latency_ms,
             dimensions=self._current_dimensions(),
             logger=self._logger,

@@ -7,10 +7,12 @@ import time
 from typing import Any
 
 from aethergraph.services.llm.adapters import ImageAdapterInvocation, invoke_image_adapter
-from aethergraph.services.llm.types import ImageGenerationResult
+from aethergraph.services.llm.types import ImageGenerationResult, ImageGenerationUsage
 from aethergraph.services.tracing import resolve_tracer
 
-ImageUsageAccountant = Callable[[str, dict[str, Any], int], Awaitable[None]]
+ImageUsageAccountant = Callable[
+    [str, ImageGenerationUsage, int, str | None, str | None, int], Awaitable[None]
+]
 
 
 async def _execute_image_generation(
@@ -52,11 +54,26 @@ async def _execute_image_generation(
         )
         result = provider_result.value
         latency_ms = int((time.perf_counter() - start) * 1000)
-        await account_usage(invocation.model, result.usage or {}, latency_ms)
+        usage = result.usage_receipt or ImageGenerationUsage.from_provider_usage(result.usage)
+        await account_usage(
+            invocation.model,
+            usage,
+            len(result.images or []),
+            invocation.size,
+            invocation.quality,
+            latency_ms,
+        )
+        usage_payload = usage.to_dict()
         await span.finish(
-            response={"usage": result.usage or {}, "images_count": len(result.images or [])},
+            response={"usage": usage_payload, "images_count": len(result.images or [])},
             metadata=dimensions,
-            metrics={**(result.usage or {}), "latency_ms": latency_ms},
+            metrics={
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+                "images_count": len(result.images or []),
+                "latency_ms": latency_ms,
+            },
         )
         return result
     except Exception as exc:

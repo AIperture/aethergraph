@@ -34,6 +34,18 @@ class _FakeHttp:
 
 @pytest.mark.asyncio
 async def test_independent_image_client_applies_profile_defaults_and_exact_endpoint() -> None:
+    class _Metering:
+        def __init__(self) -> None:
+            self.image_records: list[dict] = []
+            self.llm_records: list[dict] = []
+
+        async def record_image_generation(self, **record) -> None:
+            self.image_records.append(record)
+
+        async def record_llm(self, **record) -> None:
+            self.llm_records.append(record)
+
+    metering = _Metering()
     client = GenericImageGenerationClient(
         provider="openai",
         model="gpt-image-test",
@@ -43,6 +55,7 @@ async def test_independent_image_client_applies_profile_defaults_and_exact_endpo
         default_size="1024x1024",
         default_output_format="png",
         default_response_format="b64_json",
+        metering=metering,  # type: ignore[arg-type]
     )
     fake_http = _FakeHttp(
         {
@@ -62,6 +75,29 @@ async def test_independent_image_client_applies_profile_defaults_and_exact_endpo
     assert fake_http.last_json["size"] == "1024x1024"
     assert fake_http.last_json["output_format"] == "png"
     assert fake_http.last_json["response_format"] == "b64_json"
+    assert result.usage == {"input_tokens": 4, "output_tokens": 6}
+    assert result.usage_receipt is not None
+    assert result.usage_receipt.availability == "complete"
+    assert result.usage_receipt.total_tokens == 10
+    assert metering.llm_records == []
+    assert metering.image_records == [
+        {
+            "user_id": None,
+            "org_id": None,
+            "run_id": None,
+            "graph_id": None,
+            "provider": "openai",
+            "model": "gpt-image-test",
+            "image_count": 2,
+            "size": "1024x1024",
+            "quality": None,
+            "input_tokens": 4,
+            "output_tokens": 6,
+            "total_tokens": 10,
+            "usage_availability": "complete",
+            "latency_ms": metering.image_records[0]["latency_ms"],
+        }
+    ]
 
 
 def test_image_factory_builds_named_profiles_without_chat_configuration() -> None:

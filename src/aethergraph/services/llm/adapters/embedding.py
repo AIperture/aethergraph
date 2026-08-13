@@ -11,8 +11,9 @@ from aethergraph.services.llm.adapters.azure_embeddings import AzureEmbeddingsAd
 from aethergraph.services.llm.adapters.gemini_embeddings import GeminiEmbeddingsAdapter
 from aethergraph.services.llm.adapters.openai_embeddings import OpenAIEmbeddingsAdapter
 from aethergraph.services.llm.provider_transport import ProviderCallResult
+from aethergraph.services.llm.types import EmbeddingResult, EmbeddingUsage
 
-EmbeddingAdapterResult = ProviderCallResult[list[list[float]]]
+EmbeddingAdapterResult = ProviderCallResult[EmbeddingResult]
 EmbeddingHandler = Callable[[Any, "EmbeddingAdapterInvocation"], Awaitable[EmbeddingAdapterResult]]
 
 
@@ -184,7 +185,12 @@ async def _invoke_dummy_embeddings(
     host: Any, invocation: EmbeddingAdapterInvocation
 ) -> EmbeddingAdapterResult:
     del host
-    return ProviderCallResult([[float(len(text))] for text in invocation.texts])
+    return ProviderCallResult(
+        EmbeddingResult(
+            vectors=[[float(len(text))] for text in invocation.texts],
+            usage=EmbeddingUsage.from_provider_usage(None),
+        )
+    )
 
 
 _EMBEDDING_HANDLERS: dict[str, EmbeddingHandler] = {

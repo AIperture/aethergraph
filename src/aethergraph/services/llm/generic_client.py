@@ -95,6 +95,7 @@ from aethergraph.services.llm.types import (
     ChatOutputFormat,
     ImageFormat,
     ImageGenerationResult,
+    ImageGenerationUsage,
     ImageResponseFormat,
     LLMContextWindowExceededError,
     LLMRequestEstimate,
@@ -115,7 +116,10 @@ from aethergraph.services.llm.usage import (
     normalize_llm_usage,
     normalized_usage_metrics,
 )
-from aethergraph.services.llm.usage_metering import _record_model_metering
+from aethergraph.services.llm.usage_metering import (
+    _record_image_generation_metering,
+    _record_model_metering,
+)
 from aethergraph.services.llm.utils import (
     _ensure_system_json_directive,
     _extract_json_text,
@@ -3564,13 +3568,23 @@ class GenericLLMClient(LLMClientProtocol):
 
         async def account_usage(
             selected_model: str,
-            usage: dict[str, Any],
+            usage: ImageGenerationUsage,
+            image_count: int,
+            selected_size: str | None,
+            selected_quality: str | None,
             latency_ms: int,
         ) -> None:
-            await self._account_llm_usage(
+            await _record_image_generation_metering(
+                self.metering or current_metering(),
+                provider=self.provider,
                 model=selected_model,
                 usage=usage,
+                image_count=image_count,
+                size=selected_size,
+                quality=selected_quality,
                 latency_ms=latency_ms,
+                dimensions=self._current_dimensions(),
+                logger=self._logger,
             )
 
         return await _execute_image_generation(

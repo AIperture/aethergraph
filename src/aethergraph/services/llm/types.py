@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 ChatOutputFormat = Literal[
@@ -423,6 +423,394 @@ class LLMRunQuotaExceededError(LLMRunQuotaError):
     """Report actual provider usage that crossed an AG quota."""
 
 
+UsageAvailability = Literal["complete", "partial", "unavailable"]
+
+
+def _operation_usage_int(raw: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int) and value >= 0:
+            return value
+    return None
+
+
+@dataclass(frozen=True)
+class EmbeddingUsage:
+    """Retain normalized embedding input usage and its provider receipt.
+
+    Intro:
+        Distinguishes unavailable provider usage from a real zero-token receipt
+        without changing the vector-only compatibility facade.
+
+    Examples:
+        Normalize an OpenAI embedding receipt:
+            ```python
+            usage = EmbeddingUsage.from_provider_usage(
+                {"prompt_tokens": 4, "total_tokens": 4}
+            )
+            assert usage.input_tokens == 4
+            ```
+
+        Preserve unavailable usage:
+            ```python
+            usage = EmbeddingUsage.from_provider_usage(None)
+            assert usage.availability == "unavailable"
+            ```
+
+    Args:
+        availability: Whether normalized provider usage is complete, partial,
+            or unavailable.
+        input_tokens: Provider-reported embedding input tokens when known.
+        provider_usage_raw: Detached provider usage receipt.
+
+    Returns:
+        EmbeddingUsage: Immutable operation-specific usage receipt.
+
+    Notes:
+        Character estimates are deliberately excluded because they are not
+        provider billing truth.
+    """
+
+    availability: UsageAvailability
+    input_tokens: int | None = None
+    provider_usage_raw: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.availability not in {"complete", "partial", "unavailable"}:
+            raise ValueError("embedding usage availability is invalid")
+        if self.input_tokens is not None and (
+            isinstance(self.input_tokens, bool)
+            or not isinstance(self.input_tokens, int)
+            or self.input_tokens < 0
+        ):
+            raise ValueError("embedding input_tokens must be a non-negative integer or None")
+        if self.availability == "unavailable" and self.input_tokens is not None:
+            raise ValueError("unavailable embedding usage cannot contain input tokens")
+        if self.availability != "unavailable" and self.input_tokens is None:
+            raise ValueError("available embedding usage requires input tokens")
+        object.__setattr__(self, "provider_usage_raw", copy.deepcopy(self.provider_usage_raw))
+
+    @classmethod
+    def from_provider_usage(cls, usage: dict[str, Any] | None) -> "EmbeddingUsage":
+        """Normalize one embedding provider receipt.
+
+        Intro:
+            Accepts common snake-case and Gemini camel-case token fields while
+            retaining the exact detached provider mapping.
+
+        Examples:
+            Normalize prompt tokens:
+                ```python
+                usage = EmbeddingUsage.from_provider_usage({"prompt_tokens": 3})
+                assert usage.availability == "complete"
+                ```
+
+            Normalize Gemini metadata:
+                ```python
+                usage = EmbeddingUsage.from_provider_usage({"promptTokenCount": 2})
+                assert usage.input_tokens == 2
+                ```
+
+        Args:
+            cls: The `EmbeddingUsage` class.
+            usage: Optional provider-owned usage mapping.
+
+        Returns:
+            EmbeddingUsage: Detached normalized embedding usage.
+
+        Notes:
+            A non-empty receipt without a recognized token counter is retained
+            as unavailable rather than coerced to zero.
+        """
+
+        raw = copy.deepcopy(dict(usage or {}))
+        tokens = _operation_usage_int(
+            raw,
+            "input_tokens",
+            "prompt_tokens",
+            "total_tokens",
+            "inputTokenCount",
+            "promptTokenCount",
+            "totalTokenCount",
+        )
+        if tokens is None:
+            return cls(availability="unavailable", provider_usage_raw=raw)
+        return cls(availability="complete", input_tokens=tokens, provider_usage_raw=raw)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the embedding usage receipt.
+
+        Intro:
+            Produces a detached JSON-compatible observation and metering value.
+
+        Examples:
+            Serialize available usage:
+                ```python
+                payload = EmbeddingUsage.from_provider_usage(
+                    {"prompt_tokens": 3}
+                ).to_dict()
+                assert payload["input_tokens"] == 3
+                ```
+
+            Serialize unavailable usage:
+                ```python
+                payload = EmbeddingUsage.from_provider_usage(None).to_dict()
+                assert payload["availability"] == "unavailable"
+                ```
+
+        Args:
+            self: Immutable embedding usage receipt.
+
+        Returns:
+            dict[str, Any]: Detached usage payload.
+
+        Notes:
+            Missing counters remain `None` and are never represented as zero.
+        """
+
+        return {
+            "availability": self.availability,
+            "input_tokens": self.input_tokens,
+            "provider_usage_raw": copy.deepcopy(self.provider_usage_raw),
+        }
+
+
+@dataclass
+class EmbeddingResult:
+    """Carry normalized embedding vectors with retained provider usage.
+
+    Intro:
+        Keeps the canonical embedding result intact until accounting completes,
+        while allowing the public facade to return only vectors.
+
+    Examples:
+        Build an unavailable-usage result:
+            ```python
+            result = EmbeddingResult(vectors=[[0.1, 0.2]])
+            assert result.usage.availability == "unavailable"
+            ```
+
+        Build a provider-reported result:
+            ```python
+            result = EmbeddingResult(
+                vectors=[[0.1]],
+                usage=EmbeddingUsage.from_provider_usage({"prompt_tokens": 2}),
+            )
+            ```
+
+    Args:
+        vectors: Ordered normalized embedding vectors.
+        usage: Typed operation-specific provider usage.
+
+    Returns:
+        EmbeddingResult: Detached vectors and retained provider usage.
+
+    Notes:
+        Vector detachment prevents adapters and compatibility consumers from
+        sharing mutable nested lists.
+    """
+
+    vectors: list[list[float]]
+    usage: EmbeddingUsage = field(
+        default_factory=lambda: EmbeddingUsage(availability="unavailable")
+    )
+
+    def __post_init__(self) -> None:
+        """Detach normalized vector rows after construction.
+
+        Intro:
+            Copies every vector row so provider response containers cannot be
+            mutated through the canonical result.
+
+        Examples:
+            Detach one vector:
+                ```python
+                source = [[0.1]]
+                result = EmbeddingResult(source)
+                source[0][0] = 0.2
+                assert result.vectors == [[0.1]]
+                ```
+
+            Preserve an empty batch:
+                ```python
+                assert EmbeddingResult([]).vectors == []
+                ```
+
+        Args:
+            self: Newly initialized embedding result.
+
+        Returns:
+            None: Completes after replacing vectors with detached rows.
+
+        Notes:
+            Numeric element validation remains the physical adapter's response-
+            shape responsibility.
+        """
+
+        self.vectors = [list(vector) for vector in self.vectors]
+
+
+@dataclass(frozen=True)
+class ImageGenerationUsage:
+    """Retain normalized image-generation token usage and provider receipt.
+
+    Intro:
+        Keeps image usage distinct from Chat usage while preserving providers
+        that expose only a subset of token counters.
+
+    Examples:
+        Normalize a complete image receipt:
+            ```python
+            usage = ImageGenerationUsage.from_provider_usage(
+                {"input_tokens": 4, "output_tokens": 6, "total_tokens": 10}
+            )
+            assert usage.total_tokens == 10
+            ```
+
+        Preserve unavailable image usage:
+            ```python
+            usage = ImageGenerationUsage.from_provider_usage({})
+            assert usage.availability == "unavailable"
+            ```
+
+    Args:
+        availability: Whether the provider supplied complete, partial, or no
+            normalized usage.
+        input_tokens: Provider-reported input tokens when known.
+        output_tokens: Provider-reported image output tokens when known.
+        total_tokens: Provider-reported or exactly derived total when known.
+        provider_usage_raw: Detached provider usage receipt.
+
+    Returns:
+        ImageGenerationUsage: Immutable operation-specific usage receipt.
+
+    Notes:
+        Image count, size, and quality are invocation dimensions, not tokens.
+    """
+
+    availability: UsageAvailability
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    provider_usage_raw: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.availability not in {"complete", "partial", "unavailable"}:
+            raise ValueError("image usage availability is invalid")
+        for name in ("input_tokens", "output_tokens", "total_tokens"):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
+            ):
+                raise ValueError(f"image {name} must be a non-negative integer or None")
+        if self.availability == "unavailable" and any(
+            value is not None
+            for value in (self.input_tokens, self.output_tokens, self.total_tokens)
+        ):
+            raise ValueError("unavailable image usage cannot contain token counters")
+        object.__setattr__(self, "provider_usage_raw", copy.deepcopy(self.provider_usage_raw))
+
+    @classmethod
+    def from_provider_usage(cls, usage: dict[str, Any] | None) -> "ImageGenerationUsage":
+        """Normalize one image-generation provider receipt.
+
+        Intro:
+            Accepts common provider token keys, derives totals only from two
+            known components, and retains unknown receipt fields verbatim.
+
+        Examples:
+            Derive a total:
+                ```python
+                usage = ImageGenerationUsage.from_provider_usage(
+                    {"input_tokens": 2, "output_tokens": 5}
+                )
+                assert usage.total_tokens == 7
+                ```
+
+            Preserve a partial total-only receipt:
+                ```python
+                usage = ImageGenerationUsage.from_provider_usage({"total_tokens": 7})
+                assert usage.availability == "partial"
+                ```
+
+        Args:
+            cls: The `ImageGenerationUsage` class.
+            usage: Optional provider-owned usage mapping.
+
+        Returns:
+            ImageGenerationUsage: Detached normalized image usage.
+
+        Notes:
+            Missing provider usage remains unavailable and is not estimated.
+        """
+
+        raw = copy.deepcopy(dict(usage or {}))
+        input_tokens = _operation_usage_int(
+            raw, "input_tokens", "prompt_tokens", "inputTokenCount", "promptTokenCount"
+        )
+        output_tokens = _operation_usage_int(
+            raw, "output_tokens", "completion_tokens", "outputTokenCount"
+        )
+        total_tokens = _operation_usage_int(raw, "total_tokens", "totalTokenCount")
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = input_tokens + output_tokens
+        counters = (input_tokens, output_tokens, total_tokens)
+        if all(value is None for value in counters):
+            availability: UsageAvailability = "unavailable"
+        elif input_tokens is not None and output_tokens is not None:
+            availability = "complete"
+        else:
+            availability = "partial"
+        return cls(
+            availability=availability,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            provider_usage_raw=raw,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize the image-generation usage receipt.
+
+        Intro:
+            Produces a detached JSON-compatible value for meters and traces.
+
+        Examples:
+            Serialize complete usage:
+                ```python
+                payload = ImageGenerationUsage.from_provider_usage(
+                    {"input_tokens": 2, "output_tokens": 3}
+                ).to_dict()
+                assert payload["total_tokens"] == 5
+                ```
+
+            Serialize unavailable usage:
+                ```python
+                payload = ImageGenerationUsage.from_provider_usage(None).to_dict()
+                assert payload["availability"] == "unavailable"
+                ```
+
+        Args:
+            self: Immutable image-generation usage receipt.
+
+        Returns:
+            dict[str, Any]: Detached usage payload.
+
+        Notes:
+            The raw receipt remains available for provider diagnostics.
+        """
+
+        return {
+            "availability": self.availability,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+            "provider_usage_raw": copy.deepcopy(self.provider_usage_raw),
+        }
+
+
 @dataclass
 class GeneratedImage:
     # Exactly one of these is typically present.
@@ -437,3 +825,11 @@ class ImageGenerationResult:
     images: list[GeneratedImage]
     usage: dict[str, int]  # often empty for image endpoints
     raw: dict[str, Any] | None = None
+    usage_receipt: ImageGenerationUsage | None = None
+
+    def __post_init__(self) -> None:
+        self.images = list(self.images)
+        self.usage = copy.deepcopy(dict(self.usage or {}))
+        self.raw = copy.deepcopy(self.raw) if self.raw is not None else None
+        if self.usage_receipt is None:
+            self.usage_receipt = ImageGenerationUsage.from_provider_usage(self.usage)

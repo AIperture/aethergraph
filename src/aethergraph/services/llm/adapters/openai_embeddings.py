@@ -9,6 +9,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
 )
+from aethergraph.services.llm.types import EmbeddingResult, EmbeddingUsage
 
 
 class OpenAIEmbeddingsAdapter:
@@ -21,7 +22,7 @@ class OpenAIEmbeddingsAdapter:
         *,
         model: str,
         extra_body: dict[str, Any],
-    ) -> ProviderCallResult[list[list[float]]]:
+    ) -> ProviderCallResult[EmbeddingResult]:
         """Embed one text batch through an OpenAI-compatible endpoint.
 
         Intro:
@@ -74,11 +75,18 @@ class OpenAIEmbeddingsAdapter:
 
         response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata(host.provider, model, "embedding", response)
-        items = response.json().get("data", []) or []
+        data = response.json()
+        items = data.get("data", []) or []
         embeddings = [item.get("embedding") for item in items]
         if len(embeddings) != len(texts) or any(item is None for item in embeddings):
             raise RuntimeError(
                 "Embeddings response shape mismatch: "
                 f"got {len(embeddings)} items for {len(texts)} inputs"
             )
-        return ProviderCallResult(embeddings, metadata)  # type: ignore[arg-type]
+        return ProviderCallResult(
+            EmbeddingResult(
+                vectors=embeddings,  # type: ignore[arg-type]
+                usage=EmbeddingUsage.from_provider_usage(data.get("usage")),
+            ),
+            metadata,
+        )

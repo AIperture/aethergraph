@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 from pydantic import ValidationError
@@ -567,6 +568,60 @@ async def test_embedding_client_uses_the_same_typed_retry_executor() -> None:
     assert embeddings == [[0.1, 0.2]]
     assert responses == []
     assert fake_time.sleeps == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_embedding_result_retains_provider_usage_before_vector_projection() -> None:
+    class _FakeEmbeddingHttp:
+        async def post(self, url, *, headers, json):
+            return _response(
+                200,
+                json={
+                    "data": [{"embedding": [0.1, 0.2]}],
+                    "usage": {"prompt_tokens": 3, "total_tokens": 3},
+                },
+            )
+
+    class _Metering:
+        def __init__(self) -> None:
+            self.records: list[dict[str, Any]] = []
+
+        async def record_embedding(self, **record: Any) -> None:
+            self.records.append(record)
+
+    metering = _Metering()
+    client = GenericEmbeddingClient(
+        provider="openai",
+        model="embed-test",
+        api_key="test",
+        metering=metering,  # type: ignore[arg-type]
+    )
+    client._client = _FakeEmbeddingHttp()  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    result = await client.embed_result(["hello"])
+
+    assert result.vectors == [[0.1, 0.2]]
+    assert result.usage.availability == "complete"
+    assert result.usage.input_tokens == 3
+    assert result.usage.provider_usage_raw == {
+        "prompt_tokens": 3,
+        "total_tokens": 3,
+    }
+    assert metering.records == [
+        {
+            "user_id": None,
+            "org_id": None,
+            "run_id": None,
+            "graph_id": None,
+            "provider": "openai",
+            "model": "embed-test",
+            "num_texts": 1,
+            "tokens": 3,
+            "usage_availability": "complete",
+            "latency_ms": metering.records[0]["latency_ms"],
+        }
+    ]
 
 
 @pytest.mark.asyncio

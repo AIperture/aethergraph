@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 import logging
 import os
+import time
 from typing import Any
 
 import httpx
@@ -28,6 +29,9 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRetrySettings,
 )
 from aethergraph.services.llm.registry import provider_default_base_url, resolve_endpoint_adapter
+from aethergraph.services.llm.types import EmbeddingResult, EmbeddingUsage
+from aethergraph.services.llm.usage_metering import _record_embedding_metering
+from aethergraph.services.tracing import resolve_tracer
 
 
 @dataclass
@@ -283,31 +287,33 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
 
     # ------------ public API ------------------------
 
-    async def embed(
+    async def embed_result(
         self,
         texts: Sequence[str],
         *,
         model: str | None = None,
         **kw: Any,
-    ) -> list[list[float]]:
-        """Embed one ordered batch through the configured exact endpoint.
+    ) -> EmbeddingResult:
+        """Embed one ordered batch and retain typed provider usage.
 
         Intro:
             Validates provider-neutral input, resolves one endpoint before each
-            lifecycle execution, and retains retry, rate gating, and best-effort
-            metering outside the physical adapter.
+            lifecycle execution, and retains provider usage for operation-specific
+            metering before the vector-only facade projects it away.
 
         Examples:
             Embed one text:
                 ```python
                 client = GenericEmbeddingClient(provider="dummy", model="test")
-                vectors = await client.embed(["hello"])
+                result = await client.embed_result(["hello"])
                 ```
 
             Override the configured model:
                 ```python
                 client = GenericEmbeddingClient(provider="dummy", model="default")
-                vectors = await client.embed(["hello", "world"], model="test")
+                result = await client.embed_result(
+                    ["hello", "world"], model="test"
+                )
                 ```
 
         Args:
@@ -318,19 +324,19 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
                 `extra_body` and `azure_api_version`.
 
         Returns:
-            list[list[float]]: Ordered embedding vectors matching the input count.
+            EmbeddingResult: Ordered vectors and typed provider usage.
 
         Notes:
             Anthropic and DeepSeek embeddings remain explicitly unsupported.
             Physical adapters perform one attempt; this facade owns retries.
         """
-        await self._ensure_client()
-        assert self._client is not None
-
         if not isinstance(texts, Sequence) or any(not isinstance(t, str) for t in texts):
             raise TypeError("embed(texts) expects Sequence[str]")
         if len(texts) == 0:
-            return []
+            return EmbeddingResult(vectors=[], usage=EmbeddingUsage.from_provider_usage(None))
+
+        await self._ensure_client()
+        assert self._client is not None
 
         # Resolve model (override > configured)
         model = model or self.model or "text-embedding-3-small"
@@ -352,51 +358,117 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             extra_body=kw.get("extra_body") or {},
         )
 
-        async def _attempt() -> ProviderCallResult[list[list[float]]]:
+        async def _attempt() -> ProviderCallResult[EmbeddingResult]:
             return await invoke_embedding_adapter(
                 self,
                 adapter_id=adapter.adapter_id,
                 invocation=invocation,
             )
 
-        provider_result = await self._provider_retry.execute(
-            _attempt,
-            provider=self.provider,
-            model=model,
-            operation="embedding",
-            rate_limit_group=self.rate_limit_group,
+        context = current_meter_context.get()
+        dimensions = {
+            "user_id": kw.get("user_id", context.get("user_id")),
+            "org_id": kw.get("org_id", context.get("org_id")),
+            "run_id": kw.get("run_id", context.get("run_id")),
+            "graph_id": kw.get("graph_id", context.get("graph_id")),
+        }
+        tracer = resolve_tracer()
+        span = await tracer.start_span(
+            service="embedding",
+            operation="embed",
+            request={
+                "provider": self.provider,
+                "model": model,
+                "endpoint_id": adapter.adapter_id,
+                "num_texts": len(texts),
+            },
+            tags=["model", "embedding"],
+            metadata=dimensions,
         )
-        embs = provider_result.value
+        start = time.perf_counter()
+        try:
+            provider_result = await self._provider_retry.execute(
+                _attempt,
+                provider=self.provider,
+                model=model,
+                operation="embedding",
+                rate_limit_group=self.rate_limit_group,
+            )
+            result = provider_result.value
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            await _record_embedding_metering(
+                self.metering or current_metering(),
+                provider=self.provider,
+                model=model,
+                usage=result.usage,
+                num_texts=len(texts),
+                latency_ms=latency_ms,
+                dimensions=dimensions,
+                logger=logging.getLogger(__name__),
+            )
+            await span.finish(
+                response={
+                    "num_vectors": len(result.vectors),
+                    "usage": result.usage.to_dict(),
+                },
+                metadata=dimensions,
+                metrics={
+                    "num_texts": len(texts),
+                    "num_vectors": len(result.vectors),
+                    "input_tokens": result.usage.input_tokens,
+                    "latency_ms": latency_ms,
+                },
+            )
+            return result
+        except Exception as exc:
+            await span.fail(
+                exc,
+                metadata=dimensions,
+                metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+            )
+            raise
 
-        # ---- metering hook (best effort) ----
-        metering = self.metering or current_metering()
-        if metering is not None:
-            ctx = current_meter_context.get()
-            try:
-                # TODO: compute token estimates or bytes; for now just count inputs
-                await metering.record_embedding(
-                    scope=kw.get("scope"),
-                    user_id=kw.get("user_id", ctx.get("user_id")),
-                    org_id=kw.get("org_id", ctx.get("org_id")),
-                    run_id=kw.get("run_id", ctx.get("run_id")),
-                    graph_id=kw.get("graph_id", ctx.get("graph_id")),
-                    client_id=kw.get("client_id"),
-                    app_id=kw.get("app_id"),
-                    session_id=kw.get("session_id"),
-                    provider=self.provider,
-                    model=model,
-                    num_texts=len(texts),
-                    # tokens=estimated_tokens,
-                )
-            except Exception:
-                # best-effort; never break main path
-                import logging
+    async def embed(
+        self,
+        texts: Sequence[str],
+        *,
+        model: str | None = None,
+        **kw: Any,
+    ) -> list[list[float]]:
+        """Embed one ordered batch through the compatibility vector facade.
 
-                logger = logging.getLogger(__name__)
-                logger.exception("Error recording embedding metering")
-                pass
+        Intro:
+            Delegates to `embed_result()` so provider usage is retained and
+            metered once before returning the historical vector-only value.
 
-        return embs
+        Examples:
+            Embed one text:
+                ```python
+                client = GenericEmbeddingClient(provider="dummy", model="test")
+                vectors = await client.embed(["hello"])
+                ```
+
+            Override the configured model:
+                ```python
+                client = GenericEmbeddingClient(provider="dummy", model="default")
+                vectors = await client.embed(["hello", "world"], model="test")
+                ```
+
+        Args:
+            self: Configured provider-neutral embedding client.
+            texts: Ordered text inputs. An empty sequence returns immediately.
+            model: Optional per-call model override.
+            **kw: Metering context plus bounded provider request options.
+
+        Returns:
+            list[list[float]]: Ordered embedding vectors matching the input count.
+
+        Notes:
+            This public compatibility projection does not discard usage until
+            after the operation-specific meter has consumed it.
+        """
+
+        return (await self.embed_result(texts, model=model, **kw)).vectors
 
     async def embed_one(
         self,

@@ -9,6 +9,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
 )
+from aethergraph.services.llm.types import EmbeddingResult, EmbeddingUsage
 
 
 class GeminiEmbeddingsAdapter:
@@ -20,7 +21,7 @@ class GeminiEmbeddingsAdapter:
         texts: Sequence[str],
         *,
         model: str,
-    ) -> ProviderCallResult[list[list[float]]]:
+    ) -> ProviderCallResult[EmbeddingResult]:
         """Embed one text batch through Gemini `batchEmbedContents`.
 
         Intro:
@@ -67,11 +68,18 @@ class GeminiEmbeddingsAdapter:
 
         response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata("google", model, "embedding", response)
-        embeddings = [
-            (item or {}).get("values") or [] for item in response.json().get("embeddings") or []
-        ]
+        data = response.json()
+        embeddings = [(item or {}).get("values") or [] for item in data.get("embeddings") or []]
         if len(embeddings) != len(texts):
             raise RuntimeError(
                 f"Gemini batch embeddings mismatch: got {len(embeddings)} for {len(texts)}"
             )
-        return ProviderCallResult(embeddings, metadata)
+        return ProviderCallResult(
+            EmbeddingResult(
+                vectors=embeddings,
+                usage=EmbeddingUsage.from_provider_usage(
+                    data.get("usageMetadata") or data.get("usage")
+                ),
+            ),
+            metadata,
+        )

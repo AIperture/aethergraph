@@ -202,6 +202,8 @@ class EventLogMeteringService(MeteringService):
         model: str,
         num_texts: int,
         tokens: int | None = None,
+        usage_availability: str = "unavailable",
+        latency_ms: int | None = None,
     ) -> None:
         dims = self._dims_from_scope(
             scope,
@@ -227,7 +229,123 @@ class EventLogMeteringService(MeteringService):
                 "model": model,
                 "num_texts": int(num_texts),
                 "tokens": int(tokens) if tokens is not None else None,
+                "usage_availability": usage_availability,
+                "latency_ms": int(latency_ms) if latency_ms is not None else None,
                 "tags": ["meter.embedding"],
+            }
+        )
+
+    async def record_image_generation(
+        self,
+        *,
+        scope: Scope | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        run_id: str | None = None,
+        graph_id: str | None = None,
+        client_id: str | None = None,
+        app_id: str | None = None,
+        session_id: str | None = None,
+        provider: str,
+        model: str,
+        image_count: int,
+        size: str | None = None,
+        quality: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        total_tokens: int | None = None,
+        usage_availability: str = "unavailable",
+        latency_ms: int | None = None,
+    ) -> None:
+        """Record one logical image-generation invocation.
+
+        Intro:
+            Writes image count, request dimensions, typed usage availability,
+            and provider token counters to a dedicated meter event.
+
+        Examples:
+            Record a token-reporting image call:
+                ```python
+                await service.record_image_generation(
+                    provider="openai",
+                    model="gpt-image-1",
+                    image_count=1,
+                    input_tokens=4,
+                    output_tokens=6,
+                    total_tokens=10,
+                    usage_availability="complete",
+                )
+                ```
+
+            Record a provider without usage counters:
+                ```python
+                await service.record_image_generation(
+                    provider="google",
+                    model="image-model",
+                    image_count=2,
+                )
+                ```
+
+        Args:
+            self: Event-log-backed metering service.
+            scope: Optional canonical execution scope.
+            user_id: Optional explicit user identity.
+            org_id: Optional explicit organization identity.
+            run_id: Optional explicit run identity.
+            graph_id: Optional explicit graph identity.
+            client_id: Optional explicit client identity.
+            app_id: Optional explicit application identity.
+            session_id: Optional explicit session identity.
+            provider: Canonical provider identity.
+            model: Image-generation model identity.
+            image_count: Number of normalized images returned.
+            size: Optional requested image dimensions.
+            quality: Optional requested quality mode.
+            input_tokens: Provider-reported input tokens.
+            output_tokens: Provider-reported output tokens.
+            total_tokens: Provider-reported or exactly derived total tokens.
+            usage_availability: Complete, partial, or unavailable usage state.
+            latency_ms: Logical invocation latency in milliseconds.
+
+        Returns:
+            None: Appends one `meter.image_generation` event.
+
+        Notes:
+            This event is intentionally distinct from `meter.llm`; retries do
+            not create additional logical meter events.
+        """
+
+        dims = self._dims_from_scope(
+            scope,
+            user_id=user_id,
+            org_id=org_id,
+            run_id=run_id,
+            graph_id=graph_id,
+            client_id=client_id,
+            app_id=app_id,
+            session_id=session_id,
+        )
+        await self._append(
+            {
+                "kind": "meter.image_generation",
+                "user_id": dims["user_id"],
+                "org_id": dims["org_id"],
+                "client_id": dims["client_id"],
+                "app_id": dims["app_id"],
+                "session_id": dims["session_id"],
+                "run_id": dims["run_id"],
+                "graph_id": dims["graph_id"],
+                "provider": provider,
+                "model": model,
+                "image_count": int(image_count),
+                "size": size,
+                "quality": quality,
+                "input_tokens": int(input_tokens) if input_tokens is not None else None,
+                "output_tokens": int(output_tokens) if output_tokens is not None else None,
+                "total_tokens": int(total_tokens) if total_tokens is not None else None,
+                "usage_availability": usage_availability,
+                "latency_ms": int(latency_ms) if latency_ms is not None else None,
+                "tags": ["meter.image_generation"],
             }
         )
 
@@ -377,6 +495,13 @@ class EventLogMeteringService(MeteringService):
             org_id=org_id,
             run_ids=run_ids,
         )
+        images = await self._query(
+            window=window,
+            kinds=["meter.image_generation"],
+            user_id=user_id,
+            org_id=org_id,
+            run_ids=run_ids,
+        )
 
         runs = await self._query(
             window=window,
@@ -410,6 +535,9 @@ class EventLogMeteringService(MeteringService):
             "embedding_calls": len(embeddings),
             "embedding_texts": sum(e.get("num_texts", 0) for e in embeddings),
             "embedding_tokens": sum(e.get("tokens", 0) or 0 for e in embeddings),
+            "image_generation_calls": len(images),
+            "images_generated": sum(e.get("image_count", 0) or 0 for e in images),
+            "image_generation_tokens": sum(e.get("total_tokens", 0) or 0 for e in images),
             "runs": len(runs),
             "runs_succeeded": sum(1 for e in runs if e.get("status") == "succeeded"),
             "runs_failed": sum(1 for e in runs if e.get("status") == "failed"),
@@ -477,6 +605,69 @@ class EventLogMeteringService(MeteringService):
             s["calls"] += 1
             s["num_texts"] += int(e.get("num_texts", 0))
             s["tokens"] += int(e.get("tokens", 0) or 0)
+        return stats
+
+    async def get_image_generation_stats(
+        self,
+        *,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        window: str = "24h",
+        run_ids: set[str] | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Aggregate image-generation usage by model.
+
+        Intro:
+            Reads only dedicated image-generation meter events and aggregates
+            logical calls, returned images, and reported tokens.
+
+        Examples:
+            Read the default window:
+                ```python
+                stats = await service.get_image_generation_stats()
+                ```
+
+            Restrict aggregation to selected runs:
+                ```python
+                stats = await service.get_image_generation_stats(
+                    window="7d", run_ids={"run-1"}
+                )
+                ```
+
+        Args:
+            self: Event-log-backed metering service.
+            user_id: Optional user filter.
+            org_id: Optional organization filter.
+            window: Relative query window such as `24h` or `7d`.
+            run_ids: Optional exact run filter.
+
+        Returns:
+            dict[str, dict[str, int]]: Per-model call, image, and token totals.
+
+        Notes:
+            Unavailable token receipts contribute zero tokens but still count
+            the logical call and returned images.
+        """
+
+        rows = await self._query(
+            window=window,
+            kinds=["meter.image_generation"],
+            user_id=user_id,
+            org_id=org_id,
+            run_ids=run_ids,
+        )
+        stats: dict[str, dict[str, int]] = {}
+        for event in rows:
+            model = event.get("model", "unknown")
+            values = stats.setdefault(
+                model,
+                {"calls": 0, "images": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            )
+            values["calls"] += 1
+            values["images"] += int(event.get("image_count", 0) or 0)
+            values["input_tokens"] += int(event.get("input_tokens", 0) or 0)
+            values["output_tokens"] += int(event.get("output_tokens", 0) or 0)
+            values["total_tokens"] += int(event.get("total_tokens", 0) or 0)
         return stats
 
     async def get_graph_stats(

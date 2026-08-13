@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from aethergraph.services.llm.streaming import ModelEvent
     from aethergraph.services.llm.tool_calling import ModelResponse, ToolCallResponse
     from aethergraph.services.llm.types import (
+        EmbeddingResult,
         ImageFormat,
         ImageGenerationResult,
         ImageResponseFormat,
@@ -46,6 +47,48 @@ class LLMClientProtocol(Protocol):
 
 
 class EmbeddingClientProtocol(Protocol):
+    async def embed_result(
+        self,
+        texts: Sequence[str],
+        *,
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> EmbeddingResult:
+        """Embed a batch and retain typed provider usage.
+
+        Intro:
+            Defines the canonical embedding result boundary consumed by runtime
+            accounting before vector-only compatibility projection.
+
+        Examples:
+            Embed one text with usage:
+                ```python
+                result = await client.embed_result(["hello"])
+                ```
+
+            Override the configured model:
+                ```python
+                result = await client.embed_result(
+                    ["hello", "world"], model="embedding-v2"
+                )
+                ```
+
+        Args:
+            self: Configured embedding client.
+            texts: Ordered text inputs.
+            model: Optional per-call model override.
+            **kwargs: Bounded provider options and metering dimensions.
+
+        Returns:
+            EmbeddingResult: Ordered vectors and operation-specific usage.
+
+        Notes:
+            The `embed()` compatibility method may project only the vectors, but
+            it must delegate through this lifecycle so usage is not discarded.
+        """
+
+        ...
+
     async def embed(
         self,
         texts: Sequence[str],

@@ -9,6 +9,7 @@ from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
 )
+from aethergraph.services.llm.types import EmbeddingResult, EmbeddingUsage
 
 
 class AzureEmbeddingsAdapter:
@@ -23,7 +24,7 @@ class AzureEmbeddingsAdapter:
         azure_deployment: str | None,
         azure_api_version: str | None,
         extra_body: dict[str, Any],
-    ) -> ProviderCallResult[list[list[float]]]:
+    ) -> ProviderCallResult[EmbeddingResult]:
         """Embed one text batch through an Azure deployment.
 
         Intro:
@@ -90,11 +91,18 @@ class AzureEmbeddingsAdapter:
 
         response = await host._client.post(url, headers=headers, json=body)
         metadata = checked_response_metadata("azure", model, "embedding", response)
-        items = response.json().get("data", []) or []
+        data = response.json()
+        items = data.get("data", []) or []
         embeddings = [item.get("embedding") for item in items]
         if len(embeddings) != len(texts) or any(item is None for item in embeddings):
             raise RuntimeError(
                 "Azure embeddings response shape mismatch: "
                 f"got {len(embeddings)} items for {len(texts)} inputs"
             )
-        return ProviderCallResult(embeddings, metadata)  # type: ignore[arg-type]
+        return ProviderCallResult(
+            EmbeddingResult(
+                vectors=embeddings,  # type: ignore[arg-type]
+                usage=EmbeddingUsage.from_provider_usage(data.get("usage")),
+            ),
+            metadata,
+        )
