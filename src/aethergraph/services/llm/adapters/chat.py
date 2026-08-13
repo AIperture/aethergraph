@@ -7,6 +7,7 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any
 
+from aethergraph.services.llm.adapters.anthropic import AnthropicMessagesAdapter
 from aethergraph.services.llm.adapters.azure import AzureChatAdapter
 from aethergraph.services.llm.adapters.openai_compatible import OpenAICompatibleChatAdapter
 from aethergraph.services.llm.adapters.openai_responses import OpenAIResponsesAdapter
@@ -453,7 +454,8 @@ async def _invoke_anthropic_messages(host: Any, call: ChatAdapterInvocation) -> 
     options.pop("tool_choice", None)
     thinking_budget = options.pop("thinking_budget", None)
     thinking_mode = options.pop("thinking_mode", None)
-    return await host._chat_anthropic_messages(
+    return await AnthropicMessagesAdapter.invoke(
+        host,
         call.message_list(),
         model=call.model,
         reasoning_effort=call.reasoning_effort,

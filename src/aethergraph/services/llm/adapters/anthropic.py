@@ -1,4 +1,4 @@
-"""Anthropic Messages API methods (chat + streaming with extended thinking)."""
+"""Physical Anthropic Messages Chat adapter."""
 
 from __future__ import annotations
 
@@ -576,14 +576,15 @@ def _count_cache_control_blocks(blocks: list[Any]) -> int:
     )
 
 
-class _AnthropicMixin:
-    """Provider methods for Anthropic Messages API."""
+class AnthropicMessagesAdapter:
+    """Physical adapter for the Anthropic Messages Chat endpoint."""
 
     # ------------------------------------------------------------------
     # Chat – non-streaming
     # ------------------------------------------------------------------
-    async def _chat_anthropic_messages(
-        self,
+    @staticmethod
+    async def invoke(
+        host: Any,
         messages: list[dict[str, Any]],
         *,
         model: str,
@@ -598,12 +599,68 @@ class _AnthropicMixin:
         tool_request: ToolCallRequest | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
-        await self._ensure_client()
-        assert self._client is not None
+        """Invoke one Anthropic Messages request.
+
+        Intro:
+            Projects system blocks, thinking, prompt caching, structured output,
+            native Tools, discovery, and continuation into one Messages request.
+
+        Examples:
+            Send a direct text request:
+                ```python
+                result = await AnthropicMessagesAdapter.invoke(
+                    client,
+                    messages,
+                    model="claude-test",
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=True,
+                )
+                ```
+
+            Continue native Tool discovery:
+                ```python
+                result = await AnthropicMessagesAdapter.invoke(
+                    client,
+                    messages,
+                    model="claude-test",
+                    output_format="text",
+                    json_schema=None,
+                    fail_on_unsupported=True,
+                    tool_request=continued_request,
+                )
+                ```
+
+        Args:
+            host: Bound generic client owning the Anthropic transport.
+            messages: Provider-projected stable conversation messages.
+            model: Exact configured Anthropic model identity.
+            reasoning_effort: Optional adaptive reasoning-depth override.
+            max_output_tokens: Optional maximum generated tokens.
+            thinking_budget: Optional extended-thinking token budget.
+            thinking_mode: Optional explicit thinking on/off mode.
+            output_format: Requested text, structured, or raw output mode.
+            json_schema: Optional canonical JSON schema.
+            fail_on_unsupported: Whether unsupported native fields must fail.
+            tools: Optional legacy Tool declarations, rejected rather than dropped.
+            tool_request: Optional canonical native Tool request and continuation.
+            **kw: Additional bounded Anthropic sampling and cache options.
+
+        Returns:
+            ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
+                Normalized response, raw usage, and transport metadata.
+
+        Notes:
+            Retry, quota accounting, metering, and observations remain owned by
+            the shared invocation lifecycle. This adapter makes one attempt.
+        """
+
+        await host._ensure_client()
+        assert host._client is not None
 
         if tools is not None:
             raise LLMUnsupportedFeatureError(
-                self.provider,
+                host.provider,
                 model,
                 "provider-neutral tools",
                 "Anthropic tool translation is not wired yet; refusing to drop tools silently.",
@@ -726,10 +783,10 @@ class _AnthropicMixin:
         _validate_anthropic_cache_breakpoints(payload)
 
         async def _call():
-            r = await self._client.post(
-                f"{self.base_url}/v1/messages",
+            r = await host._client.post(
+                f"{host.base_url}/v1/messages",
                 headers={
-                    "x-api-key": self.api_key,
+                    "x-api-key": host.api_key,
                     "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },
@@ -774,8 +831,9 @@ class _AnthropicMixin:
     # ------------------------------------------------------------------
     # Chat – streaming (with extended thinking support)
     # ------------------------------------------------------------------
-    async def _chat_anthropic_messages_stream(
-        self,
+    @staticmethod
+    async def stream(
+        host: Any,
         messages: list[dict[str, Any]],
         *,
         model: str,
@@ -798,7 +856,8 @@ class _AnthropicMixin:
         Examples:
             Stream assistant text:
                 ```python
-                result = await client._chat_anthropic_messages_stream(
+                result = await AnthropicMessagesAdapter.stream(
+                    client,
                     messages,
                     model="claude-test",
                     thinking_budget=None,
@@ -812,7 +871,8 @@ class _AnthropicMixin:
 
             Observe thinking and usage:
                 ```python
-                result = await client._chat_anthropic_messages_stream(
+                result = await AnthropicMessagesAdapter.stream(
+                    client,
                     messages,
                     model="claude-test",
                     thinking_budget=1024,
@@ -826,6 +886,7 @@ class _AnthropicMixin:
                 ```
 
         Args:
+            host: Bound generic client owning the Anthropic transport.
             messages: Provider-projected stable conversation messages.
             model: Exact configured Anthropic model identity.
             thinking_budget: Optional extended-thinking token budget.
@@ -846,8 +907,8 @@ class _AnthropicMixin:
             Usage callbacks are cumulative observations. Shared accounting and
             metering consume only the returned terminal receipt.
         """
-        await self._ensure_client()
-        assert self._client is not None
+        await host._ensure_client()
+        assert host._client is not None
 
         temperature = kw.get("temperature", 0.5)
         top_p = kw.get("top_p", 1.0)
@@ -892,7 +953,7 @@ class _AnthropicMixin:
         _validate_anthropic_cache_breakpoints(payload)
 
         headers: dict[str, str] = {
-            "x-api-key": self.api_key,
+            "x-api-key": host.api_key,
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
@@ -905,9 +966,9 @@ class _AnthropicMixin:
         async def _call():
             nonlocal usage
 
-            async with self._client.stream(
+            async with host._client.stream(
                 "POST",
-                f"{self.base_url}/v1/messages",
+                f"{host.base_url}/v1/messages",
                 headers=headers,
                 json=payload,
             ) as r:

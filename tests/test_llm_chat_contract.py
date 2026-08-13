@@ -23,6 +23,7 @@ from aethergraph.services.llm import (
     message_from_text,
 )
 from aethergraph.services.llm.adapters import (
+    AnthropicMessagesAdapter,
     AzureChatAdapter,
     OpenAICompatibleChatAdapter,
     OpenAIResponsesAdapter,
@@ -1336,6 +1337,8 @@ def test_openai_compatible_chat_is_not_inherited_by_generic_client() -> None:
     assert not hasattr(GenericLLMClient, "_chat_azure_chat_completions")
     assert not hasattr(GenericLLMClient, "_chat_azure_chat_completions_stream")
     assert not hasattr(GenericLLMClient, "_chat_azure_responses")
+    assert not hasattr(GenericLLMClient, "_chat_anthropic_messages")
+    assert not hasattr(GenericLLMClient, "_chat_anthropic_messages_stream")
 
 
 @pytest.mark.asyncio
@@ -2059,7 +2062,8 @@ async def test_anthropic_tools_are_not_silently_dropped_in_compat_mode() -> None
     )
 
     with pytest.raises(LLMUnsupportedFeatureError, match="tools"):
-        await client._chat_anthropic_messages(  # type: ignore[misc]
+        await AnthropicMessagesAdapter.invoke(
+            client,
             [{"role": "user", "content": "hello"}],
             model="claude-test",
             output_format="text",
@@ -2084,7 +2088,8 @@ async def test_anthropic_without_cache_control_keeps_classic_system_string() -> 
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
 
-    result = await client._chat_anthropic_messages(  # type: ignore[misc]
+    result = await AnthropicMessagesAdapter.invoke(
+        client,
         [
             {"role": "system", "content": "Stable rules."},
             {"role": "user", "content": "hello"},
@@ -2124,7 +2129,8 @@ async def test_anthropic_cache_control_passes_through_system_and_messages() -> N
     client._client = fake_http  # type: ignore[assignment]
     client._bound_loop = asyncio.get_running_loop()
 
-    result = await client._chat_anthropic_messages(  # type: ignore[misc]
+    result = await AnthropicMessagesAdapter.invoke(
+        client,
         [
             {
                 "role": "system",
@@ -2188,7 +2194,8 @@ async def test_anthropic_cache_control_rejects_more_than_four_breakpoints() -> N
     ]
 
     with pytest.raises(ValueError, match="at most 4"):
-        await client._chat_anthropic_messages(  # type: ignore[misc]
+        await AnthropicMessagesAdapter.invoke(
+            client,
             messages,
             model="claude-test",
             output_format="text",

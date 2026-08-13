@@ -21,13 +21,13 @@ from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.core.schema_validation import first_schema_issue
-from aethergraph.services.llm._anthropic_mixin import _AnthropicMixin
 from aethergraph.services.llm._azure_mixin import _AzureMixin
 from aethergraph.services.llm._gemini_mixin import _GeminiMixin
 
 # Provider mixins (chat, streaming, image generation)
 from aethergraph.services.llm._openai_mixin import _OpenAIMixin
 from aethergraph.services.llm.adapters import (
+    AnthropicMessagesAdapter,
     AzureChatAdapter,
     ChatAdapterInvocation,
     OpenAICompatibleChatAdapter,
@@ -203,7 +203,6 @@ def _record_structured_output_failure(
 # ---- Generic client -------------------------------------------------------
 class GenericLLMClient(
     _OpenAIMixin,
-    _AnthropicMixin,
     _AzureMixin,
     _GeminiMixin,
     LLMClientProtocol,
@@ -3256,7 +3255,8 @@ class GenericLLMClient(
                 text, usage = provider_result.value
             elif self.provider == "anthropic":
                 provider_result = await self._provider_retry.execute(
-                    lambda: self._chat_anthropic_messages_stream(
+                    lambda: AnthropicMessagesAdapter.stream(
+                        self,
                         messages,
                         model=model,
                         thinking_budget=_thinking_budget,
