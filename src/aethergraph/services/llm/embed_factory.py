@@ -134,6 +134,7 @@ def embed_client_from_profile(
         rate_limit_group=p.transport.rate_limit_group,
         rate_gate=rate_gate,
         metering=metering,
+        endpoint_id=p.connection.endpoint_id,
     )
 
 

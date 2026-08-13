@@ -113,6 +113,7 @@ _ENDPOINTS = (
     EndpointAdapterDescriptor("openai_embeddings", "openai.embeddings", ("embeddings",)),
     EndpointAdapterDescriptor("azure_embeddings", "azure.embeddings", ("embeddings",)),
     EndpointAdapterDescriptor("gemini_embeddings", "google.embeddings", ("embeddings",)),
+    EndpointAdapterDescriptor("dummy_embeddings", "dummy.embeddings", ("embeddings",)),
     EndpointAdapterDescriptor("openai_images", "openai.images", ("image_generation",)),
     EndpointAdapterDescriptor("azure_images", "azure.images", ("image_generation",)),
     EndpointAdapterDescriptor(
@@ -179,8 +180,8 @@ _PROVIDERS = (
     ProviderDescriptor(
         "openrouter",
         "OpenRouter",
-        ("openai_chat_completions",),
-        {"chat": "openai_chat_completions"},
+        ("openai_chat_completions", "openai_embeddings"),
+        {"chat": "openai_chat_completions", "embeddings": "openai_embeddings"},
         "https://openrouter.ai/api/v1",
         None,
         ("OPENROUTER_API_KEY",),
@@ -229,8 +230,8 @@ _PROVIDERS = (
     ProviderDescriptor(
         "dummy",
         "Dummy (tests)",
-        ("dummy_chat",),
-        {"chat": "dummy_chat"},
+        ("dummy_chat", "dummy_embeddings"),
+        {"chat": "dummy_chat", "embeddings": "dummy_embeddings"},
         "http://localhost:8745",
         None,
         (),

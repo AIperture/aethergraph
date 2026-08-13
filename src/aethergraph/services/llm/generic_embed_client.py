@@ -12,15 +12,18 @@ import httpx
 from aethergraph.contracts.services.llm import EmbeddingClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.services.llm.adapters.embedding import (
+    EmbeddingAdapterInvocation,
+    invoke_embedding_adapter,
+)
 from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     ProviderRateGate,
     ProviderRetryExecutor,
     ProviderRetrySettings,
-    checked_response_metadata,
 )
-from aethergraph.services.llm.registry import provider_default_base_url
+from aethergraph.services.llm.registry import provider_default_base_url, resolve_endpoint_adapter
 
 
 @dataclass
@@ -53,6 +56,7 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
 
     # metering (optional, can be None)
     metering: MeteringService | None = None
+    endpoint_id: str | None = None
 
     def __post_init__(self) -> None:
         self.provider = (
@@ -72,6 +76,13 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             secrets=None,
         ).value
         self.base_url = self.base_url or provider_default_base_url(self.provider) or ""
+
+        if self.endpoint_id is not None:
+            self.endpoint_id = resolve_endpoint_adapter(
+                self.provider,
+                "embeddings",
+                endpoint_id=self.endpoint_id,
+            ).adapter_id
 
         # Azure deployment (for /deployments/{name}/embeddings)
         if self.provider == "azure" and self.azure_deployment is None:
@@ -118,8 +129,39 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         model: str | None = None,
         **kw: Any,
     ) -> list[list[float]]:
-        """
-        Provider-agnostic batch embedding.
+        """Embed one ordered batch through the configured exact endpoint.
+
+        Intro:
+            Validates provider-neutral input, resolves one endpoint before each
+            lifecycle execution, and retains retry, rate gating, and best-effort
+            metering outside the physical adapter.
+
+        Examples:
+            Embed one text:
+                ```python
+                client = GenericEmbeddingClient(provider="dummy", model="test")
+                vectors = await client.embed(["hello"])
+                ```
+
+            Override the configured model:
+                ```python
+                client = GenericEmbeddingClient(provider="dummy", model="default")
+                vectors = await client.embed(["hello", "world"], model="test")
+                ```
+
+        Args:
+            self: Configured provider-neutral embedding client.
+            texts: Ordered text inputs. An empty sequence returns immediately.
+            model: Optional per-call model override.
+            **kw: Metering context plus bounded provider request options such as
+                `extra_body` and `azure_api_version`.
+
+        Returns:
+            list[list[float]]: Ordered embedding vectors matching the input count.
+
+        Notes:
+            Anthropic and DeepSeek embeddings remain explicitly unsupported.
+            Physical adapters perform one attempt; this facade owns retries.
         """
         await self._ensure_client()
         assert self._client is not None
@@ -136,32 +178,25 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
             raise NotImplementedError("Embeddings not supported for anthropic")
         if self.provider == "deepseek":
             raise NotImplementedError("Embeddings not supported for deepseek")
-        if self.provider not in {
-            "openai",
-            "openrouter",
-            "lmstudio",
-            "ollama",
-            "openai_compatible",
-            "azure",
-            "google",
-            "dummy",
-        }:  # pragma: no cover
-            raise NotImplementedError(f"Unknown embedding provider: {self.provider}")
+        adapter = resolve_endpoint_adapter(
+            self.provider,
+            "embeddings",
+            endpoint_id=self.endpoint_id,
+        )
+        invocation = EmbeddingAdapterInvocation(
+            texts=tuple(texts),
+            model=model,
+            azure_deployment=self.azure_deployment,
+            azure_api_version=kw.get("azure_api_version"),
+            extra_body=kw.get("extra_body") or {},
+        )
 
         async def _attempt() -> ProviderCallResult[list[list[float]]]:
-            if self.provider in {
-                "openai",
-                "openrouter",
-                "lmstudio",
-                "ollama",
-                "openai_compatible",
-            }:
-                return await self._embed_openai_like(texts, model=model, **kw)
-            if self.provider == "azure":
-                return await self._embed_azure(texts, model=model, **kw)
-            if self.provider == "google":
-                return await self._embed_google(texts, model=model, **kw)
-            return ProviderCallResult(await self._embed_dummy(texts, model=model, **kw))
+            return await invoke_embedding_adapter(
+                self,
+                adapter_id=adapter.adapter_id,
+                invocation=invocation,
+            )
 
         provider_result = await self._provider_retry.execute(
             _attempt,
@@ -209,135 +244,39 @@ class GenericEmbeddingClient(EmbeddingClientProtocol):
         model: str | None = None,
         **kw: Any,
     ) -> list[float]:
+        """Embed one text through the configured exact endpoint.
+
+        Intro:
+            Delegates to the batch lifecycle so validation, adapter selection,
+            retry, rate gating, and metering remain centralized.
+
+        Examples:
+            Embed one text:
+                ```python
+                client = GenericEmbeddingClient(provider="dummy", model="test")
+                vector = await client.embed_one("hello")
+                ```
+
+            Override the configured model:
+                ```python
+                client = GenericEmbeddingClient(provider="dummy", model="default")
+                vector = await client.embed_one("hello", model="test")
+                ```
+
+        Args:
+            self: Configured provider-neutral embedding client.
+            text: Single text input.
+            model: Optional per-call model override.
+            **kw: Metering context and bounded provider request options forwarded
+                to `embed`.
+
+        Returns:
+            list[float]: The single normalized embedding vector.
+
+        Notes:
+            This method intentionally shares the batch lifecycle and does not
+            introduce a separate provider path.
+        """
+
         res = await self.embed([text], model=model, **kw)
         return res[0]
-
-    # ------------ provider-specific helpers ------------------------
-
-    def _headers_openai_like(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
-
-    async def _embed_openai_like(
-        self,
-        texts: Sequence[str],
-        *,
-        model: str,
-        **kw: Any,
-    ) -> ProviderCallResult[list[list[float]]]:
-        assert self._client is not None
-        url = f"{self.base_url}/embeddings"
-        headers = self._headers_openai_like()
-        extra_body: dict[str, Any] = kw.get("extra_body") or {}
-
-        body: dict[str, Any] = {
-            "model": model,
-            "input": list(texts),
-        }
-        body.update(extra_body)
-
-        def parse(data: dict[str, Any]) -> list[list[float]]:
-            items = data.get("data", []) or []
-            embs = [d.get("embedding") for d in items]
-            if len(embs) != len(texts) or any(e is None for e in embs):
-                raise RuntimeError(
-                    f"Embeddings response shape mismatch: got {len(embs)} items for {len(texts)} inputs"
-                )
-            return embs  # type: ignore[return-value]
-
-        async def _call():
-            r = await self._client.post(url, headers=headers, json=body)
-            metadata = checked_response_metadata(self.provider, model, "embedding", r)
-            return ProviderCallResult(parse(r.json()), metadata)
-
-        return await _call()
-
-    async def _embed_azure(
-        self,
-        texts: Sequence[str],
-        *,
-        model: str,
-        **kw: Any,
-    ) -> ProviderCallResult[list[list[float]]]:
-        if not self.azure_deployment:
-            raise RuntimeError(
-                "Azure embeddings requires AZURE_OPENAI_DEPLOYMENT (azure_deployment)"
-            )
-
-        assert self._client is not None
-
-        azure_api_version = kw.get("azure_api_version") or "2024-08-01-preview"
-        extra_body: dict[str, Any] = kw.get("extra_body") or {}
-
-        url = (
-            f"{self.base_url}/openai/deployments/"
-            f"{self.azure_deployment}/embeddings?api-version={azure_api_version}"
-        )
-        headers = {"api-key": self.api_key or "", "Content-Type": "application/json"}
-        body: dict[str, Any] = {"input": list(texts)}
-        # Some Azure flavors accept model/dimensions; keep flexible
-        if model:
-            body["model"] = model
-        body.update(extra_body)
-
-        def parse(data: dict[str, Any]) -> list[list[float]]:
-            items = data.get("data", []) or []
-            embs = [d.get("embedding") for d in items]
-            if len(embs) != len(texts) or any(e is None for e in embs):
-                raise RuntimeError(
-                    f"Azure embeddings response shape mismatch: got {len(embs)} items for {len(texts)} inputs"
-                )
-            return embs  # type: ignore[return-value]
-
-        async def _call():
-            r = await self._client.post(url, headers=headers, json=body)
-            metadata = checked_response_metadata("azure", model, "embedding", r)
-            return ProviderCallResult(parse(r.json()), metadata)
-
-        return await _call()
-
-    async def _embed_google(
-        self,
-        texts: Sequence[str],
-        *,
-        model: str,
-        **kw: Any,
-    ) -> ProviderCallResult[list[list[float]]]:
-        assert self._client is not None
-        base = self.base_url.rstrip("/")
-        api_key = self.api_key or ""
-        headers = {"Content-Type": "application/json"}
-
-        batch_url_v1 = f"{base}/v1/models/{model}:batchEmbedContents?key={api_key}"
-
-        def parse_batch(data: dict[str, Any]) -> list[list[float]]:
-            embs: list[list[float]] = []
-            for e in data.get("embeddings") or []:
-                embs.append((e or {}).get("values") or [])
-            if len(embs) != len(texts):
-                raise RuntimeError(
-                    f"Gemini batch embeddings mismatch: got {len(embs)} for {len(texts)}"
-                )
-            return embs
-
-        async def _call() -> ProviderCallResult[list[list[float]]]:
-            body = {"requests": [{"content": {"parts": [{"text": t}]}} for t in texts]}
-            r = await self._client.post(batch_url_v1, headers=headers, json=body)
-            metadata = checked_response_metadata("google", model, "embedding", r)
-            return ProviderCallResult(parse_batch(r.json()), metadata)
-
-        return await _call()
-
-    async def _embed_dummy(
-        self,
-        texts: Sequence[str],
-        *,
-        model: str,
-        **kw: Any,
-    ) -> list[list[float]]:
-        """
-        Dummy provider for tests: returns [len(text)] as a 1D "embedding".
-        """
-        return [[float(len(t))] for t in texts]

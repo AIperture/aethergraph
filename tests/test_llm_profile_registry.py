@@ -16,12 +16,14 @@ from aethergraph.services.llm import (
     provider_default_base_url,
     resolve_endpoint_adapter,
 )
+from aethergraph.services.llm.adapters.embedding import registered_embedding_adapter_ids
 from aethergraph.services.llm.compat import (
     chat_profile_from_legacy,
     embedding_profile_from_legacy,
     resolve_legacy_chat_adapter,
 )
 from aethergraph.services.llm.credentials import resolve_provider_credential
+from aethergraph.services.llm.embed_factory import embed_client_from_profile
 from aethergraph.services.llm.factory import build_llm_clients, client_from_profile
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
@@ -269,6 +271,29 @@ def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:
     assert canonical.operation == "embeddings"
     assert canonical.connection.endpoint_id == "gemini_embeddings"
     assert canonical.model.model_id == "text-embedding-004"
+    assert embed_client_from_profile(canonical, _Secrets()).endpoint_id == "gemini_embeddings"
+
+
+def test_embedding_runtime_registry_matches_advertised_operations() -> None:
+    advertised = {
+        adapter_id
+        for adapter_id, descriptor in ENDPOINT_ADAPTERS.items()
+        if "embeddings" in descriptor.implemented_operations
+    }
+
+    assert registered_embedding_adapter_ids() == advertised
+
+
+def test_existing_openrouter_and_dummy_embedding_support_is_canonical() -> None:
+    assert resolve_endpoint_adapter("openrouter", "embeddings").adapter_id == "openai_embeddings"
+    assert resolve_endpoint_adapter("dummy", "embeddings").adapter_id == "dummy_embeddings"
+
+
+@pytest.mark.asyncio
+async def test_dummy_embedding_uses_the_exact_registered_adapter() -> None:
+    client = GenericEmbeddingClient(provider="dummy", model="dummy-embedding")
+
+    assert await client.embed(["hello", ""]) == [[5.0], [0.0]]
 
 
 def test_canonical_profiles_are_closed_and_immutable() -> None:
