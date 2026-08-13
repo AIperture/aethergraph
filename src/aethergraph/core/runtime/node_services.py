@@ -15,7 +15,6 @@ from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.mcp.service import MCPService
 from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.planning.planner_service import PlannerService
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.tracing import NoopTracer, TracerProtocol
@@ -47,7 +46,6 @@ class NodeServices:
     runner: RunFacade | None = None  # RunFacade for child run orchestration
     indices: ScopedIndices | None = None  # ScopedIndices for this node
     execution: Any | None = None  # ExecutionService
-    planner_service: PlannerService | None = None  # PlannerService
     kb: NodeKB | None = None  # NodeKB
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
     web_search: WebSearchFacade | None = None  # Web search facade

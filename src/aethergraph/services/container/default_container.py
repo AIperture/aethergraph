@@ -75,11 +75,6 @@ from aethergraph.services.observability import (
     open_active_observability_facade,
 )
 
-# ---- Planning components ----
-from aethergraph.services.planning.action_catalog import ActionCatalog
-from aethergraph.services.planning.flow_validator import FlowValidator
-from aethergraph.services.planning.planner_service import PlannerService
-
 # ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
 from aethergraph.services.registry.registration_service import RegistrationService
@@ -216,9 +211,6 @@ class DefaultContainer:
     run_manager: RunManager | None = None  # RunManager
     run_cancellation_registry: RunCancellationRegistry | None = None
     session_store: SessionStore | None = None  # SessionStore
-
-    # planner
-    planner_service: PlannerService | None = None
 
     # optional services (not used by default)
     execution: ExecutionService | None = None
@@ -545,16 +537,6 @@ def build_default_container(
         LocalPythonExecutionService()
     )  # simple local python executor -- NOT SANDBOXED; just for local functionality testing
 
-    # Planner service
-    catalog = ActionCatalog(registry=registry)
-    flow_validator = FlowValidator(catalog=catalog)
-    planner_service = PlannerService(
-        catalog=catalog,
-        llm=llm_service.get("default") if llm_service else None,
-        validator=flow_validator,
-        run_manager=run_manager,
-    )
-
     agent_event_registry = register_default_agent_event_types(AgentEventTypeRegistry())
 
     # trigger services
@@ -600,7 +582,6 @@ def build_default_container(
         trigger_engine=trigger_engine,
         trigger_service=trigger_service,
         execution=execution,
-        planner_service=planner_service,
         doc_store=doc_store,
         kv_hot=kv_hot,
         state_store=state_store,

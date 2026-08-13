@@ -31,7 +31,6 @@ from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.planning.node_planner import NodePlanner
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.scope.scope import Scope
@@ -56,7 +55,6 @@ class NodeContext:
     scope: Scope | None = None
     agent_id: str | None = None  # for agent-invoked runs
     app_id: str | None = None  # for app-invoked runs
-    _planner_facade: NodePlanner | None = None  # lazy init
     chat_tag_provider: Callable[[], list[str]] | None = None
 
     # --- accessors (compatible names) ---
@@ -320,16 +318,6 @@ class NodeContext:
             stacklevel=2,
         )
         await self.runner().cancel_run(run_id, reason=reason)
-
-    def planner(self) -> "NodePlanner":
-        if self._planner_facade is None:
-            if self.services.planner_service is None:
-                raise RuntimeError("NodeContext.services.planner_service is not configured")
-            self._planner_facade = NodePlanner(
-                service=self.services.planner_service,
-                node_ctx=self,
-            )
-        return self._planner_facade
 
     def logger(self):
         if not self.services.logger:

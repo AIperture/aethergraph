@@ -270,7 +270,6 @@ class RuntimeEnv:
             execution=self.container.execution
             if self.container.execution is not None
             else None,  # ExecutionService
-            planner_service=self.container.planner_service,
             kb=kb,  # NodeKB
             triggers=triggers,  # TriggerFacade for this node
             web_search=web_search,  # WebSearchFacade or None
