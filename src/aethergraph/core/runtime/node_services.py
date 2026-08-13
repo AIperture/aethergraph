@@ -8,12 +8,10 @@ from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.stores.fs_store import FSContinuationStore
 from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.image_service import ImageGenerationService
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import StdLoggerService
-from aethergraph.services.mcp.service import MCPService
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
@@ -21,7 +19,6 @@ from aethergraph.services.tracing import NoopTracer, TracerProtocol
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
-from aethergraph.services.websearch.facade import WebSearchFacade
 
 
 @dataclass
@@ -42,12 +39,8 @@ class NodeServices:
     llm: LLMService | None = None  # LLMService
     embedding: EmbeddingService | None = None  # EmbeddingService
     image_model: ImageGenerationService | None = None  # ImageGenerationService
-    mcp: MCPService | None = None  # MCPService
     runner: RunFacade | None = None  # RunFacade for child run orchestration
     indices: ScopedIndices | None = None  # ScopedIndices for this node
-    execution: Any | None = None  # ExecutionService
-    kb: NodeKB | None = None  # NodeKB
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
-    web_search: WebSearchFacade | None = None  # Web search facade
     registry: RegistryFacade | None = None  # Scope-bound runtime registry facade
     tracer: TracerProtocol | NoopTracer | None = None

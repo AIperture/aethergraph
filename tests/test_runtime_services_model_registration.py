@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from aethergraph.core.runtime.runtime_services import register_llm_client, use_services
-from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBackend
 
 
 class _ProfileService:
@@ -75,22 +74,3 @@ def test_register_llm_client_fails_before_chat_when_legacy_embedding_is_disabled
         )
 
     assert llm.calls == []
-
-
-@pytest.mark.asyncio
-async def test_knowledge_reembed_reports_canonical_embedding_model(tmp_path) -> None:
-    backend = LocalFSKnowledgeBackend(
-        corpus_root=str(tmp_path),
-        artifacts=object(),
-        search_backend=object(),  # type: ignore[arg-type]
-        embed_client=SimpleNamespace(model="text-embedding-3-small"),  # type: ignore[arg-type]
-        llm_client=object(),  # type: ignore[arg-type]
-        chunker=object(),  # type: ignore[arg-type]
-    )
-
-    result = await backend.reembed(scope=None, corpus_id="missing")
-
-    assert result == {
-        "reembedded": 0,
-        "model": "text-embedding-3-small",
-    }

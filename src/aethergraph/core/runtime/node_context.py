@@ -5,12 +5,6 @@ from typing import Any
 import warnings
 
 from aethergraph.contracts.integration import OriginBinding
-from aethergraph.contracts.services.execution import (
-    CodeExecutionRequest,
-    CodeExecutionResult,
-    ExecutionService,
-    Language,
-)
 from aethergraph.contracts.services.llm import (
     EmbeddingClientProtocol,
     ImageGenerationClientProtocol,
@@ -27,7 +21,6 @@ from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.facade import MemoryFacade
@@ -36,7 +29,6 @@ from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.scope.scope import Scope
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
-from aethergraph.services.websearch.facade import WebSearchFacade
 
 from .base_service import _ServiceHandle
 from .node_services import NodeServices
@@ -60,31 +52,6 @@ class NodeContext:
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:
         return self.services
-
-    async def execute(
-        self,
-        code: str,
-        *,
-        language: Language = "python",
-        timeout_s: float = 30.0,
-        args: list[str] | None = None,
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> CodeExecutionResult:
-        """ """
-        exe_svs: ExecutionService | None = getattr(self.services, "execution", None)
-        if exe_svs is None:
-            raise RuntimeError("NodeContext.services.execution is not configured")
-
-        req = CodeExecutionRequest(
-            language=language,
-            code=code,
-            args=args or [],
-            timeout_s=timeout_s,
-            workdir=workdir,
-            env=env,
-        )
-        return await exe_svs.execute(req)
 
     async def spawn_run(
         self,
@@ -452,16 +419,6 @@ class NodeContext:
             raise RuntimeError("Viz service (facade) not available")
         return self.services.viz
 
-    def kb(self) -> NodeKB:
-        if not self.services.kb:
-            raise RuntimeError("NodeKB service not available")
-        return self.services.kb
-
-    def web_search(self) -> WebSearchFacade:
-        if not self.services.web_search:
-            raise RuntimeError("Web search service not available")
-        return self.services.web_search
-
     def runner(self) -> RunFacade:
         """
         Get the centralized run management facade for this node context.
@@ -684,11 +641,6 @@ class NodeContext:
         if svc is None:
             raise RuntimeError("LLM service not available")
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
-
-    def mcp(self, name):
-        if not self.services.mcp:
-            raise RuntimeError("MCPService not available")
-        return self.services.mcp.get(name)
 
     def indices(self) -> ScopedIndices:
         if not self.services.indices:

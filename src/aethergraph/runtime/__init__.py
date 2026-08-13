@@ -19,18 +19,13 @@ from aethergraph.core.runtime.runtime_services import (
     get_ext_context_service,
     # llm service helpers
     get_llm_service,
-    get_mcp_service,
     # general service management
     install_services,
     list_ext_context_services,
-    list_mcp_clients,
     register_channel_adapter,
     # external context service helpers
     register_context_service,
     register_llm_client,
-    register_mcp_client,
-    # mcp service helpers
-    set_mcp_service,
 )
 
 __all__ = [
@@ -44,19 +39,12 @@ __all__ = [
     # llm service helpers
     "get_llm_service",
     "register_llm_client",
-    "set_rag_llm_client",
-    "set_rag_index_backend",
     # logger service helpers
     "current_logger_factory",
     # external context service helpers
     "register_context_service",
     "get_ext_context_service",
     "list_ext_context_services",
-    # mcp service helpers
-    "set_mcp_service",
-    "get_mcp_service",
-    "register_mcp_client",
-    "list_mcp_clients",
     # ad-hoc context
     "open_session",
     # run manager and types

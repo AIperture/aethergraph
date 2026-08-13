@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .llm import EmbeddingSettings, ImageGenerationSettings, LLMSettings
 from .observability import ObservabilitySettings
-from .search import KnowledgeSettings, SearchBackendSettings
+from .search import SearchBackendSettings
 from .storage import StorageSettings
 
 
@@ -122,15 +122,6 @@ class ChannelSettings(BaseModel):
     """Reserved host-level Channel configuration namespace."""
 
 
-class RAGSettings(BaseModel):
-    root: str = (
-        "./aethergraph_workspace/rag"  # base dir for rag; should not use it unless customized
-    )
-    backend: str = "sqlite"  # "sqlite" | "faiss"
-    index_path: str | None = None  # defaults set at runtime if None
-    dim: int | None = None  # only for faiss; optional
-
-
 class AuthSettings(BaseModel):
     cookie_name: str = "ag_auth_session"
     cookie_secure: bool = False
@@ -202,11 +193,9 @@ class AppSettings(BaseSettings):
     cont: ContinuationStoreSettings = ContinuationStoreSettings()
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
-    rag: RAGSettings = RAGSettings()
     auth: AuthSettings = AuthSettings()
     storage: StorageSettings = StorageSettings()
     search: SearchBackendSettings = SearchBackendSettings()
-    knowledge: KnowledgeSettings = KnowledgeSettings()
 
     # Optional path to demo-service directory (for admin routes).
     # Set via env: AETHERGRAPH_DEMO_SERVICE_DIR=/path/to/demo-service

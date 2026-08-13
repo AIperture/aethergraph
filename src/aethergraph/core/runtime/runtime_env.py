@@ -21,7 +21,6 @@ from aethergraph.services.continuations.stores.fs_store import (
 
 # ---- memory services ----
 from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.knowledge.node_kb import NodeKB
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.resume.router import ResumeRouter
@@ -30,7 +29,6 @@ from aethergraph.services.tracing import NoopTracer
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
-from aethergraph.services.websearch.facade import WebSearchFacade
 
 from ..graph.task_node import TaskNodeRuntime
 from .execution_context import ExecutionContext
@@ -117,14 +115,6 @@ class RuntimeEnv:
     @property
     def image_model_service(self):
         return self.container.image_service
-
-    @property
-    def mcp_service(self):
-        return self.container.mcp
-
-    @property
-    def web_search_service(self):
-        return self.container.web_search
 
     @property
     def resume_router(self) -> ResumeRouter:
@@ -219,11 +209,6 @@ class RuntimeEnv:
             scope=node_scope,
         )
 
-        kb = NodeKB(
-            backend=self.container.kb_backend,
-            scope=mem_scope,
-        )
-
         # ----- TriggerFacade tied to this node/run -----
         # trigger_scope = self.container.scope_factory.for_trigger(identity=self.identity)
         trigger_scope = (
@@ -234,10 +219,6 @@ class RuntimeEnv:
             trigger_engine=self.container.trigger_engine,
             scope=trigger_scope,
         )
-
-        web_search = None
-        if self.web_search_service is not None:
-            web_search = WebSearchFacade(self.web_search_service)
 
         runner = RunFacade(
             run_manager=self.container.run_manager,
@@ -264,15 +245,9 @@ class RuntimeEnv:
             llm=self.llm_service,  # LLMService
             embedding=self.embedding_service,  # EmbeddingService
             image_model=self.image_model_service,  # ImageGenerationService
-            mcp=self.mcp_service,  # MCPService
             runner=runner,  # RunFacade
             indices=indices,  # ScopedIndices for this node
-            execution=self.container.execution
-            if self.container.execution is not None
-            else None,  # ExecutionService
-            kb=kb,  # NodeKB
             triggers=triggers,  # TriggerFacade for this node
-            web_search=web_search,  # WebSearchFacade or None
             registry=RegistryFacade(
                 registry=self.registry,
                 scope=mem_scope or node_scope,
@@ -280,16 +255,6 @@ class RuntimeEnv:
             ),
             tracer=self.container.tracer or NoopTracer(),
         )
-        try:
-            from aethergraph.services.harness.overrides import wrap_node_services
-
-            services = wrap_node_services(
-                services,
-                graph_id=self.graph_id,
-                node_id=node.node_id,
-            )
-        except Exception:
-            pass
         return ExecutionContext(
             run_id=self.run_id,
             session_id=self.session_id,

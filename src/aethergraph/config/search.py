@@ -51,26 +51,3 @@ class SearchBackendSettings(BaseModel):
 
     # NEW: toggle lexical index when using vector backends
     enable_lexical: bool = True
-
-
-class KnowledgeSettings(BaseModel):
-    """
-    Settings for the Knowledge Base subsystem.
-    """
-
-    # Where LocalFSKnowledgeBackend stores corpus files
-    corpus_root: str = "kb/corpora"
-
-    # Search backend for KB (separate index from global indices)
-    search: SearchBackendSettings = SearchBackendSettings(
-        backend="sqlite_vector",
-        sqlite_vector=SQLiteVectorIndexSettings(
-            dir="kb/search/vector_sqlite",
-            filename="index.sqlite",
-        ),
-        sqlite_lexical=SQLiteLexicalSearchSettings(
-            dir="kb/search/sqlite_lexical",
-            filename="index.sqlite",
-        ),
-        enable_lexical=True,
-    )

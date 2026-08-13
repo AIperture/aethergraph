@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
 from typing import Any
 
 # ---- core services ----
 from aethergraph.config.config import AppSettings
 from aethergraph.contracts.integration import HostManifest
-from aethergraph.contracts.services.execution import ExecutionService
 
 # ---- optional services (not used by default) ----
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
@@ -41,7 +39,6 @@ from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.stores.fs_store import (
     FSContinuationStore,  # AsyncContinuationStore
 )
-from aethergraph.services.execution.local_python import LocalPythonExecutionService
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
@@ -49,10 +46,8 @@ from aethergraph.services.inspect import (
     AgentEventTypeRegistry,
     register_default_agent_event_types,
 )
-from aethergraph.services.knowledge.chunker import TextSplitter
 
 # ---- kv services ----
-from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBackend
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
@@ -61,7 +56,6 @@ from aethergraph.services.llm.image_service import ImageGenerationService
 from aethergraph.services.llm.provider_transport import ProviderRateGate
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
-from aethergraph.services.mcp.service import MCPService
 
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
@@ -90,10 +84,6 @@ from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
 from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
-from aethergraph.services.websearch.httpx_fetcher import HttpxWebPageFetcher
-from aethergraph.services.websearch.providers.default import DefaultWebSearchProvider
-from aethergraph.services.websearch.service import WebSearchService
-from aethergraph.services.websearch.types import WebSearchEngine
 
 # ---- storage builders ----
 from aethergraph.storage.factory import (
@@ -114,7 +104,7 @@ from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
 from aethergraph.storage.memory.event_persist import EventLogPersistence
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
-from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
+from aethergraph.storage.search_factory import build_search_backend
 from aethergraph.storage.triggers.trigger_docstore import DocTriggerStore
 
 SERVICE_KEYS = [
@@ -188,8 +178,6 @@ class DefaultContainer:
     registration_service: RegistrationService
     eventlog: EventLog
     global_indices: GlobalIndices
-    kb_backend: LocalFSKnowledgeBackend  # for now just use the local FS backend as the default; in the future, we can make this swappable like the global indices backend, and add auto-indexing to the NodeKB facade
-
     # memory
     memory_factory: MemoryFactory
 
@@ -200,10 +188,8 @@ class DefaultContainer:
     llm: LLMService | None = None
     observability: ObservabilityFacade | None = None
     retention_janitor: RetentionJanitor | None = None
-    mcp: MCPService | None = None
     embed_service: EmbeddingService | None = None
     image_service: ImageGenerationService | None = None
-    web_search: WebSearchService | None = None
 
     # run controls -- for http endpoints and run manager
     run_store: RunStore | None = None
@@ -213,7 +199,6 @@ class DefaultContainer:
     session_store: SessionStore | None = None  # SessionStore
 
     # optional services (not used by default)
-    execution: ExecutionService | None = None
     authn: AuthnService | None = None
     authz: AllowAllAuthz | None = None
 
@@ -444,17 +429,6 @@ def build_default_container(
     if llm_service is not None and image_service is not None:
         llm_service.bind_image_service(image_service)
 
-    mcp = MCPService()  # empty MCP service; users can register clients as needed
-
-    # web search service uses a provider-agnostic default no-op provider.
-    # This keeps `fetch` always available even when search providers are not configured.
-    default_web_provider = DefaultWebSearchProvider()
-    web_search: WebSearchService | None = WebSearchService(
-        providers={WebSearchEngine.custom: default_web_provider},
-        default_engine=WebSearchEngine.custom,
-        page_fetcher=HttpxWebPageFetcher(),
-    )
-
     # memory factory
     hotlog = build_memory_hotlog(cfg)
     memory_factory = MemoryFactory(
@@ -521,22 +495,6 @@ def build_default_container(
     global_indices_backend = build_search_backend(cfg=cfg, embedder=embed_client)
     global_indices = GlobalIndices(backend=global_indices_backend)  # to be set up later as needed
 
-    kb_search_backend = build_kb_search_backend(cfg, embedder=embed_client)
-    kb_backend = LocalFSKnowledgeBackend(
-        corpus_root=os.path.join(os.path.abspath(cfg.workspace), cfg.knowledge.corpus_root),
-        artifacts=artifacts,  # this is store, not Facade with auto-indexing, long doc has its own indexing method
-        search_backend=kb_search_backend,
-        embed_client=embed_client,
-        llm_client=llm_clients.get("default") if llm_clients else None,
-        chunker=TextSplitter(),
-        logger=logger_factory.for_service(ns="kb_backend"),
-    )
-
-    # Execution service
-    execution = (
-        LocalPythonExecutionService()
-    )  # simple local python executor -- NOT SANDBOXED; just for local functionality testing
-
     agent_event_registry = register_default_agent_event_types(AgentEventTypeRegistry())
 
     # trigger services
@@ -581,7 +539,6 @@ def build_default_container(
         trigger_store=trigger_store,
         trigger_engine=trigger_engine,
         trigger_service=trigger_service,
-        execution=execution,
         doc_store=doc_store,
         kv_hot=kv_hot,
         state_store=state_store,
@@ -590,7 +547,6 @@ def build_default_container(
         registration_manifest_store=registration_manifest_store,
         registration_service=registration_service,
         global_indices=global_indices,
-        kb_backend=kb_backend,
         viz_service=viz_service,
         eventlog=eventlog,
         memory_factory=memory_factory,
@@ -599,8 +555,6 @@ def build_default_container(
         retention_janitor=retention_janitor,
         embed_service=embed_service,
         image_service=image_service,
-        web_search=web_search,
-        mcp=mcp,
         run_store=run_store,
         run_result_store=run_result_store,
         run_manager=run_manager,

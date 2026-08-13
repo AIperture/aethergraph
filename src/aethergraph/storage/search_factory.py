@@ -154,19 +154,3 @@ def build_search_backend(
         settings=cfg.search,
         embedder=embedder,
     )
-
-
-def build_kb_search_backend(
-    cfg: AppSettings,
-    *,
-    embedder: EmbeddingClientProtocol | None,
-) -> SearchBackend:
-    """
-    Build the SearchBackend used by the KnowledgeBackend / KB.
-    """
-    root = os.path.abspath(cfg.workspace)
-    return build_search_backend_from_settings(
-        root=root,
-        settings=cfg.knowledge.search,
-        embedder=embedder,
-    )
