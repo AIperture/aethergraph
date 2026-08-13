@@ -7,6 +7,7 @@ from aethergraph_engine.compiler import compile_system_project
 import pytest
 
 from aethergraph.config.config import AppSettings
+from aethergraph.config.llm import LLMProfile
 from aethergraph.contracts.integration import HostManifest
 from aethergraph.services.host import (
     HostCompatibilityError,
@@ -17,6 +18,7 @@ from aethergraph.services.host import (
     load_host_manifest,
     seal_host_manifest,
 )
+from aethergraph.services.host.builder import _bind_runtime_profile
 from tests._integration_fixtures import (
     contract_compatibility,
     runtime_compatibility,
@@ -69,6 +71,24 @@ def test_load_host_manifest_rejects_tampered_content(tmp_path) -> None:
 
     with pytest.raises(HostManifestError, match="digest"):
         load_host_manifest(path)
+
+
+def test_host_binds_the_manifest_selected_runtime_profile() -> None:
+    settings = AppSettings()
+    settings.llm.profiles["deployment"] = LLMProfile(
+        provider="anthropic",
+        model="deployment-model",
+    )
+
+    _bind_runtime_profile(settings, "deployment")
+
+    assert settings.llm.default.provider == "anthropic"
+    assert settings.llm.default.model == "deployment-model"
+
+
+def test_host_rejects_a_missing_manifest_selected_runtime_profile() -> None:
+    with pytest.raises(HostManifestError, match="missing from Host settings"):
+        _bind_runtime_profile(AppSettings(), "missing")
 
 
 def test_host_rejects_incompatible_release_before_entrypoint_import(tmp_path) -> None:

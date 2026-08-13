@@ -198,6 +198,7 @@ def build_host(
     set_current_registry(registry)
     pinned_settings = settings.model_copy(deep=True)
     pinned_settings.workspace = str(workspace_path)
+    _bind_runtime_profile(pinned_settings, manifest.runtime_profile_name)
     container = build_default_container(
         root=str(workspace_path),
         cfg=pinned_settings,
@@ -240,6 +241,47 @@ def build_host(
         container=container,
         integration_manager=integration_manager,
     )
+
+
+def _bind_runtime_profile(settings: AppSettings, profile_name: str | None) -> None:
+    """Make the manifest-selected Chat profile the Host application default.
+
+    Intro:
+        Studio and other control planes can select one named profile while the
+        Host still receives the complete immutable settings snapshot.
+
+    Examples:
+        Bind a named profile:
+            ```python
+            _bind_runtime_profile(settings, "deployment")
+            ```
+
+        Preserve legacy manifests:
+            ```python
+            _bind_runtime_profile(settings, None)
+            ```
+
+    Args:
+        settings: Deep-copied settings owned by this Host construction.
+        profile_name: Optional manifest-pinned Chat profile name.
+
+    Returns:
+        None: The copied default profile is updated in place when selected.
+
+    Notes:
+        Missing named profiles fail closed. Credentials remain sourced from the
+        immutable settings snapshot and are not copied into the manifest.
+    """
+
+    if profile_name is None:
+        return
+    profiles = {"default": settings.llm.default, **settings.llm.profiles}
+    selected = profiles.get(profile_name)
+    if selected is None:
+        raise HostManifestError(
+            f"Pinned runtime profile {profile_name!r} is missing from Host settings."
+        )
+    settings.llm.default = selected.model_copy(deep=True)
 
 
 def _validate_runtime_identity(

@@ -267,6 +267,7 @@ class HostManifest(IntegrationContract):
     entry_agent_id: Identifier
     environment_snapshot_digest: Digest
     runtime_profile_digest: Digest
+    runtime_profile_name: Identifier | None = None
     application_settings_digest: Digest
     semantic_event_protocol_version: SemanticEventProtocolVersion = SEMANTIC_EVENT_PROTOCOL_VERSION
     ingress_protocol_version: Literal["aethergraph.ingress/v1"] = INGRESS_PROTOCOL_VERSION
