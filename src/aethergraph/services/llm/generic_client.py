@@ -30,6 +30,7 @@ from aethergraph.services.llm.adapters import (
     AnthropicMessagesAdapter,
     AzureChatAdapter,
     ChatAdapterInvocation,
+    GeminiGenerateContentAdapter,
     OpenAICompatibleChatAdapter,
     OpenAIResponsesAdapter,
     invoke_chat_adapter,
@@ -3314,7 +3315,8 @@ class GenericLLMClient(
                 text, usage = provider_result.value
             elif self.provider == "google" and stream_adapter.protocol_family == "generateContent":
                 provider_result = await self._provider_retry.execute(
-                    lambda: self._chat_gemini_generate_content_stream(
+                    lambda: GeminiGenerateContentAdapter.stream(
+                        self,
                         messages,
                         model=model,
                         reasoning_effort=reasoning_effort,

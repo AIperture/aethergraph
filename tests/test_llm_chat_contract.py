@@ -25,6 +25,7 @@ from aethergraph.services.llm import (
 from aethergraph.services.llm.adapters import (
     AnthropicMessagesAdapter,
     AzureChatAdapter,
+    GeminiGenerateContentAdapter,
     OpenAICompatibleChatAdapter,
     OpenAIResponsesAdapter,
 )
@@ -1339,6 +1340,8 @@ def test_openai_compatible_chat_is_not_inherited_by_generic_client() -> None:
     assert not hasattr(GenericLLMClient, "_chat_azure_responses")
     assert not hasattr(GenericLLMClient, "_chat_anthropic_messages")
     assert not hasattr(GenericLLMClient, "_chat_anthropic_messages_stream")
+    assert not hasattr(GenericLLMClient, "_chat_gemini_generate_content")
+    assert not hasattr(GenericLLMClient, "_chat_gemini_generate_content_stream")
 
 
 @pytest.mark.asyncio
@@ -1401,6 +1404,45 @@ async def test_azure_image_generation_survives_chat_adapter_extraction() -> None
     assert fake_http.last_url == (
         "https://example.openai.azure.com/openai/deployments/image-deployment/"
         "images/generations?api-version=2025-04-01-preview"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gemini_image_generation_survives_chat_adapter_extraction() -> None:
+    client = GenericLLMClient(
+        provider="google",
+        model="gemini-image-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "data": "aW1hZ2U=",
+                                    "mimeType": "image/png",
+                                }
+                            }
+                        ]
+                    }
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 4, "candidatesTokenCount": 6},
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    result = await client.generate_image("A glass compass")
+
+    assert result.images[0].b64 == "aW1hZ2U="
+    assert result.images[0].mime_type == "image/png"
+    assert result.usage == {"input_tokens": 4, "output_tokens": 6}
+    assert fake_http.last_url == (
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-image-test:generateContent"
     )
 
 
@@ -2216,7 +2258,8 @@ async def test_gemini_tools_are_not_passed_through_in_compat_mode() -> None:
     )
 
     with pytest.raises(LLMUnsupportedFeatureError, match="tools"):
-        await client._chat_gemini_generate_content(  # type: ignore[misc]
+        await GeminiGenerateContentAdapter.invoke(
+            client,
             [{"role": "user", "content": "hello"}],
             model="gemini-test",
             output_format="text",

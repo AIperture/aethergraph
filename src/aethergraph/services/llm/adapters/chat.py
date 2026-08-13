@@ -9,6 +9,7 @@ from typing import Any
 
 from aethergraph.services.llm.adapters.anthropic import AnthropicMessagesAdapter
 from aethergraph.services.llm.adapters.azure import AzureChatAdapter
+from aethergraph.services.llm.adapters.gemini import GeminiGenerateContentAdapter
 from aethergraph.services.llm.adapters.openai_compatible import OpenAICompatibleChatAdapter
 from aethergraph.services.llm.adapters.openai_responses import OpenAIResponsesAdapter
 from aethergraph.services.llm.provider_transport import ProviderCallResult
@@ -510,7 +511,8 @@ async def _invoke_gemini_generate_content(
     tools = options.pop("tools", None)
     options.pop("tool_choice", None)
     thinking_mode = options.pop("thinking_mode", None)
-    return await host._chat_gemini_generate_content(
+    return await GeminiGenerateContentAdapter.invoke(
+        host,
         call.message_list(),
         model=call.model,
         reasoning_effort=call.reasoning_effort,
