@@ -67,6 +67,7 @@ channels = [
   "aethergraph[webhook]"
 ]
 faiss    = ["faiss-cpu>=1.7.4"]      # optional vector index accel
+media    = ["Pillow>=10.0"]
 
 dev = [
   "ruff>=0.5",

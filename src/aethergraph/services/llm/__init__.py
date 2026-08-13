@@ -33,6 +33,13 @@ from .contracts import (
     TextPart,
     message_from_text,
 )
+from .media import (
+    ImagePreparationPolicy,
+    MediaPreparationError,
+    PreparedImage,
+    is_accepted_image_mime,
+    prepare_image_bytes,
+)
 from .profiles import (
     CapabilityState,
     ChatCapabilityOverrides,
@@ -198,6 +205,7 @@ __all__ = [
     "ImageGenerationProfile",
     "ImageGenerationResult",
     "ImageGenerationUsage",
+    "ImagePreparationPolicy",
     "LLMContextWindowExceededError",
     "LLMProviderRequestError",
     "LLMRequestCompatibilityError",
@@ -221,6 +229,7 @@ __all__ = [
     "LLMToolCallResponseError",
     "MODEL_REQUEST_CONTRACT_VERSION",
     "MessageRole",
+    "MediaPreparationError",
     "ModelContinuation",
     "ModelEvent",
     "ModelReasoningDelta",
@@ -246,6 +255,7 @@ __all__ = [
     "ProviderResponseMetadata",
     "ProviderRetrySettings",
     "ProviderTransportAttempt",
+    "PreparedImage",
     "ProviderConnection",
     "ProviderDescriptor",
     "RequestCompatibilityDiagnostic",
@@ -296,7 +306,9 @@ __all__ = [
     "get_endpoint_adapter",
     "get_provider_descriptor",
     "message_from_text",
+    "is_accepted_image_mime",
     "prepare_structured_output",
+    "prepare_image_bytes",
     "provider_default_base_url",
     "resolve_endpoint_adapter",
     "resolve_endpoint_family",
