@@ -19,6 +19,39 @@ class EndpointAdapterDescriptor:
     protocol_family: str
     implemented_operations: tuple[ModelOperation, ...]
     implementation_capabilities: tuple[str, ...] = ()
+    adapter_revision: int = 1
+
+    def __post_init__(self) -> None:
+        """Validate the stable adapter contract revision.
+
+        Intro:
+            Adapter revisions let persisted runtime snapshots identify the
+            implementation contract that produced an effective binding.
+
+        Examples:
+            Accept the initial adapter revision:
+                ```python
+                EndpointAdapterDescriptor("demo", "demo", ("chat",))
+                ```
+
+            Reject a non-positive revision:
+                ```python
+                EndpointAdapterDescriptor("demo", "demo", ("chat",), adapter_revision=0)
+                ```
+
+        Args:
+            self: Newly initialized endpoint adapter descriptor.
+
+        Returns:
+            None: Validation completes without changing the frozen descriptor.
+
+        Notes:
+            Increment the revision only when adapter behavior changes in a way
+            that can invalidate a previously resolved runtime binding.
+        """
+
+        if self.adapter_revision < 1:
+            raise ValueError("adapter_revision must be at least 1")
 
 
 @dataclass(frozen=True)

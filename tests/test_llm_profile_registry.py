@@ -37,6 +37,7 @@ from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.image_factory import image_client_from_profile
 from aethergraph.services.llm.providers import Provider
+from aethergraph.services.llm.registry import EndpointAdapterDescriptor
 
 
 class _Secrets:
@@ -57,6 +58,16 @@ def test_registry_endpoints_exist_and_support_declared_defaults() -> None:
         for operation, endpoint_id in provider.default_endpoints.items():
             assert endpoint_id in provider.endpoint_ids
             assert operation in ENDPOINT_ADAPTERS[endpoint_id].implemented_operations
+
+
+def test_endpoint_adapter_revision_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="adapter_revision must be at least 1"):
+        EndpointAdapterDescriptor(
+            adapter_id="invalid",
+            protocol_family="invalid",
+            implemented_operations=("chat",),
+            adapter_revision=0,
+        )
 
 
 def test_registry_rejects_unknown_provider_and_cross_provider_endpoint() -> None:

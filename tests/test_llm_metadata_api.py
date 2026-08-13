@@ -34,6 +34,7 @@ def test_registry_api_returns_visible_providers_and_exact_endpoints() -> None:
         "azure_embeddings",
         "azure_images",
     ]
+    assert all(item["adapter_revision"] == 1 for item in providers["azure"]["endpoints"])
     assert all("api_key" not in provider for provider in providers.values())
 
 

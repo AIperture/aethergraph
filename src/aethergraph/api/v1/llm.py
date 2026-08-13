@@ -69,6 +69,7 @@ def build_llm_registry_response(*, include_hidden: bool = False) -> LLMRegistryR
             endpoints=tuple(
                 LLMEndpointAdapterView(
                     adapter_id=adapter.adapter_id,
+                    adapter_revision=adapter.adapter_revision,
                     protocol_family=adapter.protocol_family,
                     implemented_operations=adapter.implemented_operations,
                     implementation_capabilities=adapter.implementation_capabilities,

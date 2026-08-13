@@ -25,6 +25,7 @@ class LLMEndpointAdapterView(LLMApiContract):
     """Describe one provider-owned selectable endpoint adapter."""
 
     adapter_id: str
+    adapter_revision: int = Field(ge=1)
     protocol_family: str
     implemented_operations: tuple[ModelOperation, ...]
     implementation_capabilities: tuple[str, ...] = ()
