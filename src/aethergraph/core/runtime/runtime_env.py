@@ -111,6 +111,10 @@ class RuntimeEnv:
         return self.container.llm
 
     @property
+    def embedding_service(self):
+        return self.container.embed_service
+
+    @property
     def mcp_service(self):
         return self.container.mcp
 
@@ -254,6 +258,7 @@ class RuntimeEnv:
             agent_state=AgentStateFacade(memory=mem),
             viz=vis_facade,
             llm=self.llm_service,  # LLMService
+            embedding=self.embedding_service,  # EmbeddingService
             mcp=self.mcp_service,  # MCPService
             runner=runner,  # RunFacade
             indices=indices,  # ScopedIndices for this node

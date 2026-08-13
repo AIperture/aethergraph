@@ -9,6 +9,7 @@ from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.stores.fs_store import FSContinuationStore
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.knowledge.node_kb import NodeKB
+from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.service import LLMService
 from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.mcp.service import MCPService
@@ -40,6 +41,7 @@ class NodeServices:
     agent_state: AgentStateFacade | None = None  # experimental bound agent state facade
     viz: VizFacade | None = None  # VizFacade
     llm: LLMService | None = None  # LLMService
+    embedding: EmbeddingService | None = None  # EmbeddingService
     mcp: MCPService | None = None  # MCPService
     runner: RunFacade | None = None  # RunFacade for child run orchestration
     indices: ScopedIndices | None = None  # ScopedIndices for this node

@@ -11,6 +11,7 @@ from aethergraph.contracts.services.execution import (
     ExecutionService,
     Language,
 )
+from aethergraph.contracts.services.llm import EmbeddingClientProtocol
 from aethergraph.core.runtime.run_types import (
     RunImportance,
     RunOrigin,
@@ -581,6 +582,42 @@ class NodeContext:
             azure_deployment=azure_deployment,
             timeout=timeout,
         )
+
+    def embedding(self, profile: str = "default") -> EmbeddingClientProtocol:
+        """Return a configured embedding client for this node context.
+
+        Intro:
+            Resolves a named client from the container-owned embedding service so
+            graph code uses the same profiles, retry controls, rate gate, and
+            metering configuration as other AG services.
+
+        Examples:
+            Embed with the default profile:
+                ```python
+                vector = await context.embedding().embed_one("hello")
+                ```
+
+            Select a named profile:
+                ```python
+                vectors = await context.embedding("search").embed(["north", "south"])
+                ```
+
+        Args:
+            self: Active node context with container-bound services.
+            profile: Configured embedding profile name.
+
+        Returns:
+            EmbeddingClientProtocol: Exact configured embedding client.
+
+        Notes:
+            AG owns this service boundary and does not require or import AG Engine.
+            Runtime profile mutation is intentionally not exposed here.
+        """
+
+        service = self.services.embedding
+        if service is None:
+            raise RuntimeError("Embedding service not available")
+        return service.get(profile)
 
     def llm_set_key(self, provider: str, model: str, api_key: str, profile: str = "default"):
         """
