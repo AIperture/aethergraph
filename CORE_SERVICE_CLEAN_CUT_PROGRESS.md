@@ -33,7 +33,8 @@ wiring.
 | A5b telemetry consolidation | Complete | Commit `5ae889c`; logger and metering moved under `aethergraph.observability`; no-op tracing replaced by persisted operation observations; AG full clean gate passed; Engine `770 passed, 1 deselected`; Studio causal gate `27 passed`; clean wheel has 430 entries and zero legacy telemetry paths. |
 | A6 scheduler/resume simplification | Complete | Commit `ec8b433`; deleted unused global scheduler; one local scheduler registry and exactly-once dispatch path; AG `754 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 429 entries. |
 | A7 continuation timers | Complete | Commits `a3ec887`, `347c916`; durable SQLite leases, canonical ResumeRouter delivery, lifespan ownership, legacy wakeup deletion; AG `764 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 423 entries. |
-| A8-A10 | Pending | Not started. |
+| A8 trigger repair | Complete | Commit `d5a82c5`; atomic SQLite occurrence claims/receipts, deterministic run IDs, catch-up policy, timezone recurrence, paginated overlap enforcement, scoped CRUD/event firing, and global route removal; focused gate `19 passed`; AG causal gate `782 passed, 2 skipped, 3 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 424 entries. |
+| A9-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -268,3 +269,42 @@ No compatibility alias or fallback is accepted as completion evidence.
   duplicate-store paths.
 - No Engine or Studio source update was required; both isolated external worktrees
   remain clean, and their original checkouts were not mutated.
+
+## A8 - trigger repair
+
+- Replaced the non-atomic DocStore trigger scan with one dedicated SQLite trigger
+  authority. Trigger definitions, stable occurrence identities, leases, retries,
+  skip receipts, delivery receipts, and deterministic run IDs now participate in
+  the same durable scheduling model; the legacy `trigger_docstore` path is deleted.
+- `claim_due(now, worker_id, lease_until, limit)` uses `BEGIN IMMEDIATE` so competing
+  processes cannot claim the same occurrence. Expired leases are reclaimable, and a
+  restarted worker deduplicates against the deterministic run record before marking
+  the occurrence delivered.
+- Trigger schedules advance in the claim transaction. `catch_up_missed=True`
+  advances one recurrence at a time; the default policy skips startup misses and
+  advances directly to the first future recurrence. The policy also applies to
+  one-shots, while one-shots created at the current instant remain due.
+- Cron recurrence resolves the configured timezone on every occurrence, including
+  daylight-saving transitions. Creation rejects invalid cron expressions,
+  timezones, non-positive intervals, negative overlap limits, and missing
+  kind-specific configuration.
+- Overlap checks now enforce `running >= max_overlap_runs`, fail closed without a
+  run store, and paginate every non-terminal status rather than truncating at the
+  first 1,000 runs.
+- Facade and API reads, cancelation, deletion, and event firing pass explicit tenant
+  scope into the service/store boundary. Engine-owned time scans remain deliberately
+  all-tenant. The unauthenticated `/triggers/fire-event-global` endpoint is removed.
+- Added nineteen tests covering validation, zero-delay one-shots, DST recurrence,
+  interval cadence, startup skip/catch-up, atomic competing workers, stale-lease
+  restart deduplication, paginated overlap counting, tenant-scoped events and CRUD,
+  all-tenant engine scans, facade scope forwarding, and the deleted global route.
+- Focused gate: `19 passed`. Full AG causal gate: `782 passed`, `2 skipped`, and `3`
+  exact non-causal tests deselected. Engine full causal gate: `770 passed`, `1`
+  worktree-path assertion deselected. Studio execution contract/API/worker-bridge
+  causal gate: `25 passed`.
+- Ruff, Ruff-format, Python compilation, container construction, `git diff --check`,
+  deleted-path scans, and wheel inspection passed. The clean wheel contains 424
+  entries, includes only `sqlite_trigger_store.py` under trigger storage, and has no
+  legacy DocStore trigger implementation or global-fire route.
+- No Engine or Studio source update was required. Their isolated worktrees remain at
+  `822324f` and `1af2aa8`, and the original checkouts were not mutated.
