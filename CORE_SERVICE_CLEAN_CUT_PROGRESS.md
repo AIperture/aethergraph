@@ -32,7 +32,8 @@ wiring.
 | A5a public observation boundary | Complete | AG `99d7fc2`, Engine `822324f`, Studio `1af2aa8`; no legacy import aliases; AG `739 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 non-causal path test deselected`; Studio causal gate `27 passed`; clean wheel has 432 entries. |
 | A5b telemetry consolidation | Complete | Commit `5ae889c`; logger and metering moved under `aethergraph.observability`; no-op tracing replaced by persisted operation observations; AG full clean gate passed; Engine `770 passed, 1 deselected`; Studio causal gate `27 passed`; clean wheel has 430 entries and zero legacy telemetry paths. |
 | A6 scheduler/resume simplification | Complete | Commit `ec8b433`; deleted unused global scheduler; one local scheduler registry and exactly-once dispatch path; AG `754 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 429 entries. |
-| A7-A10 | Pending | Not started. |
+| A7 continuation timers | Complete | Commits `a3ec887`, `347c916`; durable SQLite leases, canonical ResumeRouter delivery, lifespan ownership, legacy wakeup deletion; AG `764 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 423 entries. |
+| A8-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -232,3 +233,38 @@ No compatibility alias or fallback is accepted as completion evidence.
   `core/execution/global_scheduler.py`.
 - No Engine or Studio source update was required. Their isolated A5a worktrees remain
   clean at `822324f` and `1af2aa8`; their original checkouts were not mutated.
+
+## A7 - canonical continuation timers
+
+- Added `ContinuationTimerService` under the runtime continuation layer and a durable
+  SQLite lease/receipt store. Stable fire identities derive from run, node, token,
+  and scheduled occurrence, so repeated poll waits receive distinct claims without a
+  parallel in-memory queue.
+- Claims use SQLite `BEGIN IMMEDIATE`, worker identities, lease deadlines, durable
+  attempts, retry timestamps, delivery receipts, and dead-letter state. Expired
+  leases are atomically reclaimable by a restarted or competing worker.
+- Due deadline and polling continuations deliver through the same `ResumeRouter` as
+  human/event responses. Token validation and continuation deletion therefore retain
+  one canonical path, while delivered receipts suppress duplicate timer fires.
+- Added injected-clock scheduling, bounded exponential retry, explicit absent-
+  scheduler retry/dead-letter behavior, and canonical operation observations for
+  claim, delivery, retry, lease expiry, and dead letter.
+- `DefaultContainer` now requires `continuation_timer`; FastAPI lifespan starts and
+  stops it explicitly. `wakeup_queue` and its container construction are absent.
+- Deleted `ThreadSafeWakeupQueue`, `ScannerProducer`, `WakeWorker`, `WakeupWatcher`,
+  the wakeup contract/event, the broken unused continuation factory, the obsolete
+  recovery helper calling nonexistent APIs, and two duplicate unused continuation
+  store implementations. No alternate timer delivery path remains.
+- Added ten timer tests covering deadline and poll payloads, canonical router
+  delivery, duplicate workers, worker restart, stale-lease reclamation, durable retry,
+  absent scheduler, dead letter, observations, shutdown, and deleted boundaries.
+- Focused continuation/scheduler/integration/lifespan gate: `88 passed`. Full AG clean
+  gate: `764 passed`, `2 skipped`, and the same `2` packaging-only Host tests
+  deselected. Engine full causal gate: `770 passed`, `1` worktree-path assertion
+  deselected. Studio execution contract/API/worker-bridge causal gate: `25 passed`.
+- Ruff, Ruff-format, Python compilation, `git diff --check`, deleted-module import
+  smoke, and source residue scans passed. A clean wheel has 423 entries, includes the
+  timer service and lease store, and contains none of the eight deleted wakeup and
+  duplicate-store paths.
+- No Engine or Studio source update was required; both isolated external worktrees
+  remain clean, and their original checkouts were not mutated.
