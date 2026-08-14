@@ -34,7 +34,8 @@ wiring.
 | A6 scheduler/resume simplification | Complete | Commit `ec8b433`; deleted unused global scheduler; one local scheduler registry and exactly-once dispatch path; AG `754 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 429 entries. |
 | A7 continuation timers | Complete | Commits `a3ec887`, `347c916`; durable SQLite leases, canonical ResumeRouter delivery, lifespan ownership, legacy wakeup deletion; AG `764 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 423 entries. |
 | A8 trigger repair | Complete | Commit `d5a82c5`; atomic SQLite occurrence claims/receipts, deterministic run IDs, catch-up policy, timezone recurrence, paginated overlap enforcement, scoped CRUD/event firing, and global route removal; focused gate `19 passed`; AG causal gate `782 passed, 2 skipped, 3 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 424 entries. |
-| A9-A10 | Pending | Not started. |
+| A9 security and admission | Complete | AG commit `9df3c7d`, Studio `66d2442`; canonical `server/admission` limiter and `server/security` credential/redaction boundaries; AG focused gate `93 passed`; full causal gate `793 passed, 2 skipped, 3 deselected`; Engine `770 passed, 1 deselected`; Studio expanded causal gate `46 passed`; clean wheel has 425 entries. |
+| A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -308,3 +309,44 @@ No compatibility alias or fallback is accepted as completion evidence.
   legacy DocStore trigger implementation or global-fire route.
 - No Engine or Studio source update was required. Their isolated worktrees remain at
   `822324f` and `1af2aa8`, and the original checkouts were not mutated.
+
+## A9 - security and admission reconciliation
+
+- Moved the process-local run burst limiter to `aethergraph.server.admission` as
+  `RunBurstLimiter`. It now uses an injected monotonic clock and a lock-protected
+  sliding window. The container field is exactly `run_burst_limiter`, matching the
+  API dependency; the disconnected `rate_limiter` field and service tree are gone.
+- Added real-container HTTP tests for both demo and cloud modes proving the second
+  request receives HTTP 429 at a configured one-request burst boundary. Rate-limit
+  configuration now rejects non-positive concurrency, window, and burst values.
+- Moved the synchronous exact-name `SecretStore` contract and
+  `EnvironmentSecretStore` implementation under `aethergraph.server.security`.
+  Chat, embedding, image-generation, and hot-reconfiguration paths all consume that
+  one contract. Deleted the inconsistent async `services/secrets` protocol and its
+  synchronous implementation, and removed the container's node-visible `secrets`
+  field.
+- The model credential selector remains at its stable model-service boundary but
+  delegates every environment lookup to `EnvironmentSecretStore`; provider
+  precedence and behavior are unchanged. Studio now imports the canonical store and
+  deletes its private duplicate adapter in isolated commit `66d2442`.
+- Authentication signing material is resolved before operational store creation.
+  Demo and cloud startup reject missing `auth.secret`; the fixed development secret
+  is available only in explicit local mode.
+- Consolidated observation persistence redaction and UI credential masking under
+  `aethergraph.server.security.redaction`. The boundary now removes keyed credentials,
+  bearer values, credential assignments, embedded data URLs, and binary payloads.
+  Deleted `aethergraph.observability.redaction` with no forwarding module.
+- Added eleven security/admission tests covering atomic windows, real HTTP 429s,
+  container and NodeServices boundaries, startup secret policy, synchronous
+  credential resolution, credential/data persistence redaction, removed modules,
+  and rate configuration validation.
+- Focused AG security/model/profile gate: `93 passed`. Full AG causal gate: `793
+  passed`, `2 skipped`, and `3` exact non-causal tests deselected. Engine full causal
+  gate: `770 passed`, `1` worktree-path assertion deselected. Studio application
+  settings plus execution causal gate: `46 passed`.
+- Ruff, Ruff-format, Python compilation, `git diff --check`, source residue scans,
+  container construction, and wheel inspection passed. The clean wheel contains 425
+  entries, includes only the new admission/security modules, and contains none of
+  the three deleted service/redaction paths.
+- Engine required no source change. Studio is clean at `66d2442`; the original
+  Engine and Studio checkouts were not mutated.
