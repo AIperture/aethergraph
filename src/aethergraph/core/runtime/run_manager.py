@@ -837,21 +837,22 @@ class RunManager:
             status_str = getattr(record.status, "value", str(record.status))
             meter_status = status_str
 
-        try:
-            await meter.record_run(
-                user_id=user_id,
-                org_id=org_id,
-                run_id=record.run_id,
-                graph_id=graph_id,
-                status=meter_status,
-                duration_s=duration_s,
-            )
-        except Exception:  # noqa: BLE001
-            import logging
+        if meter is not None:
+            try:
+                await meter.record_run(
+                    user_id=user_id,
+                    org_id=org_id,
+                    run_id=record.run_id,
+                    graph_id=graph_id,
+                    status=meter_status,
+                    duration_s=duration_s,
+                )
+            except Exception:  # noqa: BLE001
+                import logging
 
-            logging.getLogger("aethergraph.runtime.run_manager").exception(
-                "Error recording run metering for run_id=%s", record.run_id
-            )
+                logging.getLogger("aethergraph.runtime.run_manager").exception(
+                    "Error recording run metering for run_id=%s", record.run_id
+                )
 
         try:
             if record.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:

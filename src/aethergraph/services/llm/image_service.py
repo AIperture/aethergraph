@@ -100,7 +100,7 @@ class ImageGenerationService:
 
         Intro:
             Delegates directly to the selected operation client so endpoint,
-            transport, retry, rate, tracing, and metering ownership remain there.
+            transport, retry, rate, observation, and metering ownership remain there.
 
         Examples:
             Generate with the default profile:

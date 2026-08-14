@@ -13,7 +13,7 @@ from aethergraph.core.runtime.run_types import (
     RunRecord,
     RunVisibility,
 )
-from aethergraph.services.tracing import resolve_tracer
+from aethergraph.observability.operations import resolve_operation_observer
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -173,8 +173,8 @@ class RunFacade:
         effective_session_id = session_id or self.session_id
         effective_agent_id = agent_id if agent_id is not None else self.agent_id
         effective_app_id = app_id if app_id is not None else self.app_id
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="spawn_run",
             request={
@@ -275,8 +275,8 @@ class RunFacade:
         effective_session_id = session_id or self.session_id
         effective_agent_id = agent_id if agent_id is not None else self.agent_id
         effective_app_id = app_id if app_id is not None else self.app_id
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="run_and_wait",
             request={
@@ -366,8 +366,8 @@ class RunFacade:
             When `return_outputs=True`, succeeded runs now resolve durable outputs
             even after process boundaries when persisted results are available.
         """
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="wait_run",
             request={"run_id": run_id, "timeout_s": timeout_s, "return_outputs": return_outputs},
@@ -422,8 +422,8 @@ class RunFacade:
             Supported causes are enforced by the run manager. Cancellation may
             not be immediate; scheduler termination is best-effort.
         """
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="cancel_run",
             request={"run_id": run_id, "reason": reason},

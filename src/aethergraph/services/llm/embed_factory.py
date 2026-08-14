@@ -8,9 +8,9 @@ from pydantic import SecretStr
 
 from aethergraph.config.config import EmbeddingUsageQuotaSettings
 from aethergraph.config.llm import EmbeddingProfile, EmbeddingSettings
+from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.provider_transport import ProviderRateGate
-from aethergraph.services.metering.eventlog_metering import MeteringService
 
 from ..secrets.base import Secrets
 from .compat import embedding_profile_from_legacy

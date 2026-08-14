@@ -69,7 +69,7 @@ class WriteMixin:
         """
         if (state_key is None) != (expected_state_revision is None):
             raise ValueError("state_key and expected_state_revision must be supplied together")
-        span = await self._start_trace(
+        span = await self._start_observation(
             operation="record_raw",
             request={"base": base, "text": text, "metrics": metrics},
             tags=["memory", "record"],
@@ -191,7 +191,12 @@ class WriteMixin:
                         self.logger.exception("Error indexing memory event %s", evt.event_id)
             try:
                 meter = current_metering()
-                await meter.record_event(scope=self.scope, scope_id=scope_id, kind=f"memory.{kind}")
+                if meter is not None:
+                    await meter.record_event(
+                        scope=self.scope,
+                        scope_id=scope_id,
+                        kind=f"memory.{kind}",
+                    )
             except Exception:
                 if self.logger:
                     self.logger.exception("Error recording metering event")
@@ -349,8 +354,7 @@ class WriteMixin:
             raise ValueError("external resource event session_id does not match memory session")
         payload = normalized.to_dict()
         text = normalized.summary or (
-            f"external resource changed: {normalized.resource_key} "
-            f"revision {normalized.revision}"
+            f"external resource changed: {normalized.resource_key} revision {normalized.revision}"
         )
         return await self.record_raw(
             base={

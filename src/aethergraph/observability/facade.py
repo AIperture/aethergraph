@@ -378,7 +378,7 @@ class ObservabilityFacade:
             TraceEventListResponse: Translated service-operation page.
 
         Notes:
-            Generic tracing is off by default, so an empty page is valid.
+            An empty page is valid when no operation observations were retained.
         """
         return await self._presenter().list_traces(**filters)
 
@@ -444,7 +444,7 @@ class ObservabilityFacade:
             InspectLogListResponse: Translated structured-log page.
 
         Notes:
-            Ordinary logs are never converted into semantic trace spans.
+            Ordinary logs are never converted into service-operation observations.
         """
         return await self._presenter().list_logs(**filters)
 

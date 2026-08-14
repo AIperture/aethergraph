@@ -83,7 +83,7 @@ class ImageAdapterInvocation:
         ImageAdapterInvocation: Immutable prepared adapter-call state.
 
     Notes:
-        Retry, rate gating, accounting, metering, observations, and tracing remain
+        Retry, rate gating, accounting, metering, and observations remain
         owned by the shared image-generation lifecycle.
     """
 

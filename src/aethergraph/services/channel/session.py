@@ -19,6 +19,7 @@ from aethergraph.contracts.services.channel import (
     FileRef,
     OutEvent,
 )
+from aethergraph.observability.operations import resolve_operation_observer
 from aethergraph.services.channel.choices import (
     build_choice_options,
     choice_prompt_payload,
@@ -26,7 +27,6 @@ from aethergraph.services.channel.choices import (
     prompt_choices_from_prompt,
 )
 from aethergraph.services.continuations.continuation import Correlator
-from aethergraph.services.tracing import resolve_tracer
 
 
 def _artifact_filename(artifact: Artifact, fallback: str | None = None) -> str:
@@ -186,8 +186,8 @@ class ChannelSession:
         return self.ctx.session_id
 
     @property
-    def _tracer(self):
-        return resolve_tracer(getattr(self.ctx.services, "tracer", None))
+    def _operation_observer(self):
+        return resolve_operation_observer()
 
     def _begin_reply_lifecycle(self) -> str:
         self._phase_group_counter += 1
@@ -1386,7 +1386,7 @@ class ChannelSession:
         timeout_s: int,
     ) -> dict:
         ch_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation=f"_ask_core:{kind}",
             request={
@@ -1594,7 +1594,7 @@ class ChannelSession:
             Reply memory logging occurs only when returned text is non-empty.
         """
         channel_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_text",
             request={"prompt": prompt, "timeout_s": timeout_s, "channel_key": channel_key},
@@ -1740,7 +1740,7 @@ class ChannelSession:
         """
         channel_key = self._resolve_key(channel)
         choice_options = build_choice_options(options)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_choices",
             request={
@@ -1867,7 +1867,7 @@ class ChannelSession:
             `accept` is advisory and adapter-dependent, not strict server-side validation.
         """
         channel_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_files",
             request={
@@ -1966,7 +1966,7 @@ class ChannelSession:
             Prefer `ask_text` + `get_latest_uploads` or `ask_files` when modality is known.
         """
         channel_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_text_or_files",
             request={"prompt": prompt, "timeout_s": timeout_s, "channel_key": channel_key},

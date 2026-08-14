@@ -15,6 +15,8 @@ from .legacy_cleanup import (
     cleanup_legacy_observability,
     scan_legacy_observability,
 )
+from .logger import LoggingConfig, StdLoggerService
+from .metering import EventLogMeteringService
 from .models import (
     CaptureMode,
     LLMObservationRecord,
@@ -23,6 +25,13 @@ from .models import (
     ObservationScope,
     PurgeResult,
     StorageStats,
+)
+from .operations import (
+    OperationObserver,
+    OperationSpan,
+    extract_metrics,
+    resolve_operation_observer,
+    summarize_payload,
 )
 from .policy import ObservationPolicy
 from .retention import RetentionJanitor, RetentionPolicy
@@ -41,10 +50,13 @@ __all__ = [
     "LLMObservationRecord",
     "LegacyObservabilityCleanupResult",
     "LegacyObservabilityReport",
+    "LoggingConfig",
     "ObservationFilter",
     "ObservationPolicy",
     "ObservationRecord",
     "ObservationScope",
+    "OperationObserver",
+    "OperationSpan",
     "ObservabilityFacade",
     "ObservabilityIdentity",
     "ObservabilityNotFoundError",
@@ -54,11 +66,16 @@ __all__ = [
     "RetentionJanitor",
     "RetentionPolicy",
     "SQLiteObservationStore",
+    "StdLoggerService",
     "StorageStats",
     "cleanup_legacy_observability",
     "emit_agent_event",
+    "extract_metrics",
     "open_active_observability_facade",
     "open_observability_facade",
     "register_default_agent_event_types",
+    "resolve_operation_observer",
     "scan_legacy_observability",
+    "summarize_payload",
+    "EventLogMeteringService",
 ]

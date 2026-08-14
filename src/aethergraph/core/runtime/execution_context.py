@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.integration import OriginBinding
+from aethergraph.observability.logger import StdLoggerService
 from aethergraph.services.scope.scope import Scope
 
 if TYPE_CHECKING:
     from aethergraph.core.graph.task_node import TaskNodeRuntime
 
 from aethergraph.services.clock.clock import SystemClock
-from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.resume.router import ResumeRouter
 
 from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID, RESERVED_INJECTABLES

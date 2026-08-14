@@ -6,6 +6,7 @@ from typing import Any
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.contracts.services.memory import HotLog, Persistence
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
+from aethergraph.observability.operations import resolve_operation_observer
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.memory.facade.deprecated import DeprecatedMixin
 from aethergraph.services.memory.facade.introspection import IntrospectionMixin
@@ -15,7 +16,6 @@ from aethergraph.services.memory.facade.read import ReadMixin
 from aethergraph.services.memory.facade.summary import SummaryMixin
 from aethergraph.services.memory.facade.write import WriteMixin
 from aethergraph.services.scope.scope import Scope
-from aethergraph.services.tracing import resolve_tracer
 
 
 def derive_timeline_id(
@@ -114,7 +114,7 @@ class MemoryFacade(
             meta.update({k: v for k, v in extra.items() if v is not None})
         return meta
 
-    async def _start_trace(
+    async def _start_observation(
         self,
         *,
         operation: str,
@@ -123,8 +123,8 @@ class MemoryFacade(
         metrics: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ):
-        tracer = resolve_tracer()
-        return await tracer.start_span(
+        observer = resolve_operation_observer()
+        return await observer.start_span(
             service="memory",
             operation=operation,
             request=request,

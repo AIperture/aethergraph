@@ -21,6 +21,7 @@ from aethergraph.contracts.services.llm import ImageGenerationClientProtocol, LL
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
 from aethergraph.core.schema_validation import first_schema_issue
+from aethergraph.observability.operations import resolve_operation_observer
 from aethergraph.services.llm.adapters import (
     ChatAdapterInvocation,
     ChatStreamInvocation,
@@ -125,7 +126,6 @@ from aethergraph.services.llm.utils import (
     _extract_json_text,
     _strip_schema_enforced_json_fence,
 )
-from aethergraph.services.tracing import resolve_tracer
 
 DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
@@ -1530,7 +1530,7 @@ class GenericLLMClient(LLMClientProtocol):
 
     @staticmethod
     def _quota_state() -> tuple[str, dict[str, Any]] | None:
-        ctx = current_meter_context.get()
+        ctx = current_meter_context.get() or {}
         run_id = ctx.get("run_id")
         if not run_id:
             return None
@@ -1541,7 +1541,7 @@ class GenericLLMClient(LLMClientProtocol):
         return str(run_id), state
 
     def _initialize_shared_quota_state(self) -> None:
-        """Create the nested run ledger before tracing copies the meter context."""
+        """Create the nested run ledger before operation observation copies context."""
         if self._get_usage_quota_cfg() is not None:
             self._quota_state()
 
@@ -2528,8 +2528,8 @@ class GenericLLMClient(LLMClientProtocol):
         if call_name:
             tags.append(call_name)
         self._initialize_shared_quota_state()
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="llm",
             operation="chat",
             request={
@@ -3092,7 +3092,7 @@ class GenericLLMClient(LLMClientProtocol):
 
         Intro:
             Applies common validation, estimation, quota reservation, retry,
-            accounting, observation, and tracing around one pinned adapter call.
+            accounting and canonical observations around one pinned adapter call.
 
         Examples:
             Accumulate a stream:
@@ -3252,8 +3252,8 @@ class GenericLLMClient(LLMClientProtocol):
         if call_name:
             tags.append(call_name)
         self._initialize_shared_quota_state()
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="llm",
             operation="chat_stream",
             request={

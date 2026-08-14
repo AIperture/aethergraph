@@ -31,11 +31,14 @@ from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
 from aethergraph.observability import (
     AgentEventTypeRegistry,
+    EventLogMeteringService,
+    LoggingConfig,
     ObservabilityFacade,
     ObservationPolicy,
     RetentionJanitor,
     RetentionPolicy,
     SQLiteObservationStore,
+    StdLoggerService,
     open_active_observability_facade,
     register_default_agent_event_types,
 )
@@ -61,11 +64,9 @@ from aethergraph.services.llm.image_factory import build_image_generation_client
 from aethergraph.services.llm.image_service import ImageGenerationService
 from aethergraph.services.llm.provider_transport import ProviderRateGate
 from aethergraph.services.llm.service import LLMService
-from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
-from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
 
 # ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
@@ -76,7 +77,6 @@ from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
 from aethergraph.services.secrets.env import EnvSecrets
-from aethergraph.services.tracing import NoopTracer
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
@@ -131,7 +131,6 @@ SERVICE_KEYS = [
     "authz",
     "metering",
     "observability",
-    "tracer",
     "secrets",
 ]
 
@@ -202,7 +201,6 @@ class DefaultContainer:
 
     metering: MeteringService | None = None
     rate_limiter: SimpleRateLimiter | None = None
-    tracer: NoopTracer | None = None
     agent_event_registry: AgentEventTypeRegistry | None = None
     secrets: EnvSecrets | None = None
 
@@ -563,7 +561,6 @@ def build_default_container(
         authz=authz,
         metering=metering,
         rate_limiter=rate_limiter,
-        tracer=NoopTracer(),
         agent_event_registry=agent_event_registry,
         settings=cfg,
     )

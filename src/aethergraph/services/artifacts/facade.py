@@ -16,12 +16,12 @@ from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.search_backend import ScoredItem, SearchMode
 from aethergraph.core.runtime.runtime_metering import current_metering
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.observability.operations import resolve_operation_observer
 from aethergraph.services.artifacts.paths import _from_uri_or_path
 from aethergraph.services.artifacts.types import ArtifactContent, ArtifactSearchResult
 from aethergraph.services.artifacts.utils import _infer_content_mode
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.scope.scope import Scope, ScopeLevel
-from aethergraph.services.tracing import resolve_tracer
 from aethergraph.storage.vector_index.utils import build_index_meta_from_scope
 
 
@@ -346,12 +346,13 @@ class ArtifactFacade:
                 or 0
             )
 
-            await meter.record_artifact(
-                scope=self.scope,  # Scope carries user/org/run/graph/app/session
-                kind=getattr(a, "kind", "unknown"),
-                bytes=int(size),
-                pinned=bool(getattr(a, "pinned", False)),
-            )
+            if meter is not None:
+                await meter.record_artifact(
+                    scope=self.scope,  # Scope carries user/org/run/graph/app/session
+                    kind=getattr(a, "kind", "unknown"),
+                    bytes=int(size),
+                    pinned=bool(getattr(a, "pinned", False)),
+                )
         except Exception:
             import logging
 
@@ -411,8 +412,8 @@ class ArtifactFacade:
         Returns:
             str: The planned staging file path as a string.
         """
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="stage_path",
             request={"ext": ext},
@@ -454,8 +455,8 @@ class ArtifactFacade:
         Returns:
             str: The planned staging directory path as a string.
         """
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="stage_dir",
             request={"suffix": suffix},
@@ -535,8 +536,8 @@ class ArtifactFacade:
         # Add scope identity + scope_id
         scoped_labels = self._with_scope_labels(eff_labels)
 
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="ingest_file",
             request={
@@ -723,8 +724,8 @@ class ArtifactFacade:
             eff_labels["filename"] = PurePath(suggested_uri).name
 
         labels = self._with_scope_labels(eff_labels)
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="save_file",
             request={
@@ -972,8 +973,8 @@ class ArtifactFacade:
             - If you want tags, call `w.add_labels({"tags": [...]})` inside the context
         """
         # 1) Delegate to the store's async context manager
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="writer",
             request={"kind": kind, "planned_ext": planned_ext, "pin": pin},
@@ -1034,8 +1035,8 @@ class ArtifactFacade:
         Returns:
             Artifact | None: The matching `Artifact` object if found, otherwise `None`.
         """
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="get_by_id",
             request={"artifact_id": artifact_id},
@@ -1649,8 +1650,8 @@ class ArtifactFacade:
         if tags:
             eff_labels.setdefault("tags", tags)
 
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="list",
             request={
@@ -1753,8 +1754,8 @@ class ArtifactFacade:
             eff_labels.setdefault("tags", tags)
 
         # --- Structured path: no query or empty query ---------------------
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="artifacts",
             operation="search",
             request={

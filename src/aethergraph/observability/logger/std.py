@@ -45,9 +45,9 @@ class LoggingConfig:
     use_json: bool = False
     enable_queue: bool = False
     per_namespace_levels: Mapping[str, str] = None
-    console_pattern = "%(asctime)s %(levelname)s %(name)s " "run=%(run_id)s - %(message)s"
+    console_pattern = "%(asctime)s %(levelname)s %(name)s run=%(run_id)s - %(message)s"
 
-    file_pattern = "%(asctime)s %(levelname)s %(name)s " "run=%(run_id)s %(message)s"
+    file_pattern = "%(asctime)s %(levelname)s %(name)s run=%(run_id)s %(message)s"
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 5
 

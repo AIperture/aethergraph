@@ -421,7 +421,7 @@ async def test_metering_is_independent_of_capture_mode(tmp_path: Path, mode: str
 
 
 @pytest.mark.asyncio
-async def test_default_container_uses_sqlite_and_no_jsonl_or_persisted_tracer(
+async def test_default_container_uses_sqlite_without_legacy_observability_sinks(
     tmp_path: Path,
 ) -> None:
     settings = AppSettings(
@@ -450,7 +450,7 @@ async def test_default_container_uses_sqlite_and_no_jsonl_or_persisted_tracer(
 
     assert (tmp_path / "events" / "observability.db").is_file()
     assert not list(tmp_path.rglob("llm_calls.jsonl"))
-    assert container.tracer.__class__.__name__ == "NoopTracer"
+    assert not hasattr(container, "tracer")
     rows = await container.observability.list_llm_calls(limit=None)
     assert rows[0]["capture_mode"] == "manifest"
 

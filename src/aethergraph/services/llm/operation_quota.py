@@ -53,7 +53,7 @@ class OperationQuotaLedger:
     def _state(self) -> tuple[str, dict[str, Any]] | None:
         if not self.enabled:
             return None
-        context = current_meter_context.get()
+        context = current_meter_context.get() or {}
         run_id = context.get("run_id")
         if not run_id:
             return None

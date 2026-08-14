@@ -197,7 +197,7 @@ class PromptMixin:
         Returns:
             dict: ``{"long_term": str, "recent_chat": list, "recent_tools": list}``.
         """
-        span = await self._start_trace(
+        span = await self._start_observation(
             operation="build_prompt_segments",
             request={
                 "recent_chat_limit": recent_chat_limit,

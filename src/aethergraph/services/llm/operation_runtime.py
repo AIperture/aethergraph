@@ -8,15 +8,15 @@ import time
 from typing import Any, Generic, TypeVar
 
 from aethergraph.core.runtime.runtime_metering import current_meter_context
+from aethergraph.observability.operations import resolve_operation_observer
 from aethergraph.services.llm.provider_transport import ProviderCallResult
-from aethergraph.services.tracing import resolve_tracer
 
 _ResultT = TypeVar("_ResultT")
 
 
 @dataclass(frozen=True)
 class OperationTraceProjection(Generic[_ResultT]):
-    """Describe sanitized tracing for one model-operation invocation."""
+    """Describe a sanitized observation for one model-operation invocation."""
 
     service: str
     operation: str
@@ -34,7 +34,7 @@ def model_operation_dimensions(
     """Project common model-operation dimensions from the active runtime.
 
     Intro:
-        Produces one consistent detached dimension map for operation tracing and
+        Produces one consistent detached dimension map for operation observation and
         metering while allowing explicit invocation values to override context.
 
     Examples:
@@ -65,7 +65,7 @@ def model_operation_dimensions(
         included in this projection.
     """
 
-    context = current_meter_context.get()
+    context = current_meter_context.get() or {}
     explicit = dict(overrides or {})
     keys = (
         "user_id",
@@ -103,7 +103,7 @@ async def execute_model_operation(
     """Execute one complete non-Chat model-operation lifecycle.
 
     Intro:
-        Owns atomic quota admission, lazy transport setup, sanitized tracing,
+        Owns atomic quota admission, lazy transport setup, sanitized observation,
         retry/rate gating, actual-usage reconciliation, metering order, and
         cancellation-safe reservation release around one single-attempt adapter.
 
@@ -166,7 +166,7 @@ async def execute_model_operation(
     span = None
     try:
         await host._ensure_client()
-        span = await resolve_tracer().start_span(
+        span = await resolve_operation_observer().start_span(
             service=trace.service,
             operation=trace.operation,
             request=dict(trace.request),

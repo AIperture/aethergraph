@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from aethergraph.observability.logger import StdLoggerService
 from aethergraph.services.agent_state import AgentStateFacade
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.clock.clock import SystemClock
@@ -11,11 +12,9 @@ from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.image_service import ImageGenerationService
 from aethergraph.services.llm.service import LLMService
-from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
-from aethergraph.services.tracing import NoopTracer, TracerProtocol
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
@@ -43,4 +42,3 @@ class NodeServices:
     indices: ScopedIndices | None = None  # ScopedIndices for this node
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
     registry: RegistryFacade | None = None  # Scope-bound runtime registry facade
-    tracer: TracerProtocol | NoopTracer | None = None

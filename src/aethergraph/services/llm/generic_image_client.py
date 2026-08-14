@@ -213,7 +213,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
 
         Intro:
             Applies image-profile defaults, freezes one adapter invocation, and
-            executes the centralized retry, rate, tracing, and metering lifecycle.
+            executes the centralized retry, rate, observation, and metering lifecycle.
 
         Examples:
             Generate with profile defaults:

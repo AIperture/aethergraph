@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
+from aethergraph.observability import EventLogMeteringService
 from aethergraph.services.llm.types import ImageGenerationUsage
 from aethergraph.services.llm.usage_metering import _record_image_generation_metering
-from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
 
 
 class _Store:
