@@ -355,13 +355,3 @@ def list_ext_context_services() -> list[str]:
     """
     svc = current_services()
     return list(svc.ext_services.keys())
-
-
-# --------- Scheduler helpers --------- - (Not used)
-def ensure_global_scheduler_started() -> None:
-    svc = current_services()
-    sched = svc.schedulers.get("global")
-    if sched and not sched.is_running():
-        import asyncio
-
-        asyncio.create_task(sched.run_forever())

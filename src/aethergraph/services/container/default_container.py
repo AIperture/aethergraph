@@ -23,7 +23,6 @@ from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.contracts.storage.doc_store import DocStore
 from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.contracts.storage.trigger_store import TriggerStore
-from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 
 # ---- artifact services ----
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
@@ -142,9 +141,6 @@ class DefaultContainer:
 
     # scope
     scope_factory: ScopeFactory
-
-    # schedulers
-    schedulers: dict[str, Any]
 
     # core
     registry: UnifiedRegistry
@@ -349,17 +345,6 @@ def build_default_container(
     # state_store = JsonGraphStateStore(root=str(root_p / "graph_states"))
     state_store = build_graph_state_store(cfg)
 
-    # global scheduler
-    global_sched = GlobalForwardScheduler(
-        registry=sched_registry,
-        global_max_concurrency=None,  # TODO: make configurable
-        logger=logger_factory.for_scheduler(),
-    )
-    schedulers = {
-        "global": global_sched,
-        "registry": sched_registry,
-    }
-
     # channels
     selected_channel_adapters = (
         make_channel_adapters_from_env(cfg) if channel_adapters is None else dict(channel_adapters)
@@ -521,7 +506,6 @@ def build_default_container(
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
-        schedulers=schedulers,
         registry=registry,
         logger=logger_factory,
         clock=clock,

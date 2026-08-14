@@ -13,8 +13,6 @@ from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunResultStore, RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
-from aethergraph.core.execution.forward_scheduler import ForwardScheduler
-from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 from aethergraph.core.runtime.run_cancellation import (
     RunCancellationHandle,
     RunCancellationRegistry,
@@ -134,10 +132,7 @@ _ROOT_TURN_ORIGINS = frozenset(
 
 class RunManager:
     """
-    TODO: for global schedulers, we may want to have a dedicated run manager -- current
-    implementation utilize the async_run which create a local ForwardScheduler instance
-    each graph run. This is fine for concurrent graphs under thousands but may
-    not scale well for large number of concurrent graphs.
+    Manage graph runs executed by one local scheduler per active run.
     """
 
     def __init__(
@@ -1281,22 +1276,12 @@ class RunManager:
                 return None
 
             try:
-                # if local scheduler -> terminate
-                # if global scheduler -> terminate_run(run_id)
-                if isinstance(sched, GlobalForwardScheduler):
-                    await sched.terminate_run(run_id)
-                    return {
-                        "kind": sched.__class__.__name__,
-                        "run_id": run_id,
-                        "state": "cancellation_requested",
-                    }
-                elif isinstance(sched, ForwardScheduler):
-                    await sched.terminate()
-                    return {
-                        "kind": sched.__class__.__name__,
-                        "run_id": run_id,
-                        "state": "cancellation_requested",
-                    }
+                await sched.terminate()
+                return {
+                    "kind": sched.__class__.__name__,
+                    "run_id": run_id,
+                    "state": "cancellation_requested",
+                }
             except Exception:  # noqa: BLE001
                 import logging
 
@@ -1309,8 +1294,9 @@ class RunManager:
         if record is None:
             if handle is None:
                 handle = await self._ensure_cancellation_handle(run_id)
+            has_adapter = handle.adapter_kind not in {None, "none"}
             await handle.request_cancel(reason=reason)
-            if handle.adapter_kind is None:
+            if not has_adapter:
                 await _terminate_scheduler()
             return None
 
@@ -1339,8 +1325,9 @@ class RunManager:
                 else None,
             )
 
+        has_adapter = handle.adapter_kind not in {None, "none"}
         await handle.request_cancel(reason=reason)
-        if handle.adapter_kind is None:
+        if not has_adapter:
             backend_state = await _terminate_scheduler()
             if backend_state:
                 handle.backend_state_value = dict(backend_state)

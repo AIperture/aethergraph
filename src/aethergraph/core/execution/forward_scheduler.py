@@ -939,9 +939,3 @@ class ForwardScheduler(BaseScheduler):
         return any(
             (not _is_plan(n)) and (n.state.status in WAITING_STATES) for n in self.graph.nodes
         )
-
-    def post_resume_event_threadsafe(self, run_id: str, node_id: str, payload: dict):
-        if not self.loop or not self.loop.is_running():
-            # no-op or log; bus will warn
-            return
-        asyncio.run_coroutine_threadsafe(self.on_resume_event(run_id, node_id, payload), self.loop)

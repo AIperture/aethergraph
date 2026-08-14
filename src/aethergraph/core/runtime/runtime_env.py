@@ -64,10 +64,6 @@ class RuntimeEnv:
 
     # --- convenience projections of commonly used services ---
     @property
-    def schedulers(self) -> dict[str, Any]:
-        return self.container.schedulers
-
-    @property
     def registry(self):
         return self.container.registry
 
