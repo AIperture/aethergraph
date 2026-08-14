@@ -30,6 +30,7 @@ from aethergraph.core.runtime.runtime_services import (
 from aethergraph.runtime.contracts import (
     RuntimeGraphRegistration,
     RuntimeIdentity,
+    RuntimeModelProfile,
     RuntimeOpenRequest,
     RuntimeRunRecord,
     RuntimeRunRequest,
@@ -78,6 +79,7 @@ __all__ = [
     "RuntimeIdentity",
     "RuntimeInteractionError",
     "RuntimeNotReadyError",
+    "RuntimeModelProfile",
     "RuntimeOpenRequest",
     "RuntimeRunRecord",
     "RuntimeRunRequest",

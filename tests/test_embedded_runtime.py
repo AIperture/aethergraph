@@ -118,6 +118,29 @@ async def test_submit_maps_public_contract_without_exposing_run_record():
             agent_id="agent-1",
             run_config={"origin_binding": {"source": "studio"}},
         )
+
+
+def test_runtime_exposes_immutable_profile_and_capture_values():
+    settings = SimpleNamespace(
+        llm=SimpleNamespace(
+            default=SimpleNamespace(provider="lmstudio", model="agent-engine"),
+            profiles={
+                "summarizer": SimpleNamespace(
+                    provider="openai",
+                    model="summary-model",
+                )
+            },
+            observability=SimpleNamespace(capture_mode="manifest"),
+        )
+    )
+    runtime = EmbeddedRuntime(_container(settings=settings))
+
+    default = runtime.model_profile("default")
+    summarizer = runtime.model_profile("summarizer")
+
+    assert (default.provider, default.model) == ("lmstudio", "agent-engine")
+    assert (summarizer.provider, summarizer.model) == ("openai", "summary-model")
+    assert runtime.observability_capture_mode() == "manifest"
     )
 
     graph_id, submitted = manager.submitted

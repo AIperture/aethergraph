@@ -84,6 +84,15 @@ class RuntimeGraphRegistration:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeModelProfile:
+    """Immutable model-profile values exposed to an embedding Host."""
+
+    name: str
+    provider: str | None
+    model: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSemanticEvent:
     """Host-facing semantic event with its durable shared-log cursor."""
 
@@ -95,6 +104,7 @@ class RuntimeSemanticEvent:
 __all__ = [
     "RuntimeGraphRegistration",
     "RuntimeIdentity",
+    "RuntimeModelProfile",
     "RuntimeOpenRequest",
     "RuntimeRunRecord",
     "RuntimeRunRequest",

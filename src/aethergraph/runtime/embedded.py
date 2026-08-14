@@ -34,6 +34,7 @@ from aethergraph.services.integration import (
 
 from .contracts import (
     RuntimeGraphRegistration,
+    RuntimeModelProfile,
     RuntimeOpenRequest,
     RuntimeRunRecord,
     RuntimeRunRequest,
@@ -674,6 +675,72 @@ class EmbeddedRuntime:
         if self._container.observability is None:
             raise RuntimeNotReadyError("Observability is unavailable.")
         return self._container.observability
+
+    def model_profile(self, name: str) -> RuntimeModelProfile:
+        """Read immutable values for one configured model profile.
+
+        Examples:
+            Read the default profile:
+            ```python
+            profile = runtime.model_profile("default")
+            ```
+
+            Verify a named summarizer profile:
+            ```python
+            assert runtime.model_profile("summarizer").name == "summarizer"
+            ```
+
+        Args:
+            name: Exact configured profile name.
+
+        Returns:
+            RuntimeModelProfile: Immutable name, provider, and model values.
+
+        Notes:
+            The mutable settings object and LLM service remain private.
+        """
+        self._ensure_open()
+        settings = self._container.settings
+        if settings is None:
+            raise RuntimeNotReadyError("Runtime settings are unavailable.")
+        profiles = {"default": settings.llm.default, **dict(settings.llm.profiles or {})}
+        profile = profiles.get(name)
+        if profile is None:
+            raise KeyError(f"Unknown runtime model profile: {name}")
+        return RuntimeModelProfile(
+            name=name,
+            provider=str(profile.provider or "") or None,
+            model=str(profile.model or "") or None,
+        )
+
+    def observability_capture_mode(self) -> str:
+        """Read the immutable prompt-capture mode selected at runtime open.
+
+        Examples:
+            Verify Studio test manifest capture:
+            ```python
+            assert runtime.observability_capture_mode() == "manifest"
+            ```
+
+            Record a Host diagnostic without reading settings:
+            ```python
+            mode = runtime.observability_capture_mode()
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str: Configured observability capture mode.
+
+        Notes:
+            This returns one immutable scalar rather than the mutable settings tree.
+        """
+        self._ensure_open()
+        settings = self._container.settings
+        if settings is None:
+            raise RuntimeNotReadyError("Runtime settings are unavailable.")
+        return str(settings.llm.observability.capture_mode)
 
     async def close(self) -> None:
         """Cancel owned work and release runtime-owned process resources.
