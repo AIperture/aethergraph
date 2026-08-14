@@ -195,6 +195,172 @@ class ObservabilityFacade:
     async def list_llm_calls(self, **filters: Any) -> list[dict[str, Any]]:
         return await self.store.query_llm_calls(**filters)
 
+    async def list_suppressed_scopes(self) -> dict[str, set[str]]:
+        """List observation scopes hidden by retention operations.
+
+        Intro:
+            Reads the canonical suppression markers without exposing the
+            underlying observation store.
+
+        Examples:
+            Read all suppressed scopes:
+            ```python
+            suppressed = await facade.list_suppressed_scopes()
+            ```
+
+            Check one run:
+            ```python
+            hidden = "run-1" in (await facade.list_suppressed_scopes())["run_id"]
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, set[str]]: Suppressed identifiers grouped by scope kind.
+
+        Notes:
+            This method does not apply identity filtering or mutate retention state.
+        """
+        return await self.store.list_suppressed_scopes()
+
+    async def list_runs(self, *, limit: int = 100, offset: int = 0) -> list[Any]:
+        """List authoritative runs visible to this facade identity.
+
+        Intro:
+            Reads the configured run store and applies the facade's identity
+            boundary without exposing the store implementation.
+
+        Examples:
+            Read the first page:
+            ```python
+            runs = await facade.list_runs()
+            ```
+
+            Read a larger historical page:
+            ```python
+            runs = await facade.list_runs(limit=1000, offset=0)
+            ```
+
+        Args:
+            limit: Maximum number of run records requested from the store.
+            offset: Zero-based run-record offset.
+
+        Returns:
+            list[Any]: Visible authoritative run records in store order.
+
+        Notes:
+            Raises `ObservabilityUnavailableError` when no run store is configured.
+        """
+        if self.run_store is None:
+            raise ObservabilityUnavailableError("Run store is required for observability reads")
+        runs = await self.run_store.list(limit=limit, offset=offset)
+        return [run for run in runs if self._run_is_visible(run)]
+
+    async def get_run(self, run_id: str) -> Any | None:
+        """Read one authoritative run visible to this facade identity.
+
+        Intro:
+            Resolves one run through the configured store and treats an
+            identity-hidden record as absent.
+
+        Examples:
+            Read a run:
+            ```python
+            run = await facade.get_run("run-1")
+            ```
+
+            Handle a missing run:
+            ```python
+            if await facade.get_run("unknown") is None:
+                print("not found")
+            ```
+
+        Args:
+            run_id: Exact authoritative run identifier.
+
+        Returns:
+            Any | None: Visible run record, or `None` when absent or hidden.
+
+        Notes:
+            Raises `ObservabilityUnavailableError` when no run store is configured.
+        """
+        if self.run_store is None:
+            raise ObservabilityUnavailableError("Run store is required for observability reads")
+        run = await self.run_store.get(run_id)
+        if run is None or not self._run_is_visible(run):
+            return None
+        return run
+
+    async def list_engine_events(self, *, run_id: str) -> list[dict[str, Any]]:
+        """List canonical Engine events for one run in causal storage order.
+
+        Intro:
+            Queries the canonical memory event log for `agent_engine` tagged
+            rows while keeping the event-log implementation private.
+
+        Examples:
+            Read events for a run:
+            ```python
+            events = await facade.list_engine_events(run_id="run-1")
+            ```
+
+            Iterate in ascending order:
+            ```python
+            for event in await facade.list_engine_events(run_id="run-1"):
+                print(event["kind"])
+            ```
+
+        Args:
+            run_id: Exact run identifier used to scope canonical events.
+
+        Returns:
+            list[dict[str, Any]]: Canonical Engine event rows in ascending order.
+
+        Notes:
+            Raises `ObservabilityUnavailableError` when no Engine event log is configured.
+        """
+        if self.engine_event_log is None:
+            raise ObservabilityUnavailableError(
+                "Canonical Engine event log is required for observability reads"
+            )
+        return await self.engine_event_log.query(
+            tags=["agent_engine"],
+            run_id=run_id,
+            limit=None,
+            order_dir="asc",
+        )
+
+    async def hydrate_prompt_manifest(self, manifest_id: str) -> dict[str, Any] | None:
+        """Hydrate one captured prompt manifest by identifier.
+
+        Intro:
+            Reads the canonical prompt manifest through the facade so callers
+            do not depend on the observation store implementation.
+
+        Examples:
+            Hydrate one manifest:
+            ```python
+            manifest = await facade.hydrate_prompt_manifest("manifest-1")
+            ```
+
+            Handle an unavailable manifest:
+            ```python
+            if await facade.hydrate_prompt_manifest("unknown") is None:
+                print("not captured")
+            ```
+
+        Args:
+            manifest_id: Exact captured prompt manifest identifier.
+
+        Returns:
+            dict[str, Any] | None: Hydrated manifest, or `None` when unavailable.
+
+        Notes:
+            Capture policy determines which prompt fragments are available.
+        """
+        return await self.store.hydrate_prompt_manifest(manifest_id)
+
     async def list_inspect_traces(self, **filters: Any) -> TraceEventListResponse:
         """Project explicit service observations into the current Inspect DTO.
 

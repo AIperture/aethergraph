@@ -13,7 +13,7 @@ from aethergraph.contracts.services.runtime_output import RuntimeOutputFrame
 from aethergraph.core.execution.retry_policy import RetryPolicy
 from aethergraph.core.execution.step_forward import step_forward
 from aethergraph.core.graph.graph_fn import GRAPH_FN_ROOT_NODE_ID, GraphFunction
-from aethergraph.services.runtime_output import (
+from aethergraph.observability.runtime_output import (
     EventLogRuntimeOutputSink,
     capture_runtime_output,
     enable_runtime_output_capture,

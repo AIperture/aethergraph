@@ -1,3 +1,8 @@
+from .agent_events import (
+    AgentEventTypeRegistry,
+    emit_agent_event,
+    register_default_agent_event_types,
+)
 from .facade import (
     ActiveObservabilityScopeError,
     ObservabilityFacade,
@@ -31,6 +36,7 @@ from .studio_translation import (
 
 __all__ = [
     "ActiveObservabilityScopeError",
+    "AgentEventTypeRegistry",
     "CaptureMode",
     "LLMObservationRecord",
     "LegacyObservabilityCleanupResult",
@@ -50,7 +56,9 @@ __all__ = [
     "SQLiteObservationStore",
     "StorageStats",
     "cleanup_legacy_observability",
+    "emit_agent_event",
     "open_active_observability_facade",
     "open_observability_facade",
+    "register_default_agent_event_types",
     "scan_legacy_observability",
 ]

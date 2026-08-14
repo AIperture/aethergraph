@@ -29,6 +29,7 @@ wiring.
 | A2 dead leaf services | Complete | Commit `a9f847d`; full AG gate `726 passed, 2 skipped, 2 deselected`; Engine `770 passed`; no causal Studio failure. |
 | A3 legacy planning | Complete | Commit `7f6bffc`; full AG gate `729 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio container gate `35 passed`. |
 | A4 optional capabilities | Complete | Commit `2a89e35`; full AG gate `739 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio causal gate `148 passed`; wheel residue clean. |
+| A5a public observation boundary | Complete | Coordinated AG/Engine/Studio cutover prepared with no legacy import aliases; AG `739 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 non-causal path test deselected`; Studio causal gate `27 passed`; clean wheel has 432 entries. |
 | A5-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
@@ -143,3 +144,30 @@ wiring.
   transport, or unrelated model-service construction implementation changed.
 
 No compatibility alias or fallback is accepted as completion evidence.
+
+## A5a - coordinated public observation boundary
+
+- Moved the observation facade, policy, storage, translation, redaction, retention,
+  logging integration, agent-event emission, and bounded runtime-output capture to
+  the public `aethergraph.observability` package.
+- Moved `RuntimeInspectionService` and its diagnostic DTOs to
+  `aethergraph.core.runtime.inspection`.
+- Deleted the old `aethergraph.services.observability`,
+  `aethergraph.services.inspect`, and `aethergraph.services.runtime_output` source
+  paths. No forwarding modules or re-export aliases remain.
+- Added explicit facade reads for suppression scopes, authoritative runs, canonical
+  Engine events, and prompt-manifest hydration. Engine no longer reaches through
+  `.store`, `.run_store`, or `.engine_event_log` internals.
+- Updated Engine and Studio manually in isolated worktrees. The original checkouts
+  were not modified.
+- Focused AG boundary gate: `64 passed`; public facade follow-up: `2 passed`.
+- Full AG clean gate: `739 passed`, `2 skipped`, and the same `2` packaging-only Host
+  tests deselected. Engine clean gate: `770 passed` with one worktree-path-coupled
+  source-layout assertion deselected. Studio import/inspection/trace/worker causal
+  gate: `27 passed`.
+- Ruff and Python compilation passed in all three worktrees. Cross-repository import
+  smoke passed with AG and Engine worktree sources ordered ahead of Studio.
+- A clean wheel rebuild contains 432 entries, includes the new public modules, and
+  contains zero files under the three removed service paths.
+- Remaining A5 work is internal consolidation of tracing, metering, and logger
+  ownership; this boundary cutover does not mark all of A5 complete.

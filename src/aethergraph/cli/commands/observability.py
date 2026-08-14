@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from aethergraph.cli import output
-from aethergraph.services.observability.legacy_cleanup import cleanup_legacy_observability
+from aethergraph.observability.legacy_cleanup import cleanup_legacy_observability
 
 
 def register_parser(subparsers) -> None:

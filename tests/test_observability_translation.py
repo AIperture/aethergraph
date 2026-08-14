@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
-from aethergraph.services.observability import (
+from aethergraph.observability import (
     LLMObservationRecord,
     ObservabilityFacade,
     ObservationPolicy,

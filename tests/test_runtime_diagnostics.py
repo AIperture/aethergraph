@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aethergraph.services.inspect.runtime_diagnostics import (
+from aethergraph.core.runtime.inspection import (
     RuntimeInspectionService,
     build_error_info,
 )

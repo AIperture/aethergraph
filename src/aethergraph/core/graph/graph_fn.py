@@ -14,13 +14,13 @@ from aethergraph.core.graph.graphify_validation import (
     validate_graph_source,
     warnings_as_errors_enabled,
 )
+from aethergraph.observability.runtime_output import capture_runtime_output
 from aethergraph.services.registry.agent_app_meta import (
     AgentConfig,
     AppConfig,
     build_agent_meta,
     build_app_meta,
 )
-from aethergraph.services.runtime_output import capture_runtime_output
 
 from ..runtime.injection import pop_explicit_node_context, resolve_node_context_param
 from ..runtime.runtime_env import RuntimeEnv

@@ -6,8 +6,9 @@ from datetime import UTC, datetime
 import pytest
 
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
-from aethergraph.services.observability import (
+from aethergraph.observability import (
     LLMObservationRecord,
+    ObservabilityFacade,
     ObservationPolicy,
     ObservationRecord,
     ObservationScope,
@@ -105,5 +106,52 @@ def test_workspace_facade_reads_active_and_historical_records(tmp_path) -> None:
         await observation_store.close()
         await writer.close()
         await engine_writer.close()
+
+    asyncio.run(exercise())
+
+
+def test_public_reader_methods_hide_observability_store_implementations() -> None:
+    class Store:
+        async def list_suppressed_scopes(self) -> dict[str, set[str]]:
+            return {"run_id": {"hidden"}, "trace_id": set(), "session_id": set()}
+
+        async def hydrate_prompt_manifest(self, manifest_id: str):
+            return {"manifest_id": manifest_id}
+
+    class Runs:
+        async def list(self, *, limit: int, offset: int):
+            assert (limit, offset) == (25, 5)
+            return [{"run_id": "run-1"}]
+
+        async def get(self, run_id: str):
+            return {"run_id": run_id}
+
+    class EngineEvents:
+        async def query(self, **filters):
+            assert filters == {
+                "tags": ["agent_engine"],
+                "run_id": "run-1",
+                "limit": None,
+                "order_dir": "asc",
+            }
+            return [{"id": "event-1"}]
+
+    async def exercise() -> None:
+        facade = ObservabilityFacade(
+            Store(),  # type: ignore[arg-type]
+            engine_event_log=EngineEvents(),
+            run_store=Runs(),
+            owns_store=False,
+        )
+
+        assert await facade.list_suppressed_scopes() == {
+            "run_id": {"hidden"},
+            "trace_id": set(),
+            "session_id": set(),
+        }
+        assert await facade.list_runs(limit=25, offset=5) == [{"run_id": "run-1"}]
+        assert await facade.get_run("run-1") == {"run_id": "run-1"}
+        assert await facade.list_engine_events(run_id="run-1") == [{"id": "event-1"}]
+        assert await facade.hydrate_prompt_manifest("manifest-1") == {"manifest_id": "manifest-1"}
 
     asyncio.run(exercise())

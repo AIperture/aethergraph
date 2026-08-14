@@ -11,13 +11,14 @@ from aethergraph.api.v1 import observability as observability_api
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
 from aethergraph.core.runtime.runtime_metering import current_meter_context
-from aethergraph.services.inspect import (
+from aethergraph.observability import (
     AgentEventTypeRegistry,
+    ObservabilityFacade,
+    PurgeResult,
     emit_agent_event,
     register_default_agent_event_types,
 )
-from aethergraph.services.observability import ObservabilityFacade, PurgeResult
-from aethergraph.services.observability.logging import ObservationLogHandler
+from aethergraph.observability.logging import ObservationLogHandler
 
 
 class FakeEventLog:

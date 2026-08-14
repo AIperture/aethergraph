@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from aethergraph.server.server_state import workspace_lock
-from aethergraph.services.observability.legacy_cleanup import (
+from aethergraph.observability.legacy_cleanup import (
     LegacyObservabilityContainmentError,
     LegacyObservabilityWorkspaceActiveError,
     cleanup_legacy_observability,
     scan_legacy_observability,
 )
+from aethergraph.server.server_state import workspace_lock
 from aethergraph.storage.eventlog.sqlite_event_sync import SQLiteEventLogSync
 
 

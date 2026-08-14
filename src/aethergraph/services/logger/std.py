@@ -10,7 +10,7 @@ import queue
 
 from aethergraph.config.config import AppSettings
 from aethergraph.core.graph.graph_refs import GRAPH_INPUTS_NODE_ID
-from aethergraph.services.observability.logging import ObservationLogHandler, RuntimeContextFilter
+from aethergraph.observability.logging import ObservationLogHandler, RuntimeContextFilter
 
 from .base import LogContext, LoggerService
 from .formatters import ColorFormatter, JsonFormatter, SafeFormatter

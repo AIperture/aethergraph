@@ -29,6 +29,16 @@ from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
+from aethergraph.observability import (
+    AgentEventTypeRegistry,
+    ObservabilityFacade,
+    ObservationPolicy,
+    RetentionJanitor,
+    RetentionPolicy,
+    SQLiteObservationStore,
+    open_active_observability_facade,
+    register_default_agent_event_types,
+)
 from aethergraph.services.auth.authn import AuthnService
 from aethergraph.services.auth.authz import AllowAllAuthz
 from aethergraph.services.channel.channel_bus import ChannelBus
@@ -42,10 +52,6 @@ from aethergraph.services.continuations.stores.fs_store import (
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
-from aethergraph.services.inspect import (
-    AgentEventTypeRegistry,
-    register_default_agent_event_types,
-)
 
 # ---- kv services ----
 from aethergraph.services.llm.embed_factory import build_embedding_clients
@@ -60,14 +66,6 @@ from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
 # ---- memory services ----
 from aethergraph.services.memory.factory import MemoryFactory
 from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
-from aethergraph.services.observability import (
-    ObservabilityFacade,
-    ObservationPolicy,
-    RetentionJanitor,
-    RetentionPolicy,
-    SQLiteObservationStore,
-    open_active_observability_facade,
-)
 
 # ---- Other components ----
 from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter

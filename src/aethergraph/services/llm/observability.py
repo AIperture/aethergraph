@@ -5,7 +5,7 @@ import json
 from textwrap import fill
 from typing import Any, Literal, Protocol
 
-from aethergraph.services.observability.models import CaptureMode, LLMObservationRecord
+from aethergraph.observability.models import CaptureMode, LLMObservationRecord
 
 PromptViewMode = Literal["off", "compact", "truncated", "full"]
 

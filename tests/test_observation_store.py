@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from aethergraph.services.observability import (
+from aethergraph.observability import (
     ObservabilityFacade,
     ObservationFilter,
     ObservationRecord,
     ObservationScope,
     SQLiteObservationStore,
 )
-from aethergraph.services.observability.retention import RetentionJanitor, RetentionPolicy
+from aethergraph.observability.retention import RetentionJanitor, RetentionPolicy
 
 
 @pytest.mark.asyncio

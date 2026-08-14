@@ -6,15 +6,15 @@ from typing import Any
 import pytest
 
 from aethergraph.contracts.services.runtime_output import RuntimeOutputFrame
-from aethergraph.services.inspect.agent_events import emit_agent_event
-from aethergraph.services.observability import (
+from aethergraph.observability import (
     LLMObservationRecord,
     ObservationPolicy,
     ObservationRecord,
     SQLiteObservationStore,
+    emit_agent_event,
 )
-from aethergraph.services.observability.prompt_store import PromptStore
-from aethergraph.services.runtime_output import EventLogRuntimeOutputSink
+from aethergraph.observability.prompt_store import PromptStore
+from aethergraph.observability.runtime_output import EventLogRuntimeOutputSink
 
 _DATA_URL = "data:image/png;base64,c2Vuc2l0aXZlLWJ5dGVz"
 _MARKER = "[redacted data URL: image/png]"

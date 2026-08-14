@@ -308,7 +308,7 @@ class NodeContext:
         parent_event_id: str | None = None,
         caused_by_event_id: str | None = None,
     ) -> dict[str, Any]:
-        from aethergraph.services.inspect import emit_agent_event
+        from aethergraph.observability import emit_agent_event
 
         return await emit_agent_event(
             event_type=event_type,

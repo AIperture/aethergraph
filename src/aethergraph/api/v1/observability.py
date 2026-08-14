@@ -6,14 +6,14 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Response  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
-from aethergraph.services.observability import (
+from aethergraph.observability import (
     ActiveObservabilityScopeError,
     ObservabilityFacade,
     ObservabilityIdentity,
     ObservabilityNotFoundError,
     ObservabilityUnavailableError,
 )
-from aethergraph.services.observability.studio_translation import (
+from aethergraph.observability.studio_translation import (
     _matches_scope,
     _paginate_rows,
 )

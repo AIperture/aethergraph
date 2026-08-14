@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from aethergraph.services.observability import (
+from aethergraph.observability import (
     ActiveObservabilityScopeError,
     LLMObservationRecord,
     ObservabilityFacade,
@@ -16,7 +16,7 @@ from aethergraph.services.observability import (
     ObservationScope,
     SQLiteObservationStore,
 )
-from aethergraph.services.observability.retention import (
+from aethergraph.observability.retention import (
     RetentionJanitor,
     RetentionPolicy,
 )

@@ -7,13 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query  #     type: ignore
 
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.api.v1.registry_helpers import scoped_registry
-from aethergraph.core.runtime.run_manager import DuplicateRunIdError, RunManager
-from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
-from aethergraph.core.runtime.runtime_services import current_services
-from aethergraph.services.inspect.runtime_diagnostics import (
+from aethergraph.core.runtime.inspection import (
     RuntimeInspectionService,
     build_error_info,
 )
+from aethergraph.core.runtime.run_manager import DuplicateRunIdError, RunManager
+from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
+from aethergraph.core.runtime.runtime_services import current_services
 
 from .deps import RequestIdentity, enforce_run_rate_limits, get_identity, require_runs_execute
 from .run_presenters import to_run_summary

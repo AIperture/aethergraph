@@ -7,8 +7,8 @@ from uuid import uuid4
 
 from aethergraph.contracts.services.channel import OutEvent
 from aethergraph.core.runtime.run_cancellation import RunCancellationRequestedError
+from aethergraph.observability.runtime_output import capture_runtime_output
 from aethergraph.services.continuations.continuation import Continuation
-from aethergraph.services.runtime_output import capture_runtime_output
 
 from ..graph.task_node import NodeStatus, TaskNodeRuntime
 from ..runtime.execution_context import ExecutionContext

@@ -8,6 +8,13 @@ import pytest
 
 from aethergraph.config.config import AppSettings, LLMUsageQuotaSettings
 from aethergraph.core.runtime.runtime_metering import current_meter_context
+from aethergraph.observability import (
+    LLMObservationRecord,
+    ObservabilityFacade,
+    ObservationPolicy,
+    SQLiteObservationStore,
+)
+from aethergraph.observability.redaction import canonical_json
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
@@ -25,13 +32,6 @@ from aethergraph.services.llm.types import (
     LLMRunQuotaExceededError,
     LLMRunQuotaWouldExceedError,
 )
-from aethergraph.services.observability import (
-    LLMObservationRecord,
-    ObservabilityFacade,
-    ObservationPolicy,
-    SQLiteObservationStore,
-)
-from aethergraph.services.observability.redaction import canonical_json
 
 
 def _record(

@@ -6,7 +6,7 @@ from typing import Any
 import uuid
 
 from aethergraph.core.runtime.runtime_metering import current_meter_context
-from aethergraph.services.observability.redaction import sanitize_content, sanitize_text
+from aethergraph.observability.redaction import sanitize_content, sanitize_text
 
 
 def _utc_ts() -> float:
