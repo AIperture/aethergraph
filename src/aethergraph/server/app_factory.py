@@ -103,6 +103,9 @@ def create_app(
                 container.retention_janitor.run_forever(retention_stop)
             )
 
+        await container.continuation_timer.start()
+        logger.info("ContinuationTimerService background task started")
+
         # Start trigger engine if trigger_service is present
         if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
             trigger_engine: TriggerEngine = container.trigger_engine
@@ -137,7 +140,13 @@ def create_app(
             yield
         finally:
             # --- Shutdown: best-effort cleanup of background tasks ---
-            # 1) Stop TriggerEngine gracefully
+            # 1) Stop continuation delivery before other runtime services.
+            try:
+                await container.continuation_timer.stop()
+            except Exception:
+                logger.exception("Error stopping ContinuationTimerService")
+
+            # 2) Stop TriggerEngine gracefully
             if trigger_engine_task is not None:
                 trigger_engine: TriggerEngine = container.trigger_engine
                 try:
@@ -151,7 +160,7 @@ def create_app(
                     with suppress(asyncio.CancelledError):
                         await trigger_engine_task
 
-            # 2) Stop explicitly configured provider transports
+            # 3) Stop explicitly configured provider transports
             if integration_manager is not None:
                 await integration_manager.stop()
 

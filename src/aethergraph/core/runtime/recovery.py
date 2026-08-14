@@ -1,9 +1,7 @@
 # aethergraph/runtime/recovery.py
 from __future__ import annotations
 
-import datetime
 import hashlib
-import time
 from typing import Any
 
 from aethergraph.contracts.services.state_stores import GraphStateStore
@@ -13,9 +11,36 @@ from ..graph.task_graph import TaskGraph, TaskGraphSpec
 
 
 def hash_spec(spec: TaskGraphSpec) -> str:
+    """Hash the immutable structure of one task-graph specification.
+
+    Intro:
+        Produces a stable SHA-256 digest used to detect graph-definition drift
+        before hydrating persisted runtime state.
+
+    Examples:
+        Hash a compiled task graph:
+        ```python
+        digest = hash_spec(graph.spec)
+        ```
+
+        Compare a snapshot contract:
+        ```python
+        if snapshot.spec_hash != hash_spec(graph.spec):
+            print("graph definition changed")
+        ```
+
+    Args:
+        spec: Task-graph specification whose immutable structure is hashed.
+
+    Returns:
+        str: Lowercase SHA-256 hexadecimal digest.
+
+    Notes:
+        Callable node logic is represented by its stable string form because
+        executable objects are not serialized into snapshots.
+    """
     import json
 
-    # stable hash of the immutable parts
     raw = json.dumps(
         {
             "graph_id": spec.graph_id,
@@ -48,126 +73,79 @@ async def recover_graph_run(
     run_id: str,
     store: GraphStateStore,
 ) -> TaskGraph:
-    snap = await store.load_latest_snapshot(run_id)
-    g = TaskGraph.from_spec(spec=spec, state=None)
-    g.state.run_id = run_id
-    # If no snapshot, we're starting fresh.
-    if not snap:
-        return g
+    """Rehydrate a task graph from its latest durable snapshot.
 
-    # Basic drift guard (optional: warn if different)
-    want = hash_spec(spec)
-    if snap.spec_hash != want:
-        # Soft warning; TODO: raise if later want strictness.
+    Intro:
+        Materializes the supplied specification, loads the latest run snapshot,
+        warns on definition drift, and applies persisted node state when present.
+
+    Examples:
+        Recover an interrupted run:
+        ```python
+        graph = await recover_graph_run(spec=spec, run_id="run-1", store=state_store)
+        ```
+
+        Start from a clean graph when no snapshot exists:
+        ```python
+        graph = await recover_graph_run(spec=spec, run_id="new-run", store=state_store)
+        assert graph.state.run_id == "new-run"
+        ```
+
+    Args:
+        spec: Canonical task-graph specification to materialize.
+        run_id: Exact durable run identity whose snapshot is loaded.
+        store: Graph-state store providing the latest snapshot.
+
+    Returns:
+        TaskGraph: Materialized graph with hydrated state when available.
+
+    Notes:
+        Persisted `RUNNING` nodes become `PENDING` so interrupted work can be
+        scheduled again; specification drift currently emits a warning.
+    """
+    snap = await store.load_latest_snapshot(run_id)
+    graph = TaskGraph.from_spec(spec=spec, state=None)
+    graph.state.run_id = run_id
+    if not snap:
+        return graph
+
+    expected_hash = hash_spec(spec)
+    if snap.spec_hash != expected_hash:
         import logging
 
         logger = logging.getLogger("aethergraph.core.runtime.recovery")
         logger.warning(
-            f"[recover_graph_run] Spec hash mismatch for run {run_id}: snapshot has {snap.spec_hash[:8]}..., want {want[:8]}... This typically means the graph definition changed since the snapshot was taken. It is not a problem if you created the graph differently on resume."
+            "[recover_graph_run] Spec hash mismatch for run %s: snapshot has %s..., "
+            "want %s... This typically means the graph definition changed since "
+            "the snapshot was taken.",
+            run_id,
+            snap.spec_hash[:8],
+            expected_hash[:8],
         )
 
-    # Apply snapshot state
     try:
-        _hydrate_state_from_json(g, snap.state)
-    except Exception as e:
+        _hydrate_state_from_json(graph, snap.state)
+    except Exception:
         import logging
 
-        logger = logging.getLogger("aethergraph.core.runtime.recovery")
-        logger.error(
-            f"[recover_graph_run] Failed to hydrate state from snapshot for run {run_id}: {e}"
+        logging.getLogger("aethergraph.core.runtime.recovery").exception(
+            "[recover_graph_run] Failed to hydrate state for run %s",
+            run_id,
         )
 
-    return g
+    return graph
 
 
-def _hydrate_state_from_json(graph, j: dict[str, Any]) -> None:
-    graph.state.rev = j.get("rev", 0)
-    graph.state._bound_inputs = j.get("_bound_inputs")
-    for nid, ns_json in j.get("nodes", {}).items():
-        ns = graph.state.nodes.setdefault(nid, graph.state.nodes.get(nid))
-        status_name = ns_json.get("status", "PENDING")
+def _hydrate_state_from_json(graph, payload: dict[str, Any]) -> None:
+    graph.state.rev = payload.get("rev", 0)
+    graph.state._bound_inputs = payload.get("_bound_inputs")
+    for node_id, node_payload in payload.get("nodes", {}).items():
+        node_state = graph.state.nodes.setdefault(node_id, graph.state.nodes.get(node_id))
+        status_name = node_payload.get("status", "PENDING")
         status = getattr(NodeStatus, status_name, NodeStatus.PENDING)
         if status == NodeStatus.RUNNING:
             status = NodeStatus.PENDING
-        ns.status = status
-
-        outs = ns_json.get("outputs") or {}
-        # Keep as-is; resume_policy already blocked non-JSON/ref earlier
-        ns.outputs = outs
-
-        # time fields
-        ns.started_at = ns_json.get("started_at")
-        ns.finished_at = ns_json.get("finished_at")
-
-
-async def rearm_waits_if_needed(graph, env, *, ttl_s: int = 3600):
-    store = env.container.cont_store
-    bus = env.container.channels
-    now = time.time()
-
-    for nid, ns in graph.state.nodes.items():
-        if getattr(ns, "status", None) not in (
-            NodeStatus.WAITING_HUMAN,
-            getattr(NodeStatus, "WAITING_EXTERNAL", "WAITING_EXTERNAL"),
-        ):
-            continue
-
-        cont = await store.get(run_id=env.run_id, node_id=nid)
-        # Normalize deadline to a numeric timestamp to avoid comparing datetime with float
-        deadline = getattr(cont, "deadline", None)
-        deadline_ts = deadline.timestamp() if isinstance(deadline, datetime.datetime) else deadline
-        expired = (not cont) or (deadline_ts is not None and deadline_ts < now)
-
-        if not expired:
-            continue  # still valid
-
-        # Rebuild OutEvent from saved wait_spec
-        ws = getattr(ns, "wait_spec", None)
-        if not ws:
-            # No spec → safest fallback is to keep waiting but log it
-            env.container.logger.for_run().warning(
-                f"[rearm] missing wait_spec for {env.run_id}:{nid}; staying WAITING"
-            )
-            continue
-
-        # Mint a new continuation token
-        new_deadline = now + ttl_s
-        token = store.mint(
-            run_id=env.run_id,
-            node_id=nid,
-            kind=ws["kind"],
-            channel=ws.get("channel"),
-            deadline=new_deadline,
-            meta=ws.get("meta") or {},
-        )
-        # Build + send OutEvent
-        out = {
-            "type": "session.need_input"
-            if ws["kind"] == "text"
-            else "session.need_approval"
-            if ws["kind"] == "approval"
-            else "session.need_input",  # default
-            "channel": ws.get("channel"),
-            "text": ws.get("prompt"),
-            "buttons": [{"label": o} for o in (ws.get("options") or [])],
-            "meta": ws.get("meta") or {},
-        }
-        payload = await bus.send(out)  # may inline-resume for console/web
-
-        # If adapter returned a payload immediately → deliver inline
-        if payload and "payload" in payload:
-            # inline path (same as in _enter_wait)
-            await env.container.resume_bus.deliver_inline(
-                run_id=env.run_id, node_id=nid, payload=payload["payload"]
-            )
-        else:
-            # Persist (replace/insert) the new continuation
-            store.save_for_node(
-                run_id=env.run_id,
-                node_id=nid,
-                token=token,
-                kind=ws["kind"],
-                channel=ws.get("channel"),
-                deadline=new_deadline,
-                meta=ws.get("meta") or {},
-            )
+        node_state.status = status
+        node_state.outputs = node_payload.get("outputs") or {}
+        node_state.started_at = node_payload.get("started_at")
+        node_state.finished_at = node_payload.get("finished_at")

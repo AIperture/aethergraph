@@ -8,6 +8,7 @@ from typing import Any
 # ---- core services ----
 from aethergraph.config.config import AppSettings
 from aethergraph.contracts.integration import HostManifest
+from aethergraph.contracts.services.continuations import AsyncContinuationStore
 
 # ---- optional services (not used by default) ----
 # ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
@@ -25,6 +26,7 @@ from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.contracts.storage.trigger_store import TriggerStore
 
 # ---- artifact services ----
+from aethergraph.core.runtime.continuation_timer import ContinuationTimerService
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
@@ -48,9 +50,6 @@ from aethergraph.services.channel.channel_bus import ChannelBus
 # ---- channel services ----
 from aethergraph.services.channel.factory import build_bus, make_channel_adapters_from_env
 from aethergraph.services.clock.clock import SystemClock
-from aethergraph.services.continuations.stores.fs_store import (
-    FSContinuationStore,  # AsyncContinuationStore
-)
 
 # ---- Global Indices ----
 from aethergraph.services.indices.global_indices import GlobalIndices
@@ -80,7 +79,9 @@ from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
-from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
+from aethergraph.storage.continuation_store.timer_leases import (
+    SQLiteContinuationTimerLeaseStore,
+)
 
 # ---- storage builders ----
 from aethergraph.storage.factory import (
@@ -116,7 +117,7 @@ SERVICE_KEYS = [
     "wait_registry",
     "resume_bus",
     "resume_router",
-    "wakeup_queue",
+    "continuation_timer",
     # storage and artifacts
     "kv_hot",
     "artifacts",
@@ -151,12 +152,12 @@ class DefaultContainer:
     channels: ChannelBus
 
     # continuations and resume
-    cont_store: FSContinuationStore
+    cont_store: AsyncContinuationStore
     sched_registry: SchedulerRegistry
     wait_registry: WaitRegistry
     resume_bus: MultiSchedulerResumeBus
     resume_router: ResumeRouter
-    wakeup_queue: ThreadSafeWakeupQueue
+    continuation_timer: ContinuationTimerService
     state_store: GraphStateStore
     trigger_engine: TriggerEngine
     trigger_service: TriggerService
@@ -341,7 +342,13 @@ def build_default_container(
         logger=logger_factory.for_service(ns="resume_router"),
         wait_registry=wait_registry,
     )
-    wakeup_queue = ThreadSafeWakeupQueue()  # TODO: this is a placeholder, not fully implemented
+    continuation_timer = ContinuationTimerService(
+        continuation_store=cont_store,
+        lease_store=SQLiteContinuationTimerLeaseStore(root_p / "continuations" / "timer_leases.db"),
+        resume_router=resume_router,
+        clock=clock,
+        logger=logger_factory.for_service(ns="continuation_timer"),
+    )
     # state_store = JsonGraphStateStore(root=str(root_p / "graph_states"))
     state_store = build_graph_state_store(cfg)
 
@@ -515,7 +522,7 @@ def build_default_container(
         wait_registry=wait_registry,
         resume_bus=resume_bus,
         resume_router=resume_router,
-        wakeup_queue=wakeup_queue,
+        continuation_timer=continuation_timer,
         trigger_store=trigger_store,
         trigger_engine=trigger_engine,
         trigger_service=trigger_service,

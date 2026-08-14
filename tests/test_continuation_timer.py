@@ -10,9 +10,15 @@ import pytest
 from aethergraph.core.runtime.continuation_timer import ContinuationTimerService, _fire_id
 from aethergraph.observability import OperationObserver
 from aethergraph.observability.models import ObservationRecord
+from aethergraph.services.container.default_container import SERVICE_KEYS, DefaultContainer
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
-from aethergraph.services.resume.multi_scheduler_resume_bus import SchedulerUnavailableError
+from aethergraph.services.resume.multi_scheduler_resume_bus import (
+    MultiSchedulerResumeBus,
+    SchedulerUnavailableError,
+)
+from aethergraph.services.resume.router import ResumeRouter
+from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.storage.continuation_store.timer_leases import (
     SQLiteContinuationTimerLeaseStore,
 )
@@ -66,6 +72,23 @@ class _Sink:
     async def append_observation(self, record: ObservationRecord, **_: Any) -> str:
         self.records.append(record)
         return record.observation_id
+
+
+class _Scheduler:
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def on_resume_event(
+        self,
+        run_id: str,
+        node_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        self.calls.append((run_id, node_id, payload))
+
+    async def terminate(self) -> None:
+        return None
 
 
 async def _save_due(
@@ -149,6 +172,41 @@ async def test_deadline_timer_delivers_once_and_persists_receipt(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_timer_delivers_through_canonical_resume_router(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 13, tzinfo=UTC)
+    clock = _Clock(now)
+    store = InMemoryContinuationStore(secret=b"secret")
+    continuation = await _save_due(store, now=now)
+    registry = SchedulerRegistry()
+    scheduler = _Scheduler(asyncio.get_running_loop())
+    registry.register(continuation.run_id, scheduler)
+    resume_bus = MultiSchedulerResumeBus(registry=registry, store=store)
+    resume_router = ResumeRouter(store=store, runner=resume_bus)
+    timer = ContinuationTimerService(
+        continuation_store=store,
+        lease_store=SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db"),
+        resume_router=resume_router,
+        clock=clock,  # type: ignore[arg-type]
+        worker_id="worker-a",
+    )
+
+    assert await timer.run_once() == 1
+
+    assert scheduler.calls == [
+        (
+            continuation.run_id,
+            continuation.node_id,
+            {
+                "timer_fired": True,
+                "timer_kind": "deadline",
+                "scheduled_for": continuation.next_wakeup_at.isoformat(),
+            },
+        )
+    ]
+    assert await store.get(continuation.run_id, continuation.node_id) is None
+
+
+@pytest.mark.asyncio
 async def test_poll_timer_uses_poll_payload(tmp_path: Path) -> None:
     now = datetime(2026, 8, 13, tzinfo=UTC)
     clock = _Clock(now)
@@ -201,6 +259,7 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
     store = InMemoryContinuationStore(secret=b"secret")
     continuation = await _save_due(store, now=now)
     router = _Router(store)
+    sink = _Sink()
     lease_store = SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db")
     fire_id = _fire_id(
         run_id=continuation.run_id,
@@ -225,6 +284,7 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
         router=router,
         clock=clock,
         worker_id="restarted-worker",
+        observer=OperationObserver(sink),
     )
 
     assert await restarted.run_once() == 1
@@ -233,6 +293,11 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
     assert receipt is not None
     assert receipt.status == "delivered"
     assert receipt.attempts == 2
+    assert [record.name for record in sink.records] == [
+        "lease_expired",
+        "claim",
+        "delivery",
+    ]
 
 
 @pytest.mark.asyncio
@@ -290,12 +355,14 @@ async def test_retry_limit_dead_letters_and_preserves_continuation(tmp_path: Pat
     store = InMemoryContinuationStore(secret=b"secret")
     continuation = await _save_due(store, now=now)
     router = _Router(store, failures=1)
+    sink = _Sink()
     timer = _timer(
         tmp_path,
         store=store,
         router=router,
         clock=clock,
         max_attempts=1,
+        observer=OperationObserver(sink),
     )
 
     assert await timer.run_once() == 1
@@ -310,6 +377,7 @@ async def test_retry_limit_dead_letters_and_preserves_continuation(tmp_path: Pat
     assert receipt is not None
     assert receipt.status == "dead_letter"
     assert await store.get(continuation.run_id, continuation.node_id) is not None
+    assert [record.name for record in sink.records] == ["claim", "dead_letter"]
 
 
 @pytest.mark.asyncio
@@ -328,3 +396,23 @@ async def test_timer_start_and_shutdown_are_idempotent(tmp_path: Path) -> None:
     await timer.stop()
     await timer.stop()
     assert timer._task is None
+
+
+def test_legacy_wakeup_boundary_is_deleted() -> None:
+    source_root = Path(__file__).parents[1] / "src" / "aethergraph"
+    deleted_files = (
+        source_root / "contracts" / "services" / "wakeup.py",
+        source_root / "core" / "runtime" / "wakeup_watcher.py",
+        source_root / "services" / "wakeup" / "memory_queue.py",
+        source_root / "services" / "wakeup" / "scanner_producer.py",
+        source_root / "services" / "wakeup" / "worker.py",
+        source_root / "services" / "continuations" / "factory.py",
+        source_root / "storage" / "continuation_store" / "fs_cont.py",
+        source_root / "storage" / "continuation_store" / "inmem_cont.py",
+    )
+
+    assert all(not path.exists() for path in deleted_files)
+    assert "continuation_timer" in DefaultContainer.__dataclass_fields__
+    assert "wakeup_queue" not in DefaultContainer.__dataclass_fields__
+    assert "continuation_timer" in SERVICE_KEYS
+    assert "wakeup_queue" not in SERVICE_KEYS
