@@ -51,8 +51,8 @@ def build_release_compatibility(
         ```python
         compatibility = build_release_compatibility(
             build_root=compiled.output_root,
-            aethergraph_version="0.1.0a16",
-            engine_version="0.1.0a1",
+            aethergraph_version="0.1.0a17",
+            engine_version="0.1.0a3",
             python_abi="cpython-313",
             platform_name="win32",
             architecture="AMD64",
