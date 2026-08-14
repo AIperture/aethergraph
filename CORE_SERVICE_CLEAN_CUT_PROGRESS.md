@@ -31,7 +31,8 @@ wiring.
 | A4 optional capabilities | Complete | Commit `2a89e35`; full AG gate `739 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio causal gate `148 passed`; wheel residue clean. |
 | A5a public observation boundary | Complete | AG `99d7fc2`, Engine `822324f`, Studio `1af2aa8`; no legacy import aliases; AG `739 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 non-causal path test deselected`; Studio causal gate `27 passed`; clean wheel has 432 entries. |
 | A5b telemetry consolidation | Complete | Commit `5ae889c`; logger and metering moved under `aethergraph.observability`; no-op tracing replaced by persisted operation observations; AG full clean gate passed; Engine `770 passed, 1 deselected`; Studio causal gate `27 passed`; clean wheel has 430 entries and zero legacy telemetry paths. |
-| A6-A10 | Pending | Not started. |
+| A6 scheduler/resume simplification | Complete | Commit `ec8b433`; deleted unused global scheduler; one local scheduler registry and exactly-once dispatch path; AG `754 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 429 entries. |
+| A7-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -199,3 +200,35 @@ No compatibility alias or fallback is accepted as completion evidence.
 - No Engine or Studio source update was required for A5b; their A5a isolated
   worktrees remain at `822324f` and `1af2aa8`, and the original checkouts remain
   unchanged.
+
+## A6 - scheduler and resume simplification
+
+- Deleted the 701-line `GlobalForwardScheduler`, its unused container construction,
+  the `container.schedulers` dictionary, the `RuntimeEnv.schedulers` projection, and
+  the unused global-start helper. Every graph run continues to construct exactly one
+  `ForwardScheduler`.
+- Replaced the scheduler registry's concrete global-scheduler annotation with the
+  minimal local control protocol required for resume dispatch and cancellation.
+  `RunRegistrationGuard` remains the sole execution-lifetime registration owner; the
+  duplicate async registration context manager was deleted.
+- Removed `post_resume_event_threadsafe` and the bus's second resume submission.
+  Same-loop delivery is awaited directly; cross-thread delivery is posted once to the
+  scheduler's owning loop.
+- Invalid tokens, missing schedulers, missing loops, and dispatch failures now raise
+  explicit errors. The durable continuation is retained until a dispatch succeeds,
+  so an inactive run is recoverable instead of being logged and silently lost.
+- Repaired scheduler-level cancellation fallback: a handle without an installed
+  cancellation adapter now reaches the registered scheduler instead of becoming
+  unreachable after the handle labels its adapter kind as `none`.
+- Added nine scheduler/resume tests covering same-loop and cross-thread delivery,
+  duplicate delivery, invalid tokens, absent scheduler/loop, dispatch failure,
+  registration lifetime, cancellation, and the deleted public/container boundary.
+- Focused scheduler/resume/runtime gate: `34 passed`. Full AG clean gate: `754
+  passed`, `2 skipped`, and the same `2` packaging-only Host tests deselected. Engine
+  full causal gate: `770 passed`, `1` worktree-path assertion deselected. Studio
+  execution contract/API/worker-bridge causal gate: `25 passed`.
+- Ruff, Ruff-format, Python compilation, `git diff --check`, deleted-module import
+  smoke, and boundary scans passed. A clean wheel contains 429 entries and no
+  `core/execution/global_scheduler.py`.
+- No Engine or Studio source update was required. Their isolated A5a worktrees remain
+  clean at `822324f` and `1af2aa8`; their original checkouts were not mutated.
