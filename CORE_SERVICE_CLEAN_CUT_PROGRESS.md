@@ -30,7 +30,8 @@ wiring.
 | A3 legacy planning | Complete | Commit `7f6bffc`; full AG gate `729 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio container gate `35 passed`. |
 | A4 optional capabilities | Complete | Commit `2a89e35`; full AG gate `739 passed, 2 skipped, 2 deselected`; Engine `770 passed`; Studio causal gate `148 passed`; wheel residue clean. |
 | A5a public observation boundary | Complete | AG `99d7fc2`, Engine `822324f`, Studio `1af2aa8`; no legacy import aliases; AG `739 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 non-causal path test deselected`; Studio causal gate `27 passed`; clean wheel has 432 entries. |
-| A5-A10 | Pending | Not started. |
+| A5b telemetry consolidation | Complete | Commit `5ae889c`; logger and metering moved under `aethergraph.observability`; no-op tracing replaced by persisted operation observations; AG full clean gate passed; Engine `770 passed, 1 deselected`; Studio causal gate `27 passed`; clean wheel has 430 entries and zero legacy telemetry paths. |
+| A6-A10 | Pending | Not started. |
 | B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
 
 ## Checkpoints
@@ -169,5 +170,32 @@ No compatibility alias or fallback is accepted as completion evidence.
   smoke passed with AG and Engine worktree sources ordered ahead of Studio.
 - A clean wheel rebuild contains 432 entries, includes the new public modules, and
   contains zero files under the three removed service paths.
-- Remaining A5 work is internal consolidation of tracing, metering, and logger
-  ownership; this boundary cutover does not mark all of A5 complete.
+
+## A5b - telemetry consolidation
+
+- Moved the logger implementation and `EventLogMeteringService` under the canonical
+  `aethergraph.observability` package and updated every AG consumer to that boundary.
+- Replaced the installed no-op tracer with `OperationObserver`. Service operations
+  now preserve trace/span context and persist bounded request/response summaries,
+  allowlisted metrics, lifecycle state, and errors through the existing observation
+  facade and SQLite store.
+- Reused the canonical observation-store redaction boundary; a persisted operation
+  test proves embedded data URLs are redacted before storage.
+- Deleted `services/logger`, `services/metering`, and `services/tracing`, including
+  the unused logger compatibility helper, `NoopMetering`, `NoopTracer`, tracing
+  protocols, container/runtime tracer fields, and runtime tracer helper. No forwarding
+  module, no-op provider, or legacy import alias remains.
+- Metering absence is now explicit as `None`; guarded consumers record only when a
+  real container or context-local metering implementation is configured.
+- Focused post-format gate: `31 passed`. Full AG clean gate passed with the two
+  packaging-only Host tests deselected. Engine full causal gate: `770 passed` with
+  one worktree-path-coupled source-layout assertion deselected. Studio AG-facing
+  causal gate: `27 passed`.
+- Ruff, Ruff-format, `git diff --check`, public import smoke, forbidden import scan,
+  and deleted-module assertions passed. A clean wheel has 430 entries, includes
+  `observability/logger`, `observability/metering.py`, and
+  `observability/operations.py`, and has zero files under the six removed observation
+  and telemetry service paths.
+- No Engine or Studio source update was required for A5b; their A5a isolated
+  worktrees remain at `822324f` and `1af2aa8`, and the original checkouts remain
+  unchanged.
