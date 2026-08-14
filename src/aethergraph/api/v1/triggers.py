@@ -7,10 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status  # type: ignore
 from pydantic import BaseModel, Field  # type: ignore
 
 from aethergraph.api.v1.deps import RequestIdentity, get_identity
-from aethergraph.contracts.services.trigger import TriggerKind
+from aethergraph.contracts.services.trigger import TriggerKind, TriggerService
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.services.scope.scope import ScopeLevel
-from aethergraph.services.triggers.trigger_service import TriggerService
 from aethergraph.services.triggers.types import TriggerRecord
 
 router = APIRouter(prefix="/triggers", tags=["triggers"])
@@ -178,7 +177,7 @@ def _trigger_to_meta(rec: TriggerRecord) -> TriggerMeta:
     )
 
 
-def _tenant_for_identity(identity: RequestIdentity) -> dict[str, str | None]:
+def _owner_for_identity(identity: RequestIdentity) -> dict[str, str | None]:
     """
     Normalization: Treat 'user' as user_id OR client_id.
     """
@@ -186,29 +185,8 @@ def _tenant_for_identity(identity: RequestIdentity) -> dict[str, str | None]:
     return {
         "org_id": identity.org_id,
         "user_id": user_or_client,
-        # "client_id": identity.client_id,
+        "client_id": identity.client_id,
     }
-
-
-# just for double-checking in the engine that a trigger belongs to the firing identity;
-# we should be filtering at the store level but this is a sanity check to avoid rogue triggers slipping through
-def _check_trigger_belongs_to_identity(
-    rec: TriggerRecord,
-    identity: RequestIdentity,
-) -> bool:
-    t = _tenant_for_identity(identity)
-
-    if t["org_id"] is not None and rec.org_id != t["org_id"]:
-        return False
-
-    if t["user_id"] is not None:  # noqa: SIM102
-        if not (rec.user_id == t["user_id"] or rec.client_id == t["user_id"]):
-            return False
-
-    # if t["client_id"] is not None and rec.client_id != t["client_id"]:  # noqa: SIM103
-    #     return False
-
-    return True
 
 
 @router.get("", response_model=TriggerListResponse)
@@ -220,8 +198,8 @@ async def list_triggers(
     """
     services = current_services()
     trigger_svc: TriggerService = services.trigger_service
-    tenant = _tenant_for_identity(identity)
-    recs = await trigger_svc.list_for_owner(**tenant)
+    owner = _owner_for_identity(identity)
+    recs = await trigger_svc.list_for_owner(org_id=owner["org_id"], user_id=owner["user_id"])
 
     metas = [_trigger_to_meta(rec) for rec in recs]
     return TriggerListResponse(triggers=metas)
@@ -291,22 +269,25 @@ async def create_trigger(
     if payload.kind == "event" and not payload.event_key:
         raise HTTPException(status_code=400, detail="event_key is required for event triggers")
 
-    rec = await trigger_svc.create_from_scope(
-        scope=scope,
-        graph_id=payload.graph_id,
-        default_inputs=inputs,
-        kind=payload.kind,
-        cron_expr=payload.cron_expr,
-        interval_seconds=payload.interval_seconds,
-        run_at=payload.run_at,
-        event_key=payload.event_key,
-        tz=payload.tz,
-        max_overlap_runs=payload.max_overlap_runs,
-        catch_up_missed=payload.catch_up_missed,
-        origin="schedule",
-        trigger_name=payload.trigger_name,
-        meta=payload.meta or {},
-    )
+    try:
+        rec = await trigger_svc.create_from_scope(
+            scope=scope,
+            graph_id=payload.graph_id,
+            default_inputs=inputs,
+            kind=payload.kind,
+            cron_expr=payload.cron_expr,
+            interval_seconds=payload.interval_seconds,
+            run_at=payload.run_at,
+            event_key=payload.event_key,
+            tz=payload.tz,
+            max_overlap_runs=payload.max_overlap_runs,
+            catch_up_missed=payload.catch_up_missed,
+            origin="schedule",
+            trigger_name=payload.trigger_name,
+            meta=payload.meta or {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _trigger_to_meta(rec)
 
 
@@ -320,12 +301,8 @@ async def get_trigger(
     """
     services = current_services()
     trigger_svc: TriggerService = services.trigger_service
-    rec = await trigger_svc.get(trigger_id)
+    rec = await trigger_svc.get(trigger_id, **_owner_for_identity(identity))
     if not rec:
-        raise HTTPException(status_code=404, detail="Trigger not found")
-
-    # Check ownership
-    if not _check_trigger_belongs_to_identity(rec, identity):
         raise HTTPException(status_code=404, detail="Trigger not found")
 
     return _trigger_to_meta(rec)
@@ -341,15 +318,12 @@ async def delete_trigger(
     """
     services = current_services()
     trigger_svc: TriggerService = services.trigger_service
-    rec = await trigger_svc.get(trigger_id)
+    owner = _owner_for_identity(identity)
+    rec = await trigger_svc.get(trigger_id, **owner)
     if not rec:
         raise HTTPException(status_code=404, detail="Trigger not found")
 
-    # Check ownership
-    if not _check_trigger_belongs_to_identity(rec, identity):
-        raise HTTPException(status_code=404, detail="Trigger not found")
-
-    await trigger_svc.cancel(trigger_id)
+    await trigger_svc.cancel(trigger_id, **owner)
 
 
 @router.delete("/{trigger_id}/hard", status_code=status.HTTP_204_NO_CONTENT)
@@ -362,15 +336,12 @@ async def hard_delete_trigger(
     """
     services = current_services()
     trigger_svc: TriggerService = services.trigger_service
-    rec = await trigger_svc.get(trigger_id)
+    owner = _owner_for_identity(identity)
+    rec = await trigger_svc.get(trigger_id, **owner)
     if not rec:
         raise HTTPException(status_code=404, detail="Trigger not found")
 
-    # Check ownership
-    if not _check_trigger_belongs_to_identity(rec, identity):
-        raise HTTPException(status_code=404, detail="Trigger not found")
-
-    await trigger_svc.delete(trigger_id)
+    await trigger_svc.delete(trigger_id, **owner)
 
 
 @router.post("/fire-event", status_code=status.HTTP_204_NO_CONTENT)
@@ -390,23 +361,4 @@ async def fire_event(
         user_id=identity.user_id,
         client_id=identity.client_id,
     )
-    return {"ok": True}
-
-
-@router.post("/fire-event-global", status_code=status.HTTP_204_NO_CONTENT)
-async def fire_event_global(
-    payload: FireEventRequest,
-) -> None:
-    """
-    Fire an event-based trigger by event_key, with optional payload, without any tenant scoping. This will execute all active triggers matching the event_key, regardless of their org/user/client association. Use with caution.
-    """
-    services = current_services()
-    trigger_engine = services.trigger_engine
-    await trigger_engine.fire_event(
-        event_key=payload.event_key,
-        payload=payload.payload,
-        org_id=None,
-        user_id=None,
-        client_id=None,
-    )
-    return {"ok": True}
+    return None

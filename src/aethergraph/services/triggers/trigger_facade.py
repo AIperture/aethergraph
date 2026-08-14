@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from aethergraph.contracts.services.trigger import TriggerKind
+from aethergraph.contracts.services.trigger import TriggerKind, TriggerService
 from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.services.triggers.engine import TriggerEngine
-from aethergraph.services.triggers.trigger_service import TriggerService
 from aethergraph.services.triggers.types import TriggerRecord
 
 
@@ -34,6 +33,8 @@ class TriggerConfig:
     tz: str | None = (
         None  # timezone for cron triggers, e.g., "America/New_York". Defaults to UTC if not set.
     )
+    max_overlap_runs: int | None = None
+    catch_up_missed: bool = False
 
 
 @dataclass
@@ -143,6 +144,8 @@ class TriggerFacade:
             run_at=config.run_at,
             event_key=config.event_key,
             tz=config.tz,
+            max_overlap_runs=config.max_overlap_runs,
+            catch_up_missed=config.catch_up_missed,
             origin="schedule" if config.kind != "event" else "event",
             trigger_name=trigger_name,
         )
@@ -326,9 +329,9 @@ class TriggerFacade:
         """
         if delay_seconds <= 0:
             # Fire "immediately" – effectively as soon as the engine loop ticks.
-            run_at = datetime.now(timezone.utc)
+            run_at = datetime.now(UTC)
         else:
-            run_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+            run_at = datetime.now(UTC) + timedelta(seconds=delay_seconds)
 
         return await self.at(
             graph_id=graph_id,
@@ -489,9 +492,10 @@ class TriggerFacade:
             None: This method returns no value.
 
         Notes:
-            Canceling a missing trigger is typically a no-op in the service.
+            The service applies this facade's tenant scope atomically with the
+            mutation. Missing and out-of-scope trigger IDs are no-ops.
         """
-        await self.trigger_service.cancel(trigger_id)
+        await self.trigger_service.cancel(trigger_id, **self._owner_scope())
 
     async def get(self, trigger_id: str) -> TriggerRecord | None:
         """
@@ -520,9 +524,10 @@ class TriggerFacade:
                 found.
 
         Notes:
-            No additional scope filtering is applied in this facade method.
+            The service returns no record when the identifier is outside this
+            facade's tenant scope.
         """
-        return await self.trigger_service.get(trigger_id)
+        return await self.trigger_service.get(trigger_id, **self._owner_scope())
 
     async def fire_event(
         self,
@@ -570,3 +575,10 @@ class TriggerFacade:
             user_id=user_id,
             client_id=client_id,
         )
+
+    def _owner_scope(self) -> dict[str, str | None]:
+        return {
+            "org_id": self.scope.org_id,
+            "user_id": self.scope.user_id,
+            "client_id": self.scope.client_id,
+        }

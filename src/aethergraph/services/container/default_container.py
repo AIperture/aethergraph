@@ -103,7 +103,7 @@ from aethergraph.storage.memory.event_persist import EventLogPersistence
 from aethergraph.storage.metering.meter_event import EventLogMeteringStore
 from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
 from aethergraph.storage.search_factory import build_search_backend
-from aethergraph.storage.triggers.trigger_docstore import DocTriggerStore
+from aethergraph.storage.triggers.sqlite_trigger_store import SQLiteTriggerStore
 
 SERVICE_KEYS = [
     # core
@@ -494,9 +494,7 @@ def build_default_container(
         artifact_store=artifacts,
         artifact_index=artifact_index,
     )
-    trigger_store = DocTriggerStore(
-        doc_store=doc_store
-    )  # for simplicity, we use the event log as the backing store for triggers; in the future, we can make this swappable like other storage services
+    trigger_store = SQLiteTriggerStore(root_p / "triggers" / "triggers.db")
     trigger_service = TriggerServiceImpl(
         store=trigger_store,
         event_log=eventlog,
