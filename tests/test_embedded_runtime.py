@@ -118,6 +118,16 @@ async def test_submit_maps_public_contract_without_exposing_run_record():
             agent_id="agent-1",
             run_config={"origin_binding": {"source": "studio"}},
         )
+    )
+
+    graph_id, submitted = manager.submitted
+    assert graph_id == "agent"
+    assert submitted["identity"].user_id == "studio"
+    assert submitted["identity"].org_id == "tenant-1"
+    assert submitted["origin"] is RunOrigin.playground
+    assert record.run_id == "run-1"
+    assert record.status == "pending"
+    assert record.metadata == {"accepted": True}
 
 
 def test_runtime_exposes_immutable_profile_and_capture_values():
@@ -141,16 +151,6 @@ def test_runtime_exposes_immutable_profile_and_capture_values():
     assert (default.provider, default.model) == ("lmstudio", "agent-engine")
     assert (summarizer.provider, summarizer.model) == ("openai", "summary-model")
     assert runtime.observability_capture_mode() == "manifest"
-    )
-
-    graph_id, submitted = manager.submitted
-    assert graph_id == "agent"
-    assert submitted["identity"].user_id == "studio"
-    assert submitted["identity"].org_id == "tenant-1"
-    assert submitted["origin"] is RunOrigin.playground
-    assert record.run_id == "run-1"
-    assert record.status == "pending"
-    assert record.metadata == {"accepted": True}
 
 
 @pytest.mark.asyncio
