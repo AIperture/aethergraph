@@ -35,8 +35,8 @@ wiring.
 | A7 continuation timers | Complete | Commits `a3ec887`, `347c916`; durable SQLite leases, canonical ResumeRouter delivery, lifespan ownership, legacy wakeup deletion; AG `764 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 423 entries. |
 | A8 trigger repair | Complete | Commit `d5a82c5`; atomic SQLite occurrence claims/receipts, deterministic run IDs, catch-up policy, timezone recurrence, paginated overlap enforcement, scoped CRUD/event firing, and global route removal; focused gate `19 passed`; AG causal gate `782 passed, 2 skipped, 3 deselected`; Engine `770 passed, 1 deselected`; Studio causal gate `25 passed`; clean wheel has 424 entries. |
 | A9 security and admission | Complete | AG commit `9df3c7d`, Studio `66d2442`; canonical `server/admission` limiter and `server/security` credential/redaction boundaries; AG focused gate `93 passed`; full causal gate `793 passed, 2 skipped, 3 deselected`; Engine `770 passed, 1 deselected`; Studio expanded causal gate `46 passed`; clean wheel has 425 entries. |
-| A10 | Pending | Not started. |
-| B1-B5 external reconciliation | Pending | No external repository mutation authorized; stop if a later phase creates a causal external failure. |
+| A10 documentation, tests, and packaging | Complete | AG `9585d5d`, docs `3e6f4b4`; AG causal gate `794 passed, 2 skipped, 2 deselected`; Engine `770 passed, 1 deselected`; Studio immutable-wheel gate `46 passed`; clean wheel has 425 entries and only `default_chat_agent`. |
+| B1-B5 external reconciliation | Complete | Public observation/runtime-output cutovers are committed in Engine `822324f` and Studio `1af2aa8`; Studio security cutover is `66d2442`; no legacy fallback imports remain. |
 
 ## Checkpoints
 
@@ -350,3 +350,26 @@ No compatibility alias or fallback is accepted as completion evidence.
   the three deleted service/redaction paths.
 - Engine required no source change. Studio is clean at `66d2442`; the original
   Engine and Studio checkouts were not mutated.
+
+## A10 - documentation, tests, and packaging cleanup
+
+- Deleted the final commented-out graph test invocation. Retained the default-agent
+  and removed-skill boundary tests, which confirm that `default_chat_agent` is the
+  only bundled Agent and that the legacy skill runtime surface is absent.
+- Reconciled the separate documentation worktree in commit `3e6f4b4`. Deleted the
+  planning, skills, MCP, and knowledge Context reference pages plus the obsolete MCP
+  and RAG tutorials. Rewrote the service, DI, scheduling, server, Context, runtime,
+  KV, artifact, and memory pages around the final core/Engine/plugin ownership.
+- Documentation navigation and relative-link validation has zero missing targets;
+  all 113 remaining mkdocstrings API targets resolve against the exact AG source;
+  the current docs contain zero forbidden legacy service/accessor references.
+- The clean AG wheel contains 425 entries, no removed service paths, and exactly
+  `aethergraph/plugins/agents/chat_agent/default_chat_agent.py` under bundled Agent
+  sources. An isolated installed-wheel import smoke passed.
+- Final AG causal gate: `794 passed`, `2 skipped`, and the two immutable-release Host
+  tests deselected because they require installed distribution metadata. Engine:
+  `770 passed`, `1` worktree-path assertion deselected. Studio: `46 passed` against
+  freshly built immutable AG and Engine wheels, including its subprocess release
+  probe.
+- Engine and Studio worktrees are clean at their existing cutover commits. Their
+  original checkouts and the original docs checkout were not mutated.
