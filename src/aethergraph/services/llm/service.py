@@ -4,8 +4,8 @@ from typing import TYPE_CHECKING
 from pydantic import SecretStr
 
 from aethergraph.config.llm import LLMProfile
+from aethergraph.server.security.credentials import SecretStore
 
-from ..secrets.base import Secrets
 from .compat import chat_profile_from_legacy
 from .credentials import resolve_provider_credential
 from .generic_client import GenericLLMClient
@@ -26,7 +26,7 @@ class LLMService:
     def __init__(
         self,
         clients: dict[str, GenericLLMClient],
-        secrets: Secrets | None = None,
+        secrets: SecretStore | None = None,
         profiles: dict[str, LLMProfile] | None = None,
     ) -> None:
         """Create the named-client registry and its runtime profile metadata.
@@ -467,13 +467,3 @@ class LLMService:
             model=model,
             api_key=api_key,
         )
-
-    def persist_key(self, secret_name: str, api_key: str):
-        """
-        Optional: store the key via the installed Secrets provider for later runs.
-        Implement only after Secrets supports write (e.g., dev file store). Env-based usually won't.
-        """
-        raise NotImplementedError("persist_key not implemented in this Secrets provider")
-        if not self._secrets or not hasattr(self._secrets, "set"):
-            raise RuntimeError("Secrets provider is not writable")
-        self._secrets.set(secret_name, api_key)  # type: ignore[attr-defined]

@@ -14,15 +14,15 @@ class RateLimitSettings(BaseSettings):
     enabled: bool = True
 
     # Concurrency
-    max_concurrent_runs: int = 8
+    max_concurrent_runs: int = Field(default=8, gt=0)
 
     # Per-identity, per-window run limits (using metering)
     runs_window: str = "1h"
-    max_runs_per_window: int = 100
+    max_runs_per_window: int = Field(default=100, gt=0)
 
     # Short-burst, in-memory limiter for POST /runs
-    burst_max_runs: int = 10
-    burst_window_seconds: int = 10
+    burst_max_runs: int = Field(default=10, gt=0)
+    burst_window_seconds: int = Field(default=10, gt=0)
 
 
 class LLMUsageQuotaSettings(BaseSettings):

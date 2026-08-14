@@ -10,6 +10,10 @@ from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 from aethergraph.config.dotenv_writer import write_dotenv
 from aethergraph.config.llm_env import aethergraph_env_key, encode_llm_profile_env
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.server.security.redaction import (
+    is_masked_secret as _is_masked,
+    mask_secret as _mask_secret,
+)
 
 from .deps import RequestIdentity, get_identity
 from .schemas.settings import (
@@ -24,8 +28,6 @@ from .schemas.settings import (
     SlackView,
     TelegramPayload,
     TelegramView,
-    _is_masked,
-    _mask_secret,
 )
 
 logger = logging.getLogger("aethergraph.api.settings")

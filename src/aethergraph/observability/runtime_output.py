@@ -14,7 +14,7 @@ from aethergraph.contracts.services.runtime_output import (
     RuntimeOutputFrame,
     RuntimeOutputSink,
 )
-from aethergraph.observability.redaction import sanitize_text
+from aethergraph.server.security.redaction import sanitize_text
 
 _capture_state: ContextVar[_CaptureState | None] = ContextVar(
     "aethergraph_runtime_output_capture",

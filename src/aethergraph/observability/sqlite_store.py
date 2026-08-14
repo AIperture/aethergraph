@@ -9,6 +9,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from aethergraph.server.security.redaction import canonical_json, sanitize_text
+
 from .models import (
     LLMObservationRecord,
     ObservationFilter,
@@ -19,7 +21,6 @@ from .models import (
 )
 from .policy import ObservationPolicy
 from .prompt_store import PreparedPromptCapture, PromptStore
-from .redaction import canonical_json, sanitize_text
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;

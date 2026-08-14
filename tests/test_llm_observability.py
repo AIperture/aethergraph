@@ -14,7 +14,7 @@ from aethergraph.observability import (
     ObservationPolicy,
     SQLiteObservationStore,
 )
-from aethergraph.observability.redaction import canonical_json
+from aethergraph.server.security.redaction import canonical_json
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient

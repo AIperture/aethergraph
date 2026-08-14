@@ -6,9 +6,9 @@ import logging
 from typing import Any
 
 from aethergraph.core.runtime.runtime_metering import current_meter_context
+from aethergraph.server.security.redaction import sanitize_content
 
 from .models import ObservationRecord, ObservationScope
-from .redaction import sanitize_content
 
 _STANDARD_LOG_RECORD_ATTRS = {
     "args",

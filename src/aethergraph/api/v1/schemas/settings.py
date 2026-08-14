@@ -7,30 +7,6 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _mask_secret(value: str | None) -> str | None:
-    """Return a masked version of a secret string, or None if empty."""
-    if not value:
-        return None
-    if len(value) <= 8:
-        return "****"
-    return value[:4] + "****" + value[-4:]
-
-
-MASKED_SENTINEL = "****"
-
-
-def _is_masked(value: str | None) -> bool:
-    """Return True if the value looks like a masked secret (should not be persisted)."""
-    if not value:
-        return True
-    return MASKED_SENTINEL in value
-
-
-# ---------------------------------------------------------------------------
 # Status (lightweight check)
 # ---------------------------------------------------------------------------
 

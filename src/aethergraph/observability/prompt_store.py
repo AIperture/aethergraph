@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from hashlib import sha256
 import uuid
 
+from aethergraph.server.security.redaction import canonical_json, sanitize_content
+
 from .models import CaptureMode, LLMObservationRecord
 from .policy import ObservationPolicy
-from .redaction import canonical_json, sanitize_content
 
 _SEMANTIC_KINDS = {
     "frozen_header",

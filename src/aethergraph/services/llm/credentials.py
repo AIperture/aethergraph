@@ -4,46 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import os
-from typing import Protocol
 
 from pydantic import SecretStr
 
+from aethergraph.server.security.credentials import EnvironmentSecretStore, SecretStore
+
 from .registry import get_provider_descriptor
-
-
-class SecretStore(Protocol):
-    """Minimal secret-store surface required by model factories."""
-
-    def get(self, name: str) -> str | None:
-        """Return one secret value by reference without exposing enumeration.
-
-        Intro:
-            Model factories require only exact named lookup and never inspect
-            the full secret-store inventory.
-
-        Examples:
-            Resolve a present secret:
-                ```python
-                value = store.get("OPENAI_API_KEY")
-                ```
-
-            Resolve an absent secret:
-                ```python
-                assert store.get("MISSING") is None
-                ```
-
-        Args:
-            name: Exact configured secret reference.
-
-        Returns:
-            str | None: Secret value when present, otherwise `None`.
-
-        Notes:
-            Implementations must not log the returned value.
-        """
-
-        ...
 
 
 @dataclass(frozen=True)
@@ -121,12 +87,12 @@ def resolve_provider_credential(
         value = secrets.get(secret_ref)
         if value:
             return ResolvedCredential(value, secret_ref)
-    values = os.environ if environ is None else environ
+    environment_store = EnvironmentSecretStore(environ)
     for name in descriptor.credential_envs:
-        value = values.get(name)
+        value = environment_store.get(name)
         if value:
             return ResolvedCredential(value, name)
     return ResolvedCredential(None, secret_ref)
 
 
-__all__ = ["ResolvedCredential", "SecretStore", "resolve_provider_credential"]
+__all__ = ["ResolvedCredential", "resolve_provider_credential"]

@@ -43,6 +43,8 @@ from aethergraph.observability import (
     open_active_observability_facade,
     register_default_agent_event_types,
 )
+from aethergraph.server.admission import RunBurstLimiter
+from aethergraph.server.security.credentials import EnvironmentSecretStore, resolve_auth_secret
 from aethergraph.services.auth.authn import AuthnService
 from aethergraph.services.auth.authz import AllowAllAuthz
 from aethergraph.services.channel.channel_bus import ChannelBus
@@ -67,14 +69,12 @@ from aethergraph.services.llm.service import LLMService
 from aethergraph.services.memory.factory import MemoryFactory
 
 # ---- Other components ----
-from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
 from aethergraph.services.registry.registration_service import RegistrationService
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
-from aethergraph.services.secrets.env import EnvSecrets
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.viz.viz_service import VizService
@@ -131,7 +131,6 @@ SERVICE_KEYS = [
     "authz",
     "metering",
     "observability",
-    "secrets",
 ]
 
 
@@ -197,9 +196,8 @@ class DefaultContainer:
     authz: AllowAllAuthz | None = None
 
     metering: MeteringService | None = None
-    rate_limiter: SimpleRateLimiter | None = None
+    run_burst_limiter: RunBurstLimiter | None = None
     agent_event_registry: AgentEventTypeRegistry | None = None
-    secrets: EnvSecrets | None = None
 
     # extensible services
     ext_services: dict[str, Any] = field(default_factory=dict)
@@ -262,6 +260,11 @@ def build_default_container(
 
         cfg = load_settings()
         set_current_settings(cfg)
+
+    auth_secret = resolve_auth_secret(
+        deploy_mode=cfg.deploy_mode,
+        configured=cfg.auth.secret,
+    )
 
     root = root or cfg.workspace
     # override workspace in cfg to match
@@ -377,28 +380,26 @@ def build_default_container(
     metering = EventLogMeteringService(store=metering_store)
 
     # optional services
-    secrets = (
-        EnvSecrets()
-    )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
+    credential_store = EnvironmentSecretStore()
     obs_cfg = cfg.llm.observability
     provider_rate_gate = ProviderRateGate()
     llm_clients = build_llm_clients(
         cfg.llm,
-        secrets,
+        credential_store,
         observation_sink=observability,
         observation_capture_mode=obs_cfg.capture_mode,
         rate_gate=provider_rate_gate,
     )  # return {profile: GenericLLMClient}
     llm_profiles = {"default": cfg.llm.default, **dict(cfg.llm.profiles or {})}
     llm_service = (
-        LLMService(clients=llm_clients, secrets=secrets, profiles=llm_profiles)
+        LLMService(clients=llm_clients, secrets=credential_store, profiles=llm_profiles)
         if llm_clients
         else None
     )
 
     embed_clients = build_embedding_clients(
         cfg.embed,
-        secrets,
+        credential_store,
         metering=metering,
         rate_gate=provider_rate_gate,
         operation_quota_cfg=cfg.model_operation_usage_quota.embedding,
@@ -408,7 +409,7 @@ def build_default_container(
 
     image_clients = build_image_generation_clients(
         cfg.image_generation,
-        secrets,
+        credential_store,
         metering=metering,
         rate_gate=provider_rate_gate,
         operation_quota_cfg=cfg.model_operation_usage_quota.image_generation,
@@ -444,17 +445,12 @@ def build_default_container(
     )
     # rate limiter
     rl_settings = cfg.rate_limit
-    rate_limiter = SimpleRateLimiter(
+    run_burst_limiter = RunBurstLimiter(
         max_events=rl_settings.burst_max_runs,
         window_seconds=rl_settings.burst_window_seconds,
     )
 
     # auth services
-    auth_secret = (
-        cfg.auth.secret.get_secret_value()
-        if cfg.auth.secret is not None
-        else "aethergraph-dev-secret"
-    )
     auth_db_path = str(root_p / "auth" / "auth_kv.db")
     auth_grant_store = SQLiteKVSync(auth_db_path, prefix="grant:")
     auth_invite_store = SQLiteKVSync(auth_db_path, prefix="invite:")
@@ -545,11 +541,10 @@ def build_default_container(
         run_manager=run_manager,
         run_cancellation_registry=run_cancellation_registry,
         session_store=session_store,
-        secrets=secrets,
         authn=authn,
         authz=authz,
         metering=metering,
-        rate_limiter=rate_limiter,
+        run_burst_limiter=run_burst_limiter,
         agent_event_registry=agent_event_registry,
         settings=cfg,
     )

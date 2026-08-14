@@ -9,10 +9,10 @@ from pydantic import SecretStr
 from aethergraph.config.config import EmbeddingUsageQuotaSettings
 from aethergraph.config.llm import EmbeddingProfile, EmbeddingSettings
 from aethergraph.contracts.services.metering import MeteringService
+from aethergraph.server.security.credentials import SecretStore
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
 from aethergraph.services.llm.provider_transport import ProviderRateGate
 
-from ..secrets.base import Secrets
 from .compat import embedding_profile_from_legacy
 from .credentials import resolve_provider_credential
 from .profiles import EmbeddingProfileSpec
@@ -24,7 +24,7 @@ def _apply_env_overrides_to_embed_profile(
     p: EmbeddingProfile,
     *,
     is_default: bool,
-    secrets: Secrets,
+    secrets: SecretStore,
 ) -> EmbeddingProfile:
     """
     Mutate + return profile with env-based overrides.
@@ -80,7 +80,7 @@ def _apply_env_overrides_to_embed_profile(
 
 def embed_client_from_profile(
     p: EmbeddingProfileSpec,
-    secrets: Secrets,
+    secrets: SecretStore,
     *,
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
@@ -149,7 +149,7 @@ def embed_client_from_profile(
 
 def build_embedding_clients(
     cfg: EmbeddingSettings,
-    secrets: Secrets,
+    secrets: SecretStore,
     *,
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,

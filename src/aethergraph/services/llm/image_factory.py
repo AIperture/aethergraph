@@ -5,17 +5,17 @@ from __future__ import annotations
 from aethergraph.config.config import ImageGenerationUsageQuotaSettings
 from aethergraph.config.llm import ImageGenerationSettings
 from aethergraph.contracts.services.metering import MeteringService
+from aethergraph.server.security.credentials import SecretStore
 from aethergraph.services.llm.compat import image_generation_profile_from_settings
 from aethergraph.services.llm.credentials import resolve_provider_credential
 from aethergraph.services.llm.generic_image_client import GenericImageGenerationClient
 from aethergraph.services.llm.profiles import ImageGenerationProfile
 from aethergraph.services.llm.provider_transport import ProviderRateGate
-from aethergraph.services.secrets.base import Secrets
 
 
 def image_client_from_profile(
     profile: ImageGenerationProfile,
-    secrets: Secrets,
+    secrets: SecretStore,
     *,
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,
@@ -92,7 +92,7 @@ def image_client_from_profile(
 
 def build_image_generation_clients(
     settings: ImageGenerationSettings,
-    secrets: Secrets,
+    secrets: SecretStore,
     *,
     metering: MeteringService | None = None,
     rate_gate: ProviderRateGate | None = None,

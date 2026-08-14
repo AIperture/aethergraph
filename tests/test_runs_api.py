@@ -1,5 +1,5 @@
 # tests/test_runs_api.py
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -11,7 +11,7 @@ from aethergraph.api.v1 import runs as runs_api
 # If your RateLimitSettings lives elsewhere, adjust this import:
 from aethergraph.config.config import RateLimitSettings
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
-from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
+from aethergraph.server.admission import RunBurstLimiter
 
 
 class FakeIdentity:
@@ -62,8 +62,8 @@ class FakeRunManager:
             graph_id=graph_id,
             kind="taskgraph",
             status=RunStatus.succeeded,
-            started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+            started_at=datetime(2024, 1, 1, tzinfo=UTC),
+            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC),
             tags=tags or [],
             user_id=identity.user_id,
             org_id=identity.org_id,
@@ -77,8 +77,8 @@ class FakeRunManager:
                 graph_id="failed-graph",
                 kind="taskgraph",
                 status=RunStatus.failed,
-                started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-                finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+                started_at=datetime(2024, 1, 1, tzinfo=UTC),
+                finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC),
                 tags=["t1"],
                 user_id="u1",
                 org_id="o1",
@@ -109,8 +109,8 @@ class FakeRunManager:
             graph_id="my-graph",
             kind="taskgraph",
             status=RunStatus.succeeded,
-            started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+            started_at=datetime(2024, 1, 1, tzinfo=UTC),
+            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC),
             tags=["t1"],
             user_id="u1",
             org_id="o1",
@@ -383,7 +383,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                     run_id=run_id,
                     graph_id="my-graph",
                     rev=2,
-                    ts=datetime(2024, 1, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp(),
+                    ts=datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC).timestamp(),
                     kind="STATUS",
                     payload={"node_id": "node-a", "status": "RUNNING"},
                 ),
@@ -391,7 +391,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                     run_id=run_id,
                     graph_id="my-graph",
                     rev=3,
-                    ts=datetime(2024, 1, 1, 0, 0, 2, tzinfo=timezone.utc).timestamp(),
+                    ts=datetime(2024, 1, 1, 0, 0, 2, tzinfo=UTC).timestamp(),
                     kind="OUTPUT",
                     payload={"node_id": "node-a", "outputs": {"value": 42}},
                 ),
@@ -399,7 +399,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                     run_id=run_id,
                     graph_id="my-graph",
                     rev=4,
-                    ts=datetime(2024, 1, 1, 0, 0, 3, tzinfo=timezone.utc).timestamp(),
+                    ts=datetime(2024, 1, 1, 0, 0, 3, tzinfo=UTC).timestamp(),
                     kind="STATUS",
                     payload={"node_id": "node-a", "status": "DONE"},
                 ),
@@ -505,7 +505,7 @@ def test_run_endpoint_burst_rate_limit(monkeypatch):
         burst_window_seconds=60,
     )
 
-    burst_limiter = SimpleRateLimiter(
+    burst_limiter = RunBurstLimiter(
         max_events=fake_settings.rate_limit.burst_max_runs,
         window_seconds=fake_settings.rate_limit.burst_window_seconds,
     )

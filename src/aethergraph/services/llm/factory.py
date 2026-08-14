@@ -4,8 +4,8 @@ import os
 from pydantic import SecretStr
 
 from aethergraph.config.llm import LLMProfile, LLMSettings
+from aethergraph.server.security.credentials import SecretStore
 
-from ..secrets.base import Secrets
 from .compat import chat_profile_from_legacy
 from .credentials import resolve_provider_credential
 from .generic_client import GenericLLMClient
@@ -21,7 +21,7 @@ def _apply_env_overrides_to_profile(
     p: LLMProfile,
     *,
     is_default: bool,
-    secrets: Secrets,
+    secrets: SecretStore,
 ) -> LLMProfile:
     """
     Mutate + return profile with env-based overrides.
@@ -93,7 +93,7 @@ def _apply_env_overrides_to_profile(
 
 def client_from_profile(
     p: ChatProfile,
-    secrets: Secrets,
+    secrets: SecretStore,
     *,
     profile_name: str | None = None,
     observation_sink: LLMObservationSink | None = None,
@@ -175,7 +175,7 @@ def client_from_profile(
 
 def build_llm_clients(
     cfg: LLMSettings,
-    secrets: Secrets,
+    secrets: SecretStore,
     *,
     observation_sink: LLMObservationSink | None = None,
     observation_capture_mode: CaptureMode = "manifest",
