@@ -27,6 +27,22 @@ from aethergraph.core.runtime.runtime_services import (
     register_context_service,
     register_llm_client,
 )
+from aethergraph.runtime.contracts import (
+    RuntimeGraphRegistration,
+    RuntimeIdentity,
+    RuntimeOpenRequest,
+    RuntimeRunRecord,
+    RuntimeRunRequest,
+    RuntimeRunStatus,
+    RuntimeSemanticEvent,
+)
+from aethergraph.runtime.embedded import EmbeddedRuntime, open_embedded_runtime
+from aethergraph.runtime.errors import (
+    EmbeddedRuntimeError,
+    RuntimeGraphLoadError,
+    RuntimeInteractionError,
+    RuntimeNotReadyError,
+)
 
 __all__ = [
     # general service management
@@ -54,4 +70,18 @@ __all__ = [
     "RunOrigin",
     "RunImportance",
     "RunVisibility",
+    # supported embedded Host boundary
+    "EmbeddedRuntime",
+    "EmbeddedRuntimeError",
+    "RuntimeGraphLoadError",
+    "RuntimeGraphRegistration",
+    "RuntimeIdentity",
+    "RuntimeInteractionError",
+    "RuntimeNotReadyError",
+    "RuntimeOpenRequest",
+    "RuntimeRunRecord",
+    "RuntimeRunRequest",
+    "RuntimeRunStatus",
+    "RuntimeSemanticEvent",
+    "open_embedded_runtime",
 ]
