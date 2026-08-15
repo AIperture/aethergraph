@@ -20,7 +20,7 @@ from ...contracts import (
     StorageTimeoutError,
 )
 
-LOCAL_DATABASE_SCHEMA_VERSION = 1
+LOCAL_DATABASE_SCHEMA_VERSION = 2
 _T = TypeVar("_T")
 _ROLE_FILENAMES = {
     "control": "control.sqlite3",
@@ -178,6 +178,82 @@ class LocalSQLiteDatabase:
             return cursor.rowcount
 
         return await self._run(operation)
+
+    def install_component(
+        self,
+        *,
+        name: str,
+        version: int,
+        statements: Sequence[str],
+    ) -> None:
+        """Install or validate one exact provider-owned schema component.
+
+        Installation runs synchronously during provider construction before the
+        database is published. Existing exact versions are idempotent; mismatches
+        fail without applying statements or upgrading legacy data.
+
+        Examples:
+            Install a blob metadata table:
+                ```python
+                database.install_component(
+                    name="blobs",
+                    version=1,
+                    statements=(CREATE_BLOBS_TABLE,),
+                )
+                ```
+
+            Validate the same component during read-only open:
+                ```python
+                readonly.install_component(name="blobs", version=1, statements=())
+                ```
+
+        Args:
+            name: Exact provider-private component identifier.
+            version: Positive exact component schema version.
+            statements: Ordered SQL statements used only for first installation.
+
+        Returns:
+            None: The exact component version exists after successful return.
+
+        Notes:
+            Read-only open validates an existing component and never executes schema
+            statements. Component upgrades require a future explicit format change.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("component name must be non-empty")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            raise ValueError("component version must be a positive integer")
+        if self._closed:
+            raise StorageHealthError(f"Local {self.role.value} database is closed")
+        try:
+            row = self._connection.execute(
+                "SELECT version FROM ag_storage_components WHERE name = ?",
+                (name,),
+            ).fetchone()
+            if row is not None:
+                if row[0] != version:
+                    raise StorageFormatError(
+                        f"Local schema component {name!r} has unsupported version {row[0]!r}"
+                    )
+                return
+            if self.mode is StorageOpenMode.READ_ONLY:
+                raise StorageFormatError(
+                    f"Read-only local database is missing schema component {name!r}"
+                )
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                for statement in statements:
+                    self._connection.execute(statement)
+                self._connection.execute(
+                    "INSERT INTO ag_storage_components(name, version) VALUES (?, ?)",
+                    (name, version),
+                )
+            except BaseException:
+                self._connection.rollback()
+                raise
+            self._connection.commit()
+        except sqlite3.Error as exc:
+            raise _classify_sqlite_error(exc, self.role) from exc
 
     async def fetch_all(
         self,
@@ -404,6 +480,14 @@ def _initialize_database(
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 role TEXT NOT NULL,
                 schema_version INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE ag_storage_components (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL CHECK (version > 0)
             )
             """
         )

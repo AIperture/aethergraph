@@ -1,5 +1,6 @@
 """Provider-private local SQLite implementation."""
 
+from .blob_store import LocalBlobStore
 from .database import (
     LOCAL_DATABASE_SCHEMA_VERSION,
     LocalCheckpoint,
@@ -17,6 +18,7 @@ __all__ = [
     "LOCAL_STORAGE_FORMAT_VERSION",
     "LOCAL_DATABASE_SCHEMA_VERSION",
     "LocalCheckpoint",
+    "LocalBlobStore",
     "LocalDatabaseRole",
     "LocalSQLiteDatabase",
     "LocalWorkspaceManifest",
