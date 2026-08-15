@@ -123,33 +123,6 @@ class ContinuationStoreSettings(BaseModel):
     memory: MemoryContinuationStoreSettings = MemoryContinuationStoreSettings()
 
 
-# --- Vector Index Storage ---
-class SQLiteVectorIndexSettings(BaseModel):
-    # Relative to AppSettings.workspace
-    dir: str = "vector_index/sqlite"
-    filename: str = "index.sqlite"  # currently not used directly, but kept for flexibility
-
-
-class FAISSVectorIndexSettings(BaseModel):
-    # Relative to AppSettings.workspace
-    dir: str = "vector_index/faiss"
-    dim: int | None = None  # optional default; can be inferred
-
-
-class ChromaVectorIndexSettings(BaseModel):
-    # Relative to AppSettings.workspace
-    persist_dir: str = "vector_index/chroma"
-    collection_prefix: str = "vec_"
-
-
-class VectorIndexStorageSettings(BaseModel):
-    backend: Literal["sqlite", "faiss", "chroma"] = "sqlite"
-
-    sqlite: SQLiteVectorIndexSettings = SQLiteVectorIndexSettings()
-    faiss: FAISSVectorIndexSettings = FAISSVectorIndexSettings()
-    chroma: ChromaVectorIndexSettings = ChromaVectorIndexSettings()
-
-
 # --- Memory Storage Settings (overall) ---
 class MemoryPersistenceSettings(BaseModel):
     # "fs" uses FSPersistence, "eventlog" uses EventLogPersistence
@@ -205,7 +178,6 @@ class StorageSettings(BaseModel):
     artifact_index: ArtifactIndexSettings = ArtifactIndexSettings()
     graph_state: GraphStateStorageSettings = GraphStateStorageSettings()
     continuation: ContinuationStoreSettings = ContinuationStoreSettings()
-    vector_index: VectorIndexStorageSettings = VectorIndexStorageSettings()
     memory: MemorySettings = MemorySettings()
     runs: RunStorageSettings = RunStorageSettings()
     sessions: SessionStorageSettings = SessionStorageSettings()

@@ -6,6 +6,7 @@ import importlib
 from pathlib import Path
 from typing import get_type_hints
 
+from aethergraph.config.storage import StorageSettings
 from aethergraph.storage.contracts import StorageOpenRequest
 
 CONTRACT_ROOT = Path(__file__).parents[1] / "src" / "aethergraph" / "storage" / "contracts"
@@ -97,3 +98,25 @@ def test_superseded_copied_sqlite_vector_implementations_are_absent() -> None:
 
     assert not (vector_root / "sqlite_index copy.py").exists()
     assert not (vector_root / "sqlite_index_vanila.py").exists()
+
+
+def test_independent_rag_vector_configuration_and_factory_are_absent() -> None:
+    vector_root = STORAGE_ROOT / "vector_index"
+    factory = STORAGE_ROOT / "factory.py"
+    function_names = {
+        node.name
+        for node in ast.walk(ast.parse(factory.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef)
+    }
+    search_tree = ast.parse(
+        (STORAGE_ROOT.parent / "config" / "search.py").read_text(encoding="utf-8")
+    )
+    imports_storage_config = any(
+        isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "storage"
+        for node in ast.walk(search_tree)
+    )
+
+    assert "vector_index" not in StorageSettings.model_fields
+    assert "build_vector_index" not in function_names
+    assert not (vector_root / "chroma_index.py").exists()
+    assert not imports_storage_config

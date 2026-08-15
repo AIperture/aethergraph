@@ -379,48 +379,6 @@ def build_continuation_store(cfg: AppSettings) -> AsyncContinuationStore:
     raise ValueError(f"Unknown continuation backend: {cont_cfg.backend}")
 
 
-def build_vector_index(cfg: AppSettings):
-    """
-    Build a VectorIndex based on cfg.storage.vector_index.
-    """
-    vcfg = cfg.storage.vector_index
-    root = os.path.abspath(cfg.workspace)
-
-    if vcfg.backend == "sqlite":
-        from aethergraph.storage.vector_index.sqlite_index import SQLiteVectorIndex
-
-        index_root = os.path.join(root, vcfg.sqlite.dir)
-        return SQLiteVectorIndex(root=index_root)
-
-    if vcfg.backend == "faiss":
-        from aethergraph.storage.vector_index.faiss_index import FAISSVectorIndex
-
-        index_root = os.path.join(root, vcfg.faiss.dir)
-        return FAISSVectorIndex(root=index_root, dim=vcfg.faiss.dim)
-
-    if vcfg.backend == "chroma":
-        try:
-            import chromadb
-        except ImportError as e:
-            chromadb = None  # type: ignore
-            raise RuntimeError("Chroma backend requires `chromadb` to be installed.") from e
-        from aethergraph.storage.vector_index.chroma_index import ChromaVectorIndex
-
-        if chromadb is None:
-            raise RuntimeError(
-                "Chroma backend selected, but `chromadb` is not installed. "
-                "Install it with `pip install chromadb`."
-            )
-        persist_dir = os.path.join(root, vcfg.chroma.persist_dir)
-        client = chromadb.PersistentClient(path=persist_dir)
-        return ChromaVectorIndex(
-            client=client,
-            collection_prefix=vcfg.chroma.collection_prefix,
-        )
-
-    raise ValueError(f"Unknown vector index backend: {vcfg.backend!r}")
-
-
 def build_memory_persistence(cfg: AppSettings) -> Persistence:
     mp = cfg.storage.memory.persistence
     root = cfg.workspace

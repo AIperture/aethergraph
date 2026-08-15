@@ -1,14 +1,10 @@
-# search_settings.py (or wherever you keep config models)
+"""Legacy-active search settings isolated pending the S9 canonical cut."""
 
 from __future__ import annotations
 
 from typing import Literal
 
 from pydantic import BaseModel
-
-from .storage import FAISSVectorIndexSettings, SQLiteVectorIndexSettings
-
-# ^ or wherever those two are defined
 
 
 class SQLiteLexicalSearchSettings(BaseModel):
@@ -19,6 +15,19 @@ class SQLiteLexicalSearchSettings(BaseModel):
 
     dir: str = "search/sqlite_lexical"
     filename: str = "index.sqlite"
+
+
+class SQLiteSearchVectorSettings(BaseModel):
+    """Legacy-active SQLite vector settings owned only by search composition."""
+
+    dir: str = "search/vector_sqlite"
+
+
+class FAISSSearchVectorSettings(BaseModel):
+    """Legacy-active FAISS vector settings owned only by search composition."""
+
+    dir: str = "search/vector_faiss"
+    dim: int | None = None
 
 
 class SearchBackendSettings(BaseModel):
@@ -34,16 +43,8 @@ class SearchBackendSettings(BaseModel):
 
     backend: Literal["none", "sqlite_vector", "faiss_vector", "sqlite_lexical"] = "sqlite_vector"
 
-    # Vector search backends (reuse your existing index settings types,
-    # but point them to search-specific directories by default).
-    sqlite_vector: SQLiteVectorIndexSettings = SQLiteVectorIndexSettings(
-        dir="search/vector_sqlite",
-        filename="index.sqlite",
-    )
-    faiss_vector: FAISSVectorIndexSettings = FAISSVectorIndexSettings(
-        dir="search/vector_faiss",
-        dim=None,
-    )
+    sqlite_vector: SQLiteSearchVectorSettings = SQLiteSearchVectorSettings()
+    faiss_vector: FAISSSearchVectorSettings = FAISSSearchVectorSettings()
 
     # Lexical search backend (for pure sqlite_lexical backend, *and* for
     # optional lexical index when enable_lexical=True on vector backends).
