@@ -17,6 +17,7 @@ from .integration import ExternalSessionBindingRepository, IngressIdempotencyRep
 from .observations import ObservationRepository
 from .scope import StorageScope
 from .stores import ArtifactRepository, BlobStore, EventStore, SearchBackend, StateStore
+from .streams import InboundEventRepository, RuntimeOutputSink, SemanticEventRepository
 from .supporting import DocumentStore, KeyValueStore
 from .triggers import TriggerRepository
 
@@ -162,6 +163,9 @@ class StorageBundle(Protocol):
     observations: ObservationRepository
     ingress_idempotency: IngressIdempotencyRepository
     external_session_bindings: ExternalSessionBindingRepository
+    inbound_events: InboundEventRepository
+    semantic_events: SemanticEventRepository
+    runtime_output: RuntimeOutputSink
 
     async def health(self) -> StorageHealth:
         """Return current readiness for the already-open bundle.
