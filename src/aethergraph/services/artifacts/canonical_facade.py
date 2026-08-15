@@ -1791,6 +1791,7 @@ class CanonicalArtifactFacade:
         query: str = "",
         mode: SearchMode = SearchMode.STRUCTURAL,
         top_k: int = 10,
+        tags: tuple[str, ...] = (),
         metadata: Mapping[str, Any] | None = None,
         require_indexed_cursor: str | None = None,
     ) -> tuple[SearchResult, ...]:
@@ -1814,6 +1815,7 @@ class CanonicalArtifactFacade:
             query: Search text; structural mode may use an empty value.
             mode: Exact required search mode with no fallback.
             top_k: Positive bounded result count.
+            tags: Immutable unique tag-intersection filters applied before ranking.
             metadata: Optional exact canonical metadata filters.
             require_indexed_cursor: Optional covering artifact search cursor.
 
@@ -1830,6 +1832,7 @@ class CanonicalArtifactFacade:
                 scope=self.owner_scope,
                 query=query,
                 top_k=top_k,
+                tags=tags,
                 metadata=dict(metadata or {}),
                 require_indexed_cursor=require_indexed_cursor,
             )
@@ -1841,6 +1844,7 @@ class CanonicalArtifactFacade:
         query: str,
         mode: SearchMode,
         top_k: int = 10,
+        tags: tuple[str, ...] = (),
         metadata: Mapping[str, Any] | None = None,
         require_indexed_cursor: str | None = None,
         deprecated_app_id: str | None = None,
@@ -1873,6 +1877,7 @@ class CanonicalArtifactFacade:
             query: Search text; structural mode may use an empty value.
             mode: Exact required search mode with no fallback.
             top_k: Positive bounded result count.
+            tags: Immutable unique tag-intersection filters applied before ranking.
             metadata: Optional exact canonical search-projection filters.
             require_indexed_cursor: Optional covering artifact search cursor.
             deprecated_app_id: Optional deprecated response-only App metadata.
@@ -1894,6 +1899,7 @@ class CanonicalArtifactFacade:
             query=query,
             mode=mode,
             top_k=top_k,
+            tags=tags,
             metadata=metadata,
             require_indexed_cursor=require_indexed_cursor,
         )
@@ -2065,5 +2071,17 @@ def _search_document(
         or _searchable_description(record.kind, record.original_filename, record.labels),
         scope=record.owner_scope,
         occurred_at=occurrence.occurred_at,
+        tags=_artifact_tags(record.labels),
         metadata=metadata,
     )
+
+
+def _artifact_tags(labels: Mapping[str, Any]) -> tuple[str, ...]:
+    value = labels.get("tags")
+    if isinstance(value, str):
+        tags = (item.strip() for item in value.split(","))
+    elif isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        tags = (str(item).strip() for item in value)
+    else:
+        return ()
+    return tuple(dict.fromkeys(tag for tag in tags if tag))

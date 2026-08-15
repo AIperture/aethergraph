@@ -33,7 +33,7 @@ from ...contracts import (
 )
 from .database import LocalSQLiteDatabase
 
-_SEARCH_COMPONENT_VERSION = 1
+_SEARCH_COMPONENT_VERSION = 2
 _MAX_WRITE_BATCH = 1_000
 _SQL_ID_BATCH = 400
 _MAX_METADATA_FILTERS = 100
@@ -81,6 +81,14 @@ CREATE TABLE local_search_metadata (
 _CREATE_METADATA_INDEX = """
 CREATE INDEX ix_local_search_metadata_value
 ON local_search_metadata(key, value_json, document_id)
+"""
+_CREATE_TAGS = """
+CREATE TABLE local_search_tags (
+    document_id INTEGER NOT NULL
+        REFERENCES local_search_documents(document_id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY(document_id, tag)
+)
 """
 _CREATE_PROGRESS = """
 CREATE TABLE local_search_progress (
@@ -130,6 +138,7 @@ class LocalSearchBackend:
                 _CREATE_DOCUMENT_CURSOR_INDEX,
                 _CREATE_METADATA,
                 _CREATE_METADATA_INDEX,
+                _CREATE_TAGS,
                 _CREATE_PROGRESS,
                 _CREATE_FTS,
             ),
@@ -219,7 +228,18 @@ class LocalSearchBackend:
                     """,
                     (document.corpus, _scope_identity(document.scope), document.item_id),
                 ).fetchone()
-                if existing is not None and _document(existing) == document:
+                existing_tags = (
+                    tuple(
+                        str(row[0])
+                        for row in connection.execute(
+                            "SELECT tag FROM local_search_tags WHERE document_id = ? ORDER BY tag",
+                            (int(existing["document_id"]),),
+                        ).fetchall()
+                    )
+                    if existing is not None
+                    else ()
+                )
+                if existing is not None and _document(existing, tags=existing_tags) == document:
                     if self._embedder is not None and existing["vector_blob"] is None:
                         raise StorageIntegrityError(
                             "Existing search projection lacks its required semantic vector"
@@ -289,10 +309,18 @@ class LocalSearchBackend:
                         (document_id,),
                     )
                     connection.execute(
+                        "DELETE FROM local_search_tags WHERE document_id = ?",
+                        (document_id,),
+                    )
+                    connection.execute(
                         "DELETE FROM local_search_fts WHERE rowid = ?",
                         (document_id,),
                     )
                 _insert_metadata(connection, document_id, document.metadata)
+                connection.executemany(
+                    "INSERT INTO local_search_tags(document_id, tag) VALUES (?, ?)",
+                    ((document_id, tag) for tag in sorted(document.tags)),
+                )
                 connection.execute(
                     """
                     INSERT INTO local_search_fts(rowid, corpus, scope_identity, item_id, text)
@@ -394,8 +422,9 @@ class LocalSearchBackend:
     async def query(self, query: SearchQuery) -> tuple[SearchResult, ...]:
         """Execute one bounded exact-mode search without fallback.
 
-        Scope, time, and arbitrary exact metadata filters are applied before candidate
-        bounds. Every returned row reports the exact requested mode.
+        Scope, time, tag intersection, and arbitrary exact metadata filters are
+        applied before candidate bounds. Every returned row reports the exact
+        requested mode.
 
         Examples:
             Execute semantic search:
@@ -409,7 +438,8 @@ class LocalSearchBackend:
                 ```
 
         Args:
-            query: Exact corpus, mode, scope, filters, bound, and freshness request.
+            query: Exact corpus, mode, scope, tag/metadata filters, bound, and
+                freshness request.
 
         Returns:
             tuple[SearchResult, ...]: At most `top_k` stable descending results.
@@ -678,6 +708,14 @@ def _query_filters(query: SearchQuery, *, alias: str) -> tuple[list[str], list[o
     if query.occurred_at_max is not None:
         clauses.append(f"{alias}.occurred_at <= ?")
         values.append(query.occurred_at_max.isoformat())
+    for index, tag in enumerate(query.tags):
+        tag_alias = f"tag{index}"
+        clauses.append(
+            "EXISTS (SELECT 1 FROM local_search_tags AS "
+            f"{tag_alias} WHERE {tag_alias}.document_id = {alias}.document_id "
+            f"AND {tag_alias}.tag = ?)"
+        )
+        values.append(tag)
     for index, (key, value) in enumerate(sorted(query.metadata.items())):
         metadata_alias = f"m{index}"
         clauses.append(
@@ -716,7 +754,7 @@ def _advance(connection: sqlite3.Connection, corpus: str) -> int:
     return sequence
 
 
-def _document(row: sqlite3.Row) -> SearchDocument:
+def _document(row: sqlite3.Row, *, tags: tuple[str, ...]) -> SearchDocument:
     try:
         return SearchDocument(
             corpus=str(row["corpus"]),
@@ -724,6 +762,7 @@ def _document(row: sqlite3.Row) -> SearchDocument:
             text=str(row["text"]),
             scope=_scope(str(row["scope_identity"])),
             occurred_at=datetime.fromisoformat(str(row["occurred_at"])),
+            tags=tags,
             metadata=json.loads(row["metadata_json"]),
             schema_version=int(row["schema_version"]),
         )

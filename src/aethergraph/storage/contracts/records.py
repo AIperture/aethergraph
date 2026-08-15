@@ -81,6 +81,15 @@ def _freeze_metrics(value: Mapping[str, float], *, path: str) -> Mapping[str, fl
     return MappingProxyType(frozen)
 
 
+def _validate_tags(tags: tuple[str, ...]) -> None:
+    if not isinstance(tags, tuple):
+        raise TypeError("tags must be an immutable tuple")
+    if any(not isinstance(tag, str) or not tag.strip() for tag in tags):
+        raise ValueError("tags must contain non-empty strings")
+    if len(set(tags)) != len(tags):
+        raise ValueError("tags must not contain duplicates")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EventDraft:
     """Provider-independent event content before an ordered cursor is assigned."""
@@ -107,12 +116,7 @@ class EventDraft:
         _optional_nonempty("topic", self.topic)
         if self.text is not None and not isinstance(self.text, str):
             raise TypeError("text must be a string when supplied")
-        if not isinstance(self.tags, tuple):
-            raise TypeError("tags must be an immutable tuple")
-        if any(not isinstance(tag, str) or not tag.strip() for tag in self.tags):
-            raise ValueError("tags must contain non-empty strings")
-        if len(set(self.tags)) != len(self.tags):
-            raise ValueError("tags must not contain duplicates")
+        _validate_tags(self.tags)
         if self.severity is not None and (
             isinstance(self.severity, bool) or not 0 <= self.severity <= 100
         ):
@@ -318,6 +322,7 @@ class SearchDocument:
     text: str
     scope: StorageScope
     occurred_at: datetime
+    tags: tuple[str, ...] = ()
     metadata: Mapping[str, FrozenJson] = field(default_factory=dict)
     schema_version: int = 1
 
@@ -327,6 +332,8 @@ class SearchDocument:
         if not isinstance(self.text, str):
             raise TypeError("text must be a string")
         _utc("occurred_at", self.occurred_at)
+        _validate_tags(self.tags)
+        object.__setattr__(self, "tags", tuple(sorted(self.tags)))
         _positive_version(self.schema_version)
         object.__setattr__(
             self,
@@ -344,6 +351,7 @@ class SearchQuery:
     scope: StorageScope
     query: str = ""
     top_k: int = 10
+    tags: tuple[str, ...] = ()
     metadata: Mapping[str, FrozenJson] = field(default_factory=dict)
     occurred_at_min: datetime | None = None
     occurred_at_max: datetime | None = None
@@ -357,6 +365,8 @@ class SearchQuery:
             raise ValueError("semantic, lexical, and hybrid search require a query")
         if isinstance(self.top_k, bool) or not 1 <= self.top_k <= 1_000:
             raise ValueError("top_k must be between 1 and 1000")
+        _validate_tags(self.tags)
+        object.__setattr__(self, "tags", tuple(sorted(self.tags)))
         for name in ("occurred_at_min", "occurred_at_max"):
             value = getattr(self, name)
             if value is not None:

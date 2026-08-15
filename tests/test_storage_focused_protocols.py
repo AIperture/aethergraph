@@ -490,6 +490,12 @@ class _SearchBackend:
             for (scope_key, corpus, _item_id), document in self.documents.items()
             if scope_key == _scope_key(query.scope) and corpus == query.corpus
         ]
+        rows = [row for row in rows if all(tag in row.tags for tag in query.tags)]
+        rows = [
+            row
+            for row in rows
+            if all(row.metadata.get(key) == value for key, value in query.metadata.items())
+        ]
         if query.mode is not SearchMode.STRUCTURAL:
             terms = set(query.query.lower().split())
             rows = [row for row in rows if terms & set(row.text.lower().split())]

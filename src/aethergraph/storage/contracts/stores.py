@@ -1205,7 +1205,8 @@ class SearchBackend(Protocol):
                 ```
 
         Args:
-            query: Exact corpus, mode, scope, filters, bound, and freshness request.
+            query: Exact corpus, mode, scope, tag/metadata filters, bound, and
+                freshness request.
 
         Returns:
             tuple[SearchResult, ...]: At most `top_k` stable ordered results.

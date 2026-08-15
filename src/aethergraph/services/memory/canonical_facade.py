@@ -458,5 +458,6 @@ def _search_document(event: EventRecord) -> SearchDocument:
         text=event.text or "",
         scope=event.scope,
         occurred_at=event.occurred_at,
+        tags=event.tags,
         metadata=metadata,
     )

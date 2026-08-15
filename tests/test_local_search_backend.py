@@ -63,6 +63,7 @@ def _document(
     text: str,
     *,
     occurred_at: datetime = NOW,
+    tags: tuple[str, ...] = (),
     metadata: dict[str, object] | None = None,
 ) -> SearchDocument:
     return SearchDocument(
@@ -71,6 +72,7 @@ def _document(
         text=text,
         scope=scope,
         occurred_at=occurred_at,
+        tags=tags,
         metadata=metadata or {},
     )
 
@@ -99,24 +101,28 @@ async def test_exact_modes_apply_scope_metadata_and_time_before_ranking(
             scope,
             "canonical storage migration",
             occurred_at=NOW - timedelta(hours=1),
+            tags=("shared", "storage"),
             metadata={"kind": "note", "labels": ["storage", "migration"]},
         ),
         _document(
             "newer",
             scope,
             "canonical provider contract",
+            tags=("provider", "shared"),
             metadata={"kind": "note", "labels": ["provider"]},
         ),
         _document(
             "other-kind",
             scope,
             "canonical storage migration",
+            tags=("storage",),
             metadata={"kind": "log"},
         ),
         _document(
             "hidden",
             other_scope,
             "canonical storage migration",
+            tags=("shared", "storage"),
             metadata={"kind": "note"},
         ),
     )
@@ -134,6 +140,15 @@ async def test_exact_modes_apply_scope_metadata_and_time_before_ranking(
         )
     )
     assert [row.item_id for row in structural] == ["newer", "older"]
+    tagged = await search.query(
+        SearchQuery(
+            corpus="memory",
+            mode=SearchMode.STRUCTURAL,
+            scope=scope,
+            tags=("storage", "shared"),
+        )
+    )
+    assert [row.item_id for row in tagged] == ["older"]
     lexical = await search.query(
         SearchQuery(
             corpus="memory",
@@ -354,6 +369,10 @@ async def test_schema_is_canonical_indexed_and_vector_corruption_fails_typed(
         for row in await database.fetch_all("PRAGMA table_info(local_search_documents)")
     }
     assert not {"app_id", "application_id", "client_id", "scope_id"} & columns
+    tag_columns = {
+        str(row["name"]) for row in await database.fetch_all("PRAGMA table_info(local_search_tags)")
+    }
+    assert tag_columns == {"document_id", "tag"}
     query_plan = " ".join(
         str(row["detail"])
         for row in await database.fetch_all(
@@ -368,6 +387,25 @@ async def test_schema_is_canonical_indexed_and_vector_corruption_fails_typed(
     )
     assert "ix_local_search_scope_time" in query_plan
     assert "SCAN local_search_documents" not in query_plan
+    tag_plan = " ".join(
+        str(row["detail"])
+        for row in await database.fetch_all(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT d.* FROM local_search_documents d
+            WHERE d.corpus = ? AND d.scope_identity = ?
+              AND EXISTS (
+                  SELECT 1 FROM local_search_tags tag_filter
+                  WHERE tag_filter.document_id = d.document_id AND tag_filter.tag = ?
+              )
+            ORDER BY d.occurred_at DESC, d.document_id DESC LIMIT ?
+            """,
+            ("memory", '{"project_id":"project-1"}', "storage", 10),
+        )
+    )
+    assert "sqlite_autoindex_local_search_tags_1" in tag_plan
+    assert "document_id=? AND tag=?" in tag_plan
+    assert "SCAN tag_filter" not in tag_plan
 
     embedder.dimension += 1
     with pytest.raises(StorageIntegrityError, match="dimension differs"):

@@ -122,7 +122,7 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
             "canonical artifact report",
             kind="report",
             original_filename="report.txt",
-            content_labels={"category": "evidence"},
+            content_labels={"category": "evidence", "tags": ("final", "reviewed")},
             occurrence_labels={"stage": "final"},
             metrics={"quality": 0.9},
             pinned=True,
@@ -134,7 +134,7 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
             "canonical artifact report",
             kind="report",
             original_filename="report.txt",
-            content_labels={"category": "evidence"},
+            content_labels={"category": "evidence", "tags": ("final", "reviewed")},
             occurrence_labels={"stage": "final"},
             metrics={"quality": 0.9},
             pinned=True,
@@ -174,6 +174,7 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
         hits = await facade.search(
             query="canonical",
             mode=SearchMode.LEXICAL,
+            tags=("reviewed", "final"),
             require_indexed_cursor=first.indexed_cursor,
         )
         assert [hit.item_id for hit in hits] == ["artifact-1"]
@@ -183,6 +184,7 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
         public_hits = await facade.search_public_artifacts(
             query="canonical",
             mode=SearchMode.LEXICAL,
+            tags=("final",),
             metadata={"category": "evidence"},
             require_indexed_cursor=first.indexed_cursor,
         )
@@ -191,6 +193,14 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
         assert public_hits[0].artifact.app_id is None
         assert public_hits[0].score == hits[0].score
         assert public_hits[0].mode is SearchMode.LEXICAL
+        assert (
+            await facade.search_public_artifacts(
+                query="canonical",
+                mode=SearchMode.LEXICAL,
+                tags=("missing",),
+            )
+            == ()
+        )
         assert await facade.get_occurrences_many(("occurrence-1", "missing")) == (
             first.occurrence,
             None,

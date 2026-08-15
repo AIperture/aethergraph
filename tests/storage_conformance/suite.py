@@ -381,6 +381,7 @@ async def check_search_backend_conformance(search: SearchBackend) -> None:
         text="canonical storage migration",
         scope=scope,
         occurred_at=NOW,
+        tags=("canonical", "shared"),
     )
     second = SearchDocument(
         corpus="memory",
@@ -388,6 +389,7 @@ async def check_search_backend_conformance(search: SearchBackend) -> None:
         text="provider contract conformance",
         scope=scope,
         occurred_at=NOW,
+        tags=("contract", "shared"),
     )
     hidden = SearchDocument(
         corpus="memory",
@@ -395,6 +397,7 @@ async def check_search_backend_conformance(search: SearchBackend) -> None:
         text="canonical storage migration",
         scope=other_scope,
         occurred_at=NOW,
+        tags=("canonical", "shared"),
     )
 
     first_cursor = await search.upsert(first)
@@ -409,6 +412,15 @@ async def check_search_backend_conformance(search: SearchBackend) -> None:
     )
     assert {row.item_id for row in structural} == {"event-1", "event-2"}
     assert all(row.mode is SearchMode.STRUCTURAL for row in structural)
+    tagged = await search.query(
+        SearchQuery(
+            corpus="memory",
+            mode=SearchMode.STRUCTURAL,
+            scope=scope,
+            tags=("shared", "canonical"),
+        )
+    )
+    assert [row.item_id for row in tagged] == ["event-1"]
     for mode in (SearchMode.SEMANTIC, SearchMode.LEXICAL, SearchMode.HYBRID):
         rows = await search.query(
             SearchQuery(
@@ -417,9 +429,11 @@ async def check_search_backend_conformance(search: SearchBackend) -> None:
                 scope=scope,
                 query="canonical migration",
                 top_k=10,
+                tags=("shared", "canonical"),
             )
         )
         assert rows
+        assert [row.item_id for row in rows] == ["event-1"]
         assert all(row.mode is mode for row in rows)
 
     delete_cursor = await search.delete(scope, "memory", ("event-1",))

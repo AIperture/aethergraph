@@ -269,6 +269,7 @@ def test_search_document_and_result_freeze_metadata() -> None:
         text="storage migration",
         scope=SCOPE,
         occurred_at=NOW,
+        tags=("storage", "canonical"),
         metadata=metadata,
     )
     result = SearchResult(
@@ -281,7 +282,15 @@ def test_search_document_and_result_freeze_metadata() -> None:
     metadata["tags"].append("changed")
 
     assert document.metadata["tags"] == ("storage",)
+    assert document.tags == ("canonical", "storage")
     assert result.metadata["tags"] == ("storage",)
+    with pytest.raises(ValueError, match="duplicates"):
+        SearchQuery(
+            corpus="memory",
+            mode=SearchMode.STRUCTURAL,
+            scope=SCOPE,
+            tags=("same", "same"),
+        )
 
 
 def test_cursor_pages_are_bounded_and_immutable() -> None:
