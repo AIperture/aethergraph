@@ -16,6 +16,7 @@ from .control import RunRepository, RunResultRepository, SessionRepository
 from .scope import StorageScope
 from .stores import ArtifactRepository, BlobStore, EventStore, SearchBackend, StateStore
 from .supporting import DocumentStore, KeyValueStore
+from .triggers import TriggerRepository
 
 
 class StorageOpenMode(StrEnum):
@@ -155,6 +156,7 @@ class StorageBundle(Protocol):
     sessions: SessionRepository
     continuations: ContinuationRepository
     continuation_leases: ContinuationLeaseRepository
+    triggers: TriggerRepository
 
     async def health(self) -> StorageHealth:
         """Return current readiness for the already-open bundle.

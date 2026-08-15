@@ -91,6 +91,16 @@ from .supporting import (
     KeyValueRecord,
     KeyValueStore,
 )
+from .triggers import (
+    ClaimedTrigger,
+    TriggerClaimRecord,
+    TriggerClaimRequest,
+    TriggerClaimStatus,
+    TriggerKind,
+    TriggerQuery,
+    TriggerRecord,
+    TriggerRepository,
+)
 
 __all__ = [
     "DuplicateStorageProviderError",
@@ -173,4 +183,12 @@ __all__ = [
     "StorageTimeoutError",
     "StorageSecretResolver",
     "UnknownStorageProviderError",
+    "ClaimedTrigger",
+    "TriggerClaimRecord",
+    "TriggerClaimRequest",
+    "TriggerClaimStatus",
+    "TriggerKind",
+    "TriggerQuery",
+    "TriggerRecord",
+    "TriggerRepository",
 ]
