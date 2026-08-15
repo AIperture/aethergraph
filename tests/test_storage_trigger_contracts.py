@@ -69,6 +69,29 @@ def test_trigger_kind_configuration_fails_closed() -> None:
         replace(record, kind="interval")
 
 
+def test_trigger_contract_preserves_zero_overlap_and_overdue_schedule_states() -> None:
+    overdue = NOW - timedelta(minutes=5)
+    record = TriggerRecord(
+        trigger_id="trigger-overdue",
+        graph_id="graph-1",
+        scope=SCOPE,
+        kind=TriggerKind.ONE_SHOT,
+        revision=1,
+        created_at=NOW,
+        updated_at=NOW,
+        run_at=overdue,
+        next_fire_at=overdue,
+        max_overlap_runs=0,
+    )
+
+    assert record.max_overlap_runs == 0
+    assert record.run_at == record.next_fire_at == overdue
+    with pytest.raises(ValueError, match="non-negative"):
+        replace(record, max_overlap_runs=-1)
+    with pytest.raises(ValueError, match="last_fired_at"):
+        replace(record, last_fired_at=NOW - timedelta(seconds=1))
+
+
 def test_trigger_queries_are_bounded_and_event_explicit() -> None:
     query = TriggerQuery(
         scope=SCOPE,

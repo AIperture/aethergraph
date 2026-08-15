@@ -80,15 +80,15 @@ class TriggerRecord:
         if not isinstance(self.catch_up_missed, bool) or not isinstance(self.active, bool):
             raise TypeError("catch_up_missed and active must be booleans")
         if self.max_overlap_runs is not None and (
-            isinstance(self.max_overlap_runs, bool) or self.max_overlap_runs < 1
+            isinstance(self.max_overlap_runs, bool) or self.max_overlap_runs < 0
         ):
-            raise ValueError("max_overlap_runs must be positive when supplied")
+            raise ValueError("max_overlap_runs must be non-negative when supplied")
         for name in ("run_at", "last_fired_at", "next_fire_at"):
             value = getattr(self, name)
             if value is not None:
                 _utc(name, value)
-                if value < self.created_at:
-                    raise ValueError(f"{name} must not precede created_at")
+        if self.last_fired_at is not None and self.last_fired_at < self.created_at:
+            raise ValueError("last_fired_at must not precede created_at")
         self._validate_schedule()
         object.__setattr__(
             self,

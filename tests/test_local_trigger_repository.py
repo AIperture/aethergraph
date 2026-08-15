@@ -258,6 +258,57 @@ async def test_missed_and_catch_up_policies_commit_receipts_and_revisions(
 
 
 @pytest.mark.asyncio
+async def test_overdue_zero_overlap_one_shot_survives_restart_and_skips_exactly_once(
+    tmp_path: Path,
+) -> None:
+    overdue = NOW - timedelta(minutes=5)
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalTriggerRepository(database=database)
+    record = replace(
+        _trigger(
+            "trigger-overdue",
+            kind=TriggerKind.ONE_SHOT,
+            created_at=NOW,
+            updated_at=NOW,
+            next_fire_at=overdue,
+        ),
+        max_overlap_runs=0,
+    )
+    await repository.create(record)
+    await database.close()
+
+    reopened = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    restarted_repository = LocalTriggerRepository(database=reopened)
+    restored = await restarted_repository.get(SCOPE, record.trigger_id)
+    assert restored == record
+    claims = await restarted_repository.claim_due(
+        _request(now=NOW, skip_missed_before=NOW, limit=10)
+    )
+    assert claims == ()
+    skipped = await restarted_repository.get(SCOPE, record.trigger_id)
+    assert skipped is not None
+    assert skipped.max_overlap_runs == 0
+    assert skipped.active is False
+    assert skipped.next_fire_at is None
+    receipts = await reopened.fetch_all(
+        "SELECT fire_id FROM local_trigger_claims WHERE trigger_id = ?",
+        (record.trigger_id,),
+    )
+    assert len(receipts) == 1
+    receipt = await restarted_repository.get_claim(SCOPE, str(receipts[0]["fire_id"]))
+    assert receipt is not None
+    assert receipt.status is TriggerClaimStatus.SKIPPED
+    assert receipt.skip_reason == "missed_before_startup"
+    assert (
+        await restarted_repository.claim_due(
+            _request(now=NOW + timedelta(minutes=1), skip_missed_before=NOW, limit=10)
+        )
+        == ()
+    )
+    await reopened.close()
+
+
+@pytest.mark.asyncio
 async def test_scoped_claim_never_falls_back_to_another_owner(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     repository = LocalTriggerRepository(database=database)
