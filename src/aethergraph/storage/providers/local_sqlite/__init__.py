@@ -2,6 +2,11 @@
 
 from .artifact_repository import LocalArtifactRepository
 from .blob_store import LocalBlobStore
+from .control_repositories import (
+    LocalRunRepository,
+    LocalRunResultRepository,
+    LocalSessionRepository,
+)
 from .database import (
     LOCAL_DATABASE_SCHEMA_VERSION,
     LocalCheckpoint,
@@ -29,8 +34,11 @@ __all__ = [
     "LocalDocumentStore",
     "LocalEventStore",
     "LocalKeyValueStore",
+    "LocalRunRepository",
+    "LocalRunResultRepository",
     "LocalSQLiteDatabase",
     "LocalSearchBackend",
+    "LocalSessionRepository",
     "LocalStateStore",
     "LocalWorkspaceManifest",
     "open_local_workspace_manifest",
