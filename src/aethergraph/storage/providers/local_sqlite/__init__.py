@@ -31,6 +31,11 @@ from .manifest import (
 from .observation_repository import LocalObservationRepository
 from .search_backend import LocalSearchBackend
 from .state_store import LocalStateStore
+from .stream_repositories import (
+    LocalInboundEventRepository,
+    LocalRuntimeOutputSink,
+    LocalSemanticEventRepository,
+)
 from .supporting_stores import LocalDocumentStore, LocalKeyValueStore
 from .trigger_repository import LocalTriggerRepository
 
@@ -47,12 +52,15 @@ __all__ = [
     "LocalEventStore",
     "LocalExternalSessionBindingRepository",
     "LocalIngressIdempotencyRepository",
+    "LocalInboundEventRepository",
     "LocalKeyValueStore",
     "LocalObservationRepository",
     "LocalRunRepository",
     "LocalRunResultRepository",
+    "LocalRuntimeOutputSink",
     "LocalSQLiteDatabase",
     "LocalSearchBackend",
+    "LocalSemanticEventRepository",
     "LocalSessionRepository",
     "LocalStateStore",
     "LocalTriggerRepository",
