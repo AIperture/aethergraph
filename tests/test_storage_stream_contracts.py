@@ -20,6 +20,8 @@ from aethergraph.storage.contracts import (
     SemanticEventRecord,
     SemanticEventRepository,
     StorageBundle,
+    StorageCapacityError,
+    StorageError,
     StorageScope,
 )
 
@@ -126,6 +128,7 @@ def test_runtime_output_frames_require_canonical_run_node_scope() -> None:
     )
 
     assert frame.scope.run_id == "run-1"
+    assert issubclass(StorageCapacityError, StorageError)
     assert "app_id" not in {item.name for item in fields(RuntimeOutputFrame)}
     with pytest.raises(ValueError, match="positive"):
         replace(frame, sequence=0)

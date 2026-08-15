@@ -51,6 +51,10 @@ class StorageConflictError(StorageError):
     """An atomic write failed because its expected version was stale."""
 
 
+class StorageCapacityError(StorageError):
+    """A bounded provider admission queue has no capacity for another write."""
+
+
 class StorageIntegrityError(StorageError):
     """Persisted or staged content failed an integrity requirement."""
 

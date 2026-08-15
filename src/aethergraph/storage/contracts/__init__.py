@@ -30,6 +30,7 @@ from .control import (
 from .errors import (
     DuplicateStorageProviderError,
     StorageCapabilityError,
+    StorageCapacityError,
     StorageConfigurationError,
     StorageConflictError,
     StorageError,
@@ -245,6 +246,7 @@ __all__ = [
     "StorageCapabilities",
     "StorageCapability",
     "StorageCapabilityError",
+    "StorageCapacityError",
     "StorageClock",
     "StorageConfigurationError",
     "StorageConflictError",
