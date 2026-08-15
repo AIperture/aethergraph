@@ -15,6 +15,7 @@ from .manifest import (
     open_local_workspace_manifest,
     read_local_workspace_manifest,
 )
+from .search_backend import LocalSearchBackend
 from .state_store import LocalStateStore
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "LocalDatabaseRole",
     "LocalEventStore",
     "LocalSQLiteDatabase",
+    "LocalSearchBackend",
     "LocalStateStore",
     "LocalWorkspaceManifest",
     "open_local_workspace_manifest",
