@@ -9,6 +9,7 @@ from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunOrigin, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
+from aethergraph.storage.contracts.scope import StorageScope
 from aethergraph.storage.runs.inmen_store import InMemoryRunStore
 from aethergraph.storage.runs.result_store import InMemoryRunResultStore
 
@@ -24,21 +25,25 @@ class FakeGraphStateStore:
     def __init__(self):
         self.snapshots: dict[str, GraphSnapshot] = {}
 
-    async def save_snapshot(self, snap: GraphSnapshot) -> None:
+    async def save_snapshot(self, scope: StorageScope, snap: GraphSnapshot) -> None:
         self.snapshots[snap.run_id] = snap
 
-    async def load_latest_snapshot(self, run_id: str) -> GraphSnapshot | None:
+    async def load_latest_snapshot(self, scope: StorageScope, run_id: str) -> GraphSnapshot | None:
         return self.snapshots.get(run_id)
 
-    async def append_event(self, ev) -> None:  # pragma: no cover - not needed here
+    async def append_event(
+        self, scope: StorageScope, ev
+    ) -> None:  # pragma: no cover - not needed here
         return None
 
     async def load_events_since(
-        self, run_id: str, from_rev: int
+        self, scope: StorageScope, run_id: str, from_rev: int
     ):  # pragma: no cover - not needed here
         return []
 
-    async def list_run_ids(self, graph_id: str | None = None):  # pragma: no cover - not needed here
+    async def list_run_ids(
+        self, scope: StorageScope, graph_id: str | None = None
+    ):  # pragma: no cover - not needed here
         return list(self.snapshots.keys())
 
 
@@ -798,6 +803,7 @@ async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_resul
     )
     await result_store.delete(record.run_id)
     await state_store.save_snapshot(
+        StorageScope(org_id="o1", user_id="u1", run_id=record.run_id, graph_id="my-graph"),
         GraphSnapshot(
             run_id=record.run_id,
             graph_id="my-graph",
@@ -805,7 +811,7 @@ async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_resul
             created_at=0.0,
             spec_hash="demo",
             state={"graph_outputs": {"out": 99}},
-        )
+        ),
     )
 
     waited_record, outputs = await rm.wait_run(record.run_id, return_outputs=True)

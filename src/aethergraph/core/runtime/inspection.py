@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from aethergraph.services.state_stores.scope import scope_for_run_record
+
 
 def build_error_info(
     payload: Any,
@@ -148,10 +150,10 @@ class RuntimeInspectionService:
         snapshot = None
         incremental_events: list[Any] = []
         if self.state_store is not None:
-            snapshot = await self.state_store.load_latest_snapshot(run_id)
+            scope = scope_for_run_record(record)
+            snapshot = await self.state_store.load_latest_snapshot(scope, run_id)
             from_rev = getattr(snapshot, "rev", -1) if snapshot is not None else -1
-            if hasattr(self.state_store, "load_events_since"):
-                incremental_events = await self.state_store.load_events_since(run_id, from_rev)
+            incremental_events = await self.state_store.load_events_since(scope, run_id, from_rev)
 
         nodes_state: dict[str, dict[str, Any]] = {}
         snapshot_edges: list[dict[str, str]] = []

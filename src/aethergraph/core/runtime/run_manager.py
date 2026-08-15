@@ -439,7 +439,9 @@ class RunManager:
         store = self._get_state_store()
         if store is None:
             return None, None
-        snap = await store.load_latest_snapshot(record.run_id)
+        from aethergraph.services.state_stores.scope import scope_for_run_record
+
+        snap = await store.load_latest_snapshot(scope_for_run_record(record), record.run_id)
         if snap is None:
             return None, None
         graph_outputs = snap.state.get("graph_outputs")

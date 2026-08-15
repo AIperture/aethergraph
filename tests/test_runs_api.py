@@ -282,7 +282,7 @@ def test_get_run_snapshot_includes_node_and_run_error_info(monkeypatch):
     fake_authz = FakeAuthz()
 
     class FakeStateStore:
-        async def load_latest_snapshot(self, run_id: str):
+        async def load_latest_snapshot(self, scope, run_id: str):
             assert run_id == "run-failed"
             return type(
                 "Snapshot",
@@ -312,7 +312,7 @@ def test_get_run_snapshot_includes_node_and_run_error_info(monkeypatch):
                 },
             )()
 
-        async def load_events_since(self, run_id: str, from_rev: int):
+        async def load_events_since(self, scope, run_id: str, from_rev: int):
             assert run_id == "run-failed"
             assert from_rev == -1
             return []
@@ -356,7 +356,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
     fake_authz = FakeAuthz()
 
     class FakeStateStore:
-        async def load_latest_snapshot(self, run_id: str):
+        async def load_latest_snapshot(self, scope, run_id: str):
             assert run_id == "run-xyz"
             return SimpleNamespace(
                 rev=1,
@@ -375,7 +375,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                 },
             )
 
-        async def load_events_since(self, run_id: str, from_rev: int):
+        async def load_events_since(self, scope, run_id: str, from_rev: int):
             assert run_id == "run-xyz"
             assert from_rev == 1
             return [

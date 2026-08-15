@@ -23,7 +23,9 @@ from aethergraph.services.state_stores.graph_observer import PersistenceObserver
 from aethergraph.services.state_stores.resume_policy import (
     assert_snapshot_json_only,
 )
+from aethergraph.services.state_stores.scope import scope_for_runtime_env
 from aethergraph.services.state_stores.utils import snapshot_from_graph
+from aethergraph.storage.contracts.scope import StorageScope
 
 from ..execution.forward_scheduler import ForwardScheduler
 from ..execution.retry_policy import RetryPolicy
@@ -60,6 +62,7 @@ async def _attach_persistence(graph, env, spec, snapshot_every=1) -> Persistence
 
     obs = PersistenceObserver(
         store=store,
+        scope=scope_for_runtime_env(env),
         artifact_store=env.container.artifacts,
         spec_hash=hash_spec(spec),
         snapshot_every=snapshot_every,
@@ -279,11 +282,39 @@ def _is_graph_complete(snap: GraphSnapshot) -> bool:
     return all(doneish(ns) for ns in nodes.values())
 
 
-async def load_latest_snapshot_json(store, run_id: str) -> dict[str, Any] | None:
+async def load_latest_snapshot_json(
+    store,
+    scope: StorageScope,
+    run_id: str,
+) -> dict[str, Any] | None:
+    """Return one latest graph snapshot as detached JSON-compatible state.
+
+    Loads through the exact scoped graph-state contract and projects only the fields
+    consumed by strict resume validation.
+
+    Examples:
+        Load a persisted snapshot:
+            ```python
+            payload = await load_latest_snapshot_json(store, scope, "run-1")
+            ```
+
+        Detect no saved state:
+            ```python
+            assert await load_latest_snapshot_json(store, scope, "missing") is None
+            ```
+
+    Args:
+        store: Graph-state service implementing the scoped protocol.
+        scope: Exact canonical owner and graph-run scope.
+        run_id: Stable run identity matching the scope.
+
+    Returns:
+        dict[str, Any] | None: Snapshot projection or `None` when absent.
+
+    Notes:
+        The helper performs no method probing or legacy lookup fallback.
     """
-    Returns the raw JSON dict of the latest snapshot (or None).
-    """
-    snap = await store.load_latest_snapshot(run_id)
+    snap = await store.load_latest_snapshot(scope, run_id)
     if not snap:
         return None
     # JsonGraphStateStore serializes GraphSnapshot via snap.__dict__
@@ -569,14 +600,12 @@ async def run_async(
     snap = None
     resume_from_run_id = rt_overrides.get("resume_from_run_id")
     resume_mode = rt_overrides.get("resume_mode")
-    assert store is None or hasattr(
-        store, "load_latest_snapshot"
-    ), "state_store must implement lo  ad_latest_snapshot(run_id)"
-
     if store:
         resume_source_run_id = resume_from_run_id or env.run_id
+        source_scope = scope_for_runtime_env(env, run_id=resume_source_run_id)
+        target_scope = scope_for_runtime_env(env)
         if resume_from_run_id and resume_from_run_id != env.run_id:
-            snap = await store.load_latest_snapshot(resume_source_run_id)
+            snap = await store.load_latest_snapshot(source_scope, resume_source_run_id)
             if snap is None:
                 raise GraphBuildError(
                     f"Resume source run '{resume_source_run_id}' not found.",
@@ -595,11 +624,16 @@ async def run_async(
             )
         else:
             # 1) Attempt cold-resume (build a graph with hydrated state)
-            graph = await recover_graph_run(spec=spec, run_id=env.run_id, store=store)
-            snap = await store.load_latest_snapshot(env.run_id)
+            graph = await recover_graph_run(
+                spec=spec,
+                run_id=env.run_id,
+                scope=target_scope,
+                store=store,
+            )
+            snap = await store.load_latest_snapshot(target_scope, env.run_id)
 
         # 2) Load raw JSON snapshot and ENFORCE strict policy
-        snap_json = await load_latest_snapshot_json(store, resume_source_run_id)
+        snap_json = await load_latest_snapshot_json(store, source_scope, resume_source_run_id)
         if snap_json:
             # keep for short-circuit + seeding
             # Short-circuit if already complete
@@ -729,7 +763,7 @@ async def run_async(
                     )
                     if resolved_result and resolved_result.get("status") != "waiting":
                         snap.state["graph_outputs"] = resolved_result
-                    await store.save_snapshot(snap)
+                    await store.save_snapshot(scope_for_runtime_env(env), snap)
                 if cancel_handle.is_cancel_requested():
                     backend_state = await cancel_handle.backend_state()
                     cancel_handle.mark_backend_stopped(

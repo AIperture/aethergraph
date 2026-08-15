@@ -5,6 +5,7 @@ import hashlib
 from typing import Any
 
 from aethergraph.contracts.services.state_stores import GraphStateStore
+from aethergraph.storage.contracts.scope import StorageScope
 
 from ..graph.node_state import NodeStatus
 from ..graph.task_graph import TaskGraph, TaskGraphSpec
@@ -71,6 +72,7 @@ async def recover_graph_run(
     *,
     spec: TaskGraphSpec,
     run_id: str,
+    scope: StorageScope,
     store: GraphStateStore,
 ) -> TaskGraph:
     """Rehydrate a task graph from its latest durable snapshot.
@@ -82,18 +84,23 @@ async def recover_graph_run(
     Examples:
         Recover an interrupted run:
         ```python
-        graph = await recover_graph_run(spec=spec, run_id="run-1", store=state_store)
+        graph = await recover_graph_run(
+            spec=spec, run_id="run-1", scope=scope, store=state_store
+        )
         ```
 
         Start from a clean graph when no snapshot exists:
         ```python
-        graph = await recover_graph_run(spec=spec, run_id="new-run", store=state_store)
+        graph = await recover_graph_run(
+            spec=spec, run_id="new-run", scope=new_scope, store=state_store
+        )
         assert graph.state.run_id == "new-run"
         ```
 
     Args:
         spec: Canonical task-graph specification to materialize.
         run_id: Exact durable run identity whose snapshot is loaded.
+        scope: Canonical owner and execution scope matching `run_id`.
         store: Graph-state store providing the latest snapshot.
 
     Returns:
@@ -103,7 +110,7 @@ async def recover_graph_run(
         Persisted `RUNNING` nodes become `PENDING` so interrupted work can be
         scheduled again; specification drift currently emits a warning.
     """
-    snap = await store.load_latest_snapshot(run_id)
+    snap = await store.load_latest_snapshot(scope, run_id)
     graph = TaskGraph.from_spec(spec=spec, state=None)
     graph.state.run_id = run_id
     if not snap:
