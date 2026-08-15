@@ -27,6 +27,7 @@ from .manifest import (
 from .search_backend import LocalSearchBackend
 from .state_store import LocalStateStore
 from .supporting_stores import LocalDocumentStore, LocalKeyValueStore
+from .trigger_repository import LocalTriggerRepository
 
 __all__ = [
     "LOCAL_STORAGE_FORMAT_VERSION",
@@ -46,6 +47,7 @@ __all__ = [
     "LocalSearchBackend",
     "LocalSessionRepository",
     "LocalStateStore",
+    "LocalTriggerRepository",
     "LocalWorkspaceManifest",
     "open_local_workspace_manifest",
     "read_local_workspace_manifest",
