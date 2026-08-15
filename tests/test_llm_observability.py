@@ -16,6 +16,12 @@ from aethergraph.observability import (
 )
 from aethergraph.server.security.redaction import canonical_json
 from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.llm import (
+    ToolCall,
+    ToolCallRequest,
+    ToolCallResponse,
+    ToolDefinition,
+)
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.observability import ConsoleLLMObservationSink
@@ -352,6 +358,76 @@ async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path:
     correlation = current_llm_call_correlation()
     assert correlation is not None
     assert correlation.llm_call_id in {row["llm_call_id"] for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_projected_discovery_model_calls_all_reach_the_inspect_reader(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteObservationStore(
+        tmp_path / "observability.db",
+        policy=ObservationPolicy(capture_mode="metadata"),
+    )
+    sink = ObservabilityFacade(store)
+    client = GenericLLMClient(
+        provider="openai",
+        model="example-model",
+        api_key="test",
+        observation_sink=sink,
+        observation_capture_mode="metadata",
+    )
+    selections = iter(("tool_search", "tool_load", "docs_read"))
+
+    async def projected_dispatch(messages, **kwargs):
+        del messages, kwargs
+        name = next(selections)
+        return ProviderCallResult(
+            (
+                ToolCallResponse(
+                    items=(ToolCall(f"call-{name}", name, {}),),
+                ),
+                {"prompt_tokens": 3, "completion_tokens": 1},
+            )
+        )
+
+    client._chat_dispatch = projected_dispatch  # type: ignore[method-assign]
+    search = ToolDefinition("tool_search", "Search Tools.", {"type": "object"})
+    load = ToolDefinition("tool_load", "Load Tools.", {"type": "object"})
+    docs = ToolDefinition("docs_read", "Read a document.", {"type": "object"})
+    token = current_meter_context.set(
+        {
+            "run_id": "run-projected-discovery",
+            "turn_id": "turn-projected-discovery",
+        }
+    )
+    try:
+        for call_name, definitions in (
+            ("select_tool_search", (search, load)),
+            ("select_tool_load", (search, load)),
+            ("select_docs_read", (search, load, docs)),
+        ):
+            response, _usage = await client.chat(
+                [{"role": "user", "content": call_name}],
+                tool_request=ToolCallRequest(
+                    tools=definitions,
+                    active_tool_names=tuple(tool.name for tool in definitions),
+                    turn_id="turn-projected-discovery",
+                ),
+                call_name=call_name,
+            )
+            assert isinstance(response, ToolCallResponse)
+    finally:
+        current_meter_context.reset(token)
+
+    page = await sink.list_inspect_llm_calls(
+        run_id="run-projected-discovery",
+        limit=10,
+    )
+    assert {item.call_name for item in page.items} == {
+        "select_tool_search",
+        "select_tool_load",
+        "select_docs_read",
+    }
 
 
 @pytest.mark.asyncio
