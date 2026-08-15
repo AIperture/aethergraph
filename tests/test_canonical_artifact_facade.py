@@ -146,6 +146,26 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
         assert first.record.owner_scope == _owner_scope()
         assert first.occurrence.scope == _execution_scope()
         assert first.retention is not None and first.retention.pinned is True
+        projected_commit = facade.project_commit(
+            first,
+            deprecated_app_id="legacy-app",
+        )
+        assert projected_commit.artifact_id == "artifact-1"
+        assert projected_commit.occurrence_id == "occurrence-1"
+        assert projected_commit.pinned is True
+        assert projected_commit.app_id == "legacy-app"
+        assert projected_commit.client_id is None
+        assert first.record.blob_locator not in projected_commit.uri
+        assert await facade.get_public("artifact-1") == facade.project_commit(first)
+        assert (
+            await facade.get_public(
+                "artifact-1",
+                scope=StorageScope(run_id="missing-run"),
+            )
+            is None
+        )
+        with pytest.raises(TypeError, match="ArtifactCommitReceipt"):
+            facade.project_commit(object())  # type: ignore[arg-type]
         assert await facade.load_bytes("artifact-1") == b"canonical artifact report"
         page = await facade.list_occurrences(PageRequest(limit=5))
         assert page.items == (first.occurrence,)
@@ -727,6 +747,7 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         "save_text",
         "save_json",
         "get",
+        "get_public",
         "get_many",
         "read",
         "load_bytes",
@@ -739,6 +760,7 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         "query_occurrences",
         "query_public_artifacts",
         "reconcile_orphans",
+        "project_commit",
         "search",
     ):
         docstring = inspect.getdoc(getattr(CanonicalArtifactFacade, name)) or ""

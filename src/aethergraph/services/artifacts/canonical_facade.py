@@ -1084,6 +1084,102 @@ class CanonicalArtifactFacade:
         """
         return await self._artifacts.get(self.owner_scope, artifact_id)
 
+    def project_commit(
+        self,
+        receipt: ArtifactCommitReceipt,
+        *,
+        deprecated_app_id: str | None = None,
+    ) -> Artifact:
+        """Project one canonical commit receipt into the frozen public Artifact DTO.
+
+        The immutable record, exact production occurrence, and optional retention
+        revision are combined only at this public response boundary.
+
+        Examples:
+            Project a new artifact for an agent response:
+                ```python
+                artifact = facade.project_commit(receipt)
+                ```
+
+            Retain explicit deprecated App response metadata:
+                ```python
+                artifact = facade.project_commit(
+                    receipt,
+                    deprecated_app_id=request.app_id,
+                )
+                ```
+
+        Args:
+            receipt: Complete commit result returned by this canonical service shape.
+            deprecated_app_id: Optional deprecated response-only App metadata; never
+                inferred and never used for authorization or lookup.
+
+        Returns:
+            Artifact: Frozen public DTO with a stable AG content route and no provider
+            blob locator.
+
+        Notes:
+            Projection performs no provider I/O and never reconstructs `client_id`.
+        """
+        if not isinstance(receipt, ArtifactCommitReceipt):
+            raise TypeError("receipt must be an ArtifactCommitReceipt")
+        return project_public_artifact(
+            receipt.record,
+            occurrence=receipt.occurrence,
+            retention=receipt.retention,
+            deprecated_app_id=deprecated_app_id,
+        )
+
+    async def get_public(
+        self,
+        artifact_id: str,
+        *,
+        scope: StorageScope | None = None,
+        deprecated_app_id: str | None = None,
+    ) -> Artifact | None:
+        """Read one occurrence-backed frozen public Artifact in canonical scope.
+
+        The provider filters exact content ownership, the requested partial execution
+        scope, and artifact identity before selecting the newest occurrence. Content
+        and current retention then hydrate through one bounded public page.
+
+        Examples:
+            Read in the facade execution scope:
+                ```python
+                artifact = await facade.get_public("artifact-1")
+                ```
+
+            Read one run-scoped occurrence:
+                ```python
+                artifact = await facade.get_public(
+                    "artifact-1",
+                    scope=StorageScope(run_id="run-1"),
+                )
+                ```
+
+        Args:
+            artifact_id: Exact stable artifact identity.
+            scope: Optional partial canonical occurrence filter; defaults to the
+                facade's exact execution scope.
+            deprecated_app_id: Optional deprecated response-only App metadata; never
+                inferred and never used for authorization or lookup.
+
+        Returns:
+            Artifact | None: Newest authorized occurrence projection or `None` when
+            no matching occurrence exists.
+
+        Notes:
+            An immutable content row without a matching authorized occurrence is not
+            exposed through this occurrence-backed public method.
+        """
+        page = await self.query_public_artifacts(
+            PageRequest(limit=1),
+            scope=scope,
+            artifact_id=artifact_id,
+            deprecated_app_id=deprecated_app_id,
+        )
+        return page.items[0] if page.items else None
+
     async def get_many(
         self,
         artifact_ids: Sequence[str],

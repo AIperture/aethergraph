@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.scope.scope import Scope
 
@@ -151,6 +152,24 @@ class InputResource:
             out["mime"] = self.mime
             out["mimetype"] = self.mime
         return {k: v for k, v in out.items() if v is not None}
+
+
+def _hydrate_public_artifact(resource: InputResource, artifact: Artifact) -> InputResource:
+    if not isinstance(artifact, Artifact):
+        raise TypeError("artifact must be the frozen public Artifact DTO")
+    if resource.artifact_id is not None and resource.artifact_id != artifact.artifact_id:
+        raise ValueError("artifact identity does not match the resource")
+    labels = dict(artifact.labels or {})
+    resource.artifact_id = artifact.artifact_id
+    resource.name = resource.name or labels.get("filename") or artifact.artifact_id
+    resource.mime = resource.mime or artifact.mime
+    if resource.size is None:
+        resource.size = artifact.bytes
+    resource.uri = resource.uri or artifact.uri
+    resource.url = resource.url or f"/api/v1/artifacts/{artifact.artifact_id}/content"
+    if not resource.labels:
+        resource.labels = labels
+    return resource
 
 
 class ResourceSet:
@@ -411,28 +430,13 @@ class InputResourceNormalizer:
             resource.status = "candidate"
         return resource
 
-    def from_artifact(self, artifact: Any, *, source: str = "artifact") -> InputResource:
-        labels = getattr(artifact, "labels", None)
-        artifact_labels = labels if isinstance(labels, dict) else {}
-        artifact_name = (
-            getattr(artifact, "name", None)
-            or getattr(artifact, "filename", None)
-            or artifact_labels.get("filename")
-        )
-        return InputResource(
+    def from_artifact(self, artifact: Artifact, *, source: str = "artifact") -> InputResource:
+        resource = InputResource(
             kind="artifact",
             source=source,
             status="materialized",
-            name=artifact_name,
-            mime=getattr(artifact, "mime", None) or getattr(artifact, "mimetype", None),
-            size=getattr(artifact, "bytes", None) or getattr(artifact, "size", None),
-            artifact_id=getattr(artifact, "artifact_id", None),
-            uri=getattr(artifact, "uri", None),
-            url=f"/api/v1/artifacts/{artifact.artifact_id}/content"
-            if getattr(artifact, "artifact_id", None)
-            else None,
-            labels=dict(artifact_labels),
         )
+        return _hydrate_public_artifact(resource, artifact)
 
     def _extract_local_paths(
         self,
@@ -498,24 +502,13 @@ class ResourceEnricher:
                 continue
             if artifact is None:
                 continue
-            labels = getattr(artifact, "labels", None)
-            if not resource.name:
-                resource.name = (
-                    getattr(artifact, "name", None)
-                    or getattr(artifact, "filename", None)
-                    or ((labels or {}).get("filename") if isinstance(labels, dict) else None)
-                )
-            resource.mime = (
-                resource.mime
-                or getattr(artifact, "mime", None)
-                or getattr(artifact, "mimetype", None)
-            )
-            resource.size = (
-                resource.size or getattr(artifact, "bytes", None) or getattr(artifact, "size", None)
-            )
-            resource.uri = resource.uri or getattr(artifact, "uri", None)
-            if not resource.labels and isinstance(labels, dict):
-                resource.labels = dict(labels)
+            if not isinstance(artifact, Artifact):
+                resource.diagnostics.append("artifact enrichment returned an invalid public DTO")
+                continue
+            if artifact.artifact_id != resource.artifact_id:
+                resource.diagnostics.append("artifact enrichment returned a different identity")
+                continue
+            _hydrate_public_artifact(resource, artifact)
         return resource_set.dedupe()
 
 
@@ -575,22 +568,18 @@ class ResourceStager:
             suggested_uri=suggested_uri or f"./uploads/{name}",
             name=name,
         )
-        artifact_id = getattr(artifact, "artifact_id", None)
-        artifact_labels = getattr(artifact, "labels", None)
-        return InputResource(
+        resource = InputResource(
             kind="upload",
             source=scope.source,
             status="materialized",
             id=file_id,
             name=name,
-            mime=getattr(artifact, "mime", None) or mime,
-            size=getattr(artifact, "bytes", None) or len(data),
-            artifact_id=artifact_id,
-            uri=getattr(artifact, "uri", None),
-            url=f"/api/v1/artifacts/{artifact_id}/content" if artifact_id else None,
-            labels=dict(artifact_labels or {}) if isinstance(artifact_labels, dict) else eff_labels,
+            mime=mime,
+            size=len(data),
+            labels=eff_labels,
             meta=dict(meta or {}),
         )
+        return _hydrate_public_artifact(resource, artifact)
 
     def _facade(self, scope: ArtifactIngressScope) -> ArtifactFacade:
         art_store = self.container.artifacts
