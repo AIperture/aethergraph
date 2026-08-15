@@ -51,6 +51,14 @@ class StorageConflictError(StorageError):
     """An atomic write failed because its expected version was stale."""
 
 
+class StorageIntegrityError(StorageError):
+    """Persisted or staged content failed an integrity requirement."""
+
+
+class StorageNotFoundError(StorageError):
+    """A required exact storage record or blob does not exist."""
+
+
 class StorageReadOnlyError(StorageError):
     """A write was attempted through a read-only provider bundle."""
 
@@ -61,3 +69,7 @@ class StorageFormatError(StorageError):
 
 class StorageHealthError(StorageError):
     """A provider failed its required readiness or health check."""
+
+
+class StorageTimeoutError(StorageError, TimeoutError):
+    """A bounded storage wait did not reach its required cursor or state."""

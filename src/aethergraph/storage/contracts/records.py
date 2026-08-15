@@ -374,3 +374,55 @@ class SearchResult:
             "metadata",
             _freeze_mapping(self.metadata, path="metadata"),
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BlobRange:
+    """Half-open byte range requested from canonical artifact content."""
+
+    start: int
+    end: int | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.start, bool) or self.start < 0:
+            raise ValueError("start must be a non-negative integer")
+        if self.end is not None and (isinstance(self.end, bool) or self.end <= self.start):
+            raise ValueError("end must be greater than start when supplied")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BlobWriteResult:
+    """Provider-neutral result of an integrity-checked streaming blob write."""
+
+    blob_locator: str
+    content_hash: str
+    hash_algorithm: str
+    size_bytes: int
+    provider_version: str | None = None
+
+    def __post_init__(self) -> None:
+        _nonempty("blob_locator", self.blob_locator)
+        _nonempty("content_hash", self.content_hash)
+        _nonempty("hash_algorithm", self.hash_algorithm)
+        if isinstance(self.size_bytes, bool) or self.size_bytes < 0:
+            raise ValueError("size_bytes must be a non-negative integer")
+        _optional_nonempty("provider_version", self.provider_version)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BlobHead:
+    """Provider-neutral metadata returned without reading blob content."""
+
+    blob_locator: str
+    size_bytes: int
+    content_hash: str
+    hash_algorithm: str
+    provider_version: str | None = None
+
+    def __post_init__(self) -> None:
+        _nonempty("blob_locator", self.blob_locator)
+        _nonempty("content_hash", self.content_hash)
+        _nonempty("hash_algorithm", self.hash_algorithm)
+        if isinstance(self.size_bytes, bool) or self.size_bytes < 0:
+            raise ValueError("size_bytes must be a non-negative integer")
+        _optional_nonempty("provider_version", self.provider_version)
