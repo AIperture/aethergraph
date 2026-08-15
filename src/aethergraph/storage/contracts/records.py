@@ -224,6 +224,29 @@ class ArtifactRecord:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ArtifactRetentionRecord:
+    """Revisioned mutable retention intent for immutable artifact content."""
+
+    artifact_id: str
+    scope: StorageScope
+    pinned: bool
+    revision: int
+    updated_at: datetime
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _nonempty("artifact_id", self.artifact_id)
+        if not isinstance(self.pinned, bool):
+            raise TypeError("pinned must be a boolean")
+        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
+            raise TypeError("revision must be an integer")
+        if self.revision < 1:
+            raise ValueError("revision must be positive")
+        _utc("updated_at", self.updated_at)
+        _positive_version(self.schema_version)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ArtifactOccurrence:
     """One production or use of immutable artifact content in execution scope."""
 

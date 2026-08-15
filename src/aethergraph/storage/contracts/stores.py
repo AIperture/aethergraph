@@ -13,6 +13,7 @@ from .records import (
     ArtifactOccurrence,
     ArtifactRecord,
     ArtifactRelation,
+    ArtifactRetentionRecord,
     BlobHead,
     BlobRange,
     BlobWriteResult,
@@ -600,6 +601,73 @@ class ArtifactRepository(Protocol):
 
         Notes:
             Occurrences and lineage require their focused methods.
+        """
+        ...
+
+    async def get_retention(
+        self,
+        scope: StorageScope,
+        artifact_id: str,
+    ) -> ArtifactRetentionRecord | None:
+        """Read mutable retention intent for one exact artifact.
+
+        Retention state is stored separately from immutable content metadata and is
+        constrained by the same exact owner scope.
+
+        Examples:
+            Read pinned state:
+                ```python
+                retention = await repository.get_retention(scope, "artifact-1")
+                ```
+
+            Detect no explicit retention state:
+                ```python
+                assert await repository.get_retention(scope, "artifact-1") is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            artifact_id: Stable artifact identity.
+
+        Returns:
+            ArtifactRetentionRecord | None: Current retention state or `None`.
+
+        Notes:
+            Absence means no explicit pin; it never changes immutable artifact labels.
+        """
+        ...
+
+    async def compare_and_set_retention(
+        self,
+        record: ArtifactRetentionRecord,
+        expected_revision: int,
+    ) -> ArtifactRetentionRecord:
+        """Atomically create or advance one artifact retention record.
+
+        The record revision must be exactly one greater than the expected revision.
+        Creation uses expected revision zero and requires existing authorized content.
+
+        Examples:
+            Pin an artifact:
+                ```python
+                stored = await repository.compare_and_set_retention(pinned, 0)
+                ```
+
+            Advance retention intent:
+                ```python
+                stored = await repository.compare_and_set_retention(unpinned, current.revision)
+                ```
+
+        Args:
+            record: Complete next revision of mutable retention intent.
+            expected_revision: Exact current revision, or zero for creation.
+
+        Returns:
+            ArtifactRetentionRecord: Newly committed authoritative retention state.
+
+        Notes:
+            Missing artifacts raise `StorageNotFoundError`; stale revisions raise
+            `StorageConflictError`. No content metadata is rewritten.
         """
         ...
 

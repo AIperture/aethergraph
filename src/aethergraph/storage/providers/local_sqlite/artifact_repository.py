@@ -16,9 +16,11 @@ from ...contracts import (
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
+    ArtifactRetentionRecord,
     Page,
     PageRequest,
     StorageConfigurationError,
+    StorageConflictError,
     StorageIntegrityError,
     StorageNotFoundError,
     StorageOpenMode,
@@ -27,7 +29,7 @@ from ...contracts import (
 )
 from .database import LocalSQLiteDatabase
 
-_ARTIFACT_COMPONENT_VERSION = 1
+_ARTIFACT_COMPONENT_VERSION = 2
 _CREATE_ARTIFACTS = """
 CREATE TABLE local_artifacts (
     artifact_id TEXT PRIMARY KEY,
@@ -48,6 +50,20 @@ CREATE TABLE local_artifacts (
 """
 _CREATE_ARTIFACT_SCOPE_INDEX = """
 CREATE INDEX ix_local_artifacts_scope ON local_artifacts(owner_scope_identity, artifact_id)
+"""
+_CREATE_ARTIFACT_RETENTION = """
+CREATE TABLE local_artifact_retention (
+    artifact_id TEXT PRIMARY KEY REFERENCES local_artifacts(artifact_id) ON DELETE CASCADE,
+    owner_scope_identity TEXT NOT NULL,
+    pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    updated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+)
+"""
+_CREATE_ARTIFACT_RETENTION_SCOPE_INDEX = """
+CREATE INDEX ix_local_artifact_retention_scope
+ON local_artifact_retention(owner_scope_identity, artifact_id)
 """
 _CREATE_OCCURRENCES = """
 CREATE TABLE local_artifact_occurrences (
@@ -107,6 +123,8 @@ class LocalArtifactRepository:
             statements=(
                 _CREATE_ARTIFACTS,
                 _CREATE_ARTIFACT_SCOPE_INDEX,
+                _CREATE_ARTIFACT_RETENTION,
+                _CREATE_ARTIFACT_RETENTION_SCOPE_INDEX,
                 _CREATE_OCCURRENCES,
                 _CREATE_OCCURRENCE_SCOPE_INDEX,
                 _CREATE_OCCURRENCE_ARTIFACT_INDEX,
@@ -225,6 +243,146 @@ class LocalArtifactRepository:
             (artifact_id, _scope_identity(scope)),
         )
         return _artifact(rows[0]) if rows else None
+
+    async def get_retention(
+        self,
+        scope: StorageScope,
+        artifact_id: str,
+    ) -> ArtifactRetentionRecord | None:
+        """Read one exact artifact retention record.
+
+        Retention is scope constrained and remains separate from immutable artifact
+        metadata and occurrence history.
+
+        Examples:
+            Read current retention:
+                ```python
+                retention = await repository.get_retention(scope, "artifact-1")
+                ```
+
+            Detect no explicit pin:
+                ```python
+                assert await repository.get_retention(scope, "artifact-1") is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            artifact_id: Stable artifact identity.
+
+        Returns:
+            ArtifactRetentionRecord | None: Current retention state or `None`.
+
+        Notes:
+            A foreign scope is indistinguishable from absence.
+        """
+        rows = await self._database.fetch_all(
+            """
+            SELECT * FROM local_artifact_retention
+            WHERE artifact_id = ? AND owner_scope_identity = ?
+            """,
+            (artifact_id, _scope_identity(scope)),
+        )
+        return _retention(rows[0]) if rows else None
+
+    async def compare_and_set_retention(
+        self,
+        record: ArtifactRetentionRecord,
+        expected_revision: int,
+    ) -> ArtifactRetentionRecord:
+        """Atomically create or advance mutable artifact retention intent.
+
+        The exact owner scope and next revision are checked in the same transaction
+        that writes pin state.
+
+        Examples:
+            Create pinned state:
+                ```python
+                stored = await repository.compare_and_set_retention(record, 0)
+                ```
+
+            Advance an existing record:
+                ```python
+                stored = await repository.compare_and_set_retention(next_record, current.revision)
+                ```
+
+        Args:
+            record: Complete next retention revision.
+            expected_revision: Exact current revision, or zero for creation.
+
+        Returns:
+            ArtifactRetentionRecord: Newly committed authoritative state.
+
+        Notes:
+            Missing or foreign artifacts raise `StorageNotFoundError`; stale revisions
+            raise `StorageConflictError` without mutation.
+        """
+        self._require_writable()
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise TypeError("expected_revision must be an integer")
+        if expected_revision < 0:
+            raise ValueError("expected_revision must be non-negative")
+        if record.revision != expected_revision + 1:
+            raise StorageConflictError("Artifact retention revision is not the exact next revision")
+
+        def commit(connection: sqlite3.Connection) -> ArtifactRetentionRecord:
+            owner_identity = _scope_identity(record.scope)
+            artifact = connection.execute(
+                """
+                SELECT artifact_id FROM local_artifacts
+                WHERE artifact_id = ? AND owner_scope_identity = ?
+                """,
+                (record.artifact_id, owner_identity),
+            ).fetchone()
+            if artifact is None:
+                raise StorageNotFoundError(record.artifact_id)
+            current = connection.execute(
+                "SELECT * FROM local_artifact_retention WHERE artifact_id = ?",
+                (record.artifact_id,),
+            ).fetchone()
+            current_revision = int(current["revision"]) if current is not None else 0
+            if current_revision != expected_revision:
+                raise StorageConflictError(
+                    f"Artifact retention revision conflict: expected {expected_revision}, "
+                    f"found {current_revision}"
+                )
+            if current is not None and record.updated_at < _retention(current).updated_at:
+                raise StorageConflictError("Artifact retention updated_at cannot move backward")
+            if current is None:
+                connection.execute(
+                    """
+                    INSERT INTO local_artifact_retention(
+                        artifact_id, owner_scope_identity, pinned, revision,
+                        updated_at, schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.artifact_id,
+                        owner_identity,
+                        int(record.pinned),
+                        record.revision,
+                        record.updated_at.isoformat(),
+                        record.schema_version,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE local_artifact_retention
+                    SET pinned = ?, revision = ?, updated_at = ?, schema_version = ?
+                    WHERE artifact_id = ? AND owner_scope_identity = ?
+                    """,
+                    (
+                        int(record.pinned),
+                        record.revision,
+                        record.updated_at.isoformat(),
+                        record.schema_version,
+                        record.artifact_id,
+                        owner_identity,
+                    ),
+                )
+            return record
+
+        return await self._database.transaction(commit)
 
     async def record_occurrence(
         self,
@@ -526,6 +684,23 @@ def _artifact(row: sqlite3.Row) -> ArtifactRecord:
         )
     except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise StorageIntegrityError("Persisted local artifact row is malformed") from exc
+
+
+def _retention(row: sqlite3.Row) -> ArtifactRetentionRecord:
+    try:
+        pinned = int(row["pinned"])
+        if pinned not in (0, 1):
+            raise ValueError("pinned")
+        return ArtifactRetentionRecord(
+            artifact_id=str(row["artifact_id"]),
+            scope=_scope(str(row["owner_scope_identity"])),
+            pinned=bool(pinned),
+            revision=int(row["revision"]),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            schema_version=int(row["schema_version"]),
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise StorageIntegrityError("Persisted local artifact retention row is malformed") from exc
 
 
 def _occurrence(row: sqlite3.Row) -> ArtifactOccurrence:

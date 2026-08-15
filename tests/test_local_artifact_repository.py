@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import inspect
 from pathlib import Path
 
 import pytest
@@ -13,8 +15,10 @@ from aethergraph.storage.contracts import (
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
+    ArtifactRetentionRecord,
     PageRequest,
     StorageConfigurationError,
+    StorageConflictError,
     StorageIntegrityError,
     StorageNotFoundError,
     StorageOpenMode,
@@ -228,9 +232,22 @@ async def test_schema_normalizes_content_occurrences_and_lineage(tmp_path: Path)
         str(row["name"])
         for row in await database.fetch_all("PRAGMA table_info(local_artifact_relations)")
     }
+    retention_columns = {
+        str(row["name"])
+        for row in await database.fetch_all("PRAGMA table_info(local_artifact_retention)")
+    }
     assert not {"run_id", "session_id", "action"} & artifact_columns
     assert not {"content_hash", "blob_locator", "media_type"} & occurrence_columns
     assert not {"content_hash", "blob_locator", "media_type"} & relation_columns
+    assert retention_columns == {
+        "artifact_id",
+        "owner_scope_identity",
+        "pinned",
+        "revision",
+        "updated_at",
+        "schema_version",
+    }
+    assert not {"run_id", "session_id", "labels_json", "content_hash"} & retention_columns
 
     occurrence_plan = " ".join(
         str(row["detail"])
@@ -291,6 +308,14 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
     writable = LocalArtifactRepository(database=writable_database)
     await writable.put(source)
     await writable.put(target)
+    retention = ArtifactRetentionRecord(
+        artifact_id=target.artifact_id,
+        scope=scope,
+        pinned=True,
+        revision=1,
+        updated_at=NOW,
+    )
+    await writable.compare_and_set_retention(retention, 0)
     await writable.record_occurrence(occurrence)
     await writable.add_relation(relation)
     await writable_database.close()
@@ -298,6 +323,7 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
     readonly_database = _database(tmp_path, StorageOpenMode.READ_ONLY)
     readonly = LocalArtifactRepository(database=readonly_database)
     assert await readonly.get(scope, target.artifact_id) == target
+    assert await readonly.get_retention(scope, target.artifact_id) == retention
     assert (await readonly.list_occurrences(run_scope, PageRequest())).items == (occurrence,)
     assert (await readonly.list_relations(scope, target.artifact_id, PageRequest())).items == (
         relation,
@@ -305,7 +331,58 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
     with pytest.raises(StorageReadOnlyError):
         await readonly.put(_artifact("new", scope))
     with pytest.raises(StorageReadOnlyError):
+        await readonly.compare_and_set_retention(replace(retention, revision=2), 1)
+    with pytest.raises(StorageReadOnlyError):
         await readonly.record_occurrence(replace(occurrence, occurrence_id="new"))
     with pytest.raises(StorageReadOnlyError):
         await readonly.add_relation(replace(relation, relation_id="new"))
     await readonly_database.close()
+
+
+@pytest.mark.asyncio
+async def test_retention_cas_has_one_concurrent_winner(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalArtifactRepository(database=database)
+    scope = StorageScope(project_id="project-1")
+    artifact = _artifact("artifact-1", scope)
+    await repository.put(artifact)
+
+    candidate = ArtifactRetentionRecord(
+        artifact_id=artifact.artifact_id,
+        scope=scope,
+        pinned=True,
+        revision=1,
+        updated_at=NOW,
+    )
+
+    async def attempt() -> str:
+        try:
+            await repository.compare_and_set_retention(candidate, 0)
+        except StorageConflictError:
+            return "conflict"
+        return "winner"
+
+    outcomes = await asyncio.gather(*(attempt() for _index in range(8)))
+    assert outcomes.count("winner") == 1
+    assert outcomes.count("conflict") == 7
+    assert await repository.get_retention(scope, artifact.artifact_id) == candidate
+    with pytest.raises(StorageConflictError, match="backward"):
+        await repository.compare_and_set_retention(
+            replace(
+                candidate,
+                pinned=False,
+                revision=2,
+                updated_at=NOW - timedelta(seconds=1),
+            ),
+            1,
+        )
+    await database.close()
+
+
+def test_retention_public_methods_follow_required_docstring_sections() -> None:
+    for name in ("get_retention", "compare_and_set_retention"):
+        docstring = inspect.getdoc(getattr(LocalArtifactRepository, name)) or ""
+        assert docstring.index("Examples:") < docstring.index("Args:")
+        assert docstring.index("Args:") < docstring.index("Returns:")
+        assert docstring.index("Returns:") < docstring.index("Notes:")
+        assert docstring.count("```python") >= 2

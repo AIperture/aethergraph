@@ -21,6 +21,7 @@ from aethergraph.storage.contracts import (
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRepository,
+    ArtifactRetentionRecord,
     BlobHead,
     BlobRange,
     BlobStore,
@@ -246,6 +247,7 @@ class _BlobStore:
 class _ArtifactRepository:
     def __init__(self) -> None:
         self.artifacts: dict[tuple, ArtifactRecord] = {}
+        self.retention: dict[tuple, ArtifactRetentionRecord] = {}
         self.occurrences: list[ArtifactOccurrence] = []
         self.relations: list[ArtifactRelation] = []
 
@@ -259,6 +261,28 @@ class _ArtifactRepository:
 
     async def get(self, scope: StorageScope, artifact_id: str) -> ArtifactRecord | None:
         return self.artifacts.get((_scope_key(scope), artifact_id))
+
+    async def get_retention(
+        self,
+        scope: StorageScope,
+        artifact_id: str,
+    ) -> ArtifactRetentionRecord | None:
+        return self.retention.get((_scope_key(scope), artifact_id))
+
+    async def compare_and_set_retention(
+        self,
+        record: ArtifactRetentionRecord,
+        expected_revision: int,
+    ) -> ArtifactRetentionRecord:
+        key = (_scope_key(record.scope), record.artifact_id)
+        if await self.get(record.scope, record.artifact_id) is None:
+            raise StorageNotFoundError(record.artifact_id)
+        current = self.retention.get(key)
+        current_revision = current.revision if current is not None else 0
+        if current_revision != expected_revision or record.revision != expected_revision + 1:
+            raise StorageConflictError("artifact retention revision conflict")
+        self.retention[key] = record
+        return record
 
     async def record_occurrence(self, occurrence: ArtifactOccurrence) -> ArtifactOccurrence:
         owner = StorageScope(

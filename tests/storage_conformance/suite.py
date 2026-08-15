@@ -12,6 +12,7 @@ from aethergraph.storage.contracts import (
     ArtifactRelation,
     ArtifactRelationKind,
     ArtifactRepository,
+    ArtifactRetentionRecord,
     BlobRange,
     BlobStore,
     EventDraft,
@@ -211,6 +212,39 @@ async def check_artifact_repository_conformance(repository: ArtifactRepository) 
     assert await repository.put(target) == target
     assert await repository.get(scope, target.artifact_id) == target
     assert await repository.get(other_scope, target.artifact_id) is None
+
+    pinned = ArtifactRetentionRecord(
+        artifact_id=target.artifact_id,
+        scope=scope,
+        pinned=True,
+        revision=1,
+        updated_at=NOW,
+    )
+    assert await repository.get_retention(scope, target.artifact_id) is None
+    assert await repository.compare_and_set_retention(pinned, 0) == pinned
+    assert await repository.get_retention(scope, target.artifact_id) == pinned
+    assert await repository.get_retention(other_scope, target.artifact_id) is None
+    with pytest.raises(StorageConflictError):
+        await repository.compare_and_set_retention(pinned, 0)
+    unpinned = ArtifactRetentionRecord(
+        artifact_id=target.artifact_id,
+        scope=scope,
+        pinned=False,
+        revision=2,
+        updated_at=NOW,
+    )
+    assert await repository.compare_and_set_retention(unpinned, 1) == unpinned
+    with pytest.raises(StorageNotFoundError):
+        await repository.compare_and_set_retention(
+            ArtifactRetentionRecord(
+                artifact_id="missing",
+                scope=scope,
+                pinned=True,
+                revision=1,
+                updated_at=NOW,
+            ),
+            0,
+        )
 
     occurrences = tuple(
         ArtifactOccurrence(

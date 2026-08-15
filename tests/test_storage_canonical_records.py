@@ -11,6 +11,7 @@ from aethergraph.storage.contracts import (
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
+    ArtifactRetentionRecord,
     EventDraft,
     EventRecord,
     Page,
@@ -134,14 +135,47 @@ def test_artifact_records_separate_content_occurrence_and_lineage() -> None:
         scope=SCOPE,
         created_at=NOW,
     )
+    retention = ArtifactRetentionRecord(
+        artifact_id=artifact.artifact_id,
+        scope=artifact.owner_scope,
+        pinned=True,
+        revision=1,
+        updated_at=NOW,
+    )
 
     artifact_fields = {item.name for item in fields(ArtifactRecord)}
     occurrence_fields = {item.name for item in fields(ArtifactOccurrence)}
+    retention_fields = {item.name for item in fields(ArtifactRetentionRecord)}
     assert {"media_type", "size_bytes", "blob_locator"} <= artifact_fields
     assert not {"mime", "mimetype", "bytes", "uri", "app_id"} & artifact_fields
     assert not {"content_hash", "size_bytes", "media_type", "blob_locator"} & occurrence_fields
+    assert retention_fields == {
+        "artifact_id",
+        "scope",
+        "pinned",
+        "revision",
+        "updated_at",
+        "schema_version",
+    }
     assert occurrence.metrics["quality"] == 0.9
+    assert retention.pinned is True
     assert relation.target_artifact_id == artifact.artifact_id
+
+
+def test_artifact_retention_requires_boolean_pin_positive_revision_and_utc_time() -> None:
+    values = {
+        "artifact_id": "artifact-1",
+        "scope": StorageScope(project_id="project-1"),
+        "pinned": True,
+        "revision": 1,
+        "updated_at": NOW,
+    }
+    with pytest.raises(TypeError, match="boolean"):
+        ArtifactRetentionRecord(**{**values, "pinned": 1})  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="positive"):
+        ArtifactRetentionRecord(**{**values, "revision": 0})
+    with pytest.raises(ValueError, match="UTC"):
+        ArtifactRetentionRecord(**{**values, "updated_at": datetime(2026, 8, 15)})
 
 
 def test_artifact_lineage_rejects_self_edges() -> None:
