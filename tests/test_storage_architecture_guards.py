@@ -128,3 +128,15 @@ def test_silent_null_search_backend_is_absent() -> None:
 
     assert not (search_root / "null_backend.py").exists()
     assert "NullSearchBackend" not in factory_source
+
+
+def test_memory_contract_has_no_duplicate_vector_or_embedding_protocol() -> None:
+    memory_contract = STORAGE_ROOT.parent / "contracts" / "services" / "memory.py"
+    class_names = {
+        node.name
+        for node in ast.walk(ast.parse(memory_contract.read_text(encoding="utf-8")))
+        if isinstance(node, ast.ClassDef)
+    }
+
+    assert "VectorIndex" not in class_names
+    assert "EmbeddingsClient" not in class_names

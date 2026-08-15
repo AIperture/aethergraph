@@ -657,23 +657,6 @@ class Distiller(Protocol):  # or base class
     ) -> dict[str, Any]: ...
 
 
-# ---------- Vector Index and Embeddings Client Protocols ----------
-class VectorIndex(Protocol):
-    async def upsert(self, *, id: str, vector: list[float], metadata: dict) -> None: ...
-    async def delete(self, *, id: str) -> None: ...
-    async def query(
-        self, *, vector: list[float], k: int = 8, filter: dict | None = None
-    ) -> list[dict]: ...
-    async def flush(self) -> None: ...
-
-
-class EmbeddingsClient(Protocol):
-    async def embed_text(self, text: str, *, model: str | None = None) -> list[float]: ...
-    async def embed_texts(
-        self, texts: list[str], *, model: str | None = None
-    ) -> list[list[float]]: ...
-
-
 # ---------- I/O Value and Ref schemas ----------
 class Ref(TypedDict, total=False):
     """A resolvable refernece to an external artifact or data."""
