@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Protocol
 
 from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
 from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
@@ -19,7 +19,6 @@ from aethergraph.core.graph.graphify_validation import (
 from aethergraph.core.runtime.runtime_services import use_services
 from aethergraph.services.registry.unified_registry import TenantIdentity, UnifiedRegistry
 from aethergraph.services.scope.tenant import normalize_registry_tenant
-from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
 
 
 @dataclass
@@ -57,6 +56,36 @@ class DeletionResult:
     errors: list[str] = field(default_factory=list)
 
 
+class _RegistrationManifestPersistence(Protocol):
+    async def upsert_entry(self, entry: dict[str, Any]) -> dict[str, Any]: ...
+
+    async def set_last_error(self, *, entry_id: str, last_error: str | None) -> None: ...
+
+    async def list_entries(
+        self,
+        *,
+        tenant: Mapping[str, str | None] | None = None,
+        include_global: bool = True,
+        active_only: bool = True,
+    ) -> list[dict[str, Any]]: ...
+
+    async def delete_entries_for_app(
+        self,
+        *,
+        app_id: str,
+        tenant: Mapping[str, str | None] | None = None,
+        include_global: bool = False,
+    ) -> int: ...
+
+    async def delete_entries_for_agent(
+        self,
+        *,
+        agent_id: str,
+        tenant: Mapping[str, str | None] | None = None,
+        include_global: bool = False,
+    ) -> int: ...
+
+
 def _normalize_tenant(tenant: TenantIdentity) -> dict[str, str | None] | None:
     return normalize_registry_tenant(tenant)
 
@@ -82,7 +111,7 @@ class RegistrationService:
         self,
         *,
         registry: UnifiedRegistry,
-        manifest_store: RegistrationManifestStore | None = None,
+        manifest_store: _RegistrationManifestPersistence | None = None,
         artifact_store: AsyncArtifactStore | None = None,
         artifact_index: AsyncArtifactIndex | None = None,
     ) -> None:
