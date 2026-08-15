@@ -1056,7 +1056,7 @@ def open_active_observability_facade(
     )
 
 
-def open_observability_facade(
+def open_observability_workspace(
     workspace_root: str | Path,
     *,
     read_only: bool = True,
@@ -1073,12 +1073,12 @@ def open_observability_facade(
     Examples:
         Open historical data read-only:
         ```python
-        facade = open_observability_facade(".runtime/build-1")
+        facade = open_observability_workspace(".runtime/build-1")
         ```
 
         Open a writable local workspace:
         ```python
-        facade = open_observability_facade(".runtime/local", read_only=False)
+        facade = open_observability_workspace(".runtime/local", read_only=False)
         ```
 
     Args:

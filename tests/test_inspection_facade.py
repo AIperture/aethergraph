@@ -13,7 +13,7 @@ from aethergraph.observability import (
     ObservationRecord,
     ObservationScope,
     SQLiteObservationStore,
-    open_observability_facade,
+    open_observability_workspace,
 )
 from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
 from aethergraph.storage.runs.sqlite_run_store import SQLiteRunStore
@@ -74,7 +74,7 @@ def test_workspace_facade_reads_active_and_historical_records(tmp_path) -> None:
             )
         )
 
-        facade = open_observability_facade(tmp_path)
+        facade = open_observability_workspace(tmp_path)
         assert [item.id for item in (await facade.list_inspect_traces(run_id="run-1")).items] == [
             "trace-1"
         ]

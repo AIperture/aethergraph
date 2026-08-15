@@ -7,7 +7,7 @@ from .facade import (
     ActiveObservabilityScopeError,
     ObservabilityFacade,
     open_active_observability_facade,
-    open_observability_facade,
+    open_observability_workspace,
 )
 from .legacy_cleanup import (
     LegacyObservabilityCleanupResult,
@@ -72,7 +72,7 @@ __all__ = [
     "emit_agent_event",
     "extract_metrics",
     "open_active_observability_facade",
-    "open_observability_facade",
+    "open_observability_workspace",
     "register_default_agent_event_types",
     "resolve_operation_observer",
     "scan_legacy_observability",
