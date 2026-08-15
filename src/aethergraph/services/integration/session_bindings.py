@@ -15,6 +15,10 @@ from aethergraph.contracts.integration import (
     ExternalSessionBinding,
     IntegrationRoute,
 )
+from aethergraph.services.canonical_storage_scope import (
+    merge_storage_scope,
+    validate_storage_owner_scope,
+)
 from aethergraph.storage.contracts import (
     ExternalSessionBindingRecord,
     ExternalSessionBindingRepository,
@@ -22,8 +26,6 @@ from aethergraph.storage.contracts import (
     StorageIntegrityError,
     StorageScope,
 )
-
-from ._canonical_scope import merge_host_scope, validate_host_owner_scope
 
 
 class SessionBindingError(RuntimeError):
@@ -203,7 +205,7 @@ class CanonicalExternalSessionBindingStore:
         Notes:
             App/client identity, provider selection, and fallback are absent.
         """
-        validate_host_owner_scope(owner_scope)
+        validate_storage_owner_scope(owner_scope)
         self._repository = repository
         self._owner_scope = owner_scope
 
@@ -585,7 +587,7 @@ def _binding_scope(
     route: IntegrationRoute,
     external_identity: ExternalIdentity,
 ) -> StorageScope:
-    return merge_host_scope(
+    return merge_storage_scope(
         owner_scope,
         scope_key=_scope_key(route=route, external_identity=external_identity),
     )

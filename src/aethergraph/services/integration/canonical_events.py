@@ -13,6 +13,10 @@ from aethergraph.contracts.integration import (
     SemanticEvent,
     SemanticEventKind,
 )
+from aethergraph.services.canonical_storage_scope import (
+    merge_storage_scope,
+    validate_storage_owner_scope,
+)
 from aethergraph.services.channel.resources import InputResource
 from aethergraph.storage.contracts import (
     InboundEventDraft,
@@ -27,7 +31,6 @@ from aethergraph.storage.contracts import (
     StorageScope,
 )
 
-from ._canonical_scope import merge_host_scope, validate_host_owner_scope
 from .events import (
     PersistedInboundEvent,
     PersistedSemanticEvent,
@@ -80,7 +83,7 @@ class CanonicalInboundEventStore:
         Notes:
             Deprecated App/client metadata is not accepted as scope or identity.
         """
-        validate_host_owner_scope(owner_scope)
+        validate_storage_owner_scope(owner_scope)
         self._repository = repository
         self._owner_scope = owner_scope
 
@@ -136,7 +139,7 @@ class CanonicalInboundEventStore:
             Repository identity conflicts fail directly; no alternate event log or
             generated replacement identity is attempted after an append failure.
         """
-        scope = merge_host_scope(self._owner_scope, session_id=binding.ag_session_id)
+        scope = merge_storage_scope(self._owner_scope, session_id=binding.ag_session_id)
         resource_payloads = tuple(_canonical_resource(resource) for resource in resources)
         resource_keys = tuple(f"artifact:{payload['artifact_id']}" for payload in resource_payloads)
         event_id = f"ingress-{uuid4().hex}"
@@ -216,7 +219,7 @@ class CanonicalSemanticEventStore:
         Notes:
             Legacy semantic v1 events and catch-all kind fallback are not supported.
         """
-        validate_host_owner_scope(owner_scope)
+        validate_storage_owner_scope(owner_scope)
         if (
             isinstance(max_history_events, bool)
             or not isinstance(max_history_events, int)
@@ -254,7 +257,7 @@ class CanonicalSemanticEventStore:
         Notes:
             Identity or authored-sequence reuse fails without renumbering or fallback.
         """
-        scope = merge_host_scope(self._owner_scope, session_id=event.session_id)
+        scope = merge_storage_scope(self._owner_scope, session_id=event.session_id)
         try:
             record = await self._repository.append(
                 SemanticEventDraft(
@@ -336,7 +339,7 @@ class CanonicalSemanticEventStore:
         ):
             raise ValueError("after_cursor must be a non-negative integer when supplied")
 
-        scope = merge_host_scope(self._owner_scope, session_id=session_id)
+        scope = merge_storage_scope(self._owner_scope, session_id=session_id)
         out: list[PersistedSemanticEvent] = []
         opaque_cursor: str | None = None
         previous_delivery_cursor = after_cursor or 0

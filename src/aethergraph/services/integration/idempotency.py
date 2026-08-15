@@ -13,6 +13,7 @@ import sqlite3
 from typing import Literal, Protocol
 
 from aethergraph.contracts.integration import IngressEnvelope, IngressReceipt
+from aethergraph.services.canonical_storage_scope import validate_storage_owner_scope
 from aethergraph.storage.contracts import (
     IngressClaimRecord,
     IngressClaimRequest,
@@ -22,8 +23,6 @@ from aethergraph.storage.contracts import (
     StorageIntegrityError,
     StorageScope,
 )
-
-from ._canonical_scope import validate_host_owner_scope
 
 
 class IngressIdempotencyError(RuntimeError):
@@ -206,7 +205,7 @@ class CanonicalIngressIdempotencyStore:
         Notes:
             App/client identity and provider-private configuration are not accepted.
         """
-        validate_host_owner_scope(owner_scope)
+        validate_storage_owner_scope(owner_scope)
         self._repository = repository
         self._owner_scope = owner_scope
         self._clock = clock

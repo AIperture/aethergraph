@@ -29,33 +29,28 @@ class _RunBounds:
     marker_emitted: bool = False
 
 
-@dataclass
-class _Barrier:
-    future: asyncio.Future[None]
-
-
-class EventLogRuntimeOutputSink:
-    """Asynchronously persist bounded runtime output frames to the event log."""
-
+class _RuntimeOutputBounds:
     def __init__(
         self,
         *,
-        event_log: Any,
-        logger: Any = None,
-        tags: tuple[str, ...] = (),
-        max_line_bytes: int = 16 * 1024,
-        max_run_bytes: int = 256 * 1024,
-        max_rows_per_run: int = 1_000,
-    ):
-        self.event_log = event_log
-        self.logger = logger
-        self.tags = tuple(tags)
+        max_line_bytes: int,
+        max_run_bytes: int,
+        max_rows_per_run: int,
+    ) -> None:
         self.max_line_bytes = max_line_bytes
         self.max_run_bytes = max_run_bytes
         self.max_rows_per_run = max_rows_per_run
         self._bounds: dict[str, _RunBounds] = {}
-        self._queue: asyncio.Queue[RuntimeOutputFrame | _Barrier] | None = None
-        self._worker_task: asyncio.Task[None] | None = None
+
+    def checkpoint(self, run_id: str) -> _RunBounds | None:
+        current = self._bounds.get(run_id)
+        return replace(current) if current is not None else None
+
+    def restore(self, run_id: str, checkpoint: _RunBounds | None) -> None:
+        if checkpoint is None:
+            self._bounds.pop(run_id, None)
+        else:
+            self._bounds[run_id] = checkpoint
 
     @staticmethod
     def _clip_utf8(text: str, limit: int) -> tuple[str, bool]:
@@ -64,14 +59,7 @@ class EventLogRuntimeOutputSink:
             return text, False
         return encoded[:limit].decode("utf-8", errors="ignore"), True
 
-    def _ensure_worker(self) -> asyncio.Queue[RuntimeOutputFrame | _Barrier]:
-        if self._queue is None:
-            self._queue = asyncio.Queue()
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._run_worker())
-        return self._queue
-
-    def _bounded(self, frame: RuntimeOutputFrame) -> RuntimeOutputFrame | None:
+    def bounded(self, frame: RuntimeOutputFrame) -> RuntimeOutputFrame | None:
         text = frame.text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
         text, line_clipped = self._clip_utf8(text, self.max_line_bytes)
         if not text and not frame.truncated:
@@ -98,8 +86,45 @@ class EventLogRuntimeOutputSink:
         bounds.size_bytes += size
         return frame
 
+
+@dataclass
+class _Barrier:
+    future: asyncio.Future[None]
+
+
+class EventLogRuntimeOutputSink:
+    """Asynchronously persist bounded runtime output frames to the event log."""
+
+    def __init__(
+        self,
+        *,
+        event_log: Any,
+        logger: Any = None,
+        tags: tuple[str, ...] = (),
+        max_line_bytes: int = 16 * 1024,
+        max_run_bytes: int = 256 * 1024,
+        max_rows_per_run: int = 1_000,
+    ):
+        self.event_log = event_log
+        self.logger = logger
+        self.tags = tuple(tags)
+        self._bounds = _RuntimeOutputBounds(
+            max_line_bytes=max_line_bytes,
+            max_run_bytes=max_run_bytes,
+            max_rows_per_run=max_rows_per_run,
+        )
+        self._queue: asyncio.Queue[RuntimeOutputFrame | _Barrier] | None = None
+        self._worker_task: asyncio.Task[None] | None = None
+
+    def _ensure_worker(self) -> asyncio.Queue[RuntimeOutputFrame | _Barrier]:
+        if self._queue is None:
+            self._queue = asyncio.Queue()
+        if self._worker_task is None or self._worker_task.done():
+            self._worker_task = asyncio.create_task(self._run_worker())
+        return self._queue
+
     def emit(self, frame: RuntimeOutputFrame) -> None:
-        bounded = self._bounded(frame)
+        bounded = self._bounds.bounded(frame)
         if bounded is not None:
             self._ensure_worker().put_nowait(bounded)
 

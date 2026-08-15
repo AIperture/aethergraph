@@ -3,6 +3,10 @@ from .agent_events import (
     emit_agent_event,
     register_default_agent_event_types,
 )
+from .canonical_runtime_output import (
+    CanonicalRuntimeOutputSink,
+    bind_canonical_runtime_output,
+)
 from .facade import (
     ActiveObservabilityScopeError,
     ObservabilityFacade,
@@ -48,6 +52,7 @@ __all__ = [
     "ActiveObservabilityScopeError",
     "AgentEventTypeRegistry",
     "CaptureMode",
+    "CanonicalRuntimeOutputSink",
     "InspectionPresenter",
     "LLMObservationRecord",
     "LegacyObservabilityCleanupResult",
@@ -71,6 +76,7 @@ __all__ = [
     "StdLoggerService",
     "StorageStats",
     "cleanup_legacy_observability",
+    "bind_canonical_runtime_output",
     "emit_agent_event",
     "extract_metrics",
     "open_active_observability_facade",
