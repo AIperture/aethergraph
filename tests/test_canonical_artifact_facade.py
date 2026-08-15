@@ -187,6 +187,127 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
 
 
 @pytest.mark.asyncio
+async def test_public_occurrence_pages_filter_then_batch_hydrate(tmp_path: Path) -> None:
+    bundle = _open_bundle(tmp_path)
+    first_execution = StorageScope(
+        **_owner_scope().as_filter(),
+        run_id="run-1",
+        session_id="session-1",
+        graph_id="graph-1",
+        node_id="node-1",
+    )
+    second_execution = StorageScope(
+        **_owner_scope().as_filter(),
+        run_id="run-1",
+        session_id="session-1",
+        graph_id="graph-1",
+        node_id="node-1",
+    )
+    first_facade = _facade(bundle, execution_scope=first_execution)
+    second_facade = _facade(bundle, execution_scope=second_execution)
+    try:
+        await bundle.runs.create(
+            RunRecord(
+                run_id="run-1",
+                graph_id="graph-1",
+                kind="graph",
+                status=RunStatus.RUNNING,
+                scope=first_execution,
+                revision=1,
+                started_at=NOW,
+            )
+        )
+        for session_id in ("session-1",):
+            await bundle.sessions.create(
+                SessionRecord(
+                    session_id=session_id,
+                    kind=SessionKind.CHAT,
+                    scope=first_execution,
+                    revision=1,
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+        first = await first_facade.save_text(
+            "first report",
+            artifact_id="report-1",
+            occurrence_id="occurrence-1",
+            kind="report",
+            content_labels={"tags": ("final", "reviewed"), "category": "evidence"},
+            occurrence_labels={"stage": "published"},
+            metrics={"quality": 0.8},
+            pinned=True,
+            occurred_at=NOW,
+        )
+        await first_facade.save_text(
+            "draft report",
+            artifact_id="draft-1",
+            occurrence_id="occurrence-draft",
+            kind="report",
+            content_labels={"tags": ("draft",), "category": "evidence"},
+            pinned=False,
+            occurred_at=NOW,
+        )
+        second = await second_facade.save_text(
+            "second report",
+            artifact_id="report-2",
+            occurrence_id="occurrence-2",
+            kind="report",
+            content_labels={"tags": ("final", "reviewed"), "category": "evidence"},
+            occurrence_labels={"stage": "published"},
+            metrics={"quality": 0.9},
+            pinned=True,
+            occurred_at=NOW,
+        )
+
+        query_args = {
+            "scope": StorageScope(run_id="run-1"),
+            "kind": "report",
+            "tags": ("final", "reviewed"),
+            "labels": {"category": "evidence"},
+            "pinned": True,
+            "deprecated_app_id": "legacy-app",
+        }
+        page_one = await first_facade.query_public_artifacts(
+            PageRequest(limit=1),
+            **query_args,
+        )
+        assert page_one.next_cursor is not None
+        assert [item.artifact_id for item in page_one.items] == [second.record.artifact_id]
+        projected = page_one.items[0]
+        assert projected.session_id == "session-1"
+        assert projected.occurrence_id == "occurrence-2"
+        assert projected.metrics == {"quality": 0.9}
+        assert projected.pinned is True
+        assert projected.app_id == "legacy-app"
+        assert projected.client_id is None
+        assert projected.uri == "/api/v1/artifacts/report-2/content"
+        assert second.record.blob_locator not in projected.uri
+
+        page_two = await first_facade.query_public_artifacts(
+            PageRequest(limit=1, cursor=page_one.next_cursor),
+            **query_args,
+        )
+        assert page_two.next_cursor is None
+        assert [item.artifact_id for item in page_two.items] == [first.record.artifact_id]
+        assert page_two.items[0].labels["stage"] == "published"
+
+        raw = await first_facade.query_occurrences(
+            scope=StorageScope(session_id="session-1"),
+            artifact_id="draft-1",
+            pinned=False,
+        )
+        assert [item.occurrence_id for item in raw.items] == ["occurrence-draft"]
+        without_compatibility = await first_facade.query_public_artifacts(
+            scope=StorageScope(run_id="run-1"),
+            artifact_id="report-1",
+        )
+        assert without_compatibility.items[0].app_id is None
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_canonical_artifact_file_source_is_not_persisted_and_cleanup_is_explicit(
     tmp_path: Path,
 ) -> None:
@@ -587,6 +708,8 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         "add_relation",
         "list_relations",
         "list_occurrences",
+        "query_occurrences",
+        "query_public_artifacts",
         "search",
     ):
         docstring = inspect.getdoc(getattr(CanonicalArtifactFacade, name)) or ""

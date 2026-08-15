@@ -15,9 +15,11 @@ import tempfile
 from typing import Any, BinaryIO
 from uuid import uuid4
 
+from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.storage.contracts import (
     ArtifactAction,
     ArtifactOccurrence,
+    ArtifactOccurrenceQuery,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
@@ -40,6 +42,7 @@ from aethergraph.storage.contracts import (
 )
 
 from ._directory_archive import extract_directory_archive, write_directory_archive
+from .public_projection import project_public_artifact
 
 _ARTIFACT_CORPUS = "artifact"
 _DEFAULT_READ_LIMIT = 64 * 1024 * 1024
@@ -1431,6 +1434,155 @@ class CanonicalArtifactFacade:
             page or PageRequest(),
             artifact_id,
         )
+
+    async def query_occurrences(
+        self,
+        page: PageRequest | None = None,
+        *,
+        scope: StorageScope | None = None,
+        artifact_id: str | None = None,
+        kind: str | None = None,
+        tags: tuple[str, ...] = (),
+        labels: Mapping[str, Any] | None = None,
+        pinned: bool | None = None,
+    ) -> Page[ArtifactOccurrence]:
+        """Query a bounded owner-authorized artifact occurrence page.
+
+        The facade supplies exact immutable-content ownership while the caller may
+        select partial canonical execution dimensions. All content and retention
+        filters run in the repository before cursor pagination.
+
+        Examples:
+            Query the facade execution scope:
+                ```python
+                page = await facade.query_occurrences(kind="report")
+                ```
+
+            Query one run with indexed filters:
+                ```python
+                page = await facade.query_occurrences(
+                    scope=StorageScope(run_id="run-1"),
+                    tags=("final",),
+                    pinned=True,
+                )
+                ```
+
+        Args:
+            page: Optional bounded opaque cursor request, capped at 500 records.
+            scope: Optional partial canonical occurrence filter; defaults to the
+                facade's exact execution scope.
+            artifact_id: Optional exact immutable artifact identity.
+            kind: Optional exact immutable artifact kind.
+            tags: Immutable unique content-tag intersection filter.
+            labels: Optional exact immutable content-label filters.
+            pinned: Optional current retention-state filter.
+
+        Returns:
+            Page[ArtifactOccurrence]: Stable matching occurrences and continuation cursor.
+
+        Notes:
+            Deprecated App/client metadata and blob locators are absent from the
+            query. This method does not hydrate content metadata or bytes.
+        """
+        return await self._artifacts.query_occurrences(
+            ArtifactOccurrenceQuery(
+                owner_scope=self.owner_scope,
+                scope=scope or self.execution_scope,
+                page=page or PageRequest(),
+                artifact_id=artifact_id,
+                kind=kind,
+                tags=tags,
+                labels=dict(labels or {}),
+                pinned=pinned,
+            )
+        )
+
+    async def query_public_artifacts(
+        self,
+        page: PageRequest | None = None,
+        *,
+        scope: StorageScope | None = None,
+        artifact_id: str | None = None,
+        kind: str | None = None,
+        tags: tuple[str, ...] = (),
+        labels: Mapping[str, Any] | None = None,
+        pinned: bool | None = None,
+        deprecated_app_id: str | None = None,
+    ) -> Page[Artifact]:
+        """Hydrate one frozen public Artifact page from canonical records.
+
+        One filtered occurrence query is followed by bounded batch metadata and
+        retention reads. The one-way public projection combines those records only
+        at the response boundary and preserves the repository cursor unchanged.
+
+        Examples:
+            Hydrate recent public artifacts:
+                ```python
+                page = await facade.query_public_artifacts(kind="report")
+                ```
+
+            Supply deprecated App response metadata explicitly:
+                ```python
+                page = await facade.query_public_artifacts(
+                    scope=StorageScope(run_id="run-1"),
+                    deprecated_app_id=request.app_id,
+                )
+                ```
+
+        Args:
+            page: Optional bounded opaque cursor request, capped at 500 records.
+            scope: Optional partial canonical occurrence filter; defaults to the
+                facade's exact execution scope.
+            artifact_id: Optional exact immutable artifact identity.
+            kind: Optional exact immutable artifact kind.
+            tags: Immutable unique content-tag intersection filter.
+            labels: Optional exact immutable content-label filters.
+            pinned: Optional current retention-state filter.
+            deprecated_app_id: Optional deprecated response-only App metadata; never
+                inferred and never used for authorization.
+
+        Returns:
+            Page[Artifact]: Frozen public DTOs with the exact provider cursor, or an
+            empty page when no authorized occurrences match.
+
+        Notes:
+            Hydration performs no single-record loop, exposes no blob locator, and
+            never reconstructs deprecated `client_id` metadata.
+        """
+        occurrences = await self.query_occurrences(
+            page,
+            scope=scope,
+            artifact_id=artifact_id,
+            kind=kind,
+            tags=tags,
+            labels=labels,
+            pinned=pinned,
+        )
+        artifact_ids = tuple(item.artifact_id for item in occurrences.items)
+        records, retention = await asyncio.gather(
+            self.get_many(artifact_ids),
+            self.get_retention_many(artifact_ids),
+        )
+        projected: list[Artifact] = []
+        for occurrence, record, retention_record in zip(
+            occurrences.items,
+            records,
+            retention,
+            strict=True,
+        ):
+            if record is None:
+                raise StorageIntegrityError(
+                    "Artifact occurrence references missing authorized content"
+                )
+            projected.append(
+                project_public_artifact(
+                    record,
+                    occurrence=occurrence,
+                    retention=retention_record,
+                    deprecated_app_id=deprecated_app_id,
+                )
+            )
+        return Page(items=tuple(projected), next_cursor=occurrences.next_cursor)
 
     async def search(
         self,
