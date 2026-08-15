@@ -11,6 +11,7 @@ from typing import Protocol
 from .pagination import Page, PageRequest
 from .records import (
     ArtifactOccurrence,
+    ArtifactOrphanCleanupResult,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRetentionRecord,
@@ -625,6 +626,53 @@ class BlobStore(Protocol):
             Only retention/administration owners call this operation. A coherent
             provider must raise `StorageConflictError` while any immutable artifact
             in the exact owner scope references the blob.
+        """
+        ...
+
+    async def reconcile_artifact_orphans(
+        self,
+        scope: StorageScope,
+        *,
+        older_than: datetime,
+        limit: int = 100,
+    ) -> ArtifactOrphanCleanupResult:
+        """Delete a bounded page of expired unreferenced artifact blobs.
+
+        The coherent provider atomically rechecks exact owner scope, last blob touch,
+        and absence of immutable artifact references before removing scoped metadata.
+        Physical content is removed only after its final scoped blob reference ends.
+
+        Examples:
+            Reconcile one owner after a grace period:
+                ```python
+                result = await blobs.reconcile_artifact_orphans(
+                    owner_scope,
+                    older_than=cutoff,
+                )
+                ```
+
+            Drain bounded maintenance pages:
+                ```python
+                while (await blobs.reconcile_artifact_orphans(
+                    owner_scope,
+                    older_than=cutoff,
+                    limit=50,
+                )).has_more:
+                    pass
+                ```
+
+        Args:
+            scope: Exact canonical artifact-content owner scope.
+            older_than: Exclusive UTC last-touch cutoff establishing the grace period.
+            limit: Positive maximum scoped blob candidates examined, at most 500.
+
+        Returns:
+            ArtifactOrphanCleanupResult: Bounded scoped and physical deletion counts,
+            freed physical bytes, and whether more eligible work remains.
+
+        Notes:
+            Read-only providers reject maintenance. Deprecated App/client metadata is
+            never a scope, reference, or eligibility input.
         """
         ...
 

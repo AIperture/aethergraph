@@ -308,6 +308,34 @@ async def test_public_occurrence_pages_filter_then_batch_hydrate(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_canonical_artifact_orphan_reconciliation_is_owner_scoped(
+    tmp_path: Path,
+) -> None:
+    bundle = _open_bundle(tmp_path)
+    facade = _facade(bundle)
+    try:
+        referenced = await facade.save_text(
+            "referenced content",
+            artifact_id="referenced",
+            occurrence_id="referenced-occurrence",
+            occurred_at=NOW,
+        )
+        orphan = await bundle.blobs.put(_owner_scope(), _bytes(b"orphan content"))
+
+        result = await facade.reconcile_orphans(
+            older_than=NOW + timedelta(days=1),
+            limit=10,
+        )
+
+        assert result.deleted_scoped_blobs == 1
+        assert result.deleted_physical_blobs == 1
+        assert await bundle.blobs.head(_owner_scope(), orphan.blob_locator) is None
+        assert await bundle.blobs.head(_owner_scope(), referenced.record.blob_locator) is not None
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_canonical_artifact_file_source_is_not_persisted_and_cleanup_is_explicit(
     tmp_path: Path,
 ) -> None:
@@ -710,6 +738,7 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         "list_occurrences",
         "query_occurrences",
         "query_public_artifacts",
+        "reconcile_orphans",
         "search",
     ):
         docstring = inspect.getdoc(getattr(CanonicalArtifactFacade, name)) or ""

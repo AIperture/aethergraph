@@ -449,3 +449,27 @@ class BlobHead:
         if isinstance(self.size_bytes, bool) or self.size_bytes < 0:
             raise ValueError("size_bytes must be a non-negative integer")
         _optional_nonempty("provider_version", self.provider_version)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ArtifactOrphanCleanupResult:
+    """Bounded result of reference-safe artifact blob maintenance."""
+
+    examined: int
+    deleted_scoped_blobs: int
+    deleted_physical_blobs: int
+    freed_bytes: int
+    has_more: bool
+
+    def __post_init__(self) -> None:
+        for name in (
+            "examined",
+            "deleted_scoped_blobs",
+            "deleted_physical_blobs",
+            "freed_bytes",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not isinstance(self.has_more, bool):
+            raise TypeError("has_more must be a boolean")

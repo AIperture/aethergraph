@@ -39,12 +39,21 @@ from aethergraph.storage.providers.local_sqlite import (
 NOW = datetime(2026, 8, 15, 20, tzinfo=UTC)
 
 
+class _Clock:
+    def now(self) -> datetime:
+        return NOW
+
+
 def _database(root: Path, mode: StorageOpenMode) -> LocalSQLiteDatabase:
     return LocalSQLiteDatabase.open(
         workspace_root=root,
         role=LocalDatabaseRole.CONTROL,
         mode=mode,
     )
+
+
+def _blob_store(database: LocalSQLiteDatabase, root: Path) -> LocalBlobStore:
+    return LocalBlobStore(database=database, workspace_root=root, clock=_Clock())
 
 
 def _artifact(
@@ -143,7 +152,7 @@ async def test_artifact_reference_commit_validates_blob_and_races_delete_safely(
     tmp_path: Path,
 ) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    blobs = LocalBlobStore(database=database, workspace_root=tmp_path)
+    blobs = _blob_store(database, tmp_path)
     repository = LocalArtifactRepository(database=database)
     owner = StorageScope(tenant_id="tenant-1", project_id="project-1")
     other_owner = StorageScope(tenant_id="tenant-1", project_id="project-2")
@@ -203,7 +212,7 @@ async def test_query_occurrences_filters_before_cursor_and_fails_closed(
     tmp_path: Path,
 ) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    blobs = LocalBlobStore(database=database, workspace_root=tmp_path)
+    blobs = _blob_store(database, tmp_path)
     repository = LocalArtifactRepository(database=database)
     owner = StorageScope(tenant_id="tenant-1", project_id="project-1")
     other_owner = StorageScope(tenant_id="tenant-1", project_id="project-2")
@@ -323,7 +332,7 @@ async def test_query_occurrences_filters_before_cursor_and_fails_closed(
 @pytest.mark.asyncio
 async def test_local_artifact_repository_passes_shared_conformance(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    blobs = LocalBlobStore(database=database, workspace_root=tmp_path)
+    blobs = _blob_store(database, tmp_path)
     repository = LocalArtifactRepository(database=database)
 
     await check_artifact_repository_conformance(repository, blobs)
@@ -334,7 +343,7 @@ async def test_local_artifact_repository_passes_shared_conformance(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_conflicting_idempotency_keys_fail_without_mutation(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    blobs = LocalBlobStore(database=database, workspace_root=tmp_path)
+    blobs = _blob_store(database, tmp_path)
     repository = LocalArtifactRepository(database=database)
     scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
     run_scope = replace(scope, run_id="run-1")
@@ -380,7 +389,7 @@ async def test_conflicting_idempotency_keys_fail_without_mutation(tmp_path: Path
 @pytest.mark.asyncio
 async def test_occurrences_and_lineage_fail_closed_across_scope(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    blobs = LocalBlobStore(database=database, workspace_root=tmp_path)
+    blobs = _blob_store(database, tmp_path)
     repository = LocalArtifactRepository(database=database)
     owner_scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
     other_scope = StorageScope(tenant_id="tenant-1", project_id="project-2")
@@ -424,7 +433,7 @@ async def test_occurrence_and_relation_cursors_are_bound_to_query_context(
     tmp_path: Path,
 ) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    blobs = LocalBlobStore(database=database, workspace_root=tmp_path)
+    blobs = _blob_store(database, tmp_path)
     repository = LocalArtifactRepository(database=database)
     scope = StorageScope(project_id="project-1")
     run_scope = replace(scope, run_id="run-1")
@@ -659,7 +668,7 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
         created_at=NOW,
     )
     writable_database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    writable_blobs = LocalBlobStore(database=writable_database, workspace_root=tmp_path)
+    writable_blobs = _blob_store(writable_database, tmp_path)
     writable = LocalArtifactRepository(database=writable_database)
     await _publish(writable, writable_blobs, source)
     await _publish(writable, writable_blobs, target)
@@ -676,7 +685,7 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
     await writable_database.close()
 
     readonly_database = _database(tmp_path, StorageOpenMode.READ_ONLY)
-    LocalBlobStore(database=readonly_database, workspace_root=tmp_path)
+    _blob_store(readonly_database, tmp_path)
     readonly = LocalArtifactRepository(database=readonly_database)
     assert await readonly.get(scope, target.artifact_id) == target
     assert await readonly.get_many(scope, (target.artifact_id, "missing")) == (target, None)
@@ -725,7 +734,7 @@ async def test_artifact_batch_reads_are_bounded_and_validate_every_slot(tmp_path
 @pytest.mark.asyncio
 async def test_retention_cas_has_one_concurrent_winner(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    blobs = LocalBlobStore(database=database, workspace_root=tmp_path)
+    blobs = _blob_store(database, tmp_path)
     repository = LocalArtifactRepository(database=database)
     scope = StorageScope(project_id="project-1")
     artifact = _artifact("artifact-1", scope)

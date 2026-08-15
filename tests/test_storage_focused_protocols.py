@@ -19,6 +19,7 @@ from storage_conformance.suite import (
 from aethergraph.storage.contracts import (
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
+    ArtifactOrphanCleanupResult,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRepository,
@@ -243,6 +244,21 @@ class _BlobStore:
             raise StorageConflictError("blob version changed")
         del self.rows[key]
         return True
+
+    async def reconcile_artifact_orphans(
+        self,
+        scope: StorageScope,
+        *,
+        older_than: datetime,
+        limit: int = 100,
+    ) -> ArtifactOrphanCleanupResult:
+        return ArtifactOrphanCleanupResult(
+            examined=0,
+            deleted_scoped_blobs=0,
+            deleted_physical_blobs=0,
+            freed_bytes=0,
+            has_more=False,
+        )
 
 
 class _ArtifactRepository:

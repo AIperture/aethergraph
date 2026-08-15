@@ -20,6 +20,7 @@ from aethergraph.storage.contracts import (
     ArtifactAction,
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
+    ArtifactOrphanCleanupResult,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
@@ -1583,6 +1584,50 @@ class CanonicalArtifactFacade:
                 )
             )
         return Page(items=tuple(projected), next_cursor=occurrences.next_cursor)
+
+    async def reconcile_orphans(
+        self,
+        *,
+        older_than: datetime,
+        limit: int = 100,
+    ) -> ArtifactOrphanCleanupResult:
+        """Reconcile a bounded page of expired unreferenced artifact blobs.
+
+        The facade fixes cleanup to its exact immutable-content owner scope and
+        delegates the atomic reference recheck, durable tombstones, and physical
+        deduplication behavior to the coherent provider.
+
+        Examples:
+            Reconcile after an explicit grace period:
+                ```python
+                result = await facade.reconcile_orphans(older_than=cutoff)
+                ```
+
+            Drain bounded cleanup pages:
+                ```python
+                result = await facade.reconcile_orphans(
+                    older_than=cutoff,
+                    limit=50,
+                )
+                ```
+
+        Args:
+            older_than: Exclusive timezone-aware UTC blob last-touch cutoff.
+            limit: Positive maximum eligible scoped blobs examined, at most 500.
+
+        Returns:
+            ArtifactOrphanCleanupResult: Bounded cleanup counts, physical bytes
+            freed, and whether another maintenance page remains.
+
+        Notes:
+            This method never derives scope from deprecated App/client metadata and
+            never performs facade-level check-then-delete logic.
+        """
+        return await self._blobs.reconcile_artifact_orphans(
+            self.owner_scope,
+            older_than=older_than,
+            limit=limit,
+        )
 
     async def search(
         self,

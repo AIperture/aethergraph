@@ -89,6 +89,7 @@ from .provider import (
 from .records import (
     ArtifactAction,
     ArtifactOccurrence,
+    ArtifactOrphanCleanupResult,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
@@ -152,6 +153,7 @@ from .triggers import (
 __all__ = [
     "DuplicateStorageProviderError",
     "ArtifactAction",
+    "ArtifactOrphanCleanupResult",
     "ArtifactOccurrence",
     "ArtifactOccurrenceQuery",
     "ArtifactRecord",

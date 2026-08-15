@@ -431,6 +431,7 @@ class LocalStorageProvider:
                 blobs=LocalBlobStore(
                     database=control,
                     workspace_root=request.workspace_root,
+                    clock=request.clock,
                 ),
                 artifacts=LocalArtifactRepository(database=control),
                 search=LocalSearchBackend(

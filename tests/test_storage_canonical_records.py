@@ -8,6 +8,7 @@ import pytest
 from aethergraph.storage.contracts import (
     ArtifactAction,
     ArtifactOccurrence,
+    ArtifactOrphanCleanupResult,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
@@ -176,6 +177,34 @@ def test_artifact_retention_requires_boolean_pin_positive_revision_and_utc_time(
         ArtifactRetentionRecord(**{**values, "revision": 0})
     with pytest.raises(ValueError, match="UTC"):
         ArtifactRetentionRecord(**{**values, "updated_at": datetime(2026, 8, 15)})
+
+
+def test_artifact_orphan_cleanup_result_is_bounded_and_strictly_typed() -> None:
+    result = ArtifactOrphanCleanupResult(
+        examined=3,
+        deleted_scoped_blobs=2,
+        deleted_physical_blobs=1,
+        freed_bytes=128,
+        has_more=True,
+    )
+
+    assert result.deleted_scoped_blobs == 2
+    with pytest.raises(ValueError, match="non-negative integer"):
+        ArtifactOrphanCleanupResult(
+            examined=-1,
+            deleted_scoped_blobs=0,
+            deleted_physical_blobs=0,
+            freed_bytes=0,
+            has_more=False,
+        )
+    with pytest.raises(TypeError, match="boolean"):
+        ArtifactOrphanCleanupResult(
+            examined=0,
+            deleted_scoped_blobs=0,
+            deleted_physical_blobs=0,
+            freed_bytes=0,
+            has_more=1,  # type: ignore[arg-type]
+        )
 
 
 def test_artifact_lineage_rejects_self_edges() -> None:
