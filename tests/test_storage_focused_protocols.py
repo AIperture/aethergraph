@@ -18,6 +18,7 @@ from storage_conformance.suite import (
 
 from aethergraph.storage.contracts import (
     ArtifactOccurrence,
+    ArtifactOccurrenceQuery,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRepository,
@@ -329,6 +330,44 @@ class _ArtifactRepository:
         ]
         start = int(page.cursor.split("-")[-1]) if page.cursor else 0
         selected = tuple(rows[start : start + page.limit])
+        next_index = start + len(selected)
+        cursor = f"page-{next_index}" if next_index < len(rows) else None
+        return Page(items=selected, next_cursor=cursor)
+
+    async def query_occurrences(
+        self,
+        query: ArtifactOccurrenceQuery,
+    ) -> Page[ArtifactOccurrence]:
+        rows: list[ArtifactOccurrence] = []
+        owner_key = _scope_key(query.owner_scope)
+        for occurrence in reversed(self.occurrences):
+            if any(
+                getattr(occurrence.scope, name) != value
+                for name, value in query.scope.as_filter().items()
+            ):
+                continue
+            if query.artifact_id is not None and occurrence.artifact_id != query.artifact_id:
+                continue
+            artifact = self.artifacts.get((owner_key, occurrence.artifact_id))
+            if artifact is None or (query.kind is not None and artifact.kind != query.kind):
+                continue
+            tag_value = artifact.labels.get("tags", ())
+            tags = (
+                tuple(item.strip() for item in tag_value.split(",") if item.strip())
+                if isinstance(tag_value, str)
+                else tuple(str(item) for item in tag_value)
+            )
+            if any(tag not in tags for tag in query.tags):
+                continue
+            if any(artifact.labels.get(key) != value for key, value in query.labels.items()):
+                continue
+            retention = self.retention.get((owner_key, occurrence.artifact_id))
+            pinned = retention.pinned if retention is not None else False
+            if query.pinned is not None and pinned is not query.pinned:
+                continue
+            rows.append(occurrence)
+        start = int(query.page.cursor.split("-")[-1]) if query.page.cursor else 0
+        selected = tuple(rows[start : start + query.page.limit])
         next_index = start + len(selected)
         cursor = f"page-{next_index}" if next_index < len(rows) else None
         return Page(items=selected, next_cursor=cursor)
