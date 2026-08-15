@@ -57,6 +57,8 @@ _DIRECTORY_FORMAT = "tar.v1"
 _DEFAULT_DIRECTORY_ENTRIES = 10_000
 _DEFAULT_DIRECTORY_BYTES = 1024 * 1024 * 1024
 _DEFAULT_DIRECTORY_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
+_MAX_PUBLIC_SEARCH_HYDRATION = 500
+_DEPRECATED_IDENTITY_LABELS = frozenset({"app_id", "application_id", "client_id"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,15 @@ class ArtifactCommitReceipt:
     occurrence: ArtifactOccurrence
     retention: ArtifactRetentionRecord | None
     indexed_cursor: str
+
+
+@dataclass(frozen=True, slots=True)
+class PublicArtifactSearchHit:
+    """One ranked canonical search result hydrated to the frozen public Artifact."""
+
+    artifact: Artifact
+    score: float
+    mode: SearchMode
 
 
 class CanonicalArtifactWriter:
@@ -578,6 +589,11 @@ class CanonicalArtifactFacade:
         now = occurred_at or self._now()
         resolved_artifact_id = artifact_id or self._artifact_id_factory()
         resolved_occurrence_id = occurrence_id or self._occurrence_id_factory()
+        resolved_content_labels = _canonical_artifact_labels("content_labels", content_labels)
+        resolved_occurrence_labels = _canonical_artifact_labels(
+            "occurrence_labels",
+            occurrence_labels,
+        )
         record = ArtifactRecord(
             artifact_id=resolved_artifact_id,
             content_hash="pending",
@@ -589,7 +605,7 @@ class CanonicalArtifactFacade:
             owner_scope=self.owner_scope,
             created_at=now,
             original_filename=original_filename,
-            labels=dict(content_labels or {}),
+            labels=resolved_content_labels,
         )
         occurrence = ArtifactOccurrence(
             occurrence_id=resolved_occurrence_id,
@@ -599,7 +615,7 @@ class CanonicalArtifactFacade:
             occurred_at=now,
             tool_name=self.tool_name,
             tool_version=self.tool_version,
-            labels=dict(occurrence_labels or {}),
+            labels=resolved_occurrence_labels,
             metrics=dict(metrics or {}),
         )
         _search_document(record, occurrence, search_text=search_text)
@@ -1213,6 +1229,37 @@ class CanonicalArtifactFacade:
         """
         return await self._artifacts.get_many(self.owner_scope, artifact_ids)
 
+    async def get_occurrences_many(
+        self,
+        occurrence_ids: Sequence[str],
+    ) -> tuple[ArtifactOccurrence | None, ...]:
+        """Batch-read search occurrences authorized by this facade's owner.
+
+        One provider call joins each requested occurrence to immutable content under
+        the exact facade owner while retaining duplicates and missing result slots.
+
+        Examples:
+            Hydrate search occurrence identities:
+                ```python
+                rows = await facade.get_occurrences_many(("occurrence-1", "occurrence-2"))
+                ```
+
+            Detect a stale projection:
+                ```python
+                assert await facade.get_occurrences_many(("missing",)) == (None,)
+                ```
+
+        Args:
+            occurrence_ids: Bounded ordered occurrence identities; duplicates are allowed.
+
+        Returns:
+            tuple[ArtifactOccurrence | None, ...]: Authorized occurrence or missing slot.
+
+        Notes:
+            Deprecated App/client metadata is never used to authorize the batch.
+        """
+        return await self._artifacts.get_occurrences_many(self.owner_scope, occurrence_ids)
+
     def read(self, artifact_id: str) -> AsyncIterator[bytes]:
         """Stream exact owner-authorized artifact content.
 
@@ -1788,6 +1835,113 @@ class CanonicalArtifactFacade:
             )
         )
 
+    async def search_public_artifacts(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        top_k: int = 10,
+        metadata: Mapping[str, Any] | None = None,
+        require_indexed_cursor: str | None = None,
+        deprecated_app_id: str | None = None,
+    ) -> tuple[PublicArtifactSearchHit, ...]:
+        """Search and batch-hydrate ranked frozen public Artifacts.
+
+        The exact-mode search runs first, then one bounded occurrence read and bounded
+        content/retention reads hydrate results in provider rank order. Missing or
+        mismatched canonical projection references fail as storage-integrity errors.
+
+        Examples:
+            Run lexical artifact search:
+                ```python
+                hits = await facade.search_public_artifacts(
+                    query="migration report",
+                    mode=SearchMode.LEXICAL,
+                )
+                ```
+
+            Require a covering search cursor:
+                ```python
+                hits = await facade.search_public_artifacts(
+                    query="design",
+                    mode=SearchMode.SEMANTIC,
+                    require_indexed_cursor=receipt.indexed_cursor,
+                )
+                ```
+
+        Args:
+            query: Search text; structural mode may use an empty value.
+            mode: Exact required search mode with no fallback.
+            top_k: Positive bounded result count.
+            metadata: Optional exact canonical search-projection filters.
+            require_indexed_cursor: Optional covering artifact search cursor.
+            deprecated_app_id: Optional deprecated response-only App metadata.
+
+        Returns:
+            tuple[PublicArtifactSearchHit, ...]: Ranked hydrated public results.
+
+        Notes:
+            Search projection metadata never authorizes content. Owner-scoped
+            occurrence hydration does, and deprecated App/client metadata never does.
+        """
+        if isinstance(top_k, bool) or not isinstance(top_k, int):
+            raise TypeError("top_k must be an integer")
+        if not 1 <= top_k <= _MAX_PUBLIC_SEARCH_HYDRATION:
+            raise ValueError(
+                f"top_k must be between 1 and {_MAX_PUBLIC_SEARCH_HYDRATION} for hydration"
+            )
+        results = await self.search(
+            query=query,
+            mode=mode,
+            top_k=top_k,
+            metadata=metadata,
+            require_indexed_cursor=require_indexed_cursor,
+        )
+        occurrence_ids: list[str] = []
+        for result in results:
+            occurrence_id = result.metadata.get("occurrence_id")
+            if not isinstance(occurrence_id, str) or not occurrence_id.strip():
+                raise StorageIntegrityError(
+                    "Artifact search result lacks a canonical occurrence identity"
+                )
+            occurrence_ids.append(occurrence_id)
+
+        artifact_ids = tuple(result.item_id for result in results)
+        occurrences, records, retention = await asyncio.gather(
+            self.get_occurrences_many(tuple(occurrence_ids)),
+            self.get_many(artifact_ids),
+            self.get_retention_many(artifact_ids),
+        )
+        hydrated: list[PublicArtifactSearchHit] = []
+        for result, occurrence, record, retention_record in zip(
+            results,
+            occurrences,
+            records,
+            retention,
+            strict=True,
+        ):
+            if occurrence is None or record is None:
+                raise StorageIntegrityError(
+                    "Artifact search result references missing authorized records"
+                )
+            if occurrence.artifact_id != result.item_id:
+                raise StorageIntegrityError(
+                    "Artifact search result occurrence references different content"
+                )
+            hydrated.append(
+                PublicArtifactSearchHit(
+                    artifact=project_public_artifact(
+                        record,
+                        occurrence=occurrence,
+                        retention=retention_record,
+                        deprecated_app_id=deprecated_app_id,
+                    ),
+                    score=result.score,
+                    mode=result.mode,
+                )
+            )
+        return tuple(hydrated)
+
     async def _read(self, artifact_id: str) -> AsyncIterator[bytes]:
         record = await self.get(artifact_id)
         if record is None:
@@ -1857,6 +2011,17 @@ def _positive_bound(name: str, value: int) -> None:
         raise ValueError(f"{name} must be a positive integer")
 
 
+def _canonical_artifact_labels(
+    name: str,
+    labels: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    normalized = dict(labels or {})
+    forbidden = sorted(_DEPRECATED_IDENTITY_LABELS.intersection(normalized))
+    if forbidden:
+        raise ValueError(f"{name} contains deprecated identity labels: {forbidden}")
+    return normalized
+
+
 def _searchable_description(
     kind: str,
     filename: str | None,
@@ -1866,7 +2031,11 @@ def _searchable_description(
     if filename:
         parts.append(filename)
     if labels:
-        parts.extend(f"{key}: {value}" for key, value in labels.items())
+        parts.extend(
+            f"{key}: {value}"
+            for key, value in labels.items()
+            if key not in _DEPRECATED_IDENTITY_LABELS
+        )
     return " ".join(parts)
 
 
@@ -1877,11 +2046,16 @@ def _search_document(
     search_text: str,
 ) -> SearchDocument:
     metadata: dict[str, Any] = {
-        "kind": record.kind,
-        "media_type": record.media_type,
-        "content_hash": record.content_hash,
-        "occurrence_id": occurrence.occurrence_id,
+        key: value for key, value in record.labels.items() if key not in _DEPRECATED_IDENTITY_LABELS
     }
+    metadata.update(
+        {
+            "kind": record.kind,
+            "media_type": record.media_type,
+            "content_hash": record.content_hash,
+            "occurrence_id": occurrence.occurrence_id,
+        }
+    )
     if record.original_filename is not None:
         metadata["original_filename"] = record.original_filename
     return SearchDocument(

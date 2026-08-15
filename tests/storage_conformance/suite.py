@@ -283,6 +283,14 @@ async def check_artifact_repository_conformance(
     )
     for occurrence in occurrences:
         assert await repository.record_occurrence(occurrence) == occurrence
+    assert await repository.get_occurrences_many(
+        scope,
+        ("occurrence-1", "missing", "occurrence-1"),
+    ) == (occurrences[1], None, occurrences[1])
+    assert await repository.get_occurrences_many(
+        other_scope,
+        ("occurrence-1",),
+    ) == (None,)
     page_one = await repository.list_occurrences(run_scope, PageRequest(limit=2))
     assert len(page_one.items) == 2
     assert page_one.next_cursor is not None

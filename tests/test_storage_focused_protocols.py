@@ -349,6 +349,19 @@ class _ArtifactRepository:
             self.occurrences.append(occurrence)
         return occurrence
 
+    async def get_occurrences_many(
+        self,
+        owner_scope: StorageScope,
+        occurrence_ids,
+    ) -> tuple[ArtifactOccurrence | None, ...]:
+        owner_key = _scope_key(owner_scope)
+        authorized = {
+            row.occurrence_id: row
+            for row in self.occurrences
+            if (owner_key, row.artifact_id) in self.artifacts
+        }
+        return tuple(authorized.get(occurrence_id) for occurrence_id in occurrence_ids)
+
     async def list_occurrences(
         self,
         scope: StorageScope,

@@ -127,6 +127,7 @@ def test_artifact_query_contract_is_bounded_immutable_and_owned() -> None:
     )
     assert query.labels == {"stage": "review"}
     assert "get_many" in ArtifactRepository.__dict__
+    assert "get_occurrences_many" in ArtifactRepository.__dict__
     assert "get_many" not in EventStore.__dict__
 
     with pytest.raises(TypeError, match="immutable tuple"):
@@ -636,6 +637,20 @@ async def test_schema_normalizes_content_occurrences_and_lineage(tmp_path: Path)
     assert "SCAN local_artifacts" not in content_batch_plan
     assert "ix_local_artifact_retention_scope" in retention_batch_plan
     assert "SCAN local_artifact_retention" not in retention_batch_plan
+    occurrence_batch_plan = " ".join(
+        str(row["detail"])
+        for row in await database.fetch_all(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT o.* FROM local_artifact_occurrences o
+            JOIN local_artifacts a ON a.artifact_id = o.artifact_id
+            WHERE a.owner_scope_identity = ? AND o.occurrence_id IN (?, ?)
+            """,
+            ('{"project_id":"project-1"}', "occurrence-1", "occurrence-2"),
+        )
+    )
+    assert "occurrence_id" in occurrence_batch_plan
+    assert "SCAN o" not in occurrence_batch_plan
     filtered_occurrence_plan = " ".join(
         str(row["detail"])
         for row in await database.fetch_all(
@@ -730,6 +745,10 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
         retention,
         None,
     )
+    assert await readonly.get_occurrences_many(scope, (occurrence.occurrence_id, "missing")) == (
+        occurrence,
+        None,
+    )
     assert (await readonly.list_occurrences(run_scope, PageRequest())).items == (occurrence,)
     assert (await readonly.list_relations(scope, target.artifact_id, PageRequest())).items == (
         relation,
@@ -753,6 +772,7 @@ async def test_artifact_batch_reads_are_bounded_and_validate_every_slot(tmp_path
 
     assert await repository.get_many(scope, ()) == ()
     assert await repository.get_retention_many(scope, ()) == ()
+    assert await repository.get_occurrences_many(scope, ()) == ()
     with pytest.raises(StorageConfigurationError, match="at most 500"):
         await repository.get_many(scope, tuple(f"artifact-{index}" for index in range(501)))
     with pytest.raises(StorageConfigurationError, match="at most 500"):
@@ -760,10 +780,17 @@ async def test_artifact_batch_reads_are_bounded_and_validate_every_slot(tmp_path
             scope,
             tuple(f"artifact-{index}" for index in range(501)),
         )
+    with pytest.raises(StorageConfigurationError, match="at most 500"):
+        await repository.get_occurrences_many(
+            scope,
+            tuple(f"occurrence-{index}" for index in range(501)),
+        )
     with pytest.raises(TypeError, match="sequence"):
         await repository.get_many(scope, "artifact-1")
     with pytest.raises(ValueError, match="non-empty"):
         await repository.get_retention_many(scope, ("",))
+    with pytest.raises(TypeError, match="sequence"):
+        await repository.get_occurrences_many(scope, "occurrence-1")
     await database.close()
 
 
@@ -811,6 +838,7 @@ async def test_retention_cas_has_one_concurrent_winner(tmp_path: Path) -> None:
 def test_artifact_batch_and_retention_methods_follow_required_docstring_sections() -> None:
     for name in (
         "get_many",
+        "get_occurrences_many",
         "get_retention",
         "get_retention_many",
         "compare_and_set_retention",

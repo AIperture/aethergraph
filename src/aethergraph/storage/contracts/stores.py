@@ -927,6 +927,41 @@ class ArtifactRepository(Protocol):
         """
         ...
 
+    async def get_occurrences_many(
+        self,
+        owner_scope: StorageScope,
+        occurrence_ids: Sequence[str],
+    ) -> tuple[ArtifactOccurrence | None, ...]:
+        """Batch-read owner-authorized occurrences while preserving input slots.
+
+        The repository joins occurrence identity to immutable content ownership in
+        one bounded operation, so an occurrence from another owner is indistinguishable
+        from a missing identity.
+
+        Examples:
+            Hydrate search occurrences:
+                ```python
+                rows = await repository.get_occurrences_many(owner, occurrence_ids)
+                ```
+
+            Preserve missing and duplicate slots:
+                ```python
+                rows = await repository.get_occurrences_many(owner, ("a", "missing", "a"))
+                assert rows[0] == rows[2] and rows[1] is None
+                ```
+
+        Args:
+            owner_scope: Exact immutable-content owner authorizing every result.
+            occurrence_ids: Bounded ordered occurrence identities; duplicates are allowed.
+
+        Returns:
+            tuple[ArtifactOccurrence | None, ...]: One authorized result per input slot.
+
+        Notes:
+            Providers reject oversized batches and must not loop connection reads.
+        """
+        ...
+
     async def list_occurrences(
         self,
         scope: StorageScope,

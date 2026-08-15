@@ -135,8 +135,7 @@ CREATE INDEX ix_local_occurrences_artifact
 ON local_artifact_occurrences(artifact_id, sequence)
 """
 _CREATE_OCCURRENCE_SCOPE_DIMENSION_INDEXES = tuple(
-    f"CREATE INDEX ix_local_occurrences_{name[:-3]} "
-    f"ON local_artifact_occurrences({name}, sequence)"
+    f"CREATE INDEX ix_local_occurrences_{name[:-3]} ON local_artifact_occurrences({name}, sequence)"
     for name in _SCOPE_FIELDS
 )
 _CREATE_OCCURRENCE_METRICS = """
@@ -722,6 +721,52 @@ class LocalArtifactRepository:
             ),
         )
 
+    async def get_occurrences_many(
+        self,
+        owner_scope: StorageScope,
+        occurrence_ids: Sequence[str],
+    ) -> tuple[ArtifactOccurrence | None, ...]:
+        """Batch-read owner-authorized occurrences in one bounded query.
+
+        Immutable content ownership is joined before hydration while duplicate and
+        missing input identities retain their original result positions.
+
+        Examples:
+            Hydrate search hits:
+                ```python
+                rows = await repository.get_occurrences_many(owner, occurrence_ids)
+                ```
+
+            Preserve a missing slot:
+                ```python
+                assert (await repository.get_occurrences_many(owner, ("known", "missing")))[1] is None
+                ```
+
+        Args:
+            owner_scope: Exact immutable-content owner authorizing every occurrence.
+            occurrence_ids: At most 500 ordered stable occurrence identities.
+
+        Returns:
+            tuple[ArtifactOccurrence | None, ...]: One authorized result per input slot.
+
+        Notes:
+            Empty input returns an empty tuple without querying SQLite.
+        """
+        requested = _batch_occurrence_ids(occurrence_ids)
+        if not requested:
+            return ()
+        unique = tuple(dict.fromkeys(requested))
+        placeholders = ",".join("?" for _item in unique)
+        rows = await self._database.fetch_all(
+            "SELECT o.* FROM local_artifact_occurrences o "
+            "JOIN local_artifacts a ON a.artifact_id = o.artifact_id "
+            "WHERE a.owner_scope_identity = ? "
+            f"AND o.occurrence_id IN ({placeholders})",
+            (_scope_identity(owner_scope), *unique),
+        )
+        hydrated = {str(row["occurrence_id"]): _occurrence(row) for row in rows}
+        return tuple(hydrated.get(occurrence_id) for occurrence_id in requested)
+
     async def query_occurrences(
         self,
         query: ArtifactOccurrenceQuery,
@@ -993,6 +1038,20 @@ def _batch_artifact_ids(artifact_ids: Sequence[str]) -> tuple[str, ...]:
     for artifact_id in requested:
         if not isinstance(artifact_id, str) or not artifact_id.strip():
             raise ValueError("artifact_ids must contain non-empty strings")
+    return requested
+
+
+def _batch_occurrence_ids(occurrence_ids: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(occurrence_ids, str | bytes | bytearray):
+        raise TypeError("occurrence_ids must be a sequence of occurrence identities")
+    requested = tuple(occurrence_ids)
+    if len(requested) > _MAX_ARTIFACT_BATCH:
+        raise StorageConfigurationError(
+            f"occurrence_ids must contain at most {_MAX_ARTIFACT_BATCH} identities"
+        )
+    for occurrence_id in requested:
+        if not isinstance(occurrence_id, str) or not occurrence_id.strip():
+            raise ValueError("occurrence_ids must contain non-empty strings")
     return requested
 
 

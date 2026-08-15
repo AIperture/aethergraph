@@ -17,6 +17,7 @@ from aethergraph.storage.contracts import (
     PageRequest,
     RunRecord,
     RunStatus,
+    SearchDocument,
     SearchMode,
     SessionKind,
     SessionRecord,
@@ -176,6 +177,30 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
             require_indexed_cursor=first.indexed_cursor,
         )
         assert [hit.item_id for hit in hits] == ["artifact-1"]
+        assert hits[0].metadata["category"] == "evidence"
+        assert "app_id" not in hits[0].metadata
+        assert "client_id" not in hits[0].metadata
+        public_hits = await facade.search_public_artifacts(
+            query="canonical",
+            mode=SearchMode.LEXICAL,
+            metadata={"category": "evidence"},
+            require_indexed_cursor=first.indexed_cursor,
+        )
+        assert [hit.artifact.artifact_id for hit in public_hits] == ["artifact-1"]
+        assert public_hits[0].artifact.occurrence_id == "occurrence-1"
+        assert public_hits[0].artifact.app_id is None
+        assert public_hits[0].score == hits[0].score
+        assert public_hits[0].mode is SearchMode.LEXICAL
+        assert await facade.get_occurrences_many(("occurrence-1", "missing")) == (
+            first.occurrence,
+            None,
+        )
+        with pytest.raises(ValueError, match="500"):
+            await facade.search_public_artifacts(
+                query="canonical",
+                mode=SearchMode.LEXICAL,
+                top_k=501,
+            )
         unpinned = await facade.pin("artifact-1", False)
         assert unpinned.pinned is False and unpinned.revision == 2
         assert await facade.get_retention("artifact-1") == unpinned
@@ -398,6 +423,62 @@ async def test_canonical_artifact_hydration_is_bounded(tmp_path: Path) -> None:
         )
         with pytest.raises(StorageCapacityError, match="bound"):
             await facade.load_bytes("artifact-large", max_bytes=3)
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label_name", ["app_id", "application_id", "client_id"])
+async def test_canonical_artifact_write_rejects_deprecated_identity_labels(
+    tmp_path: Path,
+    label_name: str,
+) -> None:
+    bundle = _open_bundle(tmp_path)
+    facade = _facade(bundle)
+    try:
+        with pytest.raises(ValueError, match="deprecated identity"):
+            await facade.save_text(
+                "identity must remain compatibility-only",
+                content_labels={label_name: "legacy-value"},
+            )
+        with pytest.raises(ValueError, match="deprecated identity"):
+            await facade.save_text(
+                "identity must remain compatibility-only",
+                occurrence_labels={label_name: "legacy-value"},
+            )
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_public_artifact_search_rejects_stale_occurrence_projection(
+    tmp_path: Path,
+) -> None:
+    bundle = _open_bundle(tmp_path)
+    facade = _facade(bundle)
+    try:
+        receipt = await facade.save_text(
+            "canonical report",
+            artifact_id="artifact-stale",
+            occurrence_id="occurrence-valid",
+            occurred_at=NOW,
+        )
+        await bundle.search.upsert(
+            SearchDocument(
+                corpus="artifact",
+                item_id=receipt.record.artifact_id,
+                text="canonical report",
+                scope=_owner_scope(),
+                occurred_at=NOW,
+                metadata={"occurrence_id": "occurrence-missing"},
+            )
+        )
+
+        with pytest.raises(StorageIntegrityError, match="missing authorized"):
+            await facade.search_public_artifacts(
+                query="canonical",
+                mode=SearchMode.LEXICAL,
+            )
     finally:
         await bundle.close()
 
@@ -752,6 +833,7 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         "get",
         "get_public",
         "get_many",
+        "get_occurrences_many",
         "read",
         "load_bytes",
         "pin",
@@ -765,6 +847,7 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         "reconcile_orphans",
         "project_commit",
         "search",
+        "search_public_artifacts",
     ):
         docstring = inspect.getdoc(getattr(CanonicalArtifactFacade, name)) or ""
         assert docstring.index("Examples:") < docstring.index("Args:")
