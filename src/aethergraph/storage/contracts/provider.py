@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from .capabilities import StorageCapabilities
+from .continuations import ContinuationLeaseRepository, ContinuationRepository
 from .control import RunRepository, RunResultRepository, SessionRepository
 from .scope import StorageScope
 from .stores import ArtifactRepository, BlobStore, EventStore, SearchBackend, StateStore
@@ -152,6 +153,8 @@ class StorageBundle(Protocol):
     runs: RunRepository
     run_results: RunResultRepository
     sessions: SessionRepository
+    continuations: ContinuationRepository
+    continuation_leases: ContinuationLeaseRepository
 
     async def health(self) -> StorageHealth:
         """Return current readiness for the already-open bundle.

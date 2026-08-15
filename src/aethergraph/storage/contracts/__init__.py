@@ -1,6 +1,20 @@
 """Canonical contracts for selecting and opening AG storage providers."""
 
 from .capabilities import StorageCapabilities, StorageCapability
+from .continuations import (
+    ContinuationCorrelator,
+    ContinuationDraft,
+    ContinuationLeaseQuery,
+    ContinuationLeaseRecord,
+    ContinuationLeaseRepository,
+    ContinuationLeaseRequest,
+    ContinuationLeaseStatus,
+    ContinuationQuery,
+    ContinuationRecord,
+    ContinuationRepository,
+    ContinuationStatus,
+    CreatedContinuation,
+)
 from .control import (
     RunQuery,
     RunRecord,
@@ -90,6 +104,18 @@ __all__ = [
     "BlobRange",
     "BlobStore",
     "BlobWriteResult",
+    "ContinuationCorrelator",
+    "ContinuationDraft",
+    "ContinuationLeaseQuery",
+    "ContinuationLeaseRecord",
+    "ContinuationLeaseRepository",
+    "ContinuationLeaseRequest",
+    "ContinuationLeaseStatus",
+    "ContinuationQuery",
+    "ContinuationRecord",
+    "ContinuationRepository",
+    "ContinuationStatus",
+    "CreatedContinuation",
     "EventDraft",
     "EventRecord",
     "EventQuery",
