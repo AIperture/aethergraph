@@ -14,6 +14,7 @@ from .manifest import (
     open_local_workspace_manifest,
     read_local_workspace_manifest,
 )
+from .state_store import LocalStateStore
 
 __all__ = [
     "LOCAL_STORAGE_FORMAT_VERSION",
@@ -23,6 +24,7 @@ __all__ = [
     "LocalDatabaseRole",
     "LocalEventStore",
     "LocalSQLiteDatabase",
+    "LocalStateStore",
     "LocalWorkspaceManifest",
     "open_local_workspace_manifest",
     "read_local_workspace_manifest",
