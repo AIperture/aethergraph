@@ -35,19 +35,16 @@ class SearchBackendSettings(BaseModel):
     Config for the high-level SearchBackend used by ScopedIndices.
 
     backend:
-      - "none"          -> NullSearchBackend (no search at all)
       - "sqlite_vector" -> VectorSearchBackend + SQLiteVectorIndex
       - "faiss_vector"  -> VectorSearchBackend + FAISSVectorIndex
-      - "sqlite_lexical"-> SQLiteLexicalSearchBackend (no embeddings)
     """
 
-    backend: Literal["none", "sqlite_vector", "faiss_vector", "sqlite_lexical"] = "sqlite_vector"
+    backend: Literal["sqlite_vector", "faiss_vector"] = "sqlite_vector"
 
     sqlite_vector: SQLiteSearchVectorSettings = SQLiteSearchVectorSettings()
     faiss_vector: FAISSSearchVectorSettings = FAISSSearchVectorSettings()
 
-    # Lexical search backend (for pure sqlite_lexical backend, *and* for
-    # optional lexical index when enable_lexical=True on vector backends).
+    # Optional FTS channel attached to either implemented vector-backed choice.
     sqlite_lexical: SQLiteLexicalSearchSettings = SQLiteLexicalSearchSettings()
 
     # NEW: toggle lexical index when using vector backends

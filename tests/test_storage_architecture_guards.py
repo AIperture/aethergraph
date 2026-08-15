@@ -120,3 +120,11 @@ def test_independent_rag_vector_configuration_and_factory_are_absent() -> None:
     assert "build_vector_index" not in function_names
     assert not (vector_root / "chroma_index.py").exists()
     assert not imports_storage_config
+
+
+def test_silent_null_search_backend_is_absent() -> None:
+    search_root = STORAGE_ROOT / "search_backend"
+    factory_source = (STORAGE_ROOT / "search_factory.py").read_text(encoding="utf-8")
+
+    assert not (search_root / "null_backend.py").exists()
+    assert "NullSearchBackend" not in factory_source
