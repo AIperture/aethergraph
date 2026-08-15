@@ -400,7 +400,7 @@ async def search_artifacts(
     container = current_services()
     index = getattr(container, "artifact_index", None)
     if index is None:
-        return ArtifactSearchResponse(results=[])
+        return ArtifactSearchResponse(hits=[])
 
     kind = getattr(req, "kind", None)
     scope_id = getattr(req, "scope_id", None)
@@ -451,7 +451,7 @@ async def search_artifacts(
                     score=score,
                 )
             )
-        return ArtifactSearchResponse(results=hits)
+        return ArtifactSearchResponse(hits=hits)
 
     artifacts = await index.search(
         kind=kind,
@@ -473,4 +473,4 @@ async def search_artifacts(
             )
         )
 
-    return ArtifactSearchResponse(results=hits)
+    return ArtifactSearchResponse(hits=hits)

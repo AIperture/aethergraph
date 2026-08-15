@@ -149,3 +149,83 @@ def test_run_and_session_artifact_endpoints_use_occurrences(tmp_path: Path, monk
     assert global_resp.status_code == 200
     global_payload = global_resp.json()
     assert len(global_payload["artifacts"]) == 1
+
+
+def test_artifact_search_returns_frozen_hits_field(tmp_path: Path, monkeypatch) -> None:
+    store = FSArtifactStore(str(tmp_path / "cas"))
+    index = SqliteArtifactIndex(str(tmp_path / "artifact_index.db"))
+    facade = _build_facade(
+        run_id="run-1",
+        node_id="node-1",
+        session_id="sess-1",
+        store=store,
+        index=index,
+    )
+    source = tmp_path / "report.txt"
+    _write_file(source, "ranked report")
+
+    async def _save() -> str:
+        artifact = await facade.save_file(
+            str(source),
+            kind="report",
+            metrics={"quality": 0.9},
+            cleanup=False,
+        )
+        return artifact.artifact_id
+
+    import asyncio
+
+    artifact_id = asyncio.run(_save())
+
+    class FakeContainer:
+        artifact_index = index
+
+    monkeypatch.setattr("aethergraph.api.v1.artifacts.current_services", lambda: FakeContainer())
+    monkeypatch.setattr("aethergraph.api.v1.deps.current_services", lambda: FakeContainer())
+
+    app = FastAPI()
+    app.include_router(artifacts_api.router, prefix="/api/v1")
+
+    async def fake_identity() -> RequestIdentity:
+        return RequestIdentity(mode="local")
+
+    app.dependency_overrides[artifacts_api.get_identity] = fake_identity
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/v1/artifacts/search",
+        json={
+            "kind": "report",
+            "metric": "quality",
+            "mode": "max",
+            "best_only": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"hits"}
+    assert len(payload["hits"]) == 1
+    assert payload["hits"][0]["score"] == 0.9
+    assert payload["hits"][0]["artifact"]["artifact_id"] == artifact_id
+    assert payload["hits"][0]["artifact"]["kind"] == "report"
+
+
+def test_artifact_search_without_index_returns_empty_hits(monkeypatch) -> None:
+    class FakeContainer:
+        artifact_index = None
+
+    monkeypatch.setattr("aethergraph.api.v1.artifacts.current_services", lambda: FakeContainer())
+    monkeypatch.setattr("aethergraph.api.v1.deps.current_services", lambda: FakeContainer())
+
+    app = FastAPI()
+    app.include_router(artifacts_api.router, prefix="/api/v1")
+
+    async def fake_identity() -> RequestIdentity:
+        return RequestIdentity(mode="local")
+
+    app.dependency_overrides[artifacts_api.get_identity] = fake_identity
+    response = TestClient(app).post("/api/v1/artifacts/search", json={})
+
+    assert response.status_code == 200
+    assert response.json() == {"hits": []}
