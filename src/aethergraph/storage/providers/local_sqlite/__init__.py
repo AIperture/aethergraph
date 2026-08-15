@@ -17,6 +17,7 @@ from .manifest import (
 )
 from .search_backend import LocalSearchBackend
 from .state_store import LocalStateStore
+from .supporting_stores import LocalDocumentStore, LocalKeyValueStore
 
 __all__ = [
     "LOCAL_STORAGE_FORMAT_VERSION",
@@ -25,7 +26,9 @@ __all__ = [
     "LocalArtifactRepository",
     "LocalBlobStore",
     "LocalDatabaseRole",
+    "LocalDocumentStore",
     "LocalEventStore",
+    "LocalKeyValueStore",
     "LocalSQLiteDatabase",
     "LocalSearchBackend",
     "LocalStateStore",
