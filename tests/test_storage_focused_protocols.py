@@ -3,19 +3,28 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+import hashlib
 import inspect
 from typing import get_type_hints
 
 import pytest
 from storage_conformance.suite import (
+    check_artifact_repository_conformance,
+    check_blob_store_conformance,
     check_event_store_conformance,
+    check_search_backend_conformance,
     check_state_store_conformance,
 )
 
 from aethergraph.storage.contracts import (
+    ArtifactOccurrence,
+    ArtifactRecord,
+    ArtifactRelation,
     ArtifactRepository,
+    BlobHead,
     BlobRange,
     BlobStore,
+    BlobWriteResult,
     EventDraft,
     EventQuery,
     EventRecord,
@@ -24,12 +33,18 @@ from aethergraph.storage.contracts import (
     Page,
     PageRequest,
     SearchBackend,
+    SearchDocument,
+    SearchMode,
+    SearchQuery,
+    SearchResult,
     SortDirection,
     StateHistoryQuery,
     StateRecord,
     StateStore,
     StorageBundle,
     StorageConflictError,
+    StorageIntegrityError,
+    StorageNotFoundError,
     StorageScope,
 )
 
@@ -162,6 +177,221 @@ class _StateStore:
         return Page(items=selected, next_cursor=cursor)
 
 
+class _BlobStore:
+    def __init__(self) -> None:
+        self.rows: dict[tuple, tuple[bytes, BlobWriteResult]] = {}
+
+    async def put(
+        self,
+        scope: StorageScope,
+        chunks,
+        expected_hash: str | None = None,
+        hash_algorithm: str = "sha256",
+    ) -> BlobWriteResult:
+        content = b"".join([chunk async for chunk in chunks])
+        digest = hashlib.new(hash_algorithm, content).hexdigest()
+        if expected_hash is not None and digest != expected_hash:
+            raise StorageIntegrityError("content hash mismatch")
+        result = BlobWriteResult(
+            blob_locator=f"blob:{digest}",
+            content_hash=digest,
+            hash_algorithm=hash_algorithm,
+            size_bytes=len(content),
+            provider_version="1",
+        )
+        self.rows[(_scope_key(scope), result.blob_locator)] = (content, result)
+        return result
+
+    async def _content(self, scope: StorageScope, blob_locator: str) -> bytes:
+        try:
+            return self.rows[(_scope_key(scope), blob_locator)][0]
+        except KeyError as exc:
+            raise StorageNotFoundError(blob_locator) from exc
+
+    async def read(self, scope: StorageScope, blob_locator: str, byte_range=None):
+        content = await self._content(scope, blob_locator)
+        if byte_range is not None:
+            content = content[byte_range.start : byte_range.end]
+        yield content
+
+    async def head(self, scope: StorageScope, blob_locator: str) -> BlobHead | None:
+        row = self.rows.get((_scope_key(scope), blob_locator))
+        if row is None:
+            return None
+        result = row[1]
+        return BlobHead(
+            blob_locator=result.blob_locator,
+            size_bytes=result.size_bytes,
+            content_hash=result.content_hash,
+            hash_algorithm=result.hash_algorithm,
+            provider_version=result.provider_version,
+        )
+
+    async def delete(
+        self,
+        scope: StorageScope,
+        blob_locator: str,
+        provider_version: str | None = None,
+    ) -> bool:
+        key = (_scope_key(scope), blob_locator)
+        row = self.rows.get(key)
+        if row is None:
+            return False
+        if provider_version is not None and row[1].provider_version != provider_version:
+            raise StorageConflictError("blob version changed")
+        del self.rows[key]
+        return True
+
+
+class _ArtifactRepository:
+    def __init__(self) -> None:
+        self.artifacts: dict[tuple, ArtifactRecord] = {}
+        self.occurrences: list[ArtifactOccurrence] = []
+        self.relations: list[ArtifactRelation] = []
+
+    async def put(self, record: ArtifactRecord) -> ArtifactRecord:
+        key = (_scope_key(record.owner_scope), record.artifact_id)
+        existing = self.artifacts.get(key)
+        if existing is not None and existing != record:
+            raise StorageIntegrityError("artifact metadata conflicts")
+        self.artifacts[key] = record
+        return record
+
+    async def get(self, scope: StorageScope, artifact_id: str) -> ArtifactRecord | None:
+        return self.artifacts.get((_scope_key(scope), artifact_id))
+
+    async def record_occurrence(self, occurrence: ArtifactOccurrence) -> ArtifactOccurrence:
+        owner = StorageScope(
+            tenant_id=occurrence.scope.tenant_id,
+            project_id=occurrence.scope.project_id,
+        )
+        if await self.get(owner, occurrence.artifact_id) is None:
+            raise StorageNotFoundError(occurrence.artifact_id)
+        existing = next(
+            (row for row in self.occurrences if row.occurrence_id == occurrence.occurrence_id),
+            None,
+        )
+        if existing is not None and existing != occurrence:
+            raise StorageIntegrityError("occurrence conflicts")
+        if existing is None:
+            self.occurrences.append(occurrence)
+        return occurrence
+
+    async def list_occurrences(
+        self,
+        scope: StorageScope,
+        page: PageRequest,
+        artifact_id: str | None = None,
+    ) -> Page[ArtifactOccurrence]:
+        rows = [
+            row
+            for row in self.occurrences
+            if _scope_key(row.scope) == _scope_key(scope)
+            and (artifact_id is None or row.artifact_id == artifact_id)
+        ]
+        start = int(page.cursor.split("-")[-1]) if page.cursor else 0
+        selected = tuple(rows[start : start + page.limit])
+        next_index = start + len(selected)
+        cursor = f"page-{next_index}" if next_index < len(rows) else None
+        return Page(items=selected, next_cursor=cursor)
+
+    async def add_relation(self, relation: ArtifactRelation) -> ArtifactRelation:
+        for artifact_id in (relation.source_artifact_id, relation.target_artifact_id):
+            if await self.get(relation.scope, artifact_id) is None:
+                raise StorageNotFoundError(artifact_id)
+        existing = next(
+            (row for row in self.relations if row.relation_id == relation.relation_id),
+            None,
+        )
+        if existing is not None and existing != relation:
+            raise StorageIntegrityError("relation conflicts")
+        if existing is None:
+            self.relations.append(relation)
+        return relation
+
+    async def list_relations(
+        self,
+        scope: StorageScope,
+        artifact_id: str,
+        page: PageRequest,
+    ) -> Page[ArtifactRelation]:
+        rows = [
+            row
+            for row in self.relations
+            if _scope_key(row.scope) == _scope_key(scope)
+            and artifact_id in (row.source_artifact_id, row.target_artifact_id)
+        ]
+        return Page(items=tuple(rows[: page.limit]))
+
+
+class _SearchBackend:
+    def __init__(self) -> None:
+        self.documents: dict[tuple, SearchDocument] = {}
+        self.cursors: dict[str, int] = {}
+
+    def _advance(self, corpus: str) -> str:
+        self.cursors[corpus] = self.cursors.get(corpus, 0) + 1
+        return f"cursor-{self.cursors[corpus]}"
+
+    async def upsert(self, document: SearchDocument) -> str:
+        self.documents[(_scope_key(document.scope), document.corpus, document.item_id)] = document
+        return self._advance(document.corpus)
+
+    async def upsert_many(self, documents: tuple[SearchDocument, ...]) -> str | None:
+        cursor = None
+        for document in documents:
+            cursor = await self.upsert(document)
+        return cursor
+
+    async def delete(
+        self,
+        scope: StorageScope,
+        corpus: str,
+        item_ids: tuple[str, ...],
+    ) -> str | None:
+        if not item_ids:
+            return None
+        for item_id in item_ids:
+            self.documents.pop((_scope_key(scope), corpus, item_id), None)
+        return self._advance(corpus)
+
+    async def query(self, query: SearchQuery) -> tuple[SearchResult, ...]:
+        rows = [
+            document
+            for (scope_key, corpus, _item_id), document in self.documents.items()
+            if scope_key == _scope_key(query.scope) and corpus == query.corpus
+        ]
+        if query.mode is not SearchMode.STRUCTURAL:
+            terms = set(query.query.lower().split())
+            rows = [row for row in rows if terms & set(row.text.lower().split())]
+        rows = rows[: query.top_k]
+        return tuple(
+            SearchResult(
+                corpus=row.corpus,
+                item_id=row.item_id,
+                score=1.0,
+                mode=query.mode,
+                metadata=row.metadata,
+            )
+            for row in rows
+        )
+
+    async def indexed_cursor(self, corpus: str) -> str | None:
+        current = self.cursors.get(corpus)
+        return f"cursor-{current}" if current is not None else None
+
+    async def wait_until_indexed(
+        self,
+        corpus: str,
+        cursor: str,
+        timeout_seconds: float,
+    ) -> str:
+        current = await self.indexed_cursor(corpus)
+        if current is None or int(current.split("-")[-1]) < int(cursor.split("-")[-1]):
+            raise TimeoutError
+        return current
+
+
 @pytest.mark.asyncio
 async def test_fake_event_store_passes_shared_conformance_suite() -> None:
     await check_event_store_conformance(_EventStore())
@@ -170,6 +400,21 @@ async def test_fake_event_store_passes_shared_conformance_suite() -> None:
 @pytest.mark.asyncio
 async def test_fake_state_store_passes_shared_conformance_suite() -> None:
     await check_state_store_conformance(_StateStore())
+
+
+@pytest.mark.asyncio
+async def test_fake_blob_store_passes_shared_conformance_suite() -> None:
+    await check_blob_store_conformance(_BlobStore())
+
+
+@pytest.mark.asyncio
+async def test_fake_artifact_repository_passes_shared_conformance_suite() -> None:
+    await check_artifact_repository_conformance(_ArtifactRepository())
+
+
+@pytest.mark.asyncio
+async def test_fake_search_backend_passes_shared_conformance_suite() -> None:
+    await check_search_backend_conformance(_SearchBackend())
 
 
 def test_query_and_blob_range_validation_is_explicit() -> None:

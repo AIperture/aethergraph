@@ -1,17 +1,32 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
 
 import pytest
 
 from aethergraph.storage.contracts import (
+    ArtifactAction,
+    ArtifactOccurrence,
+    ArtifactRecord,
+    ArtifactRelation,
+    ArtifactRelationKind,
+    ArtifactRepository,
+    BlobRange,
+    BlobStore,
     EventDraft,
     EventQuery,
     EventStore,
     PageRequest,
+    SearchBackend,
+    SearchDocument,
+    SearchMode,
+    SearchQuery,
     StateHistoryQuery,
     StateStore,
     StorageConflictError,
+    StorageIntegrityError,
+    StorageNotFoundError,
     StorageScope,
 )
 
@@ -111,3 +126,189 @@ async def check_state_store_conformance(store: StateStore) -> None:
         await store.delete(scope, "agent", "writer", 1)
     assert await store.delete(scope, "agent", "writer", 2) is True
     assert await store.delete(scope, "agent", "writer", 0) is False
+
+
+async def check_blob_store_conformance(store: BlobStore) -> None:
+    scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
+    other_scope = StorageScope(tenant_id="tenant-1", project_id="project-2")
+    content = b"canonical artifact content"
+    digest = hashlib.sha256(content).hexdigest()
+
+    async def chunks():
+        yield content[:10]
+        yield content[10:]
+
+    stored = await store.put(scope, chunks(), expected_hash=digest)
+    assert stored.content_hash == digest
+    assert stored.size_bytes == len(content)
+    assert await store.head(scope, stored.blob_locator) is not None
+    assert await store.head(other_scope, stored.blob_locator) is None
+    assert b"".join([chunk async for chunk in store.read(scope, stored.blob_locator)]) == content
+    assert (
+        b"".join(
+            [
+                chunk
+                async for chunk in store.read(
+                    scope,
+                    stored.blob_locator,
+                    BlobRange(start=3, end=12),
+                )
+            ]
+        )
+        == content[3:12]
+    )
+
+    async def wrong_chunks():
+        yield b"wrong"
+
+    with pytest.raises(StorageIntegrityError):
+        await store.put(scope, wrong_chunks(), expected_hash=digest)
+    assert (
+        await store.delete(
+            scope,
+            stored.blob_locator,
+            provider_version=stored.provider_version,
+        )
+        is True
+    )
+    assert await store.delete(scope, stored.blob_locator) is False
+
+
+async def check_artifact_repository_conformance(repository: ArtifactRepository) -> None:
+    scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
+    run_scope = StorageScope(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        run_id="run-1",
+        session_id="session-1",
+    )
+    other_scope = StorageScope(tenant_id="tenant-1", project_id="project-2")
+    source = ArtifactRecord(
+        artifact_id="artifact-source",
+        content_hash="source-hash",
+        hash_algorithm="sha256",
+        size_bytes=10,
+        media_type="text/plain",
+        kind="source",
+        blob_locator="blob:source",
+        owner_scope=scope,
+        created_at=NOW,
+    )
+    target = ArtifactRecord(
+        artifact_id="artifact-target",
+        content_hash="target-hash",
+        hash_algorithm="sha256",
+        size_bytes=20,
+        media_type="application/json",
+        kind="result",
+        blob_locator="blob:target",
+        owner_scope=scope,
+        created_at=NOW,
+    )
+
+    assert await repository.put(source) == source
+    assert await repository.put(source) == source
+    assert await repository.put(target) == target
+    assert await repository.get(scope, target.artifact_id) == target
+    assert await repository.get(other_scope, target.artifact_id) is None
+
+    occurrences = tuple(
+        ArtifactOccurrence(
+            occurrence_id=f"occurrence-{index}",
+            artifact_id=target.artifact_id,
+            scope=run_scope,
+            action=ArtifactAction.PRODUCED if index == 0 else ArtifactAction.CONSUMED,
+            occurred_at=NOW,
+        )
+        for index in range(3)
+    )
+    for occurrence in occurrences:
+        assert await repository.record_occurrence(occurrence) == occurrence
+    page_one = await repository.list_occurrences(run_scope, PageRequest(limit=2))
+    assert len(page_one.items) == 2
+    assert page_one.next_cursor is not None
+    page_two = await repository.list_occurrences(
+        run_scope,
+        PageRequest(limit=2, cursor=page_one.next_cursor),
+    )
+    assert len(page_two.items) == 1
+
+    missing = ArtifactOccurrence(
+        occurrence_id="occurrence-missing",
+        artifact_id="missing",
+        scope=run_scope,
+        action=ArtifactAction.ATTACHED,
+        occurred_at=NOW,
+    )
+    with pytest.raises(StorageNotFoundError):
+        await repository.record_occurrence(missing)
+
+    relation = ArtifactRelation(
+        relation_id="relation-1",
+        source_artifact_id=source.artifact_id,
+        target_artifact_id=target.artifact_id,
+        kind=ArtifactRelationKind.DERIVED_FROM,
+        scope=scope,
+        created_at=NOW,
+    )
+    assert await repository.add_relation(relation) == relation
+    lineage = await repository.list_relations(scope, target.artifact_id, PageRequest())
+    assert lineage.items == (relation,)
+
+
+async def check_search_backend_conformance(search: SearchBackend) -> None:
+    scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
+    other_scope = StorageScope(tenant_id="tenant-1", project_id="project-2")
+    first = SearchDocument(
+        corpus="memory",
+        item_id="event-1",
+        text="canonical storage migration",
+        scope=scope,
+        occurred_at=NOW,
+    )
+    second = SearchDocument(
+        corpus="memory",
+        item_id="event-2",
+        text="provider contract conformance",
+        scope=scope,
+        occurred_at=NOW,
+    )
+    hidden = SearchDocument(
+        corpus="memory",
+        item_id="event-hidden",
+        text="canonical storage migration",
+        scope=other_scope,
+        occurred_at=NOW,
+    )
+
+    first_cursor = await search.upsert(first)
+    batch_cursor = await search.upsert_many((second, hidden))
+    assert batch_cursor is not None and batch_cursor != first_cursor
+    assert await search.upsert_many(()) is None
+    assert await search.indexed_cursor("memory") == batch_cursor
+    assert await search.wait_until_indexed("memory", first_cursor, 0.0) == batch_cursor
+
+    structural = await search.query(
+        SearchQuery(corpus="memory", mode=SearchMode.STRUCTURAL, scope=scope, top_k=10)
+    )
+    assert {row.item_id for row in structural} == {"event-1", "event-2"}
+    assert all(row.mode is SearchMode.STRUCTURAL for row in structural)
+    for mode in (SearchMode.SEMANTIC, SearchMode.LEXICAL, SearchMode.HYBRID):
+        rows = await search.query(
+            SearchQuery(
+                corpus="memory",
+                mode=mode,
+                scope=scope,
+                query="canonical migration",
+                top_k=10,
+            )
+        )
+        assert rows
+        assert all(row.mode is mode for row in rows)
+
+    delete_cursor = await search.delete(scope, "memory", ("event-1",))
+    assert delete_cursor is not None
+    remaining = await search.query(
+        SearchQuery(corpus="memory", mode=SearchMode.STRUCTURAL, scope=scope, top_k=10)
+    )
+    assert {row.item_id for row in remaining} == {"event-2"}
