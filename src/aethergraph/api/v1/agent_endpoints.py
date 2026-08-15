@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from hashlib import sha256
+from ipaddress import ip_address
 import json
 from typing import Annotated, Any
 
@@ -25,6 +26,8 @@ from aethergraph.services.host.endpoint_credentials import ENDPOINT_COOKIE_NAME
 from aethergraph.services.integration import VerifiedAttachment, VerifiedIntegrationContext
 
 from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
+from .pagination import decode_cursor, encode_cursor
+from .schemas.session import Session, SessionListResponse
 
 router = APIRouter(prefix="/agent-endpoints", tags=["agent-endpoints"])
 
@@ -41,6 +44,15 @@ class EndpointSessionCreate(_ClosedModel):
 class EndpointSessionView(_ClosedModel):
     session_id: str
     endpoint_id: str
+
+
+class EndpointDescriptor(_ClosedModel):
+    endpoint_id: str
+    entry_agent_id: str
+
+
+class EndpointSessionUpdate(_ClosedModel):
+    title: str | None = Field(default=None, max_length=512)
 
 
 class EndpointChoice(_ClosedModel):
@@ -94,6 +106,14 @@ def require_endpoint_credential(endpoint_id: str, request: Request) -> None:
     Notes:
         Generic AG local identity is not an authentication fallback for Host endpoints.
     """
+
+    if getattr(request.app.state, "development_ui_enabled", False):
+        client_host = request.client.host if request.client is not None else ""
+        try:
+            if ip_address(client_host).is_loopback:
+                return
+        except ValueError:
+            pass
 
     registry = _credential_registry(request)
     if not registry.validate(endpoint_id, request.cookies.get(ENDPOINT_COOKIE_NAME)):
@@ -183,6 +203,45 @@ def _route(container, endpoint_id: str):
     if len(matches) != 1 or not matches[0].enabled:
         raise HTTPException(status_code=404, detail="Agent endpoint not found.")
     return matches[0]
+
+
+@router.get("/{endpoint_id}", response_model=EndpointDescriptor)
+async def endpoint_descriptor(
+    endpoint_id: str,
+    request: Request,
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
+) -> EndpointDescriptor:
+    """Return the manifest-authoritative entry agent for one endpoint.
+
+    The descriptor lets AG UI avoid presenting agent choices that the endpoint
+    protocol cannot honor. Credential validation and manifest route resolution
+    occur before any identity is returned.
+
+    Examples:
+        Inspect an AG UI endpoint:
+            ```python
+            GET /api/v1/agent-endpoints/studio-ui
+            ```
+
+        Read the entry agent:
+            ```python
+            agent_id = response["entry_agent_id"]
+            ```
+
+    Args:
+        endpoint_id: Immutable endpoint identity selected by the Host manifest.
+        request: FastAPI request carrying the installed Host.
+        _credential: Validated endpoint credential dependency result.
+
+    Returns:
+        EndpointDescriptor: Exact endpoint and manifest entry-agent identities.
+
+    Notes:
+        The response contains no release metadata or credential material.
+    """
+
+    route = _route(_host(request), endpoint_id)
+    return EndpointDescriptor(endpoint_id=endpoint_id, entry_agent_id=route.entry_agent_id)
 
 
 def _external_identity(
@@ -321,6 +380,272 @@ async def create_endpoint_session(
             detail="Endpoint session binding conflicts with the canonical session identity.",
         )
     return EndpointSessionView(session_id=session_id, endpoint_id=endpoint_id)
+
+
+async def _get_endpoint_session(container, *, route, identity, session_id: str) -> Session:
+    external = _external_identity(identity=identity, session_id=session_id)
+    binding = await _binding(container, route=route, external_identity=external)
+    if binding.ag_session_id != session_id:
+        raise HTTPException(status_code=404, detail="Endpoint session not found.")
+    session = await container.session_store.get(session_id)
+    tenant_id, user_id = _principal(identity)
+    expected_source = (
+        "ag_ui" if route.integration_kind is IntegrationKind.AG_UI else "agent_endpoint"
+    )
+    if (
+        session is None
+        or session.user_id != user_id
+        or session.org_id != tenant_id
+        or session.source != expected_source
+        or session.external_ref != f"agent-endpoint:{route.endpoint_id}"
+    ):
+        raise HTTPException(status_code=404, detail="Endpoint session not found.")
+    return session
+
+
+@router.get("/{endpoint_id}/sessions", response_model=SessionListResponse)
+async def list_endpoint_sessions(
+    endpoint_id: str,
+    request: Request,
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
+    kind: SessionKind | None = Query(default=None),  # noqa: B008
+    limit: int = Query(default=50, ge=1, le=200),  # noqa: B008
+    cursor: str | None = Query(default=None),  # noqa: B008
+) -> SessionListResponse:
+    """List sessions owned by one exact endpoint route.
+
+    The scan applies identity, external-reference, and durable binding checks
+    before returning a session. Its cursor advances over the underlying scoped
+    session collection, so sessions belonging to other routes cannot poison or
+    truncate the endpoint view.
+
+    Examples:
+        List the first page:
+            ```python
+            GET /api/v1/agent-endpoints/studio-ui/sessions?limit=20
+            ```
+
+        Continue from a cursor:
+            ```python
+            GET /api/v1/agent-endpoints/studio-ui/sessions?cursor=...
+            ```
+
+    Args:
+        endpoint_id: Immutable manifest endpoint identity.
+        request: FastAPI request carrying the installed Host.
+        identity: Authenticated endpoint principal.
+        _credential: Validated endpoint credential dependency result.
+        kind: Optional session-kind filter.
+        limit: Maximum endpoint-owned sessions to return.
+        cursor: Optional opaque cursor over the identity-scoped session list.
+
+    Returns:
+        SessionListResponse: Endpoint-owned sessions and an optional continuation cursor.
+
+    Notes:
+        Sessions with forged or stale `external_ref` values are excluded unless a
+        matching durable endpoint binding also exists.
+    """
+
+    container = _host(request)
+    route = _route(container, endpoint_id)
+    tenant_id, user_id = _principal(identity)
+    offset = decode_cursor(cursor)
+    scan_offset = offset
+    items: list[Session] = []
+    batch_limit = max(50, min(500, limit * 2))
+    source = "ag_ui" if route.integration_kind is IntegrationKind.AG_UI else "agent_endpoint"
+    external_ref = f"agent-endpoint:{endpoint_id}"
+
+    while len(items) < limit:
+        batch = await container.session_store.list_for_user(
+            user_id=user_id,
+            org_id=tenant_id,
+            kind=kind,
+            limit=batch_limit,
+            offset=scan_offset,
+        )
+        if not batch:
+            return SessionListResponse(items=items, next_cursor=None)
+        for session in batch:
+            scan_offset += 1
+            if session.source != source or session.external_ref != external_ref:
+                continue
+            try:
+                bound = await _get_endpoint_session(
+                    container,
+                    route=route,
+                    identity=identity,
+                    session_id=session.session_id,
+                )
+            except HTTPException:
+                continue
+            items.append(bound)
+            if len(items) == limit:
+                return SessionListResponse(items=items, next_cursor=encode_cursor(scan_offset))
+        if len(batch) < batch_limit:
+            return SessionListResponse(items=items, next_cursor=None)
+
+    return SessionListResponse(items=items, next_cursor=encode_cursor(scan_offset))
+
+
+@router.get("/{endpoint_id}/sessions/{session_id}", response_model=Session)
+async def get_endpoint_session(
+    endpoint_id: str,
+    session_id: str,
+    request: Request,
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
+) -> Session:
+    """Return metadata for one endpoint-bound session.
+
+    The lookup resolves the endpoint route and durable external binding before
+    reading session metadata, preventing global-session access through this API.
+
+    Examples:
+        Read a session:
+            ```python
+            GET /api/v1/agent-endpoints/studio-ui/sessions/session-1
+            ```
+
+        Handle a cross-route session:
+            ```python
+            assert response.status_code == 404
+            ```
+
+    Args:
+        endpoint_id: Immutable manifest endpoint identity.
+        session_id: Public endpoint session identity.
+        request: FastAPI request carrying the installed Host.
+        identity: Authenticated endpoint principal.
+        _credential: Validated endpoint credential dependency result.
+
+    Returns:
+        Session: Metadata for the exact endpoint-bound session.
+
+    Notes:
+        Unknown and cross-route sessions use the same not-found response.
+    """
+
+    container = _host(request)
+    route = _route(container, endpoint_id)
+    return await _get_endpoint_session(
+        container,
+        route=route,
+        identity=identity,
+        session_id=session_id,
+    )
+
+
+@router.patch("/{endpoint_id}/sessions/{session_id}", response_model=Session)
+async def update_endpoint_session(
+    endpoint_id: str,
+    session_id: str,
+    body: EndpointSessionUpdate,
+    request: Request,
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
+) -> Session:
+    """Update the title of one endpoint-bound session.
+
+    Endpoint clients may change presentation metadata but cannot rewrite the
+    immutable endpoint external reference used for route isolation.
+
+    Examples:
+        Rename a session:
+            ```python
+            PATCH /api/v1/agent-endpoints/studio-ui/sessions/session-1
+            {"title": "New title"}
+            ```
+
+        Clear an automatically generated title:
+            ```python
+            PATCH /api/v1/agent-endpoints/studio-ui/sessions/session-1
+            {"title": null}
+            ```
+
+    Args:
+        endpoint_id: Immutable manifest endpoint identity.
+        session_id: Public endpoint session identity.
+        body: Closed title update command.
+        request: FastAPI request carrying the installed Host.
+        identity: Authenticated endpoint principal.
+        _credential: Validated endpoint credential dependency result.
+
+    Returns:
+        Session: Updated endpoint-bound session metadata.
+
+    Notes:
+        Endpoint external references cannot be changed through this route.
+    """
+
+    container = _host(request)
+    route = _route(container, endpoint_id)
+    session = await _get_endpoint_session(
+        container,
+        route=route,
+        identity=identity,
+        session_id=session_id,
+    )
+    updated = await container.session_store.update(
+        session.session_id,
+        title=body.title,
+        title_source="manual",
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Endpoint session not found.")
+    return updated
+
+
+@router.delete("/{endpoint_id}/sessions/{session_id}", status_code=204)
+async def delete_endpoint_session(
+    endpoint_id: str,
+    session_id: str,
+    request: Request,
+    identity: Annotated[RequestIdentity, Depends(get_identity)],
+    _credential: Annotated[None, Depends(require_endpoint_credential)],
+) -> Response:
+    """Delete one endpoint-bound session.
+
+    Durable route binding verification happens before deletion, so a credential
+    for one endpoint cannot delete another endpoint's session.
+
+    Examples:
+        Delete an endpoint session:
+            ```python
+            DELETE /api/v1/agent-endpoints/studio-ui/sessions/session-1
+            ```
+
+        Reject a cross-route deletion:
+            ```python
+            assert response.status_code == 404
+            ```
+
+    Args:
+        endpoint_id: Immutable manifest endpoint identity.
+        session_id: Public endpoint session identity.
+        request: FastAPI request carrying the installed Host.
+        identity: Authenticated endpoint principal.
+        _credential: Validated endpoint credential dependency result.
+
+    Returns:
+        Response: Empty HTTP 204 response after successful deletion.
+
+    Notes:
+        Deleting a session does not mutate the immutable Host manifest.
+    """
+
+    container = _host(request)
+    route = _route(container, endpoint_id)
+    session = await _get_endpoint_session(
+        container,
+        route=route,
+        identity=identity,
+        session_id=session_id,
+    )
+    await container.session_store.delete(session.session_id)
+    return Response(status_code=204)
 
 
 async def _parse_ingress(request: Request) -> tuple[EndpointIngressBody, tuple[UploadFile, ...]]:

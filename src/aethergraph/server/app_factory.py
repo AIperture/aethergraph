@@ -135,6 +135,34 @@ def create_app(
             if replay_report.errors:
                 for err in replay_report.errors:
                     logger.warning("Registry replay error: %s", err)
+
+            # The mutable sidecar still uses the canonical integration protocol.
+            # A process-local manifest gives each registered agent an immutable
+            # endpoint identity without reviving the deleted WebUI transport.
+            from aethergraph.services.host.development import (
+                build_development_ui_manifest,
+                development_ui_endpoints,
+            )
+            from aethergraph.services.host.endpoint_credentials import (
+                EndpointCredentialRegistry,
+            )
+            from aethergraph.services.integration import install_integration_ingress
+
+            development_manifest = build_development_ui_manifest(
+                registry=container.registry,
+                workspace_identity=str(Path(workspace).resolve()),
+            )
+            install_integration_ingress(container=container, manifest=development_manifest)
+            app.state.endpoint_credentials = EndpointCredentialRegistry.from_manifest(
+                development_manifest
+            )
+            endpoints = development_ui_endpoints(development_manifest)
+            app.state.development_ui_enabled = True
+            app.state.development_ui_bootstrap = {
+                "mode": "development",
+                "default_agent_id": development_manifest.entry_agent_id,
+                "endpoints": endpoints,
+            }
         try:
             # Hand control back to FastAPI / TestClient
             yield

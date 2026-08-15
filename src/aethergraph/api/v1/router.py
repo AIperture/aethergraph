@@ -5,6 +5,7 @@ from .agents import router as agents_router
 from .apps import router as apps_router
 from .artifacts import router as artifacts_router
 from .auth import router as auth_router
+from .development_ui import router as development_ui_router
 from .graphs import router as graphs_router
 from .identity import router as identity_router
 from .llm import router as llm_router
@@ -25,6 +26,7 @@ router.include_router(runs_router)
 router.include_router(graphs_router)
 router.include_router(artifacts_router)
 router.include_router(agent_endpoints_router)
+router.include_router(development_ui_router)
 router.include_router(memory_router)
 router.include_router(observability_router)
 router.include_router(stats_router)

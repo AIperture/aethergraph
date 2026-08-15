@@ -195,6 +195,63 @@ async def test_endpoint_session_and_ingress_use_manifest_route() -> None:
 
 
 @pytest.mark.anyio
+async def test_endpoint_session_metadata_is_scoped_to_route() -> None:
+    app, _ = _app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
+        descriptor = await client.get("/api/v1/agent-endpoints/support")
+        created = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-metadata", "title": "Original"},
+        )
+        session_id = created.json()["session_id"]
+        listed = await client.get("/api/v1/agent-endpoints/support/sessions")
+        fetched = await client.get(f"/api/v1/agent-endpoints/support/sessions/{session_id}")
+        updated = await client.patch(
+            f"/api/v1/agent-endpoints/support/sessions/{session_id}",
+            json={"title": "Renamed"},
+        )
+        deleted = await client.delete(f"/api/v1/agent-endpoints/support/sessions/{session_id}")
+
+    assert descriptor.status_code == 200
+    assert descriptor.json() == {"endpoint_id": "support", "entry_agent_id": "agent.support"}
+    assert listed.status_code == 200
+    assert [item["session_id"] for item in listed.json()["items"]] == [session_id]
+    assert fetched.status_code == 200
+    assert updated.json()["title"] == "Renamed"
+    assert deleted.status_code == 204
+
+
+@pytest.mark.anyio
+async def test_endpoint_session_metadata_rejects_mismatched_durable_binding() -> None:
+    app, container = _app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
+        first = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-first"},
+        )
+        second = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-second"},
+        )
+        first_id = first.json()["session_id"]
+        second_id = second.json()["session_id"]
+        first_binding = container.integration_ingress.binding_store.by_conversation[first_id]
+        container.integration_ingress.binding_store.by_conversation[first_id] = (
+            first_binding.model_copy(update={"ag_session_id": second_id})
+        )
+
+        fetched = await client.get(f"/api/v1/agent-endpoints/support/sessions/{first_id}")
+        listed = await client.get("/api/v1/agent-endpoints/support/sessions")
+
+    assert fetched.status_code == 404
+    assert [item["session_id"] for item in listed.json()["items"]] == [second_id]
+
+
+@pytest.mark.anyio
 async def test_endpoint_ingress_rejects_agent_selection_fields() -> None:
     app, _ = _app()
     transport = httpx.ASGITransport(app=app)
