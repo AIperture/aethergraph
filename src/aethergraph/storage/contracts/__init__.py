@@ -108,6 +108,7 @@ from .records import (
 )
 from .scope import StorageScope
 from .stores import (
+    ArtifactMetricOrder,
     ArtifactOccurrenceQuery,
     ArtifactRepository,
     BlobStore,
@@ -155,6 +156,7 @@ __all__ = [
     "ArtifactAction",
     "ArtifactOrphanCleanupResult",
     "ArtifactOccurrence",
+    "ArtifactMetricOrder",
     "ArtifactOccurrenceQuery",
     "ArtifactRecord",
     "ArtifactRetentionRecord",

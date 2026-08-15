@@ -17,6 +17,7 @@ from storage_conformance.suite import (
 )
 
 from aethergraph.storage.contracts import (
+    ArtifactMetricOrder,
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
     ArtifactOrphanCleanupResult,
@@ -398,6 +399,12 @@ class _ArtifactRepository:
             if query.pinned is not None and pinned is not query.pinned:
                 continue
             rows.append(occurrence)
+        if query.metric is not None:
+            rows = [row for row in rows if query.metric in row.metrics]
+            rows.sort(
+                key=lambda row: row.metrics[query.metric],
+                reverse=query.metric_order is ArtifactMetricOrder.MAXIMUM,
+            )
         start = int(query.page.cursor.split("-")[-1]) if query.page.cursor else 0
         selected = tuple(rows[start : start + query.page.limit])
         next_index = start + len(selected)

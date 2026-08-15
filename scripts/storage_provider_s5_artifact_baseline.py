@@ -19,6 +19,7 @@ from typing import Any
 from aethergraph.services.artifacts import CanonicalArtifactFacade
 from aethergraph.storage.contracts import (
     ArtifactAction,
+    ArtifactMetricOrder,
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
     ArtifactRecord,
@@ -187,6 +188,8 @@ def _filtered_query(run_id: str) -> ArtifactOccurrenceQuery:
         tags=("final", "reviewed"),
         labels={"category": "evidence"},
         pinned=True,
+        metric="quality",
+        metric_order=ArtifactMetricOrder.MAXIMUM,
     )
 
 
@@ -228,6 +231,11 @@ async def _benchmark(bundle: Any, samples: int) -> dict[str, Any]:
             page = await bundle.artifacts.query_occurrences(_filtered_query(filtered_run_id))
             if any(item.scope.run_id != filtered_run_id for item in page.items):
                 raise AssertionError("filtered query crossed run scope")
+            if [item.metrics["quality"] for item in page.items] != sorted(
+                (item.metrics["quality"] for item in page.items),
+                reverse=True,
+            ):
+                raise AssertionError("filtered query metric ranking changed")
         except Exception as exc:
             errors[f"filtered_query:{type(exc).__name__}"] += 1
         else:
@@ -242,9 +250,16 @@ async def _benchmark(bundle: Any, samples: int) -> dict[str, Any]:
                 tags=("final", "reviewed"),
                 labels={"category": "evidence"},
                 pinned=True,
+                metric="quality",
+                metric_order=ArtifactMetricOrder.MAXIMUM,
             )
             if any(item.run_id != filtered_run_id or not item.pinned for item in public.items):
                 raise AssertionError("public hydration changed query semantics")
+            if [item.metrics["quality"] for item in public.items] != sorted(
+                (item.metrics["quality"] for item in public.items),
+                reverse=True,
+            ):
+                raise AssertionError("public metric ranking changed")
         except Exception as exc:
             errors[f"hydrate:{type(exc).__name__}"] += 1
         else:

@@ -43,6 +43,13 @@ class SortDirection(StrEnum):
     DESCENDING = "descending"
 
 
+class ArtifactMetricOrder(StrEnum):
+    """Exact occurrence-metric ranking direction for artifact queries."""
+
+    MAXIMUM = "max"
+    MINIMUM = "min"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EventQuery:
     """Bounded event query over exact canonical scope and promoted dimensions."""
@@ -101,8 +108,8 @@ class ArtifactOccurrenceQuery:
     """Bounded artifact-occurrence query with explicit owner authorization.
 
     Exact immutable content ownership is separated from partial execution filters.
-    Content kind, tags, labels, and current pin state all filter before cursor
-    pagination.
+    Content kind, tags, labels, current pin state, and optional occurrence-metric
+    ranking all apply before cursor pagination.
 
     Examples:
         Query one authorized run:
@@ -133,6 +140,8 @@ class ArtifactOccurrenceQuery:
         tags: Immutable unique content-tag intersection filter.
         labels: Immutable exact content-label filters.
         pinned: Optional current retention-state filter; absent retention is unpinned.
+        metric: Optional exact occurrence metric key used for provider-side ranking.
+        metric_order: Required maximum/minimum direction when `metric` is supplied.
 
     Returns:
         ArtifactOccurrenceQuery: Immutable validated repository query value.
@@ -150,6 +159,8 @@ class ArtifactOccurrenceQuery:
     tags: tuple[str, ...] = ()
     labels: Mapping[str, FrozenJson] = field(default_factory=dict)
     pinned: bool | None = None
+    metric: str | None = None
+    metric_order: ArtifactMetricOrder | None = None
 
     def __post_init__(self) -> None:
         if not self.owner_scope.as_filter():
@@ -170,6 +181,15 @@ class ArtifactOccurrenceQuery:
             raise ValueError("tags must not contain duplicates")
         if self.pinned is not None and not isinstance(self.pinned, bool):
             raise TypeError("pinned must be a boolean when supplied")
+        if self.metric is not None:
+            _nonempty("metric", self.metric)
+        if (self.metric is None) != (self.metric_order is None):
+            raise ValueError("metric and metric_order must be supplied together")
+        if self.metric_order is not None and not isinstance(
+            self.metric_order,
+            ArtifactMetricOrder,
+        ):
+            raise TypeError("metric_order must be an ArtifactMetricOrder")
         for name, value in self.owner_scope.as_filter().items():
             occurrence_value = getattr(self.scope, name)
             if occurrence_value is not None and occurrence_value != value:

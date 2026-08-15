@@ -18,6 +18,7 @@ from uuid import uuid4
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.storage.contracts import (
     ArtifactAction,
+    ArtifactMetricOrder,
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
     ArtifactOrphanCleanupResult,
@@ -1542,6 +1543,8 @@ class CanonicalArtifactFacade:
         tags: tuple[str, ...] = (),
         labels: Mapping[str, Any] | None = None,
         pinned: bool | None = None,
+        metric: str | None = None,
+        metric_order: ArtifactMetricOrder | None = None,
     ) -> Page[ArtifactOccurrence]:
         """Query a bounded owner-authorized artifact occurrence page.
 
@@ -1573,6 +1576,8 @@ class CanonicalArtifactFacade:
             tags: Immutable unique content-tag intersection filter.
             labels: Optional exact immutable content-label filters.
             pinned: Optional current retention-state filter.
+            metric: Optional exact occurrence metric key used for indexed ranking.
+            metric_order: Required maximum/minimum ranking direction with `metric`.
 
         Returns:
             Page[ArtifactOccurrence]: Stable matching occurrences and continuation cursor.
@@ -1591,6 +1596,8 @@ class CanonicalArtifactFacade:
                 tags=tags,
                 labels=dict(labels or {}),
                 pinned=pinned,
+                metric=metric,
+                metric_order=metric_order,
             )
         )
 
@@ -1604,6 +1611,8 @@ class CanonicalArtifactFacade:
         tags: tuple[str, ...] = (),
         labels: Mapping[str, Any] | None = None,
         pinned: bool | None = None,
+        metric: str | None = None,
+        metric_order: ArtifactMetricOrder | None = None,
         deprecated_app_id: str | None = None,
     ) -> Page[Artifact]:
         """Hydrate one frozen public Artifact page from canonical records.
@@ -1635,6 +1644,8 @@ class CanonicalArtifactFacade:
             tags: Immutable unique content-tag intersection filter.
             labels: Optional exact immutable content-label filters.
             pinned: Optional current retention-state filter.
+            metric: Optional exact occurrence metric key used for indexed ranking.
+            metric_order: Required maximum/minimum ranking direction with `metric`.
             deprecated_app_id: Optional deprecated response-only App metadata; never
                 inferred and never used for authorization.
 
@@ -1654,6 +1665,8 @@ class CanonicalArtifactFacade:
             tags=tags,
             labels=labels,
             pinned=pinned,
+            metric=metric,
+            metric_order=metric_order,
         )
         artifact_ids = tuple(item.artifact_id for item in occurrences.items)
         records, retention = await asyncio.gather(

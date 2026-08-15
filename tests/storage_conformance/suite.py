@@ -7,6 +7,7 @@ import pytest
 
 from aethergraph.storage.contracts import (
     ArtifactAction,
+    ArtifactMetricOrder,
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
     ArtifactRecord,
@@ -276,6 +277,7 @@ async def check_artifact_repository_conformance(
             scope=run_scope,
             action=ArtifactAction.PRODUCED if index == 0 else ArtifactAction.CONSUMED,
             occurred_at=NOW,
+            metrics={"quality": (0.2, 0.9, 0.9)[index]},
         )
         for index in range(3)
     )
@@ -300,6 +302,27 @@ async def check_artifact_repository_conformance(
         )
     )
     assert filtered.items == tuple(reversed(occurrences))
+    ranked = await repository.query_occurrences(
+        ArtifactOccurrenceQuery(
+            owner_scope=scope,
+            scope=StorageScope(run_id="run-1"),
+            page=PageRequest(limit=2),
+            metric="quality",
+            metric_order=ArtifactMetricOrder.MAXIMUM,
+        )
+    )
+    assert ranked.items == (occurrences[2], occurrences[1])
+    assert ranked.next_cursor is not None
+    ranked_tail = await repository.query_occurrences(
+        ArtifactOccurrenceQuery(
+            owner_scope=scope,
+            scope=StorageScope(run_id="run-1"),
+            page=PageRequest(limit=2, cursor=ranked.next_cursor),
+            metric="quality",
+            metric_order=ArtifactMetricOrder.MAXIMUM,
+        )
+    )
+    assert ranked_tail.items == (occurrences[0],)
     assert (
         await repository.query_occurrences(
             ArtifactOccurrenceQuery(

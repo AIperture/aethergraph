@@ -8,10 +8,12 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 import hashlib
 import json
+import math
 import sqlite3
 
 from ...contracts import (
     ArtifactAction,
+    ArtifactMetricOrder,
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
     ArtifactRecord,
@@ -30,7 +32,7 @@ from ...contracts import (
 )
 from .database import LocalSQLiteDatabase
 
-_ARTIFACT_COMPONENT_VERSION = 3
+_ARTIFACT_COMPONENT_VERSION = 4
 _MAX_ARTIFACT_BATCH = 500
 _SCOPE_FIELDS = tuple(StorageScope.__dataclass_fields__)
 _CREATE_ARTIFACTS = """
@@ -137,6 +139,19 @@ _CREATE_OCCURRENCE_SCOPE_DIMENSION_INDEXES = tuple(
     f"ON local_artifact_occurrences({name}, sequence)"
     for name in _SCOPE_FIELDS
 )
+_CREATE_OCCURRENCE_METRICS = """
+CREATE TABLE local_artifact_occurrence_metrics (
+    occurrence_id TEXT NOT NULL
+        REFERENCES local_artifact_occurrences(occurrence_id) ON DELETE CASCADE,
+    metric_key TEXT NOT NULL,
+    metric_value REAL NOT NULL,
+    PRIMARY KEY (occurrence_id, metric_key)
+)
+"""
+_CREATE_OCCURRENCE_METRIC_RANK_INDEX = """
+CREATE INDEX ix_local_occurrence_metrics_rank
+ON local_artifact_occurrence_metrics(metric_key, metric_value, occurrence_id)
+"""
 _CREATE_RELATIONS = """
 CREATE TABLE local_artifact_relations (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +199,8 @@ class LocalArtifactRepository:
                 _CREATE_OCCURRENCE_SCOPE_INDEX,
                 _CREATE_OCCURRENCE_ARTIFACT_INDEX,
                 *_CREATE_OCCURRENCE_SCOPE_DIMENSION_INDEXES,
+                _CREATE_OCCURRENCE_METRICS,
+                _CREATE_OCCURRENCE_METRIC_RANK_INDEX,
                 _CREATE_RELATIONS,
                 _CREATE_RELATION_SOURCE_INDEX,
                 _CREATE_RELATION_TARGET_INDEX,
@@ -631,6 +648,17 @@ class LocalArtifactRepository:
                     occurrence.schema_version,
                 ),
             )
+            connection.executemany(
+                """
+                INSERT INTO local_artifact_occurrence_metrics(
+                    occurrence_id, metric_key, metric_value
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    (occurrence.occurrence_id, key, value)
+                    for key, value in sorted(occurrence.metrics.items())
+                ),
+            )
             return occurrence
 
         return await self._database.transaction(commit)
@@ -721,11 +749,20 @@ class LocalArtifactRepository:
             Page[ArtifactOccurrence]: Stable descending occurrence page and cursor.
 
         Notes:
-            Normalized scope, label, and tag indexes avoid JSON extraction and
-            deprecated App metadata is never consulted for authorization.
+            Normalized scope, label, tag, and metric indexes avoid JSON extraction;
+            deprecated App metadata is never consulted for authorization or rank.
         """
+        joins = ""
+        values: list[object] = []
+        if query.metric is not None:
+            joins = (
+                "JOIN local_artifact_occurrence_metrics metric_sort "
+                "ON metric_sort.occurrence_id = o.occurrence_id "
+                "AND metric_sort.metric_key = ? "
+            )
+            values.append(query.metric)
         clauses = ["a.owner_scope_identity = ?"]
-        values: list[object] = [_scope_identity(query.owner_scope)]
+        values.append(_scope_identity(query.owner_scope))
         for name, value in query.scope.as_filter().items():
             clauses.append(f"o.{name} = ?")
             values.append(value)
@@ -756,21 +793,45 @@ class LocalArtifactRepository:
 
         fingerprint = _artifact_occurrence_query_fingerprint(query)
         if query.page.cursor is not None:
-            clauses.append("o.sequence < ?")
-            values.append(_decode_cursor(query.page.cursor, fingerprint))
+            cursor_sequence, cursor_metric = _decode_occurrence_query_cursor(
+                query.page.cursor,
+                fingerprint,
+            )
+            if query.metric is None:
+                clauses.append("o.sequence < ?")
+                values.append(cursor_sequence)
+            else:
+                assert cursor_metric is not None
+                comparison = "<" if query.metric_order is ArtifactMetricOrder.MAXIMUM else ">"
+                clauses.append(
+                    f"(metric_sort.metric_value {comparison} ? OR "
+                    "(metric_sort.metric_value = ? AND o.sequence < ?))"
+                )
+                values.extend((cursor_metric, cursor_metric, cursor_sequence))
+        order = "o.sequence DESC"
+        selection = "SELECT o.*"
+        if query.metric is not None:
+            direction = "DESC" if query.metric_order is ArtifactMetricOrder.MAXIMUM else "ASC"
+            order = f"metric_sort.metric_value {direction}, o.sequence DESC"
+            selection = "SELECT o.*, metric_sort.metric_value AS rank_metric"
         values.append(query.page.limit + 1)
         rows = await self._database.fetch_all(
-            "SELECT o.* FROM local_artifact_occurrences o "
-            "JOIN local_artifacts a ON a.artifact_id = o.artifact_id "
+            f"{selection} FROM local_artifact_occurrences o "
+            + joins
+            + "JOIN local_artifacts a ON a.artifact_id = o.artifact_id "
             "LEFT JOIN local_artifact_retention r ON r.artifact_id = o.artifact_id "
-            f"WHERE {' AND '.join(clauses)} ORDER BY o.sequence DESC LIMIT ?",
+            f"WHERE {' AND '.join(clauses)} ORDER BY {order} LIMIT ?",
             values,
         )
         selected = rows[: query.page.limit]
         return Page(
             items=tuple(_occurrence(row) for row in selected),
             next_cursor=(
-                _encode_cursor(fingerprint, int(selected[-1]["sequence"]))
+                _encode_occurrence_query_cursor(
+                    fingerprint,
+                    int(selected[-1]["sequence"]),
+                    (float(selected[-1]["rank_metric"]) if query.metric is not None else None),
+                )
                 if len(rows) > query.page.limit
                 else None
             ),
@@ -1065,9 +1126,66 @@ def _artifact_occurrence_query_fingerprint(query: ArtifactOccurrenceQuery) -> st
                 "tags": query.tags,
                 "labels": query.labels,
                 "pinned": query.pinned,
+                "metric": query.metric,
+                "metric_order": (
+                    query.metric_order.value if query.metric_order is not None else None
+                ),
             }
         ),
     )
+
+
+def _encode_occurrence_query_cursor(
+    fingerprint: str,
+    sequence: int,
+    metric_value: float | None,
+) -> str:
+    payload = json.dumps(
+        {
+            "fingerprint": fingerprint,
+            "sequence": sequence,
+            "metric_value": metric_value,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+
+def _decode_occurrence_query_cursor(
+    cursor: str,
+    fingerprint: str,
+) -> tuple[int, float | None]:
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode())
+        if not isinstance(payload, dict) or set(payload) != {
+            "fingerprint",
+            "sequence",
+            "metric_value",
+        }:
+            raise ValueError("cursor payload")
+        if payload["fingerprint"] != fingerprint:
+            raise ValueError("cursor context")
+        sequence = payload["sequence"]
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise ValueError("cursor sequence")
+        metric_value = payload["metric_value"]
+        if metric_value is not None and (
+            isinstance(metric_value, bool)
+            or not isinstance(metric_value, int | float)
+            or not math.isfinite(float(metric_value))
+        ):
+            raise ValueError("cursor metric")
+        return sequence, float(metric_value) if metric_value is not None else None
+    except (
+        binascii.Error,
+        ValueError,
+        TypeError,
+        KeyError,
+        UnicodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise StorageConfigurationError("Invalid or mismatched artifact cursor") from exc
 
 
 def _encode_cursor(fingerprint: str, sequence: int) -> str:

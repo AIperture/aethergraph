@@ -7,7 +7,9 @@ import pytest
 
 from aethergraph.storage.contracts import (
     ArtifactAction,
+    ArtifactMetricOrder,
     ArtifactOccurrence,
+    ArtifactOccurrenceQuery,
     ArtifactOrphanCleanupResult,
     ArtifactRecord,
     ArtifactRelation,
@@ -216,6 +218,23 @@ def test_artifact_lineage_rejects_self_edges() -> None:
             kind=ArtifactRelationKind.REFERENCES,
             scope=SCOPE,
             created_at=NOW,
+        )
+
+
+def test_artifact_occurrence_metric_ranking_requires_an_explicit_pair() -> None:
+    query = ArtifactOccurrenceQuery(
+        owner_scope=StorageScope(project_id="project-1"),
+        scope=StorageScope(run_id="run-1"),
+        metric="quality",
+        metric_order=ArtifactMetricOrder.MAXIMUM,
+    )
+
+    assert query.metric_order is ArtifactMetricOrder.MAXIMUM
+    with pytest.raises(ValueError, match="supplied together"):
+        ArtifactOccurrenceQuery(
+            owner_scope=StorageScope(project_id="project-1"),
+            scope=StorageScope(run_id="run-1"),
+            metric="quality",
         )
 
 

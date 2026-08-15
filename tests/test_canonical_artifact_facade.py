@@ -12,6 +12,7 @@ import pytest
 
 from aethergraph.services.artifacts import CanonicalArtifactFacade, CanonicalArtifactWriter
 from aethergraph.storage.contracts import (
+    ArtifactMetricOrder,
     ArtifactRelationKind,
     PageRequest,
     RunRecord,
@@ -286,6 +287,8 @@ async def test_public_occurrence_pages_filter_then_batch_hydrate(tmp_path: Path)
             "tags": ("final", "reviewed"),
             "labels": {"category": "evidence"},
             "pinned": True,
+            "metric": "quality",
+            "metric_order": ArtifactMetricOrder.MAXIMUM,
             "deprecated_app_id": "legacy-app",
         }
         page_one = await first_facade.query_public_artifacts(

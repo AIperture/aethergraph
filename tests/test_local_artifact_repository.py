@@ -12,6 +12,7 @@ from storage_conformance.suite import check_artifact_repository_conformance
 
 from aethergraph.storage.contracts import (
     ArtifactAction,
+    ArtifactMetricOrder,
     ArtifactOccurrence,
     ArtifactOccurrenceQuery,
     ArtifactRecord,
@@ -274,6 +275,7 @@ async def test_query_occurrences_filters_before_cursor_and_fails_closed(
             scope=execution,
             action=ArtifactAction.PRODUCED,
             occurred_at=NOW + timedelta(microseconds=index),
+            metrics={"quality": (0.1, 0.9, 0.4, 0.6, 0.8, 1.0)[index]},
         )
         await repository.record_occurrence(occurrence)
         if record is report and execution.run_id == "run-1":
@@ -287,6 +289,8 @@ async def test_query_occurrences_filters_before_cursor_and_fails_closed(
         tags=("final", "reviewed"),
         labels={"category": "evidence"},
         pinned=True,
+        metric="quality",
+        metric_order=ArtifactMetricOrder.MAXIMUM,
     )
     first = await repository.query_occurrences(query)
     assert first.items == (expected[1],)
@@ -296,6 +300,38 @@ async def test_query_occurrences_filters_before_cursor_and_fails_closed(
     )
     assert second.items == (expected[0],)
     assert second.next_cursor is None
+    minimum = await repository.query_occurrences(
+        replace(
+            query,
+            page=PageRequest(limit=2),
+            metric_order=ArtifactMetricOrder.MINIMUM,
+        )
+    )
+    assert minimum.items == (expected[0], expected[1])
+
+    plan = " ".join(
+        str(row["detail"])
+        for row in await database.fetch_all(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT o.occurrence_id
+            FROM local_artifact_occurrences o
+            JOIN local_artifact_occurrence_metrics m
+              ON m.occurrence_id = o.occurrence_id AND m.metric_key = ?
+            JOIN local_artifacts a ON a.artifact_id = o.artifact_id
+            WHERE a.owner_scope_identity = ? AND o.run_id = ?
+            ORDER BY m.metric_value DESC, o.sequence DESC LIMIT ?
+            """,
+            (
+                "quality",
+                '{"project_id":"project-1","tenant_id":"tenant-1"}',
+                "run-1",
+                10,
+            ),
+        )
+    )
+    assert "ix_local_occurrence_metrics_rank" in plan
+    assert "SCAN m" not in plan
 
     with pytest.raises(StorageConfigurationError, match="mismatched"):
         await repository.query_occurrences(
