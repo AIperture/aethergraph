@@ -246,13 +246,29 @@ class _BlobStore:
 
 
 class _ArtifactRepository:
-    def __init__(self) -> None:
+    def __init__(self, blobs: _BlobStore) -> None:
+        self.blobs = blobs
         self.artifacts: dict[tuple, ArtifactRecord] = {}
         self.retention: dict[tuple, ArtifactRetentionRecord] = {}
         self.occurrences: list[ArtifactOccurrence] = []
         self.relations: list[ArtifactRelation] = []
 
     async def put(self, record: ArtifactRecord) -> ArtifactRecord:
+        blob = await self.blobs.head(record.owner_scope, record.blob_locator)
+        if blob is None:
+            raise StorageNotFoundError(record.blob_locator)
+        if (
+            blob.content_hash,
+            blob.hash_algorithm,
+            blob.size_bytes,
+            blob.provider_version,
+        ) != (
+            record.content_hash,
+            record.hash_algorithm,
+            record.size_bytes,
+            record.provider_version,
+        ):
+            raise StorageIntegrityError("artifact metadata conflicts with scoped blob")
         key = (_scope_key(record.owner_scope), record.artifact_id)
         existing = self.artifacts.get(key)
         if existing is not None and existing != record:
@@ -486,7 +502,8 @@ async def test_fake_blob_store_passes_shared_conformance_suite() -> None:
 
 @pytest.mark.asyncio
 async def test_fake_artifact_repository_passes_shared_conformance_suite() -> None:
-    await check_artifact_repository_conformance(_ArtifactRepository())
+    blobs = _BlobStore()
+    await check_artifact_repository_conformance(_ArtifactRepository(blobs), blobs)
 
 
 @pytest.mark.asyncio

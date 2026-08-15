@@ -14,6 +14,7 @@ from aethergraph.storage.contracts import (
     StorageScope,
 )
 from aethergraph.storage.providers.local_sqlite import (
+    LocalArtifactRepository,
     LocalBlobStore,
     LocalDatabaseRole,
     LocalSQLiteDatabase,
@@ -37,6 +38,7 @@ async def _chunks(content: bytes):
 async def test_local_blob_store_passes_shared_provider_conformance(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     store = LocalBlobStore(database=database, workspace_root=tmp_path)
+    LocalArtifactRepository(database=database)
 
     await check_blob_store_conformance(store)
 
@@ -48,6 +50,7 @@ async def test_local_blob_store_passes_shared_provider_conformance(tmp_path: Pat
 async def test_content_deduplicates_physically_without_cross_scope_access(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     store = LocalBlobStore(database=database, workspace_root=tmp_path)
+    LocalArtifactRepository(database=database)
     first_scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
     second_scope = StorageScope(tenant_id="tenant-1", project_id="project-2")
     content = b"shared immutable bytes"
@@ -73,6 +76,7 @@ async def test_content_deduplicates_physically_without_cross_scope_access(tmp_pa
 async def test_integrity_failures_remove_staging_and_publish_nothing(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     store = LocalBlobStore(database=database, workspace_root=tmp_path)
+    LocalArtifactRepository(database=database)
     scope = StorageScope(project_id="project-1")
     content = b"expected content"
 
@@ -103,6 +107,7 @@ async def test_integrity_failures_remove_staging_and_publish_nothing(tmp_path: P
 async def test_read_only_store_reads_but_rejects_put_and_delete(tmp_path: Path) -> None:
     writable_database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     writable = LocalBlobStore(database=writable_database, workspace_root=tmp_path)
+    LocalArtifactRepository(database=writable_database)
     scope = StorageScope(project_id="project-1")
     stored = await writable.put(scope, _chunks(b"read-only content"))
     await writable_database.close()

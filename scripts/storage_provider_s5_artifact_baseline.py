@@ -123,16 +123,23 @@ async def _populate(bundle: Any, samples: int) -> None:
     artifact_count = min(50, samples)
     for index in range(artifact_count):
         selected = index % 2 == 0
+        payload = f"benchmark artifact content:{index}".encode()
+
+        async def chunks(content: bytes = payload):
+            yield content
+
+        blob = await bundle.blobs.put(owner, chunks())
         artifact = ArtifactRecord(
             artifact_id=f"artifact-{index}",
-            content_hash=f"{index:064x}",
-            hash_algorithm="sha256",
-            size_bytes=128,
+            content_hash=blob.content_hash,
+            hash_algorithm=blob.hash_algorithm,
+            size_bytes=blob.size_bytes,
             media_type="text/plain",
             kind="report" if selected else "draft",
-            blob_locator=f"blob:sha256:{index:064x}",
+            blob_locator=blob.blob_locator,
             owner_scope=owner,
             created_at=_START + timedelta(microseconds=index),
+            provider_version=blob.provider_version,
             labels={
                 "tags": ("final", "reviewed") if selected else ("draft",),
                 "category": "evidence" if selected else "working",

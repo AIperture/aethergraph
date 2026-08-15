@@ -176,7 +176,10 @@ async def check_blob_store_conformance(store: BlobStore) -> None:
     assert await store.delete(scope, stored.blob_locator) is False
 
 
-async def check_artifact_repository_conformance(repository: ArtifactRepository) -> None:
+async def check_artifact_repository_conformance(
+    repository: ArtifactRepository,
+    blobs: BlobStore,
+) -> None:
     scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
     run_scope = StorageScope(
         tenant_id="tenant-1",
@@ -185,27 +188,35 @@ async def check_artifact_repository_conformance(repository: ArtifactRepository) 
         session_id="session-1",
     )
     other_scope = StorageScope(tenant_id="tenant-1", project_id="project-2")
+
+    async def content(payload: bytes):
+        yield payload
+
+    source_blob = await blobs.put(scope, content(b"source-data"))
+    target_blob = await blobs.put(scope, content(b"target-artifact-data"))
     source = ArtifactRecord(
         artifact_id="artifact-source",
-        content_hash="source-hash",
-        hash_algorithm="sha256",
-        size_bytes=10,
+        content_hash=source_blob.content_hash,
+        hash_algorithm=source_blob.hash_algorithm,
+        size_bytes=source_blob.size_bytes,
         media_type="text/plain",
         kind="source",
-        blob_locator="blob:source",
+        blob_locator=source_blob.blob_locator,
         owner_scope=scope,
         created_at=NOW,
+        provider_version=source_blob.provider_version,
     )
     target = ArtifactRecord(
         artifact_id="artifact-target",
-        content_hash="target-hash",
-        hash_algorithm="sha256",
-        size_bytes=20,
+        content_hash=target_blob.content_hash,
+        hash_algorithm=target_blob.hash_algorithm,
+        size_bytes=target_blob.size_bytes,
         media_type="application/json",
         kind="result",
-        blob_locator="blob:target",
+        blob_locator=target_blob.blob_locator,
         owner_scope=scope,
         created_at=NOW,
+        provider_version=target_blob.provider_version,
         labels={"tags": ("final", "report"), "scope_id": "scope-1"},
     )
 

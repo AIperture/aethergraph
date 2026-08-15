@@ -307,7 +307,8 @@ class LocalBlobStore:
 
         Notes:
             A version mismatch raises `StorageConflictError`; read-only mode fails
-            before changing metadata or content.
+            before changing metadata or content. An exact owner-scoped artifact
+            reference also raises `StorageConflictError` in the delete transaction.
         """
         if self._mode is StorageOpenMode.READ_ONLY:
             raise StorageReadOnlyError("Local blob store is read-only")
@@ -326,6 +327,15 @@ class LocalBlobStore:
                     return False, None
                 if provider_version is not None and row[1] != provider_version:
                     raise StorageConflictError("Blob provider version changed")
+                referenced = connection.execute(
+                    """
+                    SELECT 1 FROM local_artifacts
+                    WHERE owner_scope_identity = ? AND blob_locator = ? LIMIT 1
+                    """,
+                    (scope_key, blob_locator),
+                ).fetchone()
+                if referenced is not None:
+                    raise StorageConflictError("Blob is referenced by an artifact")
                 connection.execute(
                     "DELETE FROM local_blobs WHERE scope_key = ? AND blob_locator = ?",
                     (scope_key, blob_locator),

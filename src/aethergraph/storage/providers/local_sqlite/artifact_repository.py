@@ -214,11 +214,30 @@ class LocalArtifactRepository:
             ArtifactRecord: Authoritative immutable metadata.
 
         Notes:
-            Blob bytes, occurrences, and lineage are not duplicated in this row.
+            Exact scoped blob metadata is verified in this transaction. Blob bytes,
+            occurrences, and lineage are not duplicated in this row.
         """
         self._require_writable()
 
         def commit(connection: sqlite3.Connection) -> ArtifactRecord:
+            owner_identity = _scope_identity(record.owner_scope)
+            blob = connection.execute(
+                """
+                SELECT content_hash, hash_algorithm, size_bytes, provider_version
+                FROM local_blobs WHERE scope_key = ? AND blob_locator = ?
+                """,
+                (owner_identity, record.blob_locator),
+            ).fetchone()
+            if blob is None:
+                raise StorageNotFoundError(record.blob_locator)
+            expected_blob = (
+                record.content_hash,
+                record.hash_algorithm,
+                record.size_bytes,
+                record.provider_version,
+            )
+            if tuple(blob) != expected_blob:
+                raise StorageIntegrityError("Artifact metadata conflicts with scoped blob")
             existing = connection.execute(
                 "SELECT * FROM local_artifacts WHERE artifact_id = ?",
                 (record.artifact_id,),
@@ -241,7 +260,7 @@ class LocalArtifactRepository:
                 """,
                 (
                     record.artifact_id,
-                    _scope_identity(record.owner_scope),
+                    owner_identity,
                     record.content_hash,
                     record.hash_algorithm,
                     record.size_bytes,

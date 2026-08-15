@@ -622,7 +622,9 @@ class BlobStore(Protocol):
             bool: `True` when content was deleted; `False` when absent.
 
         Notes:
-            Only retention/administration owners call this operation.
+            Only retention/administration owners call this operation. A coherent
+            provider must raise `StorageConflictError` while any immutable artifact
+            in the exact owner scope references the blob.
         """
         ...
 
@@ -631,10 +633,11 @@ class ArtifactRepository(Protocol):
     """Metadata, occurrence, and lineage repository for canonical artifacts."""
 
     async def put(self, record: ArtifactRecord) -> ArtifactRecord:
-        """Idempotently commit immutable artifact content metadata.
+        """Atomically establish one verified immutable artifact reference.
 
-        Repeating the same artifact identity and immutable fields succeeds. Conflicting
-        immutable metadata for that identity raises an integrity error.
+        The coherent provider verifies that the exact owner-scoped blob locator,
+        digest, algorithm, size, and provider version already exist in the same commit
+        that makes artifact metadata authoritative. Exact retries succeed.
 
         Examples:
             Commit new metadata:
@@ -654,8 +657,9 @@ class ArtifactRepository(Protocol):
             ArtifactRecord: Authoritative stored metadata.
 
         Notes:
-            Blob commit failure handling is coordinated by the provider, not this
-            repository through distributed-transaction claims.
+            Missing blob metadata raises `StorageNotFoundError`; mismatched immutable
+            blob identity raises `StorageIntegrityError`. Providers must prevent an
+            orphan cleanup race from committing a dangling artifact locator.
         """
         ...
 
