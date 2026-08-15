@@ -22,7 +22,15 @@ PromptCacheMode = Literal["disabled", "explicit", "implicit", "unavailable"]
 _OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
 _PROMPT_CACHE_KEY_PREFIX = "agpc_"
 
-_CACHE_SCOPE_KEYS = ("org_id", "app_id", "agent_id")
+_CACHE_SCOPE_KEYS = (
+    "tenant_id",
+    "project_id",
+    "org_id",
+    "user_id",
+    "graph_id",
+    "agent_id",
+    "scope_key",
+)
 
 
 @dataclass(frozen=True)
