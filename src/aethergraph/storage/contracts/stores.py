@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterable, AsyncIterator, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -184,6 +184,40 @@ class EventStore(Protocol):
 
         Notes:
             Numeric provider cursors are not aliases for event identifiers.
+        """
+        ...
+
+    async def get_many(
+        self,
+        scope: StorageScope,
+        artifact_ids: Sequence[str],
+    ) -> tuple[ArtifactRecord | None, ...]:
+        """Batch-read bounded artifact metadata while preserving input slots.
+
+        One provider operation resolves duplicate and missing identities in the exact
+        owner scope without occurrence or blob hydration.
+
+        Examples:
+            Hydrate an occurrence page:
+                ```python
+                records = await repository.get_many(scope, artifact_ids)
+                ```
+
+            Preserve missing slots:
+                ```python
+                records = await repository.get_many(scope, ("known", "missing"))
+                assert records[1] is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            artifact_ids: Bounded ordered artifact identities; duplicates are allowed.
+
+        Returns:
+            tuple[ArtifactRecord | None, ...]: One exact result per input slot.
+
+        Notes:
+            Providers reject oversized batches; callers never loop single-record reads.
         """
         ...
 
@@ -634,6 +668,40 @@ class ArtifactRepository(Protocol):
 
         Notes:
             Absence means no explicit pin; it never changes immutable artifact labels.
+        """
+        ...
+
+    async def get_retention_many(
+        self,
+        scope: StorageScope,
+        artifact_ids: Sequence[str],
+    ) -> tuple[ArtifactRetentionRecord | None, ...]:
+        """Batch-read current retention while preserving artifact input slots.
+
+        One provider operation resolves current mutable pin state independently from
+        immutable content and execution occurrences.
+
+        Examples:
+            Hydrate pin state for a page:
+                ```python
+                retention = await repository.get_retention_many(scope, artifact_ids)
+                ```
+
+            Preserve duplicates and absence:
+                ```python
+                rows = await repository.get_retention_many(scope, ("a", "a", "missing"))
+                assert rows[0] == rows[1] and rows[2] is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            artifact_ids: Bounded ordered artifact identities; duplicates are allowed.
+
+        Returns:
+            tuple[ArtifactRetentionRecord | None, ...]: One current state per input slot.
+
+        Notes:
+            Absence means unpinned by default; no content-label fallback is consulted.
         """
         ...
 

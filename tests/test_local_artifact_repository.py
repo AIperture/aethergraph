@@ -280,6 +280,32 @@ async def test_schema_normalizes_content_occurrences_and_lineage(tmp_path: Path)
     assert "ix_local_relations_source" in relation_plan
     assert "ix_local_relations_target" in relation_plan
     assert "SCAN local_artifact_relations" not in relation_plan
+    content_batch_plan = " ".join(
+        str(row["detail"])
+        for row in await database.fetch_all(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM local_artifacts
+            WHERE owner_scope_identity = ? AND artifact_id IN (?, ?)
+            """,
+            ('{"project_id":"project-1"}', "artifact-1", "artifact-2"),
+        )
+    )
+    retention_batch_plan = " ".join(
+        str(row["detail"])
+        for row in await database.fetch_all(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT * FROM local_artifact_retention
+            WHERE owner_scope_identity = ? AND artifact_id IN (?, ?)
+            """,
+            ('{"project_id":"project-1"}', "artifact-1", "artifact-2"),
+        )
+    )
+    assert "ix_local_artifacts_scope" in content_batch_plan
+    assert "SCAN local_artifacts" not in content_batch_plan
+    assert "ix_local_artifact_retention_scope" in retention_batch_plan
+    assert "SCAN local_artifact_retention" not in retention_batch_plan
     await database.close()
 
 
@@ -323,7 +349,12 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
     readonly_database = _database(tmp_path, StorageOpenMode.READ_ONLY)
     readonly = LocalArtifactRepository(database=readonly_database)
     assert await readonly.get(scope, target.artifact_id) == target
+    assert await readonly.get_many(scope, (target.artifact_id, "missing")) == (target, None)
     assert await readonly.get_retention(scope, target.artifact_id) == retention
+    assert await readonly.get_retention_many(scope, (target.artifact_id, "missing")) == (
+        retention,
+        None,
+    )
     assert (await readonly.list_occurrences(run_scope, PageRequest())).items == (occurrence,)
     assert (await readonly.list_relations(scope, target.artifact_id, PageRequest())).items == (
         relation,
@@ -337,6 +368,28 @@ async def test_read_only_repository_reads_and_rejects_all_mutations(tmp_path: Pa
     with pytest.raises(StorageReadOnlyError):
         await readonly.add_relation(replace(relation, relation_id="new"))
     await readonly_database.close()
+
+
+@pytest.mark.asyncio
+async def test_artifact_batch_reads_are_bounded_and_validate_every_slot(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalArtifactRepository(database=database)
+    scope = StorageScope(project_id="project-1")
+
+    assert await repository.get_many(scope, ()) == ()
+    assert await repository.get_retention_many(scope, ()) == ()
+    with pytest.raises(StorageConfigurationError, match="at most 500"):
+        await repository.get_many(scope, tuple(f"artifact-{index}" for index in range(501)))
+    with pytest.raises(StorageConfigurationError, match="at most 500"):
+        await repository.get_retention_many(
+            scope,
+            tuple(f"artifact-{index}" for index in range(501)),
+        )
+    with pytest.raises(TypeError, match="sequence"):
+        await repository.get_many(scope, "artifact-1")
+    with pytest.raises(ValueError, match="non-empty"):
+        await repository.get_retention_many(scope, ("",))
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -379,8 +432,13 @@ async def test_retention_cas_has_one_concurrent_winner(tmp_path: Path) -> None:
     await database.close()
 
 
-def test_retention_public_methods_follow_required_docstring_sections() -> None:
-    for name in ("get_retention", "compare_and_set_retention"):
+def test_artifact_batch_and_retention_methods_follow_required_docstring_sections() -> None:
+    for name in (
+        "get_many",
+        "get_retention",
+        "get_retention_many",
+        "compare_and_set_retention",
+    ):
         docstring = inspect.getdoc(getattr(LocalArtifactRepository, name)) or ""
         assert docstring.index("Examples:") < docstring.index("Args:")
         assert docstring.index("Args:") < docstring.index("Returns:")

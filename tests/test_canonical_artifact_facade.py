@@ -173,6 +173,15 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
             created_at=NOW,
         )
         assert (await facade.list_relations("artifact-2")).items == (relation,)
+        assert await facade.get_many(("artifact-1", "missing", "artifact-2")) == (
+            first.record,
+            None,
+            second.record,
+        )
+        assert await facade.get_retention_many(("artifact-1", "missing")) == (
+            unpinned,
+            None,
+        )
     finally:
         await bundle.close()
 
@@ -569,10 +578,12 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         "save_text",
         "save_json",
         "get",
+        "get_many",
         "read",
         "load_bytes",
         "pin",
         "get_retention",
+        "get_retention_many",
         "add_relation",
         "list_relations",
         "list_occurrences",

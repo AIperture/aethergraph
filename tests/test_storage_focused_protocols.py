@@ -262,12 +262,26 @@ class _ArtifactRepository:
     async def get(self, scope: StorageScope, artifact_id: str) -> ArtifactRecord | None:
         return self.artifacts.get((_scope_key(scope), artifact_id))
 
+    async def get_many(
+        self,
+        scope: StorageScope,
+        artifact_ids,
+    ) -> tuple[ArtifactRecord | None, ...]:
+        return tuple([await self.get(scope, artifact_id) for artifact_id in artifact_ids])
+
     async def get_retention(
         self,
         scope: StorageScope,
         artifact_id: str,
     ) -> ArtifactRetentionRecord | None:
         return self.retention.get((_scope_key(scope), artifact_id))
+
+    async def get_retention_many(
+        self,
+        scope: StorageScope,
+        artifact_ids,
+    ) -> tuple[ArtifactRetentionRecord | None, ...]:
+        return tuple([await self.get_retention(scope, artifact_id) for artifact_id in artifact_ids])
 
     async def compare_and_set_retention(
         self,

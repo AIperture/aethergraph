@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 import hashlib
 import json
@@ -30,6 +30,7 @@ from ...contracts import (
 from .database import LocalSQLiteDatabase
 
 _ARTIFACT_COMPONENT_VERSION = 2
+_MAX_ARTIFACT_BATCH = 500
 _CREATE_ARTIFACTS = """
 CREATE TABLE local_artifacts (
     artifact_id TEXT PRIMARY KEY,
@@ -244,6 +245,50 @@ class LocalArtifactRepository:
         )
         return _artifact(rows[0]) if rows else None
 
+    async def get_many(
+        self,
+        scope: StorageScope,
+        artifact_ids: Sequence[str],
+    ) -> tuple[ArtifactRecord | None, ...]:
+        """Batch-read immutable artifact metadata in one bounded query.
+
+        Exact owner scope filters before hydration, while duplicate and missing input
+        identities retain their original result positions.
+
+        Examples:
+            Hydrate a page:
+                ```python
+                rows = await repository.get_many(scope, artifact_ids)
+                ```
+
+            Preserve a missing slot:
+                ```python
+                assert (await repository.get_many(scope, ("known", "missing")))[1] is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            artifact_ids: At most 500 ordered stable artifact identities.
+
+        Returns:
+            tuple[ArtifactRecord | None, ...]: One exact result per input position.
+
+        Notes:
+            Empty input returns an empty tuple without querying SQLite.
+        """
+        requested = _batch_artifact_ids(artifact_ids)
+        if not requested:
+            return ()
+        unique = tuple(dict.fromkeys(requested))
+        placeholders = ",".join("?" for _item in unique)
+        rows = await self._database.fetch_all(
+            f"SELECT * FROM local_artifacts WHERE owner_scope_identity = ? "
+            f"AND artifact_id IN ({placeholders})",
+            (_scope_identity(scope), *unique),
+        )
+        hydrated = {str(row["artifact_id"]): _artifact(row) for row in rows}
+        return tuple(hydrated.get(artifact_id) for artifact_id in requested)
+
     async def get_retention(
         self,
         scope: StorageScope,
@@ -283,6 +328,52 @@ class LocalArtifactRepository:
             (artifact_id, _scope_identity(scope)),
         )
         return _retention(rows[0]) if rows else None
+
+    async def get_retention_many(
+        self,
+        scope: StorageScope,
+        artifact_ids: Sequence[str],
+    ) -> tuple[ArtifactRetentionRecord | None, ...]:
+        """Batch-read current artifact retention in one bounded query.
+
+        Exact owner scope filters before hydration, while duplicate and missing input
+        identities retain their original result positions.
+
+        Examples:
+            Hydrate page retention:
+                ```python
+                rows = await repository.get_retention_many(scope, artifact_ids)
+                ```
+
+            Preserve duplicate slots:
+                ```python
+                rows = await repository.get_retention_many(scope, ("a", "a"))
+                assert rows[0] == rows[1]
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            artifact_ids: At most 500 ordered stable artifact identities.
+
+        Returns:
+            tuple[ArtifactRetentionRecord | None, ...]: One current state per input position.
+
+        Notes:
+            Empty input returns an empty tuple without querying SQLite; missing state
+            means unpinned and remains `None`.
+        """
+        requested = _batch_artifact_ids(artifact_ids)
+        if not requested:
+            return ()
+        unique = tuple(dict.fromkeys(requested))
+        placeholders = ",".join("?" for _item in unique)
+        rows = await self._database.fetch_all(
+            f"SELECT * FROM local_artifact_retention WHERE owner_scope_identity = ? "
+            f"AND artifact_id IN ({placeholders})",
+            (_scope_identity(scope), *unique),
+        )
+        hydrated = {str(row["artifact_id"]): _retention(row) for row in rows}
+        return tuple(hydrated.get(artifact_id) for artifact_id in requested)
 
     async def compare_and_set_retention(
         self,
@@ -662,6 +753,20 @@ class LocalArtifactRepository:
     def _require_writable(self) -> None:
         if self._mode is StorageOpenMode.READ_ONLY:
             raise StorageReadOnlyError("Local artifact repository is read-only")
+
+
+def _batch_artifact_ids(artifact_ids: Sequence[str]) -> tuple[str, ...]:
+    if isinstance(artifact_ids, str | bytes | bytearray):
+        raise TypeError("artifact_ids must be a sequence of artifact identities")
+    requested = tuple(artifact_ids)
+    if len(requested) > _MAX_ARTIFACT_BATCH:
+        raise StorageConfigurationError(
+            f"artifact_ids must contain at most {_MAX_ARTIFACT_BATCH} identities"
+        )
+    for artifact_id in requested:
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise ValueError("artifact_ids must contain non-empty strings")
+    return requested
 
 
 def _artifact(row: sqlite3.Row) -> ArtifactRecord:

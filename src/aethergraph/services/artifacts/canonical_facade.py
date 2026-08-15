@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -1080,6 +1080,38 @@ class CanonicalArtifactFacade:
         """
         return await self._artifacts.get(self.owner_scope, artifact_id)
 
+    async def get_many(
+        self,
+        artifact_ids: Sequence[str],
+    ) -> tuple[ArtifactRecord | None, ...]:
+        """Batch-read canonical artifact metadata in bound owner scope.
+
+        The provider resolves one bounded ordered request so occurrence-page hydration
+        never degrades into caller-managed single-record loops.
+
+        Examples:
+            Hydrate artifact identities:
+                ```python
+                records = await facade.get_many(("artifact-1", "artifact-2"))
+                ```
+
+            Preserve a missing slot:
+                ```python
+                records = await facade.get_many(("artifact-1", "missing"))
+                assert records[1] is None
+                ```
+
+        Args:
+            artifact_ids: Bounded ordered identities; duplicates are preserved.
+
+        Returns:
+            tuple[ArtifactRecord | None, ...]: One exact owner-scoped result per slot.
+
+        Notes:
+            No content, occurrence, lineage, or retention state is hydrated.
+        """
+        return await self._artifacts.get_many(self.owner_scope, artifact_ids)
+
     def read(self, artifact_id: str) -> AsyncIterator[bytes]:
         """Stream exact owner-authorized artifact content.
 
@@ -1230,6 +1262,38 @@ class CanonicalArtifactFacade:
             Absence means unpinned by default; no label fallback is consulted.
         """
         return await self._artifacts.get_retention(self.owner_scope, artifact_id)
+
+    async def get_retention_many(
+        self,
+        artifact_ids: Sequence[str],
+    ) -> tuple[ArtifactRetentionRecord | None, ...]:
+        """Batch-read current retention in bound canonical owner scope.
+
+        The provider resolves one bounded ordered request independently from immutable
+        content and execution occurrence records.
+
+        Examples:
+            Hydrate current pin state:
+                ```python
+                retention = await facade.get_retention_many(("artifact-1", "artifact-2"))
+                ```
+
+            Preserve duplicate slots:
+                ```python
+                rows = await facade.get_retention_many(("artifact-1", "artifact-1"))
+                assert rows[0] == rows[1]
+                ```
+
+        Args:
+            artifact_ids: Bounded ordered identities; duplicates are preserved.
+
+        Returns:
+            tuple[ArtifactRetentionRecord | None, ...]: One current state per input slot.
+
+        Notes:
+            Missing state remains `None` and means unpinned by default.
+        """
+        return await self._artifacts.get_retention_many(self.owner_scope, artifact_ids)
 
     async def add_relation(
         self,

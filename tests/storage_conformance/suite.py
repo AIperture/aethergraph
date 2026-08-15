@@ -212,6 +212,11 @@ async def check_artifact_repository_conformance(repository: ArtifactRepository) 
     assert await repository.put(target) == target
     assert await repository.get(scope, target.artifact_id) == target
     assert await repository.get(other_scope, target.artifact_id) is None
+    assert await repository.get_many(
+        scope,
+        (target.artifact_id, "missing", target.artifact_id),
+    ) == (target, None, target)
+    assert await repository.get_many(other_scope, (target.artifact_id,)) == (None,)
 
     pinned = ArtifactRetentionRecord(
         artifact_id=target.artifact_id,
@@ -224,6 +229,11 @@ async def check_artifact_repository_conformance(repository: ArtifactRepository) 
     assert await repository.compare_and_set_retention(pinned, 0) == pinned
     assert await repository.get_retention(scope, target.artifact_id) == pinned
     assert await repository.get_retention(other_scope, target.artifact_id) is None
+    assert await repository.get_retention_many(
+        scope,
+        (target.artifact_id, "missing", target.artifact_id),
+    ) == (pinned, None, pinned)
+    assert await repository.get_retention_many(other_scope, (target.artifact_id,)) == (None,)
     with pytest.raises(StorageConflictError):
         await repository.compare_and_set_retention(pinned, 0)
     unpinned = ArtifactRetentionRecord(
