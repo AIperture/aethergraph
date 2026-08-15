@@ -7,6 +7,7 @@ from typing import get_type_hints
 
 import pytest
 
+from aethergraph.contracts.integration import SemanticEventKind as HostSemanticEventKind
 from aethergraph.storage.contracts import (
     InboundEventDraft,
     InboundEventRecord,
@@ -60,6 +61,7 @@ def test_inbound_events_are_closed_scoped_and_deeply_immutable() -> None:
         external_event_id=draft.external_event_id,
         received_at=draft.received_at,
         scope=draft.scope,
+        delivery_cursor=1,
         cursor="cursor-1",
         payload=draft.payload,
         resource_keys=draft.resource_keys,
@@ -67,8 +69,11 @@ def test_inbound_events_are_closed_scoped_and_deeply_immutable() -> None:
     payload["attachments"].append("artifact:two")
 
     assert draft.payload["attachments"] == ("artifact:one",)
+    assert record.delivery_cursor == 1
     assert record.cursor == "cursor-1"
     assert "app_id" not in {item.name for item in fields(InboundEventRecord)}
+    with pytest.raises(ValueError, match="delivery_cursor"):
+        replace(record, delivery_cursor=0)
     with pytest.raises(ValueError, match="session_id"):
         replace(draft, scope=StorageScope(tenant_id="tenant-1"))
 
@@ -98,6 +103,7 @@ def test_semantic_events_preserve_authored_sequence_and_opaque_cursor() -> None:
         occurred_at=draft.occurred_at,
         kind=draft.kind,
         scope=draft.scope,
+        delivery_cursor=2,
         cursor="cursor-2",
         payload=draft.payload,
     )
@@ -108,11 +114,22 @@ def test_semantic_events_preserve_authored_sequence_and_opaque_cursor() -> None:
     )
 
     assert record.sequence == 0
+    assert record.delivery_cursor == 2
     assert query.page.limit > 0
+    with pytest.raises(ValueError, match="delivery_cursor"):
+        replace(record, delivery_cursor=True)
     with pytest.raises(ValueError, match="non-negative"):
         replace(draft, sequence=-1)
     with pytest.raises(ValueError, match="duplicates"):
         replace(query, kinds=(draft.kind, draft.kind))
+
+
+def test_semantic_event_kind_matches_exact_active_host_v2_vocabulary() -> None:
+    assert {kind.value for kind in SemanticEventKind} == {
+        kind.value for kind in HostSemanticEventKind
+    }
+    assert "run.status_changed" not in SemanticEventKind
+    assert "error" not in SemanticEventKind
 
 
 def test_runtime_output_frames_require_canonical_run_node_scope() -> None:

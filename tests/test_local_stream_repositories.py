@@ -126,6 +126,7 @@ async def test_inbound_append_is_ordered_idempotent_scoped_and_conflict_safe(
     )
     stored_first = await repository.append(first)
     stored_second = await repository.append(second)
+    assert (stored_first.delivery_cursor, stored_second.delivery_cursor) == (1, 2)
     assert stored_first.cursor != stored_second.cursor
     assert await repository.append(first) == stored_first
     assert await repository.get(SESSION_SCOPE, first.event_id) == stored_first
@@ -156,6 +157,7 @@ async def test_semantic_events_reject_identity_and_sequence_and_page_ascending(
     repository = LocalSemanticEventRepository(database=database)
     events = tuple(_semantic(f"semantic-{index}", index) for index in range(3))
     records = tuple([await repository.append(event) for event in events])
+    assert [record.delivery_cursor for record in records] == [1, 2, 3]
     with pytest.raises(StorageIntegrityError, match="identity"):
         await repository.append(events[0])
     with pytest.raises(StorageIntegrityError, match="sequence"):
@@ -175,7 +177,7 @@ async def test_semantic_events_reject_identity_and_sequence_and_page_ascending(
         await repository.query(
             replace(
                 query,
-                kinds=(SemanticEventKind.ERROR,),
+                kinds=(SemanticEventKind.WARNING_RAISED,),
                 page=PageRequest(limit=2, cursor=first.next_cursor),
             )
         )
@@ -239,18 +241,23 @@ async def test_stream_repositories_read_only_and_typed_corruption(tmp_path: Path
     writer_database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     inbound_writer = LocalInboundEventRepository(database=writer_database)
     semantic_writer = LocalSemanticEventRepository(database=writer_database)
-    await inbound_writer.append(_inbound())
-    await semantic_writer.append(_semantic("semantic-1", 0))
+    written_inbound = await inbound_writer.append(_inbound())
+    written_semantic = await semantic_writer.append(_semantic("semantic-1", 0))
     await writer_database.close()
 
     database = _database(tmp_path, StorageOpenMode.READ_ONLY)
     inbound = LocalInboundEventRepository(database=database)
     semantic = LocalSemanticEventRepository(database=database)
     sink = LocalRuntimeOutputSink(database=database)
-    assert await inbound.get(SESSION_SCOPE, "inbound-1") is not None
-    assert (
+    restored_inbound = await inbound.get(SESSION_SCOPE, "inbound-1")
+    restored_semantic = (
         await semantic.query(SemanticEventQuery(deployment_id="deployment-1", scope=SESSION_SCOPE))
-    ).items
+    ).items[0]
+    assert restored_inbound is not None
+    assert restored_inbound.delivery_cursor == written_inbound.delivery_cursor
+    assert restored_inbound.cursor == written_inbound.cursor
+    assert restored_semantic.delivery_cursor == written_semantic.delivery_cursor
+    assert restored_semantic.cursor == written_semantic.cursor
     with pytest.raises(StorageReadOnlyError):
         await inbound.append(_inbound("new", external_event_id="new"))
     with pytest.raises(StorageReadOnlyError):

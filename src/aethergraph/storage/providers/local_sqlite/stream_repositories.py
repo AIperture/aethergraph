@@ -125,8 +125,8 @@ class LocalInboundEventRepository:
     async def append(self, event: InboundEventDraft) -> InboundEventRecord:
         """Atomically append one normalized inbound event.
 
-        The provider assigns a monotonic opaque cursor. Exact event retries are
-        idempotent, while conflicting event or external-event reuse fails closed.
+        The provider assigns an integer delivery cursor and derives a separate opaque
+        record cursor. Exact retries are idempotent; conflicting reuse fails closed.
 
         Examples:
             Persist ingress evidence:
@@ -136,14 +136,14 @@ class LocalInboundEventRepository:
 
             Retain the durable cursor:
                 ```python
-                cursor = (await repository.append(event)).cursor
+                cursor = (await repository.append(event)).delivery_cursor
                 ```
 
         Args:
             event: Validated canonical payload and materialized resource keys.
 
         Returns:
-            InboundEventRecord: Authoritative event with provider cursor.
+            InboundEventRecord: Authoritative event with delivery and opaque cursors.
 
         Notes:
             Raw provider payload and Host schema objects are outside this boundary.
@@ -243,8 +243,8 @@ class LocalSemanticEventRepository:
     async def append(self, event: SemanticEventDraft) -> SemanticEventRecord:
         """Append one semantic event at its single-assignment authored sequence.
 
-        Event identity, deployment/session/turn sequence, and provider cursor commit
-        together. Any reused identity or sequence is rejected without renumbering.
+        Event identity, deployment/session/turn sequence, integer delivery cursor,
+        and opaque record cursor commit together. Reuse fails without renumbering.
 
         Examples:
             Persist completion:
@@ -254,14 +254,16 @@ class LocalSemanticEventRepository:
 
             Publish its cursor:
                 ```python
-                await delivery.publish(cursor=(await repository.append(event)).cursor)
+                await delivery.publish(
+                    cursor=(await repository.append(event)).delivery_cursor,
+                )
                 ```
 
         Args:
             event: Closed provider-neutral semantic event.
 
         Returns:
-            SemanticEventRecord: Committed event and opaque cursor.
+            SemanticEventRecord: Committed event with delivery and opaque cursors.
 
         Notes:
             Duplicate identity or sequence raises `StorageIntegrityError` even when
@@ -543,6 +545,7 @@ def _inbound_from_draft(event: InboundEventDraft, cursor: int) -> InboundEventRe
         external_event_id=event.external_event_id,
         received_at=event.received_at,
         scope=event.scope,
+        delivery_cursor=cursor,
         cursor=_record_cursor("inbound", cursor),
         payload=event.payload,
         resource_keys=event.resource_keys,
@@ -563,6 +566,7 @@ def _inbound(row: sqlite3.Row) -> InboundEventRecord:
             external_event_id=str(row["external_event_id"]),
             received_at=datetime.fromisoformat(str(row["received_at"])),
             scope=_scope(row),
+            delivery_cursor=int(row["cursor"]),
             cursor=_record_cursor("inbound", int(row["cursor"])),
             payload=_json_object(row["payload_json"]),
             resource_keys=tuple(resources),
@@ -582,6 +586,7 @@ def _semantic_from_draft(event: SemanticEventDraft, cursor: int) -> SemanticEven
         occurred_at=event.occurred_at,
         kind=event.kind,
         scope=event.scope,
+        delivery_cursor=cursor,
         cursor=_record_cursor("semantic", cursor),
         payload=event.payload,
         schema_version=event.schema_version,
@@ -599,6 +604,7 @@ def _semantic(row: sqlite3.Row) -> SemanticEventRecord:
             occurred_at=datetime.fromisoformat(str(row["occurred_at"])),
             kind=SemanticEventKind(str(row["kind"])),
             scope=_scope(row),
+            delivery_cursor=int(row["cursor"]),
             cursor=_record_cursor("semantic", int(row["cursor"])),
             payload=_json_object(row["payload_json"]),
             schema_version=int(row["schema_version"]),

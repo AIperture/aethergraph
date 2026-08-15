@@ -49,7 +49,7 @@ class InboundEventDraft:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class InboundEventRecord:
-    """Committed validated Host ingress event with durable opaque cursor."""
+    """Committed Host ingress event with delivery and pagination cursors."""
 
     event_id: str
     deployment_id: str
@@ -58,6 +58,7 @@ class InboundEventRecord:
     external_event_id: str
     received_at: datetime
     scope: StorageScope
+    delivery_cursor: int
     cursor: str
     payload: Mapping[str, FrozenJson] = field(default_factory=dict)
     resource_keys: tuple[str, ...] = ()
@@ -65,6 +66,7 @@ class InboundEventRecord:
 
     def __post_init__(self) -> None:
         _validate_inbound(self)
+        _delivery_cursor(self.delivery_cursor)
         _nonempty("cursor", self.cursor)
         object.__setattr__(self, "payload", _freeze_mapping(self.payload, path="payload"))
 
@@ -85,15 +87,21 @@ def _validate_inbound(value: InboundEventDraft | InboundEventRecord) -> None:
 
 
 class SemanticEventKind(StrEnum):
-    """Canonical integration semantic-event classification."""
+    """Exact active semantic-event v2 classification persisted by providers."""
 
+    INPUT_ACCEPTED = "input.accepted"
     MESSAGE_STARTED = "message.started"
     MESSAGE_DELTA = "message.delta"
     MESSAGE_COMPLETED = "message.completed"
+    PHASE_CHANGED = "phase.changed"
+    PROGRESS_CHANGED = "progress.changed"
     INTERACTION_REQUESTED = "interaction.requested"
     INTERACTION_RESOLVED = "interaction.resolved"
-    RUN_STATUS_CHANGED = "run.status_changed"
-    ERROR = "error"
+    TOOL_ACTIVITY = "tool.activity"
+    ARTIFACT_AVAILABLE = "artifact.available"
+    STRUCTURED_OUTPUT = "structured.output"
+    WARNING_RAISED = "warning.raised"
+    TURN_OUTCOME = "turn.outcome"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -118,7 +126,7 @@ class SemanticEventDraft:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SemanticEventRecord:
-    """Committed semantic integration event with durable opaque cursor."""
+    """Committed semantic event with delivery and pagination cursors."""
 
     event_id: str
     deployment_id: str
@@ -128,12 +136,14 @@ class SemanticEventRecord:
     occurred_at: datetime
     kind: SemanticEventKind
     scope: StorageScope
+    delivery_cursor: int
     cursor: str
     payload: Mapping[str, FrozenJson] = field(default_factory=dict)
     schema_version: int = 1
 
     def __post_init__(self) -> None:
         _validate_semantic(self)
+        _delivery_cursor(self.delivery_cursor)
         _nonempty("cursor", self.cursor)
         object.__setattr__(self, "payload", _freeze_mapping(self.payload, path="payload"))
 
@@ -148,6 +158,11 @@ def _validate_semantic(value: SemanticEventDraft | SemanticEventRecord) -> None:
         raise TypeError("kind must be a SemanticEventKind")
     value.scope.require("session_id")
     _version(value.schema_version)
+
+
+def _delivery_cursor(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("delivery_cursor must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -222,7 +237,8 @@ class InboundEventRepository(Protocol):
     async def append(self, event: InboundEventDraft) -> InboundEventRecord:
         """Append one validated ingress event before runtime dispatch.
 
-        The provider assigns the durable cursor used by the terminal ingress receipt.
+        The provider atomically assigns the positive delivery cursor used by the
+        terminal ingress receipt and an opaque record cursor for storage pagination.
 
         Examples:
             Persist ingress:
@@ -232,14 +248,14 @@ class InboundEventRepository(Protocol):
 
             Retain its cursor:
                 ```python
-                receipt_cursor = (await inbound_events.append(event)).cursor
+                receipt_cursor = (await inbound_events.append(event)).delivery_cursor
                 ```
 
         Args:
             event: Validated ingress content and materialized resource keys.
 
         Returns:
-            InboundEventRecord: Committed event with opaque cursor.
+            InboundEventRecord: Committed event with delivery and opaque cursors.
 
         Notes:
             Raw provider payloads and Host schema instances are not accepted. Identity
@@ -286,7 +302,8 @@ class SemanticEventRepository(Protocol):
     async def append(self, event: SemanticEventDraft) -> SemanticEventRecord:
         """Append one semantic event at its authored turn sequence.
 
-        Identity, `(deployment, session, turn, sequence)`, and cursor commit together.
+        Identity, `(deployment, session, turn, sequence)`, delivery cursor, and opaque
+        record cursor commit together.
 
         Examples:
             Persist completion:
@@ -296,14 +313,14 @@ class SemanticEventRepository(Protocol):
 
             Publish its cursor:
                 ```python
-                await delivery.publish(event=stored, cursor=stored.cursor)
+                await delivery.publish(event=stored, cursor=stored.delivery_cursor)
                 ```
 
         Args:
             event: Closed provider-neutral semantic event content.
 
         Returns:
-            SemanticEventRecord: Committed event with opaque cursor.
+            SemanticEventRecord: Committed event with delivery and opaque cursors.
 
         Notes:
             Duplicate identity/sequence raises `StorageIntegrityError`; providers do
