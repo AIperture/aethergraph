@@ -18,6 +18,10 @@ from .database import (
     LocalSQLiteDatabase,
 )
 from .event_store import LocalEventStore
+from .integration_repositories import (
+    LocalExternalSessionBindingRepository,
+    LocalIngressIdempotencyRepository,
+)
 from .manifest import (
     LOCAL_STORAGE_FORMAT_VERSION,
     LocalWorkspaceManifest,
@@ -41,6 +45,8 @@ __all__ = [
     "LocalDatabaseRole",
     "LocalDocumentStore",
     "LocalEventStore",
+    "LocalExternalSessionBindingRepository",
+    "LocalIngressIdempotencyRepository",
     "LocalKeyValueStore",
     "LocalObservationRepository",
     "LocalRunRepository",
