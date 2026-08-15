@@ -12,10 +12,13 @@ from storage_conformance.suite import check_artifact_repository_conformance
 from aethergraph.storage.contracts import (
     ArtifactAction,
     ArtifactOccurrence,
+    ArtifactOccurrenceQuery,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
+    ArtifactRepository,
     ArtifactRetentionRecord,
+    EventStore,
     PageRequest,
     StorageConfigurationError,
     StorageConflictError,
@@ -47,6 +50,7 @@ def _artifact(
     scope: StorageScope,
     *,
     kind: str = "result",
+    labels: dict[str, object] | None = None,
 ) -> ArtifactRecord:
     return ArtifactRecord(
         artifact_id=artifact_id,
@@ -58,7 +62,160 @@ def _artifact(
         blob_locator=f"blob:{artifact_id}",
         owner_scope=scope,
         created_at=NOW,
+        labels=labels or {},
     )
+
+
+def test_artifact_query_contract_is_bounded_immutable_and_owned() -> None:
+    owner = StorageScope(tenant_id="tenant-1", project_id="project-1")
+    query = ArtifactOccurrenceQuery(
+        owner_scope=owner,
+        scope=StorageScope(run_id="run-1"),
+        tags=("final",),
+        labels={"stage": "review"},
+    )
+    assert query.labels == {"stage": "review"}
+    assert "get_many" in ArtifactRepository.__dict__
+    assert "get_many" not in EventStore.__dict__
+
+    with pytest.raises(TypeError, match="immutable tuple"):
+        ArtifactOccurrenceQuery(
+            owner_scope=owner,
+            scope=StorageScope(run_id="run-1"),
+            tags=["final"],  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="must not exceed 500"):
+        ArtifactOccurrenceQuery(
+            owner_scope=owner,
+            scope=StorageScope(run_id="run-1"),
+            page=PageRequest(limit=501),
+        )
+    with pytest.raises(ValueError, match="conflict"):
+        ArtifactOccurrenceQuery(
+            owner_scope=owner,
+            scope=StorageScope(project_id="other", run_id="run-1"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_query_occurrences_filters_before_cursor_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalArtifactRepository(database=database)
+    owner = StorageScope(tenant_id="tenant-1", project_id="project-1")
+    other_owner = StorageScope(tenant_id="tenant-1", project_id="project-2")
+    report = _artifact(
+        "report",
+        owner,
+        kind="report",
+        labels={"tags": ("final", "reviewed"), "category": "evidence"},
+    )
+    draft = _artifact(
+        "draft",
+        owner,
+        kind="report",
+        labels={"tags": "draft, reviewed", "category": "evidence"},
+    )
+    dataset = _artifact(
+        "dataset",
+        owner,
+        kind="dataset",
+        labels={"tags": ("final",), "category": "evidence"},
+    )
+    hidden = _artifact(
+        "hidden",
+        other_owner,
+        kind="report",
+        labels={"tags": ("final",), "category": "evidence"},
+    )
+    for record in (report, draft, dataset, hidden):
+        await repository.put(record)
+    for record in (report, dataset, hidden):
+        await repository.compare_and_set_retention(
+            ArtifactRetentionRecord(
+                artifact_id=record.artifact_id,
+                scope=record.owner_scope,
+                pinned=True,
+                revision=1,
+                updated_at=NOW,
+            ),
+            0,
+        )
+
+    expected: list[ArtifactOccurrence] = []
+    for index, (record, execution) in enumerate(
+        (
+            (report, StorageScope(**owner.as_filter(), run_id="run-1", session_id="s-1")),
+            (report, StorageScope(**owner.as_filter(), run_id="run-1", session_id="s-2")),
+            (draft, StorageScope(**owner.as_filter(), run_id="run-1", session_id="s-1")),
+            (dataset, StorageScope(**owner.as_filter(), run_id="run-1", session_id="s-1")),
+            (report, StorageScope(**owner.as_filter(), run_id="run-2", session_id="s-1")),
+            (
+                hidden,
+                StorageScope(**other_owner.as_filter(), run_id="run-1", session_id="s-1"),
+            ),
+        )
+    ):
+        occurrence = ArtifactOccurrence(
+            occurrence_id=f"occurrence-{index}",
+            artifact_id=record.artifact_id,
+            scope=execution,
+            action=ArtifactAction.PRODUCED,
+            occurred_at=NOW + timedelta(microseconds=index),
+        )
+        await repository.record_occurrence(occurrence)
+        if record is report and execution.run_id == "run-1":
+            expected.append(occurrence)
+
+    query = ArtifactOccurrenceQuery(
+        owner_scope=owner,
+        scope=StorageScope(run_id="run-1"),
+        page=PageRequest(limit=1),
+        kind="report",
+        tags=("final", "reviewed"),
+        labels={"category": "evidence"},
+        pinned=True,
+    )
+    first = await repository.query_occurrences(query)
+    assert first.items == (expected[1],)
+    assert first.next_cursor is not None
+    second = await repository.query_occurrences(
+        replace(query, page=PageRequest(limit=1, cursor=first.next_cursor))
+    )
+    assert second.items == (expected[0],)
+    assert second.next_cursor is None
+
+    with pytest.raises(StorageConfigurationError, match="mismatched"):
+        await repository.query_occurrences(
+            replace(
+                query,
+                kind="dataset",
+                page=PageRequest(limit=1, cursor=first.next_cursor),
+            )
+        )
+    assert (
+        await repository.query_occurrences(
+            ArtifactOccurrenceQuery(
+                owner_scope=StorageScope(tenant_id="tenant-1", project_id="project-3"),
+                scope=StorageScope(run_id="run-1"),
+                kind="report",
+                tags=("final",),
+                pinned=True,
+            )
+        )
+    ).items == ()
+    assert (
+        await repository.query_occurrences(
+            ArtifactOccurrenceQuery(
+                owner_scope=owner,
+                scope=StorageScope(run_id="run-1"),
+                artifact_id="draft",
+                pinned=False,
+            )
+        )
+    ).items[0].artifact_id == "draft"
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -236,7 +393,27 @@ async def test_schema_normalizes_content_occurrences_and_lineage(tmp_path: Path)
         str(row["name"])
         for row in await database.fetch_all("PRAGMA table_info(local_artifact_retention)")
     }
+    label_columns = {
+        str(row["name"])
+        for row in await database.fetch_all("PRAGMA table_info(local_artifact_labels)")
+    }
+    tag_columns = {
+        str(row["name"])
+        for row in await database.fetch_all("PRAGMA table_info(local_artifact_tags)")
+    }
     assert not {"run_id", "session_id", "action"} & artifact_columns
+    assert {
+        "tenant_id",
+        "project_id",
+        "org_id",
+        "user_id",
+        "session_id",
+        "run_id",
+        "graph_id",
+        "node_id",
+        "agent_id",
+        "scope_key",
+    } <= occurrence_columns
     assert not {"content_hash", "blob_locator", "media_type"} & occurrence_columns
     assert not {"content_hash", "blob_locator", "media_type"} & relation_columns
     assert retention_columns == {
@@ -248,6 +425,8 @@ async def test_schema_normalizes_content_occurrences_and_lineage(tmp_path: Path)
         "schema_version",
     }
     assert not {"run_id", "session_id", "labels_json", "content_hash"} & retention_columns
+    assert label_columns == {"artifact_id", "label_key", "value_json"}
+    assert tag_columns == {"artifact_id", "tag"}
 
     occurrence_plan = " ".join(
         str(row["detail"])
@@ -306,6 +485,49 @@ async def test_schema_normalizes_content_occurrences_and_lineage(tmp_path: Path)
     assert "SCAN local_artifacts" not in content_batch_plan
     assert "ix_local_artifact_retention_scope" in retention_batch_plan
     assert "SCAN local_artifact_retention" not in retention_batch_plan
+    filtered_occurrence_plan = " ".join(
+        str(row["detail"])
+        for row in await database.fetch_all(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT o.* FROM local_artifact_occurrences o
+            JOIN local_artifacts a ON a.artifact_id = o.artifact_id
+            LEFT JOIN local_artifact_retention r ON r.artifact_id = o.artifact_id
+            WHERE a.owner_scope_identity = ?
+              AND o.run_id = ?
+              AND a.kind = ?
+              AND EXISTS (
+                  SELECT 1 FROM local_artifact_tags tag_filter
+                  WHERE tag_filter.artifact_id = o.artifact_id AND tag_filter.tag = ?
+              )
+              AND EXISTS (
+                  SELECT 1 FROM local_artifact_labels label_filter
+                  WHERE label_filter.artifact_id = o.artifact_id
+                    AND label_filter.label_key = ? AND label_filter.value_json = ?
+              )
+              AND COALESCE(r.pinned, 0) = ?
+              AND o.sequence < ?
+            ORDER BY o.sequence DESC LIMIT ?
+            """,
+            (
+                '{"project_id":"project-1"}',
+                "run-1",
+                "report",
+                "final",
+                "category",
+                '"evidence"',
+                1,
+                10,
+                50,
+            ),
+        )
+    )
+    assert "ix_local_occurrences_run" in filtered_occurrence_plan
+    assert "local_artifact_tags" in filtered_occurrence_plan
+    assert "local_artifact_labels" in filtered_occurrence_plan
+    assert "SCAN o" not in filtered_occurrence_plan
+    assert "SCAN tag_filter" not in filtered_occurrence_plan
+    assert "SCAN label_filter" not in filtered_occurrence_plan
     await database.close()
 
 

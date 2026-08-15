@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
@@ -24,6 +24,8 @@ from .records import (
     SearchQuery,
     SearchResult,
     StateRecord,
+    _freeze_mapping,
+    _nonempty,
 )
 from .scope import StorageScope
 
@@ -91,6 +93,91 @@ class StateHistoryQuery:
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ArtifactOccurrenceQuery:
+    """Bounded artifact-occurrence query with explicit owner authorization.
+
+    Exact immutable content ownership is separated from partial execution filters.
+    Content kind, tags, labels, and current pin state all filter before cursor
+    pagination.
+
+    Examples:
+        Query one authorized run:
+            ```python
+            query = ArtifactOccurrenceQuery(
+                owner_scope=owner_scope,
+                scope=StorageScope(run_id="run-1"),
+            )
+            ```
+
+        Query pinned report artifacts by tag:
+            ```python
+            query = ArtifactOccurrenceQuery(
+                owner_scope=owner_scope,
+                scope=StorageScope(session_id="session-1"),
+                kind="report",
+                tags=("final",),
+                pinned=True,
+            )
+            ```
+
+    Args:
+        owner_scope: Exact canonical scope authorizing immutable artifact content.
+        scope: Populated canonical occurrence dimensions applied as partial filters.
+        page: Bounded opaque cursor request with a maximum limit of 500.
+        artifact_id: Optional exact immutable artifact identity.
+        kind: Optional exact immutable artifact kind.
+        tags: Immutable unique content-tag intersection filter.
+        labels: Immutable exact content-label filters.
+        pinned: Optional current retention-state filter; absent retention is unpinned.
+
+    Returns:
+        ArtifactOccurrenceQuery: Immutable validated repository query value.
+
+    Notes:
+        Owner authorization never derives from deprecated `app_id` or `client_id`
+        metadata. Every filter is applied before pagination.
+    """
+
+    owner_scope: StorageScope
+    scope: StorageScope
+    page: PageRequest = PageRequest()
+    artifact_id: str | None = None
+    kind: str | None = None
+    tags: tuple[str, ...] = ()
+    labels: Mapping[str, FrozenJson] = field(default_factory=dict)
+    pinned: bool | None = None
+
+    def __post_init__(self) -> None:
+        if not self.owner_scope.as_filter():
+            raise ValueError("owner_scope must contain at least one canonical dimension")
+        if not self.scope.as_filter():
+            raise ValueError("scope must contain at least one canonical dimension")
+        if self.page.limit > 500:
+            raise ValueError("artifact occurrence page limit must not exceed 500")
+        for name in ("artifact_id", "kind"):
+            value = getattr(self, name)
+            if value is not None:
+                _nonempty(name, value)
+        if not isinstance(self.tags, tuple):
+            raise TypeError("tags must be an immutable tuple")
+        if any(not isinstance(tag, str) or not tag.strip() for tag in self.tags):
+            raise ValueError("tags must contain non-empty strings")
+        if len(set(self.tags)) != len(self.tags):
+            raise ValueError("tags must not contain duplicates")
+        if self.pinned is not None and not isinstance(self.pinned, bool):
+            raise TypeError("pinned must be a boolean when supplied")
+        for name, value in self.owner_scope.as_filter().items():
+            occurrence_value = getattr(self.scope, name)
+            if occurrence_value is not None and occurrence_value != value:
+                raise ValueError("scope must not conflict with owner_scope dimensions")
+        object.__setattr__(
+            self,
+            "labels",
+            _freeze_mapping(self.labels, path="labels"),
+        )
 
 
 class EventStore(Protocol):
@@ -184,40 +271,6 @@ class EventStore(Protocol):
 
         Notes:
             Numeric provider cursors are not aliases for event identifiers.
-        """
-        ...
-
-    async def get_many(
-        self,
-        scope: StorageScope,
-        artifact_ids: Sequence[str],
-    ) -> tuple[ArtifactRecord | None, ...]:
-        """Batch-read bounded artifact metadata while preserving input slots.
-
-        One provider operation resolves duplicate and missing identities in the exact
-        owner scope without occurrence or blob hydration.
-
-        Examples:
-            Hydrate an occurrence page:
-                ```python
-                records = await repository.get_many(scope, artifact_ids)
-                ```
-
-            Preserve missing slots:
-                ```python
-                records = await repository.get_many(scope, ("known", "missing"))
-                assert records[1] is None
-                ```
-
-        Args:
-            scope: Exact canonical artifact owner scope.
-            artifact_ids: Bounded ordered artifact identities; duplicates are allowed.
-
-        Returns:
-            tuple[ArtifactRecord | None, ...]: One exact result per input slot.
-
-        Notes:
-            Providers reject oversized batches; callers never loop single-record reads.
         """
         ...
 
@@ -638,6 +691,40 @@ class ArtifactRepository(Protocol):
         """
         ...
 
+    async def get_many(
+        self,
+        scope: StorageScope,
+        artifact_ids: Sequence[str],
+    ) -> tuple[ArtifactRecord | None, ...]:
+        """Batch-read bounded artifact metadata while preserving input slots.
+
+        One provider operation resolves duplicate and missing identities in the exact
+        owner scope without occurrence or blob hydration.
+
+        Examples:
+            Hydrate an occurrence page:
+                ```python
+                records = await repository.get_many(scope, artifact_ids)
+                ```
+
+            Preserve missing slots:
+                ```python
+                records = await repository.get_many(scope, ("known", "missing"))
+                assert records[1] is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            artifact_ids: Bounded ordered artifact identities; duplicates are allowed.
+
+        Returns:
+            tuple[ArtifactRecord | None, ...]: One exact result per input slot.
+
+        Notes:
+            Providers reject oversized batches; callers never loop single-record reads.
+        """
+        ...
+
     async def get_retention(
         self,
         scope: StorageScope,
@@ -800,6 +887,39 @@ class ArtifactRepository(Protocol):
 
         Notes:
             The protocol has no offset or unbounded list operation.
+        """
+        ...
+
+    async def query_occurrences(
+        self,
+        query: ArtifactOccurrenceQuery,
+    ) -> Page[ArtifactOccurrence]:
+        """Query a bounded authorized page of artifact occurrences.
+
+        Exact content ownership and partial execution dimensions are applied before
+        indexed content kind, tag, label, current pin, and cursor filters.
+
+        Examples:
+            Query a run page:
+                ```python
+                page = await repository.query_occurrences(query)
+                ```
+
+            Continue the same query:
+                ```python
+                page = await repository.query_occurrences(
+                    replace(query, page=PageRequest(cursor=cursor))
+                )
+                ```
+
+        Args:
+            query: Exact owner authorization, filters, and bounded page request.
+
+        Returns:
+            Page[ArtifactOccurrence]: Stable matching occurrences and continuation cursor.
+
+        Notes:
+            Content metadata, retention records, and blob bytes are not returned.
         """
         ...
 

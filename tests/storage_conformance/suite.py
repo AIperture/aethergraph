@@ -8,6 +8,7 @@ import pytest
 from aethergraph.storage.contracts import (
     ArtifactAction,
     ArtifactOccurrence,
+    ArtifactOccurrenceQuery,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
@@ -205,6 +206,7 @@ async def check_artifact_repository_conformance(repository: ArtifactRepository) 
         blob_locator="blob:target",
         owner_scope=scope,
         created_at=NOW,
+        labels={"tags": ("final", "report"), "scope_id": "scope-1"},
     )
 
     assert await repository.put(source) == source
@@ -276,6 +278,34 @@ async def check_artifact_repository_conformance(repository: ArtifactRepository) 
         PageRequest(limit=2, cursor=page_one.next_cursor),
     )
     assert len(page_two.items) == 1
+    filtered = await repository.query_occurrences(
+        ArtifactOccurrenceQuery(
+            owner_scope=scope,
+            scope=StorageScope(run_id="run-1"),
+            kind="result",
+            tags=("final",),
+            labels={"scope_id": "scope-1"},
+            pinned=False,
+        )
+    )
+    assert filtered.items == tuple(reversed(occurrences))
+    assert (
+        await repository.query_occurrences(
+            ArtifactOccurrenceQuery(
+                owner_scope=scope,
+                scope=StorageScope(session_id="session-1"),
+                pinned=True,
+            )
+        )
+    ).items == ()
+    assert (
+        await repository.query_occurrences(
+            ArtifactOccurrenceQuery(
+                owner_scope=other_scope,
+                scope=StorageScope(run_id="run-1"),
+            )
+        )
+    ).items == ()
 
     missing = ArtifactOccurrence(
         occurrence_id="occurrence-missing",

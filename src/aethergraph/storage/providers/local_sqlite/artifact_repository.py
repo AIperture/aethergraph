@@ -13,6 +13,7 @@ import sqlite3
 from ...contracts import (
     ArtifactAction,
     ArtifactOccurrence,
+    ArtifactOccurrenceQuery,
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRelationKind,
@@ -29,8 +30,9 @@ from ...contracts import (
 )
 from .database import LocalSQLiteDatabase
 
-_ARTIFACT_COMPONENT_VERSION = 2
+_ARTIFACT_COMPONENT_VERSION = 3
 _MAX_ARTIFACT_BATCH = 500
+_SCOPE_FIELDS = tuple(StorageScope.__dataclass_fields__)
 _CREATE_ARTIFACTS = """
 CREATE TABLE local_artifacts (
     artifact_id TEXT PRIMARY KEY,
@@ -52,6 +54,33 @@ CREATE TABLE local_artifacts (
 _CREATE_ARTIFACT_SCOPE_INDEX = """
 CREATE INDEX ix_local_artifacts_scope ON local_artifacts(owner_scope_identity, artifact_id)
 """
+_CREATE_ARTIFACT_KIND_INDEX = """
+CREATE INDEX ix_local_artifacts_kind
+ON local_artifacts(owner_scope_identity, kind, artifact_id)
+"""
+_CREATE_ARTIFACT_LABELS = """
+CREATE TABLE local_artifact_labels (
+    artifact_id TEXT NOT NULL REFERENCES local_artifacts(artifact_id) ON DELETE CASCADE,
+    label_key TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    PRIMARY KEY (artifact_id, label_key)
+)
+"""
+_CREATE_ARTIFACT_LABEL_INDEX = """
+CREATE INDEX ix_local_artifact_labels_exact
+ON local_artifact_labels(label_key, value_json, artifact_id)
+"""
+_CREATE_ARTIFACT_TAGS = """
+CREATE TABLE local_artifact_tags (
+    artifact_id TEXT NOT NULL REFERENCES local_artifacts(artifact_id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (artifact_id, tag)
+)
+"""
+_CREATE_ARTIFACT_TAG_INDEX = """
+CREATE INDEX ix_local_artifact_tags_exact
+ON local_artifact_tags(tag, artifact_id)
+"""
 _CREATE_ARTIFACT_RETENTION = """
 CREATE TABLE local_artifact_retention (
     artifact_id TEXT PRIMARY KEY REFERENCES local_artifacts(artifact_id) ON DELETE CASCADE,
@@ -66,12 +95,26 @@ _CREATE_ARTIFACT_RETENTION_SCOPE_INDEX = """
 CREATE INDEX ix_local_artifact_retention_scope
 ON local_artifact_retention(owner_scope_identity, artifact_id)
 """
+_CREATE_ARTIFACT_RETENTION_PIN_INDEX = """
+CREATE INDEX ix_local_artifact_retention_pin
+ON local_artifact_retention(owner_scope_identity, pinned, artifact_id)
+"""
 _CREATE_OCCURRENCES = """
 CREATE TABLE local_artifact_occurrences (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     occurrence_id TEXT NOT NULL UNIQUE,
     artifact_id TEXT NOT NULL REFERENCES local_artifacts(artifact_id),
     scope_identity TEXT NOT NULL,
+    tenant_id TEXT,
+    project_id TEXT,
+    org_id TEXT,
+    user_id TEXT,
+    session_id TEXT,
+    run_id TEXT,
+    graph_id TEXT,
+    node_id TEXT,
+    agent_id TEXT,
+    scope_key TEXT,
     action TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
     tool_name TEXT,
@@ -87,8 +130,13 @@ ON local_artifact_occurrences(scope_identity, sequence)
 """
 _CREATE_OCCURRENCE_ARTIFACT_INDEX = """
 CREATE INDEX ix_local_occurrences_artifact
-ON local_artifact_occurrences(scope_identity, artifact_id, sequence)
+ON local_artifact_occurrences(artifact_id, sequence)
 """
+_CREATE_OCCURRENCE_SCOPE_DIMENSION_INDEXES = tuple(
+    f"CREATE INDEX ix_local_occurrences_{name[:-3]} "
+    f"ON local_artifact_occurrences({name}, sequence)"
+    for name in _SCOPE_FIELDS
+)
 _CREATE_RELATIONS = """
 CREATE TABLE local_artifact_relations (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -124,11 +172,18 @@ class LocalArtifactRepository:
             statements=(
                 _CREATE_ARTIFACTS,
                 _CREATE_ARTIFACT_SCOPE_INDEX,
+                _CREATE_ARTIFACT_KIND_INDEX,
+                _CREATE_ARTIFACT_LABELS,
+                _CREATE_ARTIFACT_LABEL_INDEX,
+                _CREATE_ARTIFACT_TAGS,
+                _CREATE_ARTIFACT_TAG_INDEX,
                 _CREATE_ARTIFACT_RETENTION,
                 _CREATE_ARTIFACT_RETENTION_SCOPE_INDEX,
+                _CREATE_ARTIFACT_RETENTION_PIN_INDEX,
                 _CREATE_OCCURRENCES,
                 _CREATE_OCCURRENCE_SCOPE_INDEX,
                 _CREATE_OCCURRENCE_ARTIFACT_INDEX,
+                *_CREATE_OCCURRENCE_SCOPE_DIMENSION_INDEXES,
                 _CREATE_RELATIONS,
                 _CREATE_RELATION_SOURCE_INDEX,
                 _CREATE_RELATION_TARGET_INDEX,
@@ -200,6 +255,17 @@ class LocalArtifactRepository:
                     _json(record.labels),
                     record.schema_version,
                 ),
+            )
+            connection.executemany(
+                """
+                INSERT INTO local_artifact_labels(artifact_id, label_key, value_json)
+                VALUES (?, ?, ?)
+                """,
+                ((record.artifact_id, key, _json(value)) for key, value in record.labels.items()),
+            )
+            connection.executemany(
+                "INSERT INTO local_artifact_tags(artifact_id, tag) VALUES (?, ?)",
+                ((record.artifact_id, tag) for tag in _artifact_tags(record.labels)),
             )
             return record
 
@@ -528,16 +594,15 @@ class LocalArtifactRepository:
             ):
                 raise StorageNotFoundError(occurrence.artifact_id)
             connection.execute(
-                """
-                INSERT INTO local_artifact_occurrences(
-                    occurrence_id, artifact_id, scope_identity, action, occurred_at,
-                    tool_name, tool_version, labels_json, metrics_json, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+                f"INSERT INTO local_artifact_occurrences("
+                f"occurrence_id, artifact_id, scope_identity, {', '.join(_SCOPE_FIELDS)}, "
+                "action, occurred_at, tool_name, tool_version, labels_json, metrics_json, "
+                f"schema_version) VALUES ({', '.join('?' for _ in range(20))})",
                 (
                     occurrence.occurrence_id,
                     occurrence.artifact_id,
                     _scope_identity(occurrence.scope),
+                    *(getattr(occurrence.scope, name) for name in _SCOPE_FIELDS),
                     occurrence.action.value,
                     occurrence.occurred_at.isoformat(),
                     occurrence.tool_name,
@@ -606,6 +671,88 @@ class LocalArtifactRepository:
             next_cursor=(
                 _encode_cursor(fingerprint, int(selected[-1]["sequence"]))
                 if len(rows) > page.limit
+                else None
+            ),
+        )
+
+    async def query_occurrences(
+        self,
+        query: ArtifactOccurrenceQuery,
+    ) -> Page[ArtifactOccurrence]:
+        """Query one indexed owner-authorized occurrence page.
+
+        Exact immutable content ownership and every populated execution dimension
+        constrain the query before content kind, tag, label, pin, and cursor filters.
+
+        Examples:
+            Query one run:
+                ```python
+                page = await repository.query_occurrences(query)
+                ```
+
+            Continue an existing filter set:
+                ```python
+                page = await repository.query_occurrences(replace(query, page=next_page))
+                ```
+
+        Args:
+            query: Validated owner authorization, partial scope, filters, and page.
+
+        Returns:
+            Page[ArtifactOccurrence]: Stable descending occurrence page and cursor.
+
+        Notes:
+            Normalized scope, label, and tag indexes avoid JSON extraction and
+            deprecated App metadata is never consulted for authorization.
+        """
+        clauses = ["a.owner_scope_identity = ?"]
+        values: list[object] = [_scope_identity(query.owner_scope)]
+        for name, value in query.scope.as_filter().items():
+            clauses.append(f"o.{name} = ?")
+            values.append(value)
+        if query.artifact_id is not None:
+            clauses.append("o.artifact_id = ?")
+            values.append(query.artifact_id)
+        if query.kind is not None:
+            clauses.append("a.kind = ?")
+            values.append(query.kind)
+        for index, tag in enumerate(query.tags):
+            alias = f"tag_filter_{index}"
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM local_artifact_tags {alias} "
+                f"WHERE {alias}.artifact_id = o.artifact_id AND {alias}.tag = ?)"
+            )
+            values.append(tag)
+        for index, (key, value) in enumerate(query.labels.items()):
+            alias = f"label_filter_{index}"
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM local_artifact_labels {alias} "
+                f"WHERE {alias}.artifact_id = o.artifact_id "
+                f"AND {alias}.label_key = ? AND {alias}.value_json = ?)"
+            )
+            values.extend((key, _json(value)))
+        if query.pinned is not None:
+            clauses.append("COALESCE(r.pinned, 0) = ?")
+            values.append(int(query.pinned))
+
+        fingerprint = _artifact_occurrence_query_fingerprint(query)
+        if query.page.cursor is not None:
+            clauses.append("o.sequence < ?")
+            values.append(_decode_cursor(query.page.cursor, fingerprint))
+        values.append(query.page.limit + 1)
+        rows = await self._database.fetch_all(
+            "SELECT o.* FROM local_artifact_occurrences o "
+            "JOIN local_artifacts a ON a.artifact_id = o.artifact_id "
+            "LEFT JOIN local_artifact_retention r ON r.artifact_id = o.artifact_id "
+            f"WHERE {' AND '.join(clauses)} ORDER BY o.sequence DESC LIMIT ?",
+            values,
+        )
+        selected = rows[: query.page.limit]
+        return Page(
+            items=tuple(_occurrence(row) for row in selected),
+            next_cursor=(
+                _encode_cursor(fingerprint, int(selected[-1]["sequence"]))
+                if len(rows) > query.page.limit
                 else None
             ),
         )
@@ -860,6 +1007,17 @@ def _scope_authorizes(owner: StorageScope, operation: StorageScope) -> bool:
     return all(getattr(operation, name) == value for name, value in owner.as_filter().items())
 
 
+def _artifact_tags(labels: Mapping[str, object]) -> tuple[str, ...]:
+    value = labels.get("tags")
+    if isinstance(value, str):
+        tags = (item.strip() for item in value.split(","))
+    elif isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        tags = (str(item).strip() for item in value)
+    else:
+        return ()
+    return tuple(dict.fromkeys(tag for tag in tags if tag))
+
+
 def _json(value: object) -> str:
     return json.dumps(_plain(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -874,6 +1032,23 @@ def _plain(value: object) -> object:
 
 def _fingerprint(*parts: str) -> str:
     return hashlib.sha256("\x00".join(parts).encode()).hexdigest()[:24]
+
+
+def _artifact_occurrence_query_fingerprint(query: ArtifactOccurrenceQuery) -> str:
+    return _fingerprint(
+        "occurrence-query",
+        _json(
+            {
+                "owner_scope": query.owner_scope.as_filter(),
+                "scope": query.scope.as_filter(),
+                "artifact_id": query.artifact_id,
+                "kind": query.kind,
+                "tags": query.tags,
+                "labels": query.labels,
+                "pinned": query.pinned,
+            }
+        ),
+    )
 
 
 def _encode_cursor(fingerprint: str, sequence: int) -> str:

@@ -107,6 +107,7 @@ from .records import (
 )
 from .scope import StorageScope
 from .stores import (
+    ArtifactOccurrenceQuery,
     ArtifactRepository,
     BlobStore,
     EventQuery,
@@ -152,6 +153,7 @@ __all__ = [
     "DuplicateStorageProviderError",
     "ArtifactAction",
     "ArtifactOccurrence",
+    "ArtifactOccurrenceQuery",
     "ArtifactRecord",
     "ArtifactRetentionRecord",
     "ArtifactRelation",
