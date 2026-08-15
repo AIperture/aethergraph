@@ -11,6 +11,7 @@ from aethergraph.storage.contracts import StorageOpenRequest
 CONTRACT_ROOT = Path(__file__).parents[1] / "src" / "aethergraph" / "storage" / "contracts"
 CANONICAL_FILES = (
     *sorted(CONTRACT_ROOT.glob("*.py")),
+    CONTRACT_ROOT.parent / "composition.py",
     CONTRACT_ROOT.parent / "provider_registry.py",
 )
 FORBIDDEN_IMPORT_PREFIXES = (

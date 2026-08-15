@@ -127,7 +127,7 @@ class _ExternalProvider:
         if unknown:
             raise StorageConfigurationError(f"unknown external provider keys: {sorted(unknown)}")
 
-    async def open(self, request: StorageOpenRequest) -> StorageBundle:
+    def open(self, request: StorageOpenRequest) -> StorageBundle:
         self.validate_config(request.selection)
         if request.expected_format_version != 1:
             raise StorageConfigurationError("unsupported format version")
@@ -175,7 +175,7 @@ async def test_external_provider_opens_one_coherent_lifecycle_owned_bundle(tmp_p
     request = _request(tmp_path)
     provider.validate_config(request.selection)
 
-    bundle = await provider.open(request)
+    bundle = provider.open(request)
 
     assert bundle.provider_name == "company.external"
     assert bundle.mode is StorageOpenMode.READ_ONLY
@@ -226,6 +226,6 @@ async def test_external_selection_failure_never_creates_or_opens_local_provider(
             clock=invalid.clock,
             secrets=invalid.secrets,
         )
-        await provider.open(invalid)
+        provider.open(invalid)
 
     assert local_factory_calls == 0

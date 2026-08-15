@@ -38,7 +38,7 @@ class _Provider:
     def validate_config(self, selection: StorageProviderSelection) -> None:
         return None
 
-    async def open(self, request: StorageOpenRequest):
+    def open(self, request: StorageOpenRequest):
         raise NotImplementedError
 
 

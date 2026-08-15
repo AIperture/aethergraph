@@ -263,7 +263,7 @@ class StorageProvider(Protocol):
         """
         ...
 
-    async def open(self, request: StorageOpenRequest) -> StorageBundle:
+    def open(self, request: StorageOpenRequest) -> StorageBundle:
         """Open one bundle in the request's explicit access mode.
 
         The provider validates format and capabilities, owns all created resources,
@@ -272,13 +272,13 @@ class StorageProvider(Protocol):
         Examples:
             Open a writable workspace:
                 ```python
-                bundle = await provider.open(request)
+                bundle = provider.open(request)
                 ```
 
             Open a historical workspace read-only:
                 ```python
                 readonly = replace(request, mode=StorageOpenMode.READ_ONLY)
-                bundle = await provider.open(readonly)
+                bundle = provider.open(readonly)
                 ```
 
         Args:
@@ -288,6 +288,8 @@ class StorageProvider(Protocol):
             StorageBundle: One coherent provider-owned bundle.
 
         Notes:
-            Unsupported mode, format, or capability requirements fail closed.
+            Construction is synchronous so the completed embedded-runtime boundary
+            remains synchronous. Store operations and bundle health/close remain
+            asynchronous. Unsupported mode or format fails closed.
         """
         ...
