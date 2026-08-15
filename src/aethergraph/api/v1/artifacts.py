@@ -12,6 +12,8 @@ from fastapi.responses import RedirectResponse  # type: ignore
 from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.contracts.storage.artifact_index import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.services.artifacts import CanonicalArtifactFacade
+from aethergraph.storage.contracts import ArtifactMetricOrder, PageRequest, SearchMode
 
 from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
 from .schemas.artifacts import (
@@ -36,6 +38,9 @@ def _latin1_safe(s: str, fallback: str = "") -> str:
 
 
 router = APIRouter(tags=["artifacts"])
+
+_DEPRECATED_SEARCH_IDENTITY_LABELS = frozenset({"app_id", "application_id", "client_id"})
+_PROMOTED_SEARCH_FIELDS = frozenset({"kind", "scope_id", "tags"})
 
 
 # -------- Helpers  -------- #
@@ -138,6 +143,109 @@ def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
         filename=labels.get("filename"),
     )
     return out
+
+
+async def _search_canonical_artifacts(
+    req: ArtifactSearchRequest,
+    facade: CanonicalArtifactFacade,
+) -> ArtifactSearchResponse:
+    """Map the frozen Artifact search request onto exact canonical query paths."""
+    query = req.query.strip() if req.query and req.query.strip() else None
+    kind = _required_optional_text("kind", req.kind)
+    scope_id = _required_optional_text("scope_id", req.scope_id)
+    metric = _required_optional_text("metric", req.metric)
+    tags = _canonical_search_tags(req.tags)
+    labels = dict(req.labels)
+    _validate_canonical_search_labels(labels)
+    if scope_id is not None:
+        labels["scope_id"] = scope_id
+    if isinstance(req.limit, bool) or not 1 <= req.limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+
+    has_metric_order = req.mode is not None
+    if query is not None:
+        if metric is not None or has_metric_order or req.best_only:
+            raise HTTPException(
+                status_code=422,
+                detail="text search cannot be combined with metric ranking or best_only",
+            )
+        metadata = dict(labels)
+        if kind is not None:
+            metadata["kind"] = kind
+        results = await facade.search_public_artifacts(
+            query=query,
+            mode=SearchMode.LEXICAL,
+            top_k=req.limit,
+            tags=tags,
+            metadata=metadata,
+        )
+        return ArtifactSearchResponse(
+            hits=[
+                ArtifactSearchHit(artifact=_artifact_to_meta(result.artifact), score=result.score)
+                for result in results
+            ]
+        )
+
+    if (metric is None) != (req.mode is None):
+        raise HTTPException(
+            status_code=422,
+            detail="metric and mode must be supplied together",
+        )
+    if req.best_only and metric is None:
+        raise HTTPException(
+            status_code=422,
+            detail="best_only requires metric and mode",
+        )
+    metric_order = ArtifactMetricOrder(req.mode) if req.mode is not None else None
+    page = await facade.query_public_artifacts(
+        PageRequest(limit=1 if req.best_only else req.limit),
+        kind=kind,
+        tags=tags,
+        labels=labels,
+        metric=metric,
+        metric_order=metric_order,
+    )
+    return ArtifactSearchResponse(
+        hits=[
+            ArtifactSearchHit(
+                artifact=_artifact_to_meta(artifact),
+                score=float(artifact.metrics[metric]) if metric is not None else 1.0,
+            )
+            for artifact in page.items
+        ]
+    )
+
+
+def _required_optional_text(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(status_code=422, detail=f"{name} must be non-empty when supplied")
+    return normalized
+
+
+def _canonical_search_tags(values: list[str] | None) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    normalized = tuple(value.strip() for value in values)
+    if any(not value for value in normalized):
+        raise HTTPException(status_code=422, detail="tags must contain non-empty strings")
+    if len(set(normalized)) != len(normalized):
+        raise HTTPException(status_code=422, detail="tags must not contain duplicates")
+    return tuple(sorted(normalized))
+
+
+def _validate_canonical_search_labels(labels: dict[str, Any]) -> None:
+    forbidden = sorted(
+        (_DEPRECATED_SEARCH_IDENTITY_LABELS | _PROMOTED_SEARCH_FIELDS).intersection(labels)
+    )
+    if forbidden:
+        names = ", ".join(forbidden)
+        raise HTTPException(
+            status_code=422,
+            detail=f"labels contains reserved or deprecated search fields: {names}",
+        )
 
 
 # -------- API Endpoints -------- #
@@ -384,7 +492,7 @@ async def search_artifacts(
     identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> ArtifactSearchResponse:
     """
-    Structured search over artifacts via the artifact index.
+    Structured search over artifacts via the active legacy artifact index.
 
     We interpret fields on ArtifactSearchRequest in a flexible way:
       - kind: optional artifact kind filter
@@ -395,7 +503,10 @@ async def search_artifacts(
       - limit: max results
       - best_only: if True, use index.best(...) and return a single hit
 
-    Tenant scoping is enforced via org_id/user_id/client_id/app_id from RequestIdentity.
+    The active pre-S9 route retains its frozen behavior and applies only its existing
+    organization/user label filters. The tested canonical request mapper remains
+    inactive until the coordinated provider cut; neither path uses client/App metadata
+    as canonical ownership or authorization.
     """
     container = current_services()
     index = getattr(container, "artifact_index", None)
