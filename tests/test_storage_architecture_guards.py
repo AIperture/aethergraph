@@ -9,6 +9,7 @@ from typing import get_type_hints
 from aethergraph.storage.contracts import StorageOpenRequest
 
 CONTRACT_ROOT = Path(__file__).parents[1] / "src" / "aethergraph" / "storage" / "contracts"
+STORAGE_ROOT = CONTRACT_ROOT.parent
 CANONICAL_FILES = (
     *sorted(CONTRACT_ROOT.glob("*.py")),
     CONTRACT_ROOT.parent / "composition.py",
@@ -89,3 +90,10 @@ def test_provider_registry_contains_no_implicit_default_or_dynamic_discovery() -
     }
 
     assert calls.isdisjoint({"getattr", "hasattr", "__import__", "import_module"})
+
+
+def test_superseded_copied_sqlite_vector_implementations_are_absent() -> None:
+    vector_root = STORAGE_ROOT / "vector_index"
+
+    assert not (vector_root / "sqlite_index copy.py").exists()
+    assert not (vector_root / "sqlite_index_vanila.py").exists()
