@@ -7,6 +7,7 @@ from .database import (
     LocalDatabaseRole,
     LocalSQLiteDatabase,
 )
+from .event_store import LocalEventStore
 from .manifest import (
     LOCAL_STORAGE_FORMAT_VERSION,
     LocalWorkspaceManifest,
@@ -20,6 +21,7 @@ __all__ = [
     "LocalCheckpoint",
     "LocalBlobStore",
     "LocalDatabaseRole",
+    "LocalEventStore",
     "LocalSQLiteDatabase",
     "LocalWorkspaceManifest",
     "open_local_workspace_manifest",
