@@ -255,12 +255,6 @@ def create_app(
         finally:
             sys.path.pop(0)
 
-    if not deployment_mode:
-        from aethergraph.api.v1.observability import trace_router
-
-        app.include_router(trace_router)
-        logger.info("AetherGraph observability router mounted at /api/trace")
-
     # Install services globally so run()/tools see the same container
     install_services(container)
 

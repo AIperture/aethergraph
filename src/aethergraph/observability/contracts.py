@@ -1,3 +1,5 @@
+"""Public inspection contracts shared by AG routes and authorized Hosts."""
+
 from __future__ import annotations
 
 from typing import Any

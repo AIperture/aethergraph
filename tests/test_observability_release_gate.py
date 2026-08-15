@@ -235,7 +235,7 @@ async def test_retention_evicts_only_the_trace_above_its_logical_byte_ceiling(
 
 
 @pytest.mark.asyncio
-async def test_active_session_deletion_is_atomic_and_completed_session_is_hidden(
+async def test_active_session_deletion_is_atomic_and_completed_session_is_suppressed(
     tmp_path: Path,
 ) -> None:
     store = SQLiteObservationStore(tmp_path / "observability.db")
@@ -278,12 +278,12 @@ async def test_active_session_deletion_is_atomic_and_completed_session_is_hidden
     results = await facade.delete_sessions_observations(["session-active"])
 
     assert results[0].deleted_observations == 1
-    assert (await facade.list_trace_sessions())["items"] == []
-    assert await facade.inspect_trace("run-active") is None
+    assert (await store.get_storage_stats()).observations == 0
+    assert (await store.list_suppressed_scopes())["session_id"] == {"session-active"}
 
 
 @pytest.mark.asyncio
-async def test_trace_session_listing_and_deletion_enforce_request_identity(
+async def test_session_deletion_enforces_request_identity(
     tmp_path: Path,
 ) -> None:
     store = SQLiteObservationStore(tmp_path / "observability.db")
@@ -319,8 +319,5 @@ async def test_trace_session_listing_and_deletion_enforce_request_identity(
         ),
     )
 
-    page = await facade.list_trace_sessions()
-
-    assert [item["session_id"] for item in page["items"]] == ["session-owned"]
     with pytest.raises(ObservabilityNotFoundError):
         await facade.delete_session_observations("session-other")

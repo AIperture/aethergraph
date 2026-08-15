@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response  # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.observability import (
@@ -13,13 +13,7 @@ from aethergraph.observability import (
     ObservabilityNotFoundError,
     ObservabilityUnavailableError,
 )
-from aethergraph.observability.studio_translation import (
-    _matches_scope,
-    _paginate_rows,
-)
-
-from .deps import RequestIdentity, get_identity
-from .schemas.inspect import (
+from aethergraph.observability.contracts import (
     AgentEventListResponse,
     AgentEventTypeListResponse,
     AgentEventTypeRecord,
@@ -31,9 +25,14 @@ from .schemas.inspect import (
     TraceEventListResponse,
     TraceSummary,
 )
+from aethergraph.observability.inspection import (
+    _matches_scope,
+    _paginate_rows,
+)
+
+from .deps import RequestIdentity, get_identity
 
 router = APIRouter(prefix="/inspect", tags=["inspect"])
-trace_router = APIRouter(prefix="/api/trace", tags=["trace"])
 
 
 def _parse_window(value: datetime | None) -> datetime | None:
@@ -503,166 +502,3 @@ async def list_agent_events(
         )
     except ObservabilityUnavailableError as exc:
         raise _observability_http_error(exc) from exc
-
-
-def _required_trace(value: dict | None) -> dict:
-    if value is None:
-        raise HTTPException(status_code=404, detail="Trace was not found")
-    return value
-
-
-@trace_router.get("/sessions")
-async def list_trace_sessions(
-    limit: int = Query(50, ge=1, le=200),  # noqa: B008
-    cursor: str | None = Query(None),  # noqa: B008
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    return await _observability_facade(identity).list_trace_sessions(limit=limit, cursor=cursor)
-
-
-@trace_router.delete("/sessions/{session_id}", status_code=204)
-async def delete_trace_session(
-    session_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> Response:
-    """Delete observations for one completed Trace Explorer session.
-
-    Intro:
-        Purges AG-owned capture while retaining canonical runtime history.
-
-    Examples:
-        `DELETE /api/trace/sessions/session-1`
-        `DELETE /api/trace/sessions/session-complete`
-
-    Args:
-        session_id: Exact authoritative session identity.
-        identity: Authenticated request identity used for containment.
-
-    Returns:
-        Response: Empty HTTP 204 response after completed deletion.
-
-    Notes:
-        Active or resumable sessions return HTTP 409.
-    """
-    try:
-        await _observability_facade(identity).delete_session_observations(session_id)
-    except ActiveObservabilityScopeError as exc:
-        raise _observability_http_error(exc) from exc
-    return Response(status_code=204)
-
-
-@trace_router.post("/sessions/delete")
-async def delete_trace_sessions(
-    payload: dict,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict[str, int]:
-    """Delete observations for multiple completed sessions.
-
-    Intro:
-        Validates every session before performing the first destructive action.
-
-    Examples:
-        `POST /api/trace/sessions/delete {"session_ids": ["s-1"]}`
-        `POST /api/trace/sessions/delete {"session_ids": []}`
-
-    Args:
-        payload: JSON object containing a `session_ids` list.
-        identity: Authenticated request identity used for containment.
-
-    Returns:
-        dict[str, int]: Count of unique session scopes deleted.
-
-    Notes:
-        One active, resumable, or unauthorized session prevents the whole batch.
-    """
-    session_ids = payload.get("session_ids")
-    if not isinstance(session_ids, list):
-        raise HTTPException(status_code=400, detail="session_ids must be a list")
-    normalized = [str(session_id).strip() for session_id in session_ids if str(session_id).strip()]
-    try:
-        results = await _observability_facade(identity).delete_sessions_observations(normalized)
-    except ActiveObservabilityScopeError as exc:
-        raise _observability_http_error(exc) from exc
-    return {"deleted": len(results)}
-
-
-@trace_router.get("/traces/{trace_id}")
-async def get_trace_session(
-    trace_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    facade = _observability_facade(identity)
-    tree = _required_trace(await facade.inspect_trace(trace_id))
-    run = tree["runs"][0]
-    return {
-        "trace_id": trace_id,
-        "session_id": run["session_id"],
-        "graph_id": run["graph_id"],
-        "graph_topology": tree["graph_topologies_by_trace_id"][trace_id],
-        "spans": tree["spans_by_trace_id"][trace_id],
-        "agent_states": tree["agent_states_by_trace_id"][trace_id],
-        "plans": tree["plans_by_trace_id"][trace_id],
-        "started_at": run["started_at"],
-        "ended_at": run.get("ended_at"),
-        "status": run["status"],
-    }
-
-
-@trace_router.get("/traces/{trace_id}/tree")
-async def get_trace_tree(
-    trace_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    return _required_trace(await _observability_facade(identity).inspect_trace(trace_id))
-
-
-@trace_router.get("/traces/{trace_id}/graph")
-async def get_trace_graph(
-    trace_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    return _required_trace(await _observability_facade(identity).get_trace_graph(trace_id))
-
-
-@trace_router.get("/traces/{trace_id}/spans")
-async def get_trace_spans(
-    trace_id: str,
-    kind: str | None = Query(None),  # noqa: B008
-    agent_id: str | None = Query(None),  # noqa: B008
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    return _required_trace(
-        await _observability_facade(identity).get_trace_spans(
-            trace_id, kind=kind, agent_id=agent_id
-        )
-    )
-
-
-@trace_router.get("/traces/{trace_id}/plans")
-async def get_trace_plans(
-    trace_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    return _required_trace(await _observability_facade(identity).get_trace_plans(trace_id))
-
-
-@trace_router.get("/traces/{trace_id}/context-snapshots/{snapshot_id}")
-async def get_trace_context_snapshot(
-    trace_id: str,
-    snapshot_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    return _required_trace(
-        await _observability_facade(identity).get_trace_context_snapshot(trace_id, snapshot_id)
-    )
-
-
-@trace_router.get("/traces/{trace_id}/agents/{agent_id}/states")
-async def get_trace_agent_states(
-    trace_id: str,
-    agent_id: str,
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> dict:
-    return _required_trace(
-        await _observability_facade(identity).get_trace_agent_states(trace_id, agent_id)
-    )

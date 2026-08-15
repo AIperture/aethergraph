@@ -473,7 +473,6 @@ def client(monkeypatch) -> TestClient:
     )
     app = FastAPI()
     app.include_router(observability_api.router, prefix="/api/v1")
-    app.include_router(observability_api.trace_router)
 
     async def fake_get_identity():
         return RequestIdentity(user_id="u1", org_id="o1", mode="cloud")
@@ -522,42 +521,11 @@ def test_get_run_trace(client: TestClient) -> None:
     assert data["items"][0]["trace_id"] == "tr_1"
 
 
-def test_connected_trace_router_uses_observability_facade(client: TestClient) -> None:
-    resp = client.get("/api/trace/sessions")
-    assert resp.status_code == 200
-    assert resp.json()["items"][0]["latest_trace_id"] == "run-1"
-
-
-def test_engine_semantic_trace_v2_routes_are_removed(client: TestClient) -> None:
+def test_superseded_trace_routes_are_removed(client: TestClient) -> None:
     paths = {
         path for route in client.app.routes if (path := getattr(route, "path", None)) is not None
     }
-    assert not any(path.startswith("/api/trace/v2") for path in paths)
-
-
-def test_connected_trace_router_deletes_completed_session_observations(
-    client: TestClient,
-) -> None:
-    deleted = client.delete("/api/trace/sessions/sess-1")
-    batch = client.post(
-        "/api/trace/sessions/delete",
-        json={"session_ids": ["sess-1", "sess-1"]},
-    )
-
-    assert deleted.status_code == 204
-    assert batch.status_code == 200
-    assert batch.json() == {"deleted": 1}
-
-
-def test_connected_trace_router_refuses_active_session_deletion(
-    client: TestClient,
-) -> None:
-    client.fake_run_manager.status = RunStatus.waiting
-
-    response = client.delete("/api/trace/sessions/sess-1")
-
-    assert response.status_code == 409
-    assert "active runs: run-1" in response.json()["detail"]
+    assert not any(path.startswith("/api/trace") for path in paths)
 
 
 def test_get_run_trace_summary(client: TestClient) -> None:

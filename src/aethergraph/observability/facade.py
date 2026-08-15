@@ -9,6 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 from aethergraph.services.llm.correlation import complete_llm_call_correlation
 
+from .inspection import (
+    InspectionPresenter,
+    ObservabilityIdentity,
+    ObservabilityNotFoundError,
+    ObservabilityUnavailableError,
+    ObservabilityWorkspaceError,
+)
 from .models import (
     LLMObservationRecord,
     ObservationFilter,
@@ -18,16 +25,9 @@ from .models import (
 )
 from .policy import ObservationPolicy
 from .sqlite_store import SQLiteObservationStore
-from .studio_translation import (
-    ObservabilityIdentity,
-    ObservabilityNotFoundError,
-    ObservabilityUnavailableError,
-    ObservabilityWorkspaceError,
-    StudioTranslationPresenter,
-)
 
 if TYPE_CHECKING:
-    from aethergraph.api.v1.schemas.inspect import (
+    from aethergraph.observability.contracts import (
         AgentEventListResponse,
         InspectLogListResponse,
         LLMCallListResponse,
@@ -469,168 +469,6 @@ class ObservabilityFacade:
         """
         return await self._presenter().list_agent_events(**filters)
 
-    async def list_trace_sessions(
-        self, *, limit: int = 50, cursor: str | None = None
-    ) -> dict[str, Any]:
-        """List current Trace Explorer session groups from v2 data.
-
-        Intro:
-            Groups authoritative runs by session without an engine trace store.
-
-        Examples:
-            `page = await facade.list_trace_sessions()`
-            `page = await facade.list_trace_sessions(limit=25, cursor="25")`
-
-        Args:
-            limit: Maximum session groups returned.
-            cursor: Optional decimal offset cursor.
-
-        Returns:
-            dict[str, Any]: Current session-group page shape.
-
-        Notes:
-            Run IDs are the semantic trace IDs during the UI transition.
-        """
-        return await self._presenter()._list_trace_sessions(limit=limit, cursor=cursor)
-
-    async def inspect_trace(self, trace_id: str) -> dict[str, Any] | None:
-        """Build one current Trace Explorer tree from v2 records.
-
-        Intro:
-            Composes run, event, plan, graph, and context availability at read time.
-
-        Examples:
-            `tree = await facade.inspect_trace("run-1")`
-            `missing = await facade.inspect_trace("unknown")`
-
-        Args:
-            trace_id: Exact AG run identity.
-
-        Returns:
-            dict[str, Any] | None: Current trace tree or `None`.
-
-        Notes:
-            No translated tree is persisted or cached.
-        """
-        return await self._presenter()._inspect_trace(trace_id)
-
-    async def get_trace_graph(self, trace_id: str) -> dict[str, Any] | None:
-        """Build the observed agent/dispatch graph for one run.
-
-        Intro:
-            Includes only nodes and edges supported by canonical events.
-
-        Examples:
-            `graph = await facade.get_trace_graph("run-1")`
-            `missing = await facade.get_trace_graph("unknown")`
-
-        Args:
-            trace_id: Exact AG run identity.
-
-        Returns:
-            dict[str, Any] | None: Current graph DTO or `None`.
-
-        Notes:
-            Unknown topology is omitted rather than inferred.
-        """
-        return await self._presenter()._get_trace_graph(trace_id)
-
-    async def get_trace_spans(
-        self,
-        trace_id: str,
-        *,
-        kind: str | None = None,
-        agent_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Project canonical events into current Trace Explorer spans.
-
-        Intro:
-            Pairs tools and dispatches by explicit causal identities.
-
-        Examples:
-            `page = await facade.get_trace_spans("run-1")`
-            `tools = await facade.get_trace_spans("run-1", kind="tool_call")`
-
-        Args:
-            trace_id: Exact AG run identity.
-            kind: Optional translated span-kind filter.
-            agent_id: Optional exact agent-instance filter.
-
-        Returns:
-            dict[str, Any] | None: Mapping with translated `items`, or `None`.
-
-        Notes:
-            Unrepresented legacy span kinds are honestly absent.
-        """
-        return await self._presenter()._get_trace_spans(trace_id, kind=kind, agent_id=agent_id)
-
-    async def get_trace_plans(self, trace_id: str) -> dict[str, Any] | None:
-        """Reconstruct retained plan versions for one run.
-
-        Intro:
-            Reads canonical plan lifecycle events in persisted order.
-
-        Examples:
-            `plans = await facade.get_trace_plans("run-1")`
-            `missing = await facade.get_trace_plans("unknown")`
-
-        Args:
-            trace_id: Exact AG run identity.
-
-        Returns:
-            dict[str, Any] | None: Mapping with plan snapshots, or `None`.
-
-        Notes:
-            Only explicitly retained plan payloads are returned.
-        """
-        return await self._presenter()._get_trace_plans(trace_id)
-
-    async def get_trace_context_snapshot(
-        self, trace_id: str, snapshot_id: str
-    ) -> dict[str, Any] | None:
-        """Hydrate one prompt-manifest context snapshot for the current UI.
-
-        Intro:
-            Converts captured manifest metadata/fragments without inventing content.
-
-        Examples:
-            `snapshot = await facade.get_trace_context_snapshot("run-1", "manifest-1")`
-            `missing = await facade.get_trace_context_snapshot("run-1", "unknown")`
-
-        Args:
-            trace_id: Exact AG run identity.
-            snapshot_id: Exact prompt manifest identity.
-
-        Returns:
-            dict[str, Any] | None: Current context DTO or `None`.
-
-        Notes:
-            Metadata capture returns a valid empty body with capture information.
-        """
-        return await self._presenter()._get_context_snapshot(trace_id, snapshot_id)
-
-    async def get_trace_agent_states(self, trace_id: str, agent_id: str) -> dict[str, Any] | None:
-        """Return explicitly retained agent state history for one run.
-
-        Intro:
-            Preserves the current collection contract without synthetic snapshots.
-
-        Examples:
-            `states = await facade.get_trace_agent_states("run-1", "planner")`
-            `missing = await facade.get_trace_agent_states("unknown", "planner")`
-
-        Args:
-            trace_id: Exact AG run identity.
-            agent_id: Exact agent-instance identity.
-
-        Returns:
-            dict[str, Any] | None: State-history page or `None`.
-
-        Notes:
-            The result is empty when no canonical state event was retained.
-        """
-        return await self._presenter()._get_agent_states(trace_id, agent_id)
-
     async def get_usage(self, *, run_id: str | None = None) -> dict[str, int]:
         """Aggregate product-agent LLM and cache usage.
 
@@ -946,7 +784,7 @@ class ObservabilityFacade:
     def _run_value(run: Any, key: str) -> Any:
         return run.get(key) if isinstance(run, dict) else getattr(run, key, None)
 
-    def _presenter(self) -> StudioTranslationPresenter:
+    def _presenter(self) -> InspectionPresenter:
         async def resolve_run_statuses(run_ids: set[str]) -> dict[str, str]:
             statuses = {
                 run_id: self._run_statuses[run_id]
@@ -963,7 +801,7 @@ class ObservabilityFacade:
                 statuses[run_id] = str(getattr(value, "value", value) or "")
             return statuses
 
-        return StudioTranslationPresenter(
+        return InspectionPresenter(
             event_log=self.event_log,
             engine_event_log=self.engine_event_log,
             store=self.store,

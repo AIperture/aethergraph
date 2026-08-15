@@ -9,6 +9,13 @@ from .facade import (
     open_active_observability_facade,
     open_observability_workspace,
 )
+from .inspection import (
+    InspectionPresenter,
+    ObservabilityIdentity,
+    ObservabilityNotFoundError,
+    ObservabilityUnavailableError,
+    ObservabilityWorkspaceError,
+)
 from .legacy_cleanup import (
     LegacyObservabilityCleanupResult,
     LegacyObservabilityReport,
@@ -36,17 +43,12 @@ from .operations import (
 from .policy import ObservationPolicy
 from .retention import RetentionJanitor, RetentionPolicy
 from .sqlite_store import SQLiteObservationStore
-from .studio_translation import (
-    ObservabilityIdentity,
-    ObservabilityNotFoundError,
-    ObservabilityUnavailableError,
-    ObservabilityWorkspaceError,
-)
 
 __all__ = [
     "ActiveObservabilityScopeError",
     "AgentEventTypeRegistry",
     "CaptureMode",
+    "InspectionPresenter",
     "LLMObservationRecord",
     "LegacyObservabilityCleanupResult",
     "LegacyObservabilityReport",
