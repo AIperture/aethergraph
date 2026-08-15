@@ -1,3 +1,8 @@
+from .canonical_facade import (
+    CanonicalAgentStateFacade,
+    CanonicalAgentStateHandle,
+    project_agent_state_scope,
+)
 from .facade import (
     AgentStateBackend,
     AgentStateConflictError,
@@ -10,4 +15,7 @@ __all__ = [
     "AgentStateConflictError",
     "AgentStateFacade",
     "AgentStateHandle",
+    "CanonicalAgentStateFacade",
+    "CanonicalAgentStateHandle",
+    "project_agent_state_scope",
 ]

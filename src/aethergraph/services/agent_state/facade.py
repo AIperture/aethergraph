@@ -37,16 +37,6 @@ def _to_serializable(value: Any) -> Any:
     return value
 
 
-async def _call_memory_method(memory: Any, primary: str, fallback: str, /, *args, **kwargs):
-    method = getattr(memory, primary, None)
-    if callable(method):
-        return await method(*args, **kwargs)
-    fallback_method = getattr(memory, fallback, None)
-    if callable(fallback_method):
-        return await fallback_method(*args, **kwargs)
-    raise AttributeError(f"Memory object has neither {primary!r} nor {fallback!r}")
-
-
 class AgentStateHandle(Generic[T]):
     def __init__(
         self,
@@ -131,8 +121,8 @@ class AgentStateHandle(Generic[T]):
         """Load the current state value and hydrate its snapshot revision.
 
         Hybrid handles reuse the cached value unless `force` is true. Durable
-        and memory handles read the latest revisioned snapshot record when the
-        bound Memory facade exposes it, with a legacy value-only fallback.
+        and memory handles read the latest revisioned snapshot record from the
+        exact bound Memory facade contract.
 
         Examples:
             Load a cached hybrid state:
@@ -153,7 +143,8 @@ class AgentStateHandle(Generic[T]):
             T: Hydrated state model or the configured default value.
 
         Notes:
-            Legacy value-only Memory implementations hydrate revision zero.
+            Missing snapshots hydrate revision zero; value-only compatibility
+            method probing is intentionally unsupported.
         """
 
         async with self._lock:
@@ -175,31 +166,18 @@ class AgentStateHandle(Generic[T]):
         if self.backend == "local":
             self._cached = self._default()
             return self._cached
-        record_method = getattr(self.memory, "get_latest_state_record", None)
-        if callable(record_method):
-            record = await record_method(
-                self.key,
-                level=self.level,
-                use_persistence=user_persistence,
-                kind=self.kind,
-            )
-            if record is None:
-                raw = None
-                self._revision = 0
-            else:
-                raw = record.get("value")
-                self._revision = max(0, int(record.get("revision") or 0))
-        else:
-            raw = await _call_memory_method(
-                self.memory,
-                "get_latest_state",
-                "latest_state",
-                self.key,
-                level=self.level,
-                use_persistence=user_persistence,
-                kind=self.kind,
-            )
+        record = await self.memory.get_latest_state_record(
+            self.key,
+            level=self.level,
+            use_persistence=user_persistence,
+            kind=self.kind,
+        )
+        if record is None:
+            raw = None
             self._revision = 0
+        else:
+            raw = record.get("value")
+            self._revision = max(0, int(record.get("revision") or 0))
         self._cached = self._hydrate(raw)
         return self._cached
 
@@ -251,9 +229,9 @@ class AgentStateHandle(Generic[T]):
             Any | None: Persisted snapshot Event, or `None` for local state.
 
         Notes:
-            The canonical Memory facade forwards comparisons to its durable
-            backend, making them atomic across handles and processes. Legacy
-            value-only Memory implementations retain handle-local comparison.
+            The active Memory facade forwards comparisons to its durable backend,
+            making them atomic across handles and processes. Compatibility method
+            probing is intentionally unsupported.
         """
 
         async with self._lock:
@@ -303,34 +281,18 @@ class AgentStateHandle(Generic[T]):
             merged_meta["reason"] = reason
         if stage_id:
             merged_meta["stage_id"] = stage_id
-        append_method = getattr(self.memory, "append_state_snapshot", None)
         try:
-            if callable(append_method):
-                result = await append_method(
-                    key=self.key,
-                    value=_to_serializable(state),
-                    tags=[*self.tags, *list(tags or [])],
-                    meta=merged_meta,
-                    severity=severity,
-                    signal=signal,
-                    kind=self.kind,
-                    stage=stage_id,
-                    expected_revision=expected_revision,
-                )
-            else:
-                result = await _call_memory_method(
-                    self.memory,
-                    "append_state_snapshot",
-                    "record_state",
-                    key=self.key,
-                    value=_to_serializable(state),
-                    tags=[*self.tags, *list(tags or [])],
-                    meta=merged_meta,
-                    severity=severity,
-                    signal=signal,
-                    kind=self.kind,
-                    stage=stage_id,
-                )
+            result = await self.memory.append_state_snapshot(
+                key=self.key,
+                value=_to_serializable(state),
+                tags=[*self.tags, *list(tags or [])],
+                meta=merged_meta,
+                severity=severity,
+                signal=signal,
+                kind=self.kind,
+                stage=stage_id,
+                expected_revision=expected_revision,
+            )
         except StateSnapshotConflictError as exc:
             raise AgentStateConflictError(
                 key=self.key,
@@ -441,10 +403,7 @@ class AgentStateHandle(Generic[T]):
 
         if self.backend == "local":
             return None
-        append = getattr(self.memory, "append_external_resource_change", None)
-        if not callable(append):
-            raise AttributeError("Memory object does not expose append_external_resource_change()")
-        return await append(
+        return await self.memory.append_external_resource_change(
             ExternalResourceChangedEvent(
                 event_id=event_id,
                 scope_id=str(getattr(self.memory, "memory_scope_id", "") or ""),
@@ -473,10 +432,7 @@ class AgentStateHandle(Generic[T]):
         kind: str | None = None,
         use_persistence: bool = False,
     ) -> list[Any]:
-        return await _call_memory_method(
-            self.memory,
-            "list_state_history",
-            "state_history",
+        return await self.memory.list_state_history(
             self.key,
             tags=tags,
             limit=limit,

@@ -43,9 +43,6 @@ class FakeMemory:
         self.search_calls = []
         self.external_resource_changes = []
 
-    async def latest_state(self, key, **kwargs):
-        return self.latest
-
     async def get_latest_state_record(self, key, **kwargs):
         if self.latest is None:
             return None
@@ -56,7 +53,7 @@ class FakeMemory:
             "event_id": f"state-{len(self.record_state_calls)}",
         }
 
-    async def record_state(self, **kwargs):
+    async def append_state_snapshot(self, **kwargs):
         self.record_state_calls.append(kwargs)
         self.latest = kwargs["value"]
         self.latest_meta = dict(kwargs.get("meta") or {})
@@ -70,7 +67,7 @@ class FakeMemory:
         self.external_resource_changes.append(change)
         return SimpleNamespace(event_id=change.event_id, data=change.to_dict())
 
-    async def state_history(self, key, **kwargs):
+    async def list_state_history(self, key, **kwargs):
         self.history_calls.append((key, kwargs))
         return ["history"]
 
