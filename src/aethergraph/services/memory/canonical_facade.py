@@ -1,0 +1,462 @@
+"""Canonical memory events, bounded hot cache, and explicit search projection."""
+
+from __future__ import annotations
+
+import asyncio
+from collections import deque
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from time import monotonic
+from typing import Any
+
+from aethergraph.storage.contracts import (
+    EventDraft,
+    EventQuery,
+    EventRecord,
+    EventStore,
+    Page,
+    SearchBackend,
+    SearchDocument,
+    SearchMode,
+    SearchQuery,
+    SearchResult,
+    StorageScope,
+)
+
+_MEMORY_CORPUS = "memory"
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryCommitReceipt:
+    """Committed authoritative events and covering search-index freshness."""
+
+    events: tuple[EventRecord, ...]
+    event_cursor: str | None
+    indexed_cursor: str | None
+
+
+class CanonicalMemoryFacade:
+    """Provider-neutral memory facade with explicit durability and search semantics."""
+
+    def __init__(
+        self,
+        *,
+        event_store: EventStore,
+        search_backend: SearchBackend,
+        scope: StorageScope,
+        hot_max_events: int = 500,
+        hot_ttl_seconds: float = 900.0,
+        monotonic_clock: Callable[[], float] = monotonic,
+    ) -> None:
+        """Compose canonical memory over one bundle's event and search stores.
+
+        Retains exact dependencies and creates one bounded process-local cache without
+        selecting a provider, adapting legacy events, or enabling fallback search.
+
+        Examples:
+            Build from one bundle:
+                ```python
+                memory = CanonicalMemoryFacade(
+                    event_store=bundle.memory_events,
+                    search_backend=bundle.search,
+                    scope=scope,
+                )
+                ```
+
+            Configure a smaller hot cache:
+                ```python
+                memory = CanonicalMemoryFacade(
+                    event_store=events,
+                    search_backend=search,
+                    scope=scope,
+                    hot_max_events=100,
+                    hot_ttl_seconds=60.0,
+                )
+                ```
+
+        Args:
+            event_store: Canonical authoritative memory event stream.
+            search_backend: Canonical exact-mode searchable projection.
+            scope: Exact immutable memory ownership/execution scope.
+            hot_max_events: Positive maximum records retained in process.
+            hot_ttl_seconds: Positive insertion-age lifetime for hot records.
+            monotonic_clock: Monotonic time source used only for cache expiry.
+
+        Returns:
+            None: The inactive-until-S9 facade is ready without I/O.
+
+        Notes:
+            Durable events remain authoritative; hot cache and search are projections.
+        """
+        if isinstance(hot_max_events, bool) or not isinstance(hot_max_events, int):
+            raise TypeError("hot_max_events must be an integer")
+        if hot_max_events < 1:
+            raise ValueError("hot_max_events must be positive")
+        if isinstance(hot_ttl_seconds, bool) or not isinstance(hot_ttl_seconds, int | float):
+            raise TypeError("hot_ttl_seconds must be numeric")
+        if hot_ttl_seconds <= 0:
+            raise ValueError("hot_ttl_seconds must be positive")
+        self._events = event_store
+        self._search = search_backend
+        self.scope = scope
+        self._hot_max_events = hot_max_events
+        self._hot_ttl_seconds = float(hot_ttl_seconds)
+        self._monotonic = monotonic_clock
+        self._hot: deque[tuple[float, EventRecord]] = deque(maxlen=hot_max_events)
+        self._hot_lock = asyncio.Lock()
+
+    async def append_event(
+        self,
+        *,
+        event_id: str,
+        occurred_at: datetime,
+        kind: str,
+        stage: str | None = None,
+        topic: str | None = None,
+        text: str | None = None,
+        tags: tuple[str, ...] = (),
+        payload: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, float] | None = None,
+        severity: int | None = None,
+        signal: float | None = None,
+    ) -> MemoryCommitReceipt:
+        """Commit and index one normalized canonical memory event.
+
+        Constructs only canonical event fields, then delegates to the same bulk pipeline
+        used for multi-event commits.
+
+        Examples:
+            Append a user message:
+                ```python
+                receipt = await memory.append_event(
+                    event_id="event-1",
+                    occurred_at=now,
+                    kind="user.message",
+                    text="hello",
+                )
+                ```
+
+            Append a tool result:
+                ```python
+                receipt = await memory.append_event(
+                    event_id="event-2",
+                    occurred_at=now,
+                    kind="tool.result",
+                    topic="search",
+                    payload={"count": 3},
+                )
+                ```
+
+        Args:
+            event_id: Stable caller-owned idempotency identity.
+            occurred_at: Timezone-aware UTC event time.
+            kind: Exact normalized event family.
+            stage: Optional indexed execution stage.
+            topic: Optional indexed semantic topic.
+            text: Optional searchable human-readable content.
+            tags: Immutable unique indexed tags.
+            payload: Optional JSON-compatible event-specific content.
+            metrics: Optional finite numeric metrics.
+            severity: Optional normalized severity from zero through 100.
+            signal: Optional finite relevance signal.
+
+        Returns:
+            MemoryCommitReceipt: Authoritative event and covering search cursors.
+
+        Notes:
+            App/client/tool aliases and inline embeddings are absent by construction.
+        """
+        return await self.append_many(
+            (
+                EventDraft(
+                    event_id=event_id,
+                    occurred_at=occurred_at,
+                    scope=self.scope,
+                    kind=kind,
+                    stage=stage,
+                    topic=topic,
+                    text=text,
+                    tags=tags,
+                    payload=dict(payload or {}),
+                    metrics=dict(metrics or {}),
+                    severity=severity,
+                    signal=signal,
+                ),
+            )
+        )
+
+    async def append_many(self, events: tuple[EventDraft, ...]) -> MemoryCommitReceipt:
+        """Commit, cache, and index one bounded normalized event batch.
+
+        Authoritative event commit occurs first, hot-cache projection second, and
+        searchable projection third. Any search failure remains visible to the caller.
+
+        Examples:
+            Append a batch:
+                ```python
+                receipt = await memory.append_many((first, second))
+                ```
+
+            Append no events:
+                ```python
+                receipt = await memory.append_many(())
+                assert receipt.events == ()
+                ```
+
+        Args:
+            events: Immutable bounded canonical events in caller order.
+
+        Returns:
+            MemoryCommitReceipt: Committed records and latest event/search cursors.
+
+        Notes:
+            Exact retry is idempotent; no projection failure selects another backend.
+        """
+        if not isinstance(events, tuple):
+            raise TypeError("events must be an immutable tuple")
+        for event in events:
+            if event.scope != self.scope:
+                raise ValueError("Memory event scope must exactly match the bound facade scope")
+        if not events:
+            return MemoryCommitReceipt(events=(), event_cursor=None, indexed_cursor=None)
+        committed = await self._events.append_many(events)
+        inserted_at = self._monotonic()
+        async with self._hot_lock:
+            self._evict_expired(inserted_at)
+            cached_ids = {event.event_id for _cached_at, event in self._hot}
+            for event in committed:
+                if event.event_id in cached_ids:
+                    continue
+                self._hot.append((inserted_at, event))
+                cached_ids.add(event.event_id)
+        indexed_cursor = await self._search.upsert_many(
+            tuple(_search_document(event) for event in committed)
+        )
+        return MemoryCommitReceipt(
+            events=committed,
+            event_cursor=committed[-1].cursor,
+            indexed_cursor=indexed_cursor,
+        )
+
+    async def durable_query(self, query: EventQuery) -> Page[EventRecord]:
+        """Read one stable authoritative cursor page of canonical memory events.
+
+        Requires exact facade scope before delegating the complete bounded query to the
+        provider event store.
+
+        Examples:
+            Read recent events:
+                ```python
+                page = await memory.durable_query(EventQuery(scope=scope))
+                ```
+
+            Continue a page:
+                ```python
+                page = await memory.durable_query(next_query)
+                ```
+
+        Args:
+            query: Exact canonical event filters and opaque page request.
+
+        Returns:
+            Page[EventRecord]: Authoritative matching events and continuation cursor.
+
+        Notes:
+            This method never reads hot cache after a durable miss.
+        """
+        if query.scope != self.scope:
+            raise ValueError("Memory query scope must exactly match the bound facade scope")
+        return await self._events.query(query)
+
+    async def recent_hot(
+        self,
+        *,
+        limit: int = 50,
+        kinds: tuple[str, ...] = (),
+        tags: tuple[str, ...] = (),
+    ) -> tuple[EventRecord, ...]:
+        """Read bounded newest-first records from only the process-local hot cache.
+
+        Evicts expired insertions before applying exact kind and all-tag filters.
+
+        Examples:
+            Read recent hot events:
+                ```python
+                events = await memory.recent_hot(limit=20)
+                ```
+
+            Filter hot tool results:
+                ```python
+                events = await memory.recent_hot(kinds=("tool.result",), tags=("verified",))
+                ```
+
+        Args:
+            limit: Positive maximum number of records returned.
+            kinds: Optional exact event kinds.
+            tags: Optional tags every returned event must contain.
+
+        Returns:
+            tuple[EventRecord, ...]: Matching nonexpired records newest first.
+
+        Notes:
+            Cache expiry or eviction never triggers a durable fallback.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        now = self._monotonic()
+        async with self._hot_lock:
+            self._evict_expired(now)
+            rows = tuple(event for _inserted_at, event in reversed(self._hot))
+        allowed = set(kinds)
+        required_tags = set(tags)
+        return tuple(
+            event
+            for event in rows
+            if (not allowed or event.kind in allowed) and required_tags.issubset(event.tags)
+        )[:limit]
+
+    async def search(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        top_k: int = 10,
+        metadata: Mapping[str, Any] | None = None,
+        occurred_at_min: datetime | None = None,
+        occurred_at_max: datetime | None = None,
+        require_indexed_cursor: str | None = None,
+    ) -> tuple[SearchResult, ...]:
+        """Execute one explicit-mode canonical memory search.
+
+        Passes exact mode, scope, metadata, time bounds, result bound, and optional
+        freshness cursor directly to the provider search backend.
+
+        Examples:
+            Search lexically:
+                ```python
+                hits = await memory.search(query="hello", mode=SearchMode.LEXICAL)
+                ```
+
+            Require a committed projection:
+                ```python
+                hits = await memory.search(
+                    query="hello",
+                    mode=SearchMode.LEXICAL,
+                    require_indexed_cursor=receipt.indexed_cursor,
+                )
+                ```
+
+        Args:
+            query: Exact search text; structural mode may use an empty value.
+            mode: Required search mode with no fallback.
+            top_k: Positive provider result bound up to 1000.
+            metadata: Optional exact indexed metadata filters.
+            occurred_at_min: Optional inclusive UTC lower time bound.
+            occurred_at_max: Optional inclusive UTC upper time bound.
+            require_indexed_cursor: Optional covering search cursor requirement.
+
+        Returns:
+            tuple[SearchResult, ...]: Stable provider-ranked memory hits.
+
+        Notes:
+            Results carry identities and scores; event hydration is an explicit later read.
+        """
+        return await self._search.query(
+            SearchQuery(
+                corpus=_MEMORY_CORPUS,
+                mode=mode,
+                scope=self.scope,
+                query=query,
+                top_k=top_k,
+                metadata=dict(metadata or {}),
+                occurred_at_min=occurred_at_min,
+                occurred_at_max=occurred_at_max,
+                require_indexed_cursor=require_indexed_cursor,
+            )
+        )
+
+    async def indexed_cursor(self) -> str | None:
+        """Return the latest committed canonical memory search cursor.
+
+        Reads only the named memory corpus freshness state.
+
+        Examples:
+            Read current freshness:
+                ```python
+                cursor = await memory.indexed_cursor()
+                ```
+
+            Detect no indexed events:
+                ```python
+                assert await memory.indexed_cursor() is None
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            str | None: Opaque indexed cursor or `None` before first projection.
+
+        Notes:
+            The cursor is never parsed or compared by the facade.
+        """
+        return await self._search.indexed_cursor(_MEMORY_CORPUS)
+
+    async def wait_until_indexed(self, cursor: str, timeout_seconds: float) -> str:
+        """Wait a bounded interval for canonical memory search freshness.
+
+        Delegates the opaque required cursor and timeout without changing search mode
+        or selecting another projection.
+
+        Examples:
+            Wait for a projection:
+                ```python
+                covered = await memory.wait_until_indexed(receipt.indexed_cursor, 5.0)
+                ```
+
+            Check without waiting:
+                ```python
+                covered = await memory.wait_until_indexed(cursor, 0.0)
+                ```
+
+        Args:
+            cursor: Opaque required memory search cursor.
+            timeout_seconds: Non-negative maximum wait duration.
+
+        Returns:
+            str: Current covering search cursor.
+
+        Notes:
+            Provider timeout failure propagates directly.
+        """
+        return await self._search.wait_until_indexed(
+            _MEMORY_CORPUS,
+            cursor,
+            timeout_seconds,
+        )
+
+    def _evict_expired(self, now: float) -> None:
+        cutoff = now - self._hot_ttl_seconds
+        while self._hot and self._hot[0][0] <= cutoff:
+            self._hot.popleft()
+
+
+def _search_document(event: EventRecord) -> SearchDocument:
+    metadata: dict[str, Any] = {
+        "event_cursor": event.cursor,
+        "kind": event.kind,
+        "tags": list(event.tags),
+    }
+    if event.stage is not None:
+        metadata["stage"] = event.stage
+    if event.topic is not None:
+        metadata["topic"] = event.topic
+    return SearchDocument(
+        corpus=_MEMORY_CORPUS,
+        item_id=event.event_id,
+        text=event.text or "",
+        scope=event.scope,
+        occurred_at=event.occurred_at,
+        metadata=metadata,
+    )
