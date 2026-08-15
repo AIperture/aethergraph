@@ -14,6 +14,7 @@ from .errors import (
     StorageScopeError,
     UnknownStorageProviderError,
 )
+from .pagination import MAX_STORAGE_PAGE_SIZE, Page, PageRequest
 from .provider import (
     StorageBundle,
     StorageClock,
@@ -24,10 +25,41 @@ from .provider import (
     StorageProviderSelection,
     StorageSecretResolver,
 )
+from .records import (
+    ArtifactAction,
+    ArtifactOccurrence,
+    ArtifactRecord,
+    ArtifactRelation,
+    ArtifactRelationKind,
+    EventDraft,
+    EventRecord,
+    FrozenJson,
+    SearchDocument,
+    SearchMode,
+    SearchQuery,
+    SearchResult,
+    StateRecord,
+)
 from .scope import StorageScope
 
 __all__ = [
     "DuplicateStorageProviderError",
+    "ArtifactAction",
+    "ArtifactOccurrence",
+    "ArtifactRecord",
+    "ArtifactRelation",
+    "ArtifactRelationKind",
+    "EventDraft",
+    "EventRecord",
+    "FrozenJson",
+    "MAX_STORAGE_PAGE_SIZE",
+    "Page",
+    "PageRequest",
+    "SearchDocument",
+    "SearchMode",
+    "SearchQuery",
+    "SearchResult",
+    "StateRecord",
     "StorageBundle",
     "StorageCapabilities",
     "StorageCapability",
