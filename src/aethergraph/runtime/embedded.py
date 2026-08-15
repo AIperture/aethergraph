@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from datetime import datetime
 import importlib
 import inspect
 from pathlib import Path
@@ -11,6 +12,8 @@ import sys
 from typing import Any
 
 from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.contracts.integration import ExternalIdentity, HostManifest
+from aethergraph.contracts.services.memory import ExternalResourceChangedEvent
 from aethergraph.core.runtime.inspection import RuntimeInspectionService
 from aethergraph.core.runtime.run_types import RunOrigin, RunRecord
 from aethergraph.core.runtime.runtime_registry import current_registry
@@ -20,6 +23,7 @@ from aethergraph.observability.runtime_output import (
     enable_runtime_output_capture,
 )
 from aethergraph.services.channel.choices import normalize_choice_reply
+from aethergraph.services.channel.resources import ArtifactIngressScope, ResourceStager
 from aethergraph.services.container.default_container import (
     DefaultContainer,
     build_default_container,
@@ -30,16 +34,23 @@ from aethergraph.services.integration import (
     InteractionResolver,
     SemanticEventChannelAdapter,
     SemanticEventEmitter,
+    install_integration_ingress,
 )
+from aethergraph.services.scope.scope import Scope
 
 from .contracts import (
+    RuntimeArtifactRecord,
+    RuntimeArtifactScope,
     RuntimeGraphRegistration,
+    RuntimeIdentity,
     RuntimeModelProfile,
     RuntimeOpenRequest,
+    RuntimeRegistrationSnapshot,
     RuntimeRunRecord,
     RuntimeRunRequest,
     RuntimeRunStatus,
     RuntimeSemanticEvent,
+    RuntimeStagedArtifact,
 )
 from .errors import RuntimeGraphLoadError, RuntimeInteractionError, RuntimeNotReadyError
 
@@ -88,6 +99,7 @@ class EmbeddedRuntime:
         self._container = container
         self._output_capture: RuntimeOutputCaptureHost | None = None
         self._semantic_stores: dict[str, EventLogSemanticEventStore] = {}
+        self._integration: RuntimeIntegration | None = None
         self._active_run_ids: set[str] = set()
         self._closed = False
 
@@ -215,6 +227,40 @@ class EmbeddedRuntime:
             ),
         )
         self._semantic_stores[deployment_id] = store
+
+    def install_integration(self, manifest: HostManifest) -> RuntimeIntegration:
+        """Install one immutable canonical integration ingress boundary.
+
+        Examples:
+            Install an AG UI manifest:
+            ```python
+            integration = runtime.install_integration(manifest)
+            ```
+
+            Reuse the returned capability for session binding:
+            ```python
+            session_id = await integration.bind_session(...)
+            ```
+
+        Args:
+            manifest: Immutable Host deployment and route authority.
+
+        Returns:
+            RuntimeIntegration: Public accept, binding, and event capability.
+
+        Notes:
+            Reinstallation is rejected and coordinator stores remain private.
+        """
+        self._ensure_open()
+        if self._integration is not None:
+            raise RuntimeError("Integration ingress is already installed.")
+        coordinator = install_integration_ingress(
+            container=self._container,
+            manifest=manifest,
+        )
+        self._semantic_stores[manifest.deployment_id] = coordinator.semantic_events
+        self._integration = RuntimeIntegration(self, coordinator)
+        return self._integration
 
     def enable_output_capture(self, *, tags: Sequence[str] = ()) -> None:
         """Enable runtime-scoped stdout and stderr capture.
@@ -713,6 +759,257 @@ class EmbeddedRuntime:
             model=str(profile.model or "") or None,
         )
 
+    def registration_snapshot(
+        self,
+        *,
+        agent_ids: Sequence[str],
+        graph_ids: Sequence[str],
+    ) -> RuntimeRegistrationSnapshot:
+        """Read immutable registry facts needed for Host startup validation.
+
+        Examples:
+            Validate one Agent and graph:
+            ```python
+            snapshot = runtime.registration_snapshot(
+                agent_ids=("general",), graph_ids=("general_graph",)
+            )
+            ```
+
+            Detect a missing graph:
+            ```python
+            assert "missing" not in snapshot.registered_graph_ids
+            ```
+
+        Args:
+            agent_ids: Exact Agent identities to inspect.
+            graph_ids: Exact graph-function identities to inspect.
+
+        Returns:
+            RuntimeRegistrationSnapshot: Immutable metadata and registered graph IDs.
+
+        Notes:
+            The mutable global registry never crosses this boundary.
+        """
+        self._ensure_open()
+        registry = self._container.registry
+        agents = {
+            agent_id: registry.get_meta(nspace="agent", name=agent_id) for agent_id in agent_ids
+        }
+        registered: set[str] = set()
+        for graph_id in graph_ids:
+            try:
+                graph = registry.get_graphfn(graph_id)
+            except KeyError:
+                graph = None
+            if graph is not None:
+                registered.add(graph_id)
+        return RuntimeRegistrationSnapshot(
+            agent_metadata={
+                key: None if value is None else dict(value) for key, value in agents.items()
+            },
+            registered_graph_ids=frozenset(registered),
+        )
+
+    async def stage_artifact(
+        self,
+        *,
+        identity: RuntimeIdentity,
+        data: bytes,
+        name: str,
+        mime: str | None,
+        file_id: str | None,
+        scope: RuntimeArtifactScope,
+        labels: Mapping[str, Any] | None = None,
+    ) -> RuntimeStagedArtifact:
+        """Stage Host-authenticated bytes in the runtime artifact owner.
+
+        Examples:
+            Stage a current source buffer:
+            ```python
+            artifact = await runtime.stage_artifact(
+                identity=identity, data=b"print('hi')", name="main.py",
+                mime="text/x-python", file_id="buffer-1", scope=scope,
+            )
+            ```
+
+            Stage a produced text suggestion:
+            ```python
+            artifact = await runtime.stage_artifact(
+                identity=identity, data=text.encode(), name="suggestion.md",
+                mime="text/markdown", file_id=None, scope=scope,
+            )
+            ```
+
+        Args:
+            identity: Trusted Host identity used for artifact scope.
+            data: Exact authenticated bytes.
+            name: Safe display filename.
+            mime: Optional declared media type.
+            file_id: Optional stable inbound identity.
+            scope: Provider-neutral artifact ingress scope.
+            labels: Optional bounded provenance labels.
+
+        Returns:
+            RuntimeStagedArtifact: Stable artifact identity, size, and URI.
+
+        Notes:
+            Artifact stores and facades remain private to the runtime.
+        """
+        self._ensure_open()
+        resource = await ResourceStager(
+            container=self._container,
+            identity=RequestIdentity(
+                user_id=identity.user_id,
+                org_id=identity.org_id,
+                mode=identity.mode,
+            ),
+        ).stage_bytes(
+            data,
+            name=name,
+            mime=mime,
+            file_id=file_id,
+            scope=ArtifactIngressScope(
+                source=scope.source,
+                session_id=scope.session_id,
+                run_id=scope.run_id,
+                channel_key=scope.channel_key,
+                conversation_id=scope.conversation_id,
+                graph_id=scope.graph_id,
+                node_id=scope.node_id,
+                tool_name=scope.tool_name,
+                tool_version=scope.tool_version,
+            ),
+            labels=dict(labels or {}),
+        )
+        if not resource.artifact_id:
+            raise RuntimeError("Artifact staging produced no artifact identity.")
+        return RuntimeStagedArtifact(
+            artifact_id=resource.artifact_id,
+            size_bytes=int(resource.size or len(data)),
+            uri=resource.uri,
+        )
+
+    async def artifact(self, artifact_id: str) -> RuntimeArtifactRecord | None:
+        """Read immutable metadata for one artifact identity.
+
+        Examples:
+            Read an existing artifact:
+            ```python
+            artifact = await runtime.artifact("artifact-1")
+            ```
+
+            Detect a missing artifact:
+            ```python
+            assert await runtime.artifact("missing") is None
+            ```
+
+        Args:
+            artifact_id: Exact runtime artifact identity.
+
+        Returns:
+            RuntimeArtifactRecord | None: Immutable metadata when present.
+
+        Notes:
+            Authorization remains the embedding Host's responsibility.
+        """
+        self._ensure_open()
+        artifact = await self._container.artifact_index.get(artifact_id)
+        if artifact is None:
+            return None
+        return RuntimeArtifactRecord(
+            artifact_id=str(getattr(artifact, "artifact_id", artifact_id)),
+            uri=str(getattr(artifact, "uri", "") or "") or None,
+            name=str(getattr(artifact, "name", "") or "") or None,
+            mime=str(getattr(artifact, "mime", None) or getattr(artifact, "mimetype", None) or "")
+            or None,
+            size_bytes=int(
+                getattr(artifact, "bytes", None) or getattr(artifact, "size", None) or 0
+            ),
+            sha256=str(getattr(artifact, "sha256", "") or "") or None,
+            org_id=str(getattr(artifact, "org_id", "") or "") or None,
+            labels=dict(getattr(artifact, "labels", None) or {}),
+        )
+
+    async def load_artifact_text(self, uri: str) -> str:
+        """Load UTF-8 artifact content from one authorized runtime URI.
+
+        Examples:
+            Load a suggestion:
+            ```python
+            text = await runtime.load_artifact_text("artifact://suggestion")
+            ```
+
+            Load a staged upload after metadata authorization:
+            ```python
+            text = await runtime.load_artifact_text(artifact.uri)
+            ```
+
+        Args:
+            uri: Exact artifact-store URI from an authorized metadata record.
+
+        Returns:
+            str: Stored UTF-8 text.
+
+        Notes:
+            Callers must authorize metadata before invoking this content read.
+        """
+        self._ensure_open()
+        return await self._container.artifacts.load_text(uri)
+
+    async def append_external_resource_change(
+        self,
+        *,
+        identity: RuntimeIdentity,
+        session_id: str,
+        change: ExternalResourceChangedEvent,
+    ) -> None:
+        """Idempotently append one external-resource event to session memory.
+
+        Examples:
+            Append a workspace change:
+            ```python
+            await runtime.append_external_resource_change(
+                identity=identity, session_id="session-1", change=change
+            )
+            ```
+
+            Retry the same event safely:
+            ```python
+            await runtime.append_external_resource_change(
+                identity=identity, session_id="session-1", change=change
+            )
+            ```
+
+        Args:
+            identity: Trusted Host identity for memory isolation.
+            session_id: Exact durable AG session identity.
+            change: Strict external-resource change contract.
+
+        Returns:
+            None.
+
+        Notes:
+            The event ID is checked before append; memory stores remain private.
+        """
+        self._ensure_open()
+        scope = Scope(
+            org_id=identity.org_id,
+            user_id=identity.user_id,
+            session_id=session_id,
+            graph_id="agstudio.workspace_changes",
+            node_id="workspace_event_bridge",
+            memory_level="session",
+        )
+        memory = self._container.memory_factory.for_session(
+            run_id=f"external:{change.event_id}",
+            graph_id="agstudio.workspace_changes",
+            node_id="workspace_event_bridge",
+            session_id=session_id,
+            scope=scope,
+        )
+        if await memory.get_event(change.event_id) is None:
+            await memory.append_external_resource_change(change)
+
     def observability_capture_mode(self) -> str:
         """Read the immutable prompt-capture mode selected at runtime open.
 
@@ -865,4 +1162,134 @@ def open_embedded_runtime(request: RuntimeOpenRequest) -> EmbeddedRuntime:
     return EmbeddedRuntime(container)
 
 
-__all__ = ["EmbeddedRuntime", "open_embedded_runtime"]
+class RuntimeIntegration:
+    """Public capability wrapper for one installed integration coordinator."""
+
+    def __init__(self, runtime: EmbeddedRuntime, coordinator: Any) -> None:
+        """Bind a private canonical coordinator to deliberate Host operations.
+
+        Examples:
+            Obtain a wrapper through runtime installation:
+            ```python
+            integration = runtime.install_integration(manifest)
+            ```
+
+            Keep the coordinator private:
+            ```python
+            assert not hasattr(integration, "binding_store")
+            ```
+
+        Args:
+            runtime: Owning public embedded runtime.
+            coordinator: Internal installed integration coordinator.
+
+        Returns:
+            None.
+
+        Notes:
+            Hosts never construct this class directly.
+        """
+        self._runtime = runtime
+        self._coordinator = coordinator
+
+    async def accept(
+        self,
+        *,
+        verified: Any,
+        envelope: Any,
+        root_admission_callback: Any = None,
+    ) -> Any:
+        """Accept one canonical verified ingress envelope.
+
+        Examples:
+            Accept a root turn:
+            ```python
+            receipt = await integration.accept(verified=verified, envelope=envelope)
+            ```
+
+            Persist Host admission before scheduling:
+            ```python
+            receipt = await integration.accept(
+                verified=verified, envelope=envelope,
+                root_admission_callback=persist_run,
+            )
+            ```
+
+        Args:
+            verified: Authenticated integration authority.
+            envelope: Closed canonical ingress envelope.
+            root_admission_callback: Optional pre-scheduling Host callback.
+
+        Returns:
+            Any: Canonical public ingress receipt.
+
+        Notes:
+            Idempotency, dispatch, and interaction routing remain coordinator-owned.
+        """
+        with self._runtime.activate():
+            return await self._coordinator.accept(
+                verified=verified,
+                envelope=envelope,
+                root_admission_callback=root_admission_callback,
+            )
+
+    async def bind_session(
+        self,
+        *,
+        route_id: str,
+        external_identity: ExternalIdentity,
+        binding_id: str,
+        session_id: str,
+        now: datetime,
+    ) -> str:
+        """Resolve or create one exact route-scoped integration session.
+
+        Examples:
+            Bind a Studio thread:
+            ```python
+            session_id = await integration.bind_session(
+                route_id="studio.general", external_identity=identity,
+                binding_id="binding-1", session_id="session-1", now=now,
+            )
+            ```
+
+            Resolve the same identity idempotently:
+            ```python
+            assert await integration.bind_session(**same_scope) == session_id
+            ```
+
+        Args:
+            route_id: Exact installed manifest route identity.
+            external_identity: Canonical external conversation identity.
+            binding_id: Candidate durable binding identity.
+            session_id: Candidate durable AG session identity.
+            now: Authoritative binding timestamp.
+
+        Returns:
+            str: Persisted AG session identity.
+
+        Notes:
+            Route resolution never falls back to another profile.
+        """
+        route = next(
+            (
+                item
+                for item in self._coordinator.manifest.integration_routes
+                if item.route_id == route_id
+            ),
+            None,
+        )
+        if route is None:
+            raise RuntimeError(f"Integration route is not installed: {route_id}")
+        resolution = await self._coordinator.binding_store.get_or_create(
+            route=route,
+            external_identity=external_identity,
+            build_id=self._coordinator.manifest.build_id,
+            binding_id=binding_id,
+            ag_session_id=session_id,
+            now=now,
+        )
+        return resolution.binding.ag_session_id
+
+
+__all__ = ["EmbeddedRuntime", "RuntimeIntegration", "open_embedded_runtime"]

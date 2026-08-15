@@ -28,16 +28,24 @@ from aethergraph.core.runtime.runtime_services import (
     register_llm_client,
 )
 from aethergraph.runtime.contracts import (
+    RuntimeArtifactRecord,
+    RuntimeArtifactScope,
     RuntimeGraphRegistration,
     RuntimeIdentity,
     RuntimeModelProfile,
     RuntimeOpenRequest,
+    RuntimeRegistrationSnapshot,
     RuntimeRunRecord,
     RuntimeRunRequest,
     RuntimeRunStatus,
     RuntimeSemanticEvent,
+    RuntimeStagedArtifact,
 )
-from aethergraph.runtime.embedded import EmbeddedRuntime, open_embedded_runtime
+from aethergraph.runtime.embedded import (
+    EmbeddedRuntime,
+    RuntimeIntegration,
+    open_embedded_runtime,
+)
 from aethergraph.runtime.errors import (
     EmbeddedRuntimeError,
     RuntimeGraphLoadError,
@@ -74,16 +82,21 @@ __all__ = [
     # supported embedded Host boundary
     "EmbeddedRuntime",
     "EmbeddedRuntimeError",
+    "RuntimeArtifactRecord",
+    "RuntimeArtifactScope",
     "RuntimeGraphLoadError",
     "RuntimeGraphRegistration",
     "RuntimeIdentity",
+    "RuntimeIntegration",
     "RuntimeInteractionError",
     "RuntimeNotReadyError",
     "RuntimeModelProfile",
     "RuntimeOpenRequest",
+    "RuntimeRegistrationSnapshot",
     "RuntimeRunRecord",
     "RuntimeRunRequest",
     "RuntimeRunStatus",
     "RuntimeSemanticEvent",
+    "RuntimeStagedArtifact",
     "open_embedded_runtime",
 ]

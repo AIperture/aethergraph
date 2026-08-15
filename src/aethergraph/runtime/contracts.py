@@ -93,6 +93,52 @@ class RuntimeModelProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeRegistrationSnapshot:
+    """Immutable registration facts requested by an embedding Host."""
+
+    agent_metadata: Mapping[str, Mapping[str, Any] | None]
+    registered_graph_ids: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeArtifactScope:
+    """Provider-neutral scope for staging one Host resource."""
+
+    source: str
+    session_id: str | None = None
+    run_id: str | None = None
+    channel_key: str | None = None
+    conversation_id: str | None = None
+    graph_id: str = "channel"
+    node_id: str = "resource_ingress"
+    tool_name: str = "channel.resource_ingress"
+    tool_version: str = "1.0.0"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStagedArtifact:
+    """Immutable result of staging Host-authenticated bytes."""
+
+    artifact_id: str
+    size_bytes: int
+    uri: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeArtifactRecord:
+    """Immutable artifact metadata exposed for Host authorization."""
+
+    artifact_id: str
+    uri: str | None
+    name: str | None
+    mime: str | None
+    size_bytes: int
+    sha256: str | None
+    org_id: str | None
+    labels: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSemanticEvent:
     """Host-facing semantic event with its durable shared-log cursor."""
 
@@ -103,11 +149,15 @@ class RuntimeSemanticEvent:
 
 __all__ = [
     "RuntimeGraphRegistration",
+    "RuntimeArtifactRecord",
+    "RuntimeArtifactScope",
     "RuntimeIdentity",
     "RuntimeModelProfile",
     "RuntimeOpenRequest",
     "RuntimeRunRecord",
     "RuntimeRunRequest",
     "RuntimeRunStatus",
+    "RuntimeRegistrationSnapshot",
     "RuntimeSemanticEvent",
+    "RuntimeStagedArtifact",
 ]
