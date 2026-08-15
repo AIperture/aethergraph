@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import fields
 from datetime import UTC, datetime, timedelta
 from inspect import getdoc
 from pathlib import Path
@@ -10,6 +11,7 @@ import pytest
 
 from aethergraph.contracts.integration import (
     ExternalIdentity,
+    ExternalSessionBinding,
     IngressEnvelope,
     IngressReceipt,
     IntegrationCapabilities,
@@ -17,13 +19,20 @@ from aethergraph.contracts.integration import (
     IntegrationMatchPolicy,
     IntegrationRoute,
     IntegrationSessionPolicy,
+    MessageCompletedPayload,
     OriginAddress,
+    SemanticEvent,
     SemanticEventKind,
 )
+from aethergraph.services.channel.resources import InputResource
 from aethergraph.services.integration import (
     CanonicalExternalSessionBindingStore,
+    CanonicalInboundEventStore,
     CanonicalIngressIdempotencyStore,
+    CanonicalIntegrationPersistence,
+    CanonicalSemanticEventStore,
     IngressIdempotencyError,
+    SemanticEventStoreError,
     SessionBindingError,
     bind_canonical_integration_persistence,
 )
@@ -35,7 +44,9 @@ from aethergraph.storage.contracts import (
 from aethergraph.storage.providers.local_sqlite import (
     LocalDatabaseRole,
     LocalExternalSessionBindingRepository,
+    LocalInboundEventRepository,
     LocalIngressIdempotencyRepository,
+    LocalSemanticEventRepository,
     LocalSQLiteDatabase,
 )
 
@@ -51,6 +62,14 @@ def _database(root: Path) -> LocalSQLiteDatabase:
     return LocalSQLiteDatabase.open(
         workspace_root=root,
         role=LocalDatabaseRole.CONTROL,
+        mode=StorageOpenMode.READ_WRITE,
+    )
+
+
+def _event_database(root: Path) -> LocalSQLiteDatabase:
+    return LocalSQLiteDatabase.open(
+        workspace_root=root,
+        role=LocalDatabaseRole.EVENTS,
         mode=StorageOpenMode.READ_WRITE,
     )
 
@@ -115,6 +134,41 @@ def _receipt() -> IngressReceipt:
         session_id="session-1",
         turn_id="turn-1",
         event_cursor=1,
+    )
+
+
+def _binding() -> ExternalSessionBinding:
+    return ExternalSessionBinding(
+        binding_id="binding-1",
+        route_id="route-slack",
+        external_identity=_identity(),
+        ag_session_id="session-1",
+        build_id="build-1",
+        created_at=_NOW,
+        last_seen_at=_NOW,
+    )
+
+
+def _semantic_event(
+    *,
+    event_id: str = "semantic-1",
+    sequence: int = 0,
+    timestamp: datetime = _NOW,
+) -> SemanticEvent:
+    return SemanticEvent(
+        event_id=event_id,
+        deployment_id="deployment-1",
+        session_id="session-1",
+        turn_id="turn-1",
+        sequence=sequence,
+        producer="agent.support",
+        timestamp=timestamp,
+        kind=SemanticEventKind.MESSAGE_COMPLETED,
+        payload=MessageCompletedPayload(
+            message_id=f"message-{sequence}",
+            text=f"message {sequence}",
+        ),
+        extensions={"aethergraph.test": sequence},
     )
 
 
@@ -274,12 +328,110 @@ async def test_canonical_binding_projection_requires_route_thread(tmp_path: Path
     await database.close()
 
 
+@pytest.mark.asyncio
+async def test_canonical_inbound_projection_normalizes_resources_and_delivery_cursor(
+    tmp_path: Path,
+) -> None:
+    database = _event_database(tmp_path)
+    repository = LocalInboundEventRepository(database=database)
+    store = CanonicalInboundEventStore(repository=repository, owner_scope=_OWNER)
+    resource = InputResource(
+        kind="artifact",
+        source="slack",
+        status="materialized",
+        name="report.txt",
+        mime="text/plain",
+        size=12,
+        artifact_id="artifact-1",
+        path="C:/provider-private/source.txt",
+        uri="artifact://provider-private",
+    )
+
+    persisted = await store.append(
+        deployment_id="deployment-1",
+        route=_route(),
+        binding=_binding(),
+        envelope=_envelope(),
+        resources=(resource,),
+    )
+    scope = StorageScope(**_OWNER.as_filter(), session_id="session-1")
+    record = await repository.get(scope, persisted.event_id)
+
+    assert record is not None
+    assert persisted.cursor == record.delivery_cursor == 1
+    assert record.resource_keys == ("artifact:artifact-1",)
+    normalized_resource = record.payload["resources"][0]
+    assert normalized_resource["artifact_id"] == "artifact-1"
+    assert normalized_resource["media_type"] == "text/plain"
+    assert "path" not in normalized_resource
+    assert "uri" not in normalized_resource
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_semantic_projection_round_trips_and_resumes_by_delivery_cursor(
+    tmp_path: Path,
+) -> None:
+    database = _event_database(tmp_path)
+    repository = LocalSemanticEventRepository(database=database)
+    store = CanonicalSemanticEventStore(repository=repository, owner_scope=_OWNER)
+    events = tuple(
+        _semantic_event(
+            event_id=f"semantic-{index}",
+            sequence=index,
+            timestamp=_NOW + timedelta(seconds=index),
+        )
+        for index in range(3)
+    )
+
+    persisted = tuple([await store.append(event) for event in events])
+    assert [item.cursor for item in persisted] == [1, 2, 3]
+    assert [item.event for item in persisted] == list(events)
+    resumed = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+        after_cursor=1,
+        limit=2,
+    )
+    assert resumed == persisted[1:]
+    bounded = CanonicalSemanticEventStore(
+        repository=repository,
+        owner_scope=_OWNER,
+        max_history_events=2,
+    )
+    with pytest.raises(SemanticEventStoreError) as exceeded:
+        await bounded.list_session(
+            deployment_id="deployment-1",
+            session_id="session-1",
+        )
+    assert exceeded.value.code == "integration.semantic_event_history_limit"
+
+    await database.close()
+    reopened = _event_database(tmp_path)
+    restored = CanonicalSemanticEventStore(
+        repository=LocalSemanticEventRepository(database=reopened),
+        owner_scope=_OWNER,
+    )
+    assert (
+        await restored.list_session(
+            deployment_id="deployment-1",
+            session_id="session-1",
+            after_cursor=2,
+            limit=10,
+        )
+        == persisted[2:]
+    )
+    await reopened.close()
+
+
 def test_canonical_integration_factory_maps_exact_bundle_fields_without_io() -> None:
     ingress = object()
     bindings = object()
     bundle = SimpleNamespace(
         ingress_idempotency=ingress,
         external_session_bindings=bindings,
+        inbound_events=object(),
+        semantic_events=object(),
     )
 
     persistence = bind_canonical_integration_persistence(
@@ -290,8 +442,16 @@ def test_canonical_integration_factory_maps_exact_bundle_fields_without_io() -> 
 
     assert isinstance(persistence.idempotency, CanonicalIngressIdempotencyStore)
     assert isinstance(persistence.bindings, CanonicalExternalSessionBindingStore)
+    assert isinstance(persistence.inbound_events, CanonicalInboundEventStore)
+    assert isinstance(persistence.semantic_events, CanonicalSemanticEventStore)
     assert persistence.idempotency._repository is ingress
     assert persistence.bindings._repository is bindings
+    assert {field.name for field in fields(CanonicalIntegrationPersistence)} == {
+        "idempotency",
+        "bindings",
+        "inbound_events",
+        "semantic_events",
+    }
 
 
 @pytest.mark.parametrize(
@@ -328,6 +488,11 @@ def test_canonical_integration_public_docstrings_follow_strict_contract() -> Non
         CanonicalExternalSessionBindingStore.__init__,
         CanonicalExternalSessionBindingStore.get_or_create,
         CanonicalExternalSessionBindingStore.get,
+        CanonicalInboundEventStore.__init__,
+        CanonicalInboundEventStore.append,
+        CanonicalSemanticEventStore.__init__,
+        CanonicalSemanticEventStore.append,
+        CanonicalSemanticEventStore.list_session,
         bind_canonical_integration_persistence,
     )
     for method in methods:

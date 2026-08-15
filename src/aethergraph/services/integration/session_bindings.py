@@ -23,6 +23,8 @@ from aethergraph.storage.contracts import (
     StorageScope,
 )
 
+from ._canonical_scope import merge_host_scope, validate_host_owner_scope
+
 
 class SessionBindingError(RuntimeError):
     """Structured failure raised for invalid or incompatible session bindings."""
@@ -201,7 +203,7 @@ class CanonicalExternalSessionBindingStore:
         Notes:
             App/client identity, provider selection, and fallback are absent.
         """
-        _validate_binding_owner_scope(owner_scope)
+        validate_host_owner_scope(owner_scope)
         self._repository = repository
         self._owner_scope = owner_scope
 
@@ -583,8 +585,8 @@ def _binding_scope(
     route: IntegrationRoute,
     external_identity: ExternalIdentity,
 ) -> StorageScope:
-    return StorageScope(
-        **owner_scope.as_filter(),
+    return merge_host_scope(
+        owner_scope,
         scope_key=_scope_key(route=route, external_identity=external_identity),
     )
 
@@ -628,14 +630,3 @@ def _raise_build_mismatch(current: str, requested: str) -> None:
         code="integration.binding_build_mismatch",
         message=f"External session is pinned to build {current!r}, not {requested!r}.",
     )
-
-
-def _validate_binding_owner_scope(scope: StorageScope) -> None:
-    if not scope.as_filter():
-        raise ValueError("owner_scope must contain at least one canonical dimension")
-    forbidden = ("session_id", "run_id", "node_id", "scope_key")
-    populated = tuple(name for name in forbidden if getattr(scope, name) is not None)
-    if populated:
-        raise ValueError(
-            "owner_scope contains execution/external dimensions: " + ", ".join(populated)
-        )

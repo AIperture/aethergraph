@@ -1,5 +1,6 @@
 """Provider-neutral services for unified integration ingress."""
 
+from .canonical_events import CanonicalInboundEventStore, CanonicalSemanticEventStore
 from .canonical_factory import (
     CanonicalIntegrationPersistence,
     bind_canonical_integration_persistence,
@@ -16,6 +17,7 @@ from .dispatch import AGRootTurnDispatcher, RootTurnDispatcher
 from .events import (
     EventLogInboundEventStore,
     EventLogSemanticEventStore,
+    InboundEventStore,
     PersistedInboundEvent,
     PersistedSemanticEvent,
     SemanticEventStore,
@@ -57,7 +59,9 @@ __all__ = [
     "BindingResolution",
     "CanonicalExternalSessionBindingStore",
     "CanonicalIngressIdempotencyStore",
+    "CanonicalInboundEventStore",
     "CanonicalIntegrationPersistence",
+    "CanonicalSemanticEventStore",
     "AGRootTurnDispatcher",
     "EventLogInboundEventStore",
     "ExternalSessionBindingStore",
@@ -66,6 +70,7 @@ __all__ = [
     "IngressCoordinatorError",
     "IngressIdempotencyError",
     "IngressIdempotencyStore",
+    "InboundEventStore",
     "IntegrationRouteError",
     "IntegrationIngressCoordinator",
     "InteractionResolutionError",

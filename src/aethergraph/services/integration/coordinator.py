@@ -18,7 +18,7 @@ from aethergraph.contracts.integration import (
 from .context import VerifiedIntegrationContext
 from .delivery import SemanticEventEmitter
 from .dispatch import RootTurnDispatcher
-from .events import EventLogInboundEventStore
+from .events import InboundEventStore
 from .idempotency import IngressIdempotencyStore
 from .interactions import (
     InteractionResolutionError,
@@ -86,7 +86,7 @@ class IntegrationIngressCoordinator:
         binding_store: ExternalSessionBindingStore,
         resource_ingress: ResourceIngress,
         interaction_resolver: InteractionResolver,
-        inbound_events: EventLogInboundEventStore,
+        inbound_events: InboundEventStore,
         semantic_emitter: SemanticEventEmitter,
         resume_router,
         root_dispatcher: RootTurnDispatcher,
@@ -127,7 +127,7 @@ class IntegrationIngressCoordinator:
             binding_store: Durable external-session binding store.
             resource_ingress: Shared attachment validation/materialization service.
             interaction_resolver: Exact open-interaction resolver.
-            inbound_events: Canonical shared EventLog ingress writer.
+            inbound_events: Focused durable ingress writer.
             semantic_emitter: Canonical endpoint/provider semantic event emitter.
             resume_router: AG continuation resume router.
             root_dispatcher: Exact route-selected AG root dispatcher.

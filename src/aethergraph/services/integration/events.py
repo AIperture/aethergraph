@@ -30,6 +30,7 @@ class SemanticEventStoreError(RuntimeError):
             "integration.semantic_event_conflict",
             "integration.semantic_event_cursor_required",
             "integration.semantic_event_corrupt",
+            "integration.semantic_event_history_limit",
         ],
         message: str,
     ) -> None:
@@ -80,6 +81,63 @@ class PersistedInboundEvent:
 
     cursor: int
     event_id: str
+
+
+class InboundEventStore(Protocol):
+    """Provider-neutral persistence for validated materialized Host ingress."""
+
+    async def append(
+        self,
+        *,
+        deployment_id: str,
+        route: IntegrationRoute,
+        binding: ExternalSessionBinding,
+        envelope: IngressEnvelope,
+        resources: tuple[InputResource, ...],
+    ) -> PersistedInboundEvent:
+        """Persist one validated ingress event before runtime dispatch.
+
+        The service boundary accepts frozen Host contracts and already-materialized
+        resources. Implementations return the durable positive delivery cursor used
+        by the terminal ingress receipt.
+
+        Examples:
+            Persist text ingress:
+                ```python
+                stored = await inbound.append(
+                    deployment_id="deployment-1",
+                    route=route,
+                    binding=binding,
+                    envelope=envelope,
+                    resources=(),
+                )
+                ```
+
+            Persist materialized resources:
+                ```python
+                stored = await inbound.append(
+                    deployment_id=deployment_id,
+                    route=route,
+                    binding=binding,
+                    envelope=envelope,
+                    resources=resources,
+                )
+                ```
+
+        Args:
+            deployment_id: Exact Host deployment identity.
+            route: Exact immutable manifest route.
+            binding: Durable external-to-AG session binding.
+            envelope: Validated immutable ingress command.
+            resources: Materialized artifact-backed input resources.
+
+        Returns:
+            PersistedInboundEvent: Stable event identity and delivery cursor.
+
+        Notes:
+            Implementations must not persist raw transport payloads or secret bytes.
+        """
+        ...
 
 
 class EventLogInboundEventStore:

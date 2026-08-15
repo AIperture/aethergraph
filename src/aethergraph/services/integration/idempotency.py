@@ -23,6 +23,8 @@ from aethergraph.storage.contracts import (
     StorageScope,
 )
 
+from ._canonical_scope import validate_host_owner_scope
+
 
 class IngressIdempotencyError(RuntimeError):
     """Structured failure raised for conflicting or invalid idempotency state."""
@@ -204,7 +206,7 @@ class CanonicalIngressIdempotencyStore:
         Notes:
             App/client identity and provider-private configuration are not accepted.
         """
-        _validate_host_owner_scope(owner_scope)
+        validate_host_owner_scope(owner_scope)
         self._repository = repository
         self._owner_scope = owner_scope
         self._clock = clock
@@ -632,14 +634,3 @@ def _canonical_claim_matches(
         and record.digest_algorithm == request.digest_algorithm
         and record.scope == request.scope
     )
-
-
-def _validate_host_owner_scope(scope: StorageScope) -> None:
-    if not scope.as_filter():
-        raise ValueError("owner_scope must contain at least one canonical dimension")
-    forbidden = ("session_id", "run_id", "node_id", "scope_key")
-    populated = tuple(name for name in forbidden if getattr(scope, name) is not None)
-    if populated:
-        raise ValueError(
-            "owner_scope contains execution/external dimensions: " + ", ".join(populated)
-        )

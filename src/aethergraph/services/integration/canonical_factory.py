@@ -8,6 +8,8 @@ from datetime import datetime
 
 from aethergraph.storage.contracts import StorageBundle, StorageScope
 
+from .canonical_events import CanonicalInboundEventStore, CanonicalSemanticEventStore
+from .events import InboundEventStore, SemanticEventStore
 from .idempotency import CanonicalIngressIdempotencyStore, IngressIdempotencyStore
 from .session_bindings import (
     CanonicalExternalSessionBindingStore,
@@ -21,6 +23,8 @@ class CanonicalIntegrationPersistence:
 
     idempotency: IngressIdempotencyStore
     bindings: ExternalSessionBindingStore
+    inbound_events: InboundEventStore
+    semantic_events: SemanticEventStore
 
 
 def bind_canonical_integration_persistence(
@@ -31,8 +35,8 @@ def bind_canonical_integration_persistence(
 ) -> CanonicalIntegrationPersistence:
     """Bind Host integration persistence to exact canonical bundle fields.
 
-    The binding exposes the existing focused service protocols while all durable
-    mutations flow through the bundle's normalized ingress and external-session
+    The binding exposes the existing focused service protocols while claims,
+    bindings, accepted ingress, and semantic events flow through their exact bundle
     repositories. It performs no I/O and leaves the active installer unchanged.
 
     Examples:
@@ -74,6 +78,14 @@ def bind_canonical_integration_persistence(
         ),
         bindings=CanonicalExternalSessionBindingStore(
             repository=bundle.external_session_bindings,
+            owner_scope=owner_scope,
+        ),
+        inbound_events=CanonicalInboundEventStore(
+            repository=bundle.inbound_events,
+            owner_scope=owner_scope,
+        ),
+        semantic_events=CanonicalSemanticEventStore(
+            repository=bundle.semantic_events,
             owner_scope=owner_scope,
         ),
     )
