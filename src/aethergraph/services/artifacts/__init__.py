@@ -3,5 +3,11 @@ from .canonical_facade import (
     CanonicalArtifactFacade,
     CanonicalArtifactWriter,
 )
+from .public_projection import project_public_artifact
 
-__all__ = ["ArtifactCommitReceipt", "CanonicalArtifactFacade", "CanonicalArtifactWriter"]
+__all__ = [
+    "ArtifactCommitReceipt",
+    "CanonicalArtifactFacade",
+    "CanonicalArtifactWriter",
+    "project_public_artifact",
+]
