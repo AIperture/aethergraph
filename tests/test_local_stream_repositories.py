@@ -173,10 +173,14 @@ async def test_semantic_events_reject_identity_and_sequence_and_page_ascending(
         replace(query, page=PageRequest(limit=2, cursor=first.next_cursor))
     )
     assert (*first.items, *second.items) == records
+    resumed = await repository.query(replace(query, after_delivery_cursor=1))
+    assert resumed.items == records[1:]
+    assert all(record.delivery_cursor > 1 for record in resumed.items)
     with pytest.raises(StorageConfigurationError, match="mismatched"):
         await repository.query(
             replace(
                 query,
+                after_delivery_cursor=1,
                 kinds=(SemanticEventKind.WARNING_RAISED,),
                 page=PageRequest(limit=2, cursor=first.next_cursor),
             )

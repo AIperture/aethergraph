@@ -314,8 +314,8 @@ class LocalSemanticEventRepository:
     async def query(self, query: SemanticEventQuery) -> Page[SemanticEventRecord]:
         """Read one ascending bounded semantic-event reconnect page.
 
-        Deployment, canonical session scope, kind, and turn filters execute before
-        provider-cursor pagination.
+        Deployment, session scope, delivery cursor, kind, and turn filters execute
+        before provider-cursor pagination.
 
         Examples:
             Read session history:
@@ -340,6 +340,9 @@ class LocalSemanticEventRepository:
         clauses, values = _scope_filters(query.scope)
         clauses.append("deployment_id = ?")
         values.append(query.deployment_id)
+        if query.after_delivery_cursor is not None:
+            clauses.append("cursor > ?")
+            values.append(query.after_delivery_cursor)
         if query.kinds:
             clauses.append(f"kind IN ({','.join('?' for _ in query.kinds)})")
             values.extend(kind.value for kind in query.kinds)
@@ -715,6 +718,7 @@ def _semantic_fingerprint(query: SemanticEventQuery) -> str:
             "kind": "semantic",
             "deployment_id": query.deployment_id,
             "scope": query.scope.as_filter(),
+            "after_delivery_cursor": query.after_delivery_cursor,
             "kinds": tuple(kind.value for kind in query.kinds),
             "turn_id": query.turn_id,
             "limit": query.page.limit,

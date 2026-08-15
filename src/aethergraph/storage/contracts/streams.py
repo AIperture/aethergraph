@@ -172,12 +172,19 @@ class SemanticEventQuery:
     deployment_id: str
     scope: StorageScope
     page: PageRequest = PageRequest()
+    after_delivery_cursor: int | None = None
     kinds: tuple[SemanticEventKind, ...] = ()
     turn_id: str | None = None
 
     def __post_init__(self) -> None:
         _nonempty("deployment_id", self.deployment_id)
         self.scope.require("session_id")
+        if self.after_delivery_cursor is not None and (
+            isinstance(self.after_delivery_cursor, bool)
+            or not isinstance(self.after_delivery_cursor, int)
+            or self.after_delivery_cursor < 0
+        ):
+            raise ValueError("after_delivery_cursor must be a non-negative integer")
         if not isinstance(self.kinds, tuple):
             raise TypeError("kinds must be an immutable tuple")
         if len(set(self.kinds)) != len(self.kinds):
@@ -331,7 +338,8 @@ class SemanticEventRepository(Protocol):
     async def query(self, query: SemanticEventQuery) -> Page[SemanticEventRecord]:
         """Read one bounded ascending deployment/session event page.
 
-        Kind and turn filters apply before cursor pagination for history and reconnect.
+        Delivery cursor, kind, and turn filters apply before opaque pagination for
+        bounded history and reconnect reads.
 
         Examples:
             Read history:

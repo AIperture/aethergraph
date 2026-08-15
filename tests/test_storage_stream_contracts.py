@@ -122,6 +122,8 @@ def test_semantic_events_preserve_authored_sequence_and_opaque_cursor() -> None:
         replace(draft, sequence=-1)
     with pytest.raises(ValueError, match="duplicates"):
         replace(query, kinds=(draft.kind, draft.kind))
+    with pytest.raises(ValueError, match="after_delivery_cursor"):
+        replace(query, after_delivery_cursor=-1)
 
 
 def test_semantic_event_kind_matches_exact_active_host_v2_vocabulary() -> None:
