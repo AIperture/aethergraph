@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import hashlib
 import json
@@ -220,6 +220,62 @@ def read_local_workspace_manifest(root: Path) -> LocalWorkspaceManifest:
         if isinstance(exc, StorageFormatError):
             raise
         raise StorageFormatError("Local workspace manifest values are malformed") from exc
+
+
+def update_local_workspace_lifecycle(
+    root: Path,
+    *,
+    clean_shutdown: bool,
+    last_maintenance_at: datetime | None,
+) -> LocalWorkspaceManifest:
+    """Atomically update only the provider-owned workspace lifecycle fields.
+
+    The current exact manifest is reread and validated before replacement. Identity,
+    provider selection, compatibility, and configuration fingerprint remain unchanged.
+
+    Examples:
+        Mark a workspace active:
+            ```python
+            manifest = update_local_workspace_lifecycle(
+                root,
+                clean_shutdown=False,
+                last_maintenance_at=previous_maintenance,
+            )
+            ```
+
+        Record a clean maintained shutdown:
+            ```python
+            manifest = update_local_workspace_lifecycle(
+                root,
+                clean_shutdown=True,
+                last_maintenance_at=clock.now(),
+            )
+            ```
+
+    Args:
+        root: Authorized manifested local workspace root.
+        clean_shutdown: Whether all provider durability barriers and closes completed.
+        last_maintenance_at: Latest completed checkpoint timestamp, when available.
+
+    Returns:
+        LocalWorkspaceManifest: Strict updated manifest committed by atomic replacement.
+
+    Notes:
+        This operation never changes or persists raw provider configuration, secret
+        references, or resolved credentials.
+    """
+    if not isinstance(clean_shutdown, bool):
+        raise TypeError("clean_shutdown must be a bool")
+    if last_maintenance_at is not None:
+        _require_aware(last_maintenance_at, "last_maintenance_at")
+    current = read_local_workspace_manifest(root)
+    updated = replace(
+        current,
+        clean_shutdown=clean_shutdown,
+        last_maintenance_at=last_maintenance_at,
+    )
+    _write_manifest(root / WORKSPACE_MANIFEST_NAME, updated)
+    return updated
 
 
 def _validate_request(

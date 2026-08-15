@@ -29,6 +29,7 @@ from .manifest import (
     read_local_workspace_manifest,
 )
 from .observation_repository import LocalObservationRepository
+from .provider import LocalStorageBundle, LocalStorageProvider
 from .search_backend import LocalSearchBackend
 from .state_store import LocalStateStore
 from .stream_repositories import (
@@ -63,6 +64,8 @@ __all__ = [
     "LocalSemanticEventRepository",
     "LocalSessionRepository",
     "LocalStateStore",
+    "LocalStorageBundle",
+    "LocalStorageProvider",
     "LocalTriggerRepository",
     "LocalWorkspaceManifest",
     "open_local_workspace_manifest",

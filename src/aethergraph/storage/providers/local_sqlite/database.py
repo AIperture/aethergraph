@@ -476,6 +476,12 @@ class LocalSQLiteDatabase:
             self._closed = True
             await asyncio.to_thread(self._connection.close)
 
+    def _close_during_open_failure(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._connection.close()
+
     async def _run(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
         async with self._lock:
             if self._closed:
