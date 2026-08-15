@@ -1,5 +1,9 @@
 """Provider-neutral services for unified integration ingress."""
 
+from .canonical_factory import (
+    CanonicalIntegrationPersistence,
+    bind_canonical_integration_persistence,
+)
 from .context import VerifiedAttachment, VerifiedIntegrationContext
 from .coordinator import IngressCoordinatorError, IntegrationIngressCoordinator
 from .delivery import (
@@ -19,6 +23,7 @@ from .events import (
 )
 from .factory import install_integration_ingress
 from .idempotency import (
+    CanonicalIngressIdempotencyStore,
     IngressClaim,
     IngressIdempotencyError,
     IngressIdempotencyStore,
@@ -42,6 +47,7 @@ from .resources import ResourceIngress, ResourceIngressError, ResourceIngressPol
 from .routes import IntegrationRouteError, ManifestRouteResolver
 from .session_bindings import (
     BindingResolution,
+    CanonicalExternalSessionBindingStore,
     ExternalSessionBindingStore,
     SessionBindingError,
     SQLiteExternalSessionBindingStore,
@@ -49,6 +55,9 @@ from .session_bindings import (
 
 __all__ = [
     "BindingResolution",
+    "CanonicalExternalSessionBindingStore",
+    "CanonicalIngressIdempotencyStore",
+    "CanonicalIntegrationPersistence",
     "AGRootTurnDispatcher",
     "EventLogInboundEventStore",
     "ExternalSessionBindingStore",
@@ -87,5 +96,6 @@ __all__ = [
     "VerifiedIntegrationContext",
     "VerifiedAttachment",
     "build_interaction_payload",
+    "bind_canonical_integration_persistence",
     "install_integration_ingress",
 ]
