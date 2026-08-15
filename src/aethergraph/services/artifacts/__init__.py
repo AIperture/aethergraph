@@ -1,3 +1,7 @@
-from .canonical_facade import ArtifactCommitReceipt, CanonicalArtifactFacade
+from .canonical_facade import (
+    ArtifactCommitReceipt,
+    CanonicalArtifactFacade,
+    CanonicalArtifactWriter,
+)
 
-__all__ = ["ArtifactCommitReceipt", "CanonicalArtifactFacade"]
+__all__ = ["ArtifactCommitReceipt", "CanonicalArtifactFacade", "CanonicalArtifactWriter"]

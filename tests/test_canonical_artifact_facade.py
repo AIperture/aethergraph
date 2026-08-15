@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import inspect
+import io
+import os
 from pathlib import Path
+import shutil
+import tarfile
 
 import pytest
 
-from aethergraph.services.artifacts import CanonicalArtifactFacade
+from aethergraph.services.artifacts import CanonicalArtifactFacade, CanonicalArtifactWriter
 from aethergraph.storage.contracts import (
     ArtifactRelationKind,
     PageRequest,
@@ -16,6 +20,7 @@ from aethergraph.storage.contracts import (
     SessionKind,
     SessionRecord,
     StorageCapacityError,
+    StorageIntegrityError,
     StorageOpenMode,
     StorageOpenRequest,
     StorageProviderSelection,
@@ -217,6 +222,254 @@ async def test_canonical_artifact_hydration_is_bounded(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_canonical_directory_archive_is_deterministic_and_materializes_safely(
+    tmp_path: Path,
+) -> None:
+    first_source = tmp_path / "first"
+    second_source = tmp_path / "second"
+    (first_source / "nested").mkdir(parents=True)
+    (first_source / "empty").mkdir()
+    (first_source / "nested" / "data.txt").write_text("canonical\n", encoding="utf-8")
+    (first_source / "root.bin").write_bytes(b"root")
+    (second_source / "empty").mkdir(parents=True)
+    (second_source / "nested").mkdir()
+    (second_source / "root.bin").write_bytes(b"root")
+    (second_source / "nested" / "data.txt").write_text("canonical\n", encoding="utf-8")
+    for path in first_source.rglob("*"):
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+    for path in second_source.rglob("*"):
+        os.utime(path, (1_700_000_000, 1_700_000_000))
+
+    bundle = _open_bundle(tmp_path / "workspace")
+    facade = _facade(bundle)
+    try:
+        first = await facade.save_directory(
+            first_source,
+            content_labels={"_aethergraph_directory_format": "caller-value"},
+            artifact_id="artifact-directory-1",
+            occurrence_id="occurrence-directory-1",
+            occurred_at=NOW,
+        )
+        second = await facade.save_directory(
+            second_source,
+            artifact_id="artifact-directory-2",
+            occurrence_id="occurrence-directory-2",
+            occurred_at=NOW,
+        )
+
+        assert first.record.content_hash == second.record.content_hash
+        assert first.record.media_type == "application/vnd.aethergraph.directory+tar"
+        assert first.record.labels["_aethergraph_directory_format"] == "tar.v1"
+        assert first.record.labels["_aethergraph_directory_entry_count"] == 4
+        assert first.record.labels["_aethergraph_directory_file_count"] == 2
+        assert first.record.labels["_aethergraph_directory_total_bytes"] == sum(
+            path.stat().st_size for path in first_source.rglob("*") if path.is_file()
+        )
+
+        materialized = Path(
+            await facade.materialize_directory(
+                "artifact-directory-1",
+                tmp_path / "materialized",
+            )
+        )
+        assert (materialized / "nested" / "data.txt").read_text(encoding="utf-8") == ("canonical\n")
+        assert (materialized / "root.bin").read_bytes() == b"root"
+        assert (materialized / "empty").is_dir()
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_directory_materialization_enforces_resource_bounds(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    bundle = _open_bundle(tmp_path / "workspace")
+    facade = _facade(bundle)
+    try:
+        with pytest.raises(StorageCapacityError, match="source.*entry bound"):
+            await facade.save_directory(
+                source,
+                cleanup=True,
+                max_entries=1,
+                artifact_id="artifact-source-bound",
+                occurrence_id="occurrence-source-bound",
+                occurred_at=NOW,
+            )
+        assert source.is_dir()
+        assert await facade.get("artifact-source-bound") is None
+
+        await facade.save_directory(
+            source,
+            artifact_id="artifact-directory",
+            occurrence_id="occurrence-directory",
+            occurred_at=NOW,
+        )
+
+        entry_target = tmp_path / "too-many-entries"
+        with pytest.raises(StorageCapacityError, match="entry bound"):
+            await facade.materialize_directory(
+                "artifact-directory",
+                entry_target,
+                max_entries=1,
+            )
+        assert not entry_target.exists()
+
+        byte_target = tmp_path / "too-many-bytes"
+        with pytest.raises(StorageCapacityError, match="materialization bound"):
+            await facade.materialize_directory(
+                "artifact-directory",
+                byte_target,
+                max_total_bytes=5,
+            )
+        assert not byte_target.exists()
+
+        existing_target = tmp_path / "existing"
+        existing_target.mkdir()
+        marker = existing_target / "preserved.txt"
+        marker.write_text("keep", encoding="utf-8")
+        with pytest.raises(FileExistsError, match="already exists"):
+            await facade.materialize_directory("artifact-directory", existing_target)
+        assert marker.read_text(encoding="utf-8") == "keep"
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe_kind", ["traversal", "link"])
+async def test_canonical_directory_materialization_rejects_unsafe_members(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w") as archive:
+        if unsafe_kind == "traversal":
+            content = b"escape"
+            member = tarfile.TarInfo("../escape.txt")
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        else:
+            member = tarfile.TarInfo("linked")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "../escape.txt"
+            archive.addfile(member)
+
+    bundle = _open_bundle(tmp_path / "workspace")
+    facade = _facade(bundle)
+    try:
+        artifact_id = f"artifact-unsafe-{unsafe_kind}"
+        await facade.write(
+            _bytes(payload.getvalue()),
+            kind="directory",
+            media_type="application/vnd.aethergraph.directory+tar",
+            content_labels={"_aethergraph_directory_format": "tar.v1"},
+            artifact_id=artifact_id,
+            occurrence_id=f"occurrence-unsafe-{unsafe_kind}",
+            occurred_at=NOW,
+        )
+        target = tmp_path / f"target-{unsafe_kind}"
+
+        with pytest.raises(StorageIntegrityError, match="archive|path|permit"):
+            await facade.materialize_directory(artifact_id, target)
+        assert not target.exists()
+        assert not (tmp_path / "escape.txt").exists()
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_artifact_writer_commits_once_and_aborts_without_metadata(
+    tmp_path: Path,
+) -> None:
+    bundle = _open_bundle(tmp_path)
+    facade = _facade(bundle)
+    try:
+        async with facade.writer(
+            kind="report",
+            media_type="text/plain",
+            planned_ext=".txt",
+            original_filename="report.txt",
+            artifact_id="artifact-writer",
+            occurrence_id="occurrence-writer",
+            occurred_at=NOW,
+        ) as writer:
+            writer.add_labels({"category": "evidence"})
+            writer.add_occurrence_labels({"stage": "final"})
+            writer.add_metrics({"quality": 0.9})
+            await writer.write(b"streamed ")
+            await writer.write(b"artifact")
+
+        assert writer.receipt is not None
+        assert writer.receipt.record.labels["category"] == "evidence"
+        assert writer.receipt.occurrence.labels["stage"] == "final"
+        assert writer.receipt.occurrence.metrics["quality"] == 0.9
+        assert await facade.load_bytes("artifact-writer") == b"streamed artifact"
+        with pytest.raises(RuntimeError, match="closed"):
+            await writer.write(b"late")
+
+        with pytest.raises(RuntimeError, match="producer failed"):
+            async with facade.writer(
+                kind="binary",
+                artifact_id="artifact-aborted",
+                occurrence_id="occurrence-aborted",
+                occurred_at=NOW,
+            ) as aborted:
+                await aborted.write(b"partial")
+                raise RuntimeError("producer failed")
+        assert await facade.get("artifact-aborted") is None
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_artifact_write_validates_metadata_before_blob_commit(
+    tmp_path: Path,
+) -> None:
+    bundle = _open_bundle(tmp_path)
+    facade = _facade(bundle)
+    try:
+        with pytest.raises(ValueError, match="finite"):
+            await facade.save_text(
+                "invalid occurrence",
+                metrics={"quality": float("nan")},
+                artifact_id="artifact-invalid",
+                occurrence_id="occurrence-invalid",
+                occurred_at=NOW,
+            )
+
+        assert await facade.get("artifact-invalid") is None
+        assert (await facade.list_occurrences(artifact_id="artifact-invalid")).items == ()
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_artifact_staging_rejects_path_syntax(tmp_path: Path) -> None:
+    bundle = _open_bundle(tmp_path)
+    facade = _facade(bundle)
+    staged_file: Path | None = None
+    staged_dir: Path | None = None
+    try:
+        staged_file = Path(await facade.stage_path(".txt"))
+        staged_dir = Path(await facade.stage_dir("_bundle"))
+        assert staged_file.is_file()
+        assert staged_dir.is_dir()
+        with pytest.raises(ValueError, match="path or drive"):
+            await facade.stage_path("../escape")
+        with pytest.raises(ValueError, match="path or drive"):
+            await facade.stage_dir("C:escape")
+    finally:
+        if staged_file is not None:
+            staged_file.unlink(missing_ok=True)
+        if staged_dir is not None and staged_dir.exists():
+            shutil.rmtree(staged_dir)
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_canonical_artifact_run_and_session_counters_are_idempotent(
     tmp_path: Path,
 ) -> None:
@@ -306,8 +559,13 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         )
 
     for name in (
+        "stage_path",
+        "stage_dir",
+        "writer",
         "write",
         "save_file",
+        "save_directory",
+        "materialize_directory",
         "save_text",
         "save_json",
         "get",
@@ -325,3 +583,14 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
         assert docstring.index("Args:") < docstring.index("Returns:")
         assert docstring.index("Returns:") < docstring.index("Notes:")
         assert docstring.count("```python") >= 2
+
+    for name in ("receipt", "write", "add_labels", "add_occurrence_labels", "add_metrics"):
+        docstring = inspect.getdoc(getattr(CanonicalArtifactWriter, name)) or ""
+        assert docstring.index("Examples:") < docstring.index("Args:")
+        assert docstring.index("Args:") < docstring.index("Returns:")
+        assert docstring.index("Returns:") < docstring.index("Notes:")
+        assert docstring.count("```python") >= 2
+
+
+async def _bytes(payload: bytes):
+    yield payload

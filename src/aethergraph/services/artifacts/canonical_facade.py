@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
-from typing import Any
+import shutil
+import tempfile
+from typing import Any, BinaryIO
 from uuid import uuid4
 
 from aethergraph.storage.contracts import (
@@ -30,12 +34,24 @@ from aethergraph.storage.contracts import (
     SearchResult,
     SessionRepository,
     StorageCapacityError,
+    StorageIntegrityError,
     StorageNotFoundError,
     StorageScope,
 )
 
+from ._directory_archive import extract_directory_archive, write_directory_archive
+
 _ARTIFACT_CORPUS = "artifact"
 _DEFAULT_READ_LIMIT = 64 * 1024 * 1024
+_DIRECTORY_MEDIA_TYPE = "application/vnd.aethergraph.directory+tar"
+_DIRECTORY_FORMAT_LABEL = "_aethergraph_directory_format"
+_DIRECTORY_ENTRY_COUNT_LABEL = "_aethergraph_directory_entry_count"
+_DIRECTORY_FILE_COUNT_LABEL = "_aethergraph_directory_file_count"
+_DIRECTORY_TOTAL_BYTES_LABEL = "_aethergraph_directory_total_bytes"
+_DIRECTORY_FORMAT = "tar.v1"
+_DEFAULT_DIRECTORY_ENTRIES = 10_000
+_DEFAULT_DIRECTORY_BYTES = 1024 * 1024 * 1024
+_DEFAULT_DIRECTORY_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +62,193 @@ class ArtifactCommitReceipt:
     occurrence: ArtifactOccurrence
     retention: ArtifactRetentionRecord | None
     indexed_cursor: str
+
+
+class CanonicalArtifactWriter:
+    """Accumulate one canonical artifact stream in service-owned transient staging."""
+
+    def __init__(self, path: Path, handle: BinaryIO) -> None:
+        self._path = path
+        self._handle = handle
+        self._lock = asyncio.Lock()
+        self._closed = False
+        self._content_labels: dict[str, Any] = {}
+        self._occurrence_labels: dict[str, Any] = {}
+        self._metrics: dict[str, float] = {}
+        self._receipt: ArtifactCommitReceipt | None = None
+
+    @property
+    def receipt(self) -> ArtifactCommitReceipt | None:
+        """Return the canonical commit receipt after writer finalization.
+
+        The value remains absent while the context is open and after any failed or
+        cancelled production attempt.
+
+        Examples:
+            Inspect a committed writer:
+                ```python
+                async with facade.writer(kind="binary") as writer:
+                    await writer.write(b"data")
+                assert writer.receipt is not None
+                ```
+
+            Inspect an active writer:
+                ```python
+                async with facade.writer(kind="binary") as writer:
+                    assert writer.receipt is None
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            ArtifactCommitReceipt | None: Complete receipt after successful exit, or
+            `None` before finalization and after failure.
+
+        Notes:
+            The receipt never exposes the transient staging path.
+        """
+        return self._receipt
+
+    async def write(self, chunk: bytes) -> None:
+        """Append one immutable byte chunk to transient artifact staging.
+
+        The chunk is written off the event-loop thread and becomes durable only when
+        the surrounding facade writer context exits successfully.
+
+        Examples:
+            Write one chunk:
+                ```python
+                await writer.write(b"first")
+                ```
+
+            Write a sequence:
+                ```python
+                for chunk in chunks:
+                    await writer.write(chunk)
+                ```
+
+        Args:
+            chunk: Exact bytes to append in call order.
+
+        Returns:
+            None: The transient staging file has accepted the complete chunk.
+
+        Notes:
+            Non-bytes input and writes after context exit fail explicitly.
+        """
+        if not isinstance(chunk, bytes):
+            raise TypeError("chunk must be bytes")
+        async with self._lock:
+            self._ensure_open()
+            await asyncio.to_thread(self._handle.write, chunk)
+
+    def add_labels(self, labels: Mapping[str, Any]) -> None:
+        """Merge immutable content labels into the pending artifact record.
+
+        Labels remain separate from execution occurrence labels and are validated by
+        the canonical record when the surrounding context commits.
+
+        Examples:
+            Add one label:
+                ```python
+                writer.add_labels({"category": "report"})
+                ```
+
+            Extend labels incrementally:
+                ```python
+                writer.add_labels({"stage": "draft"})
+                writer.add_labels({"reviewed": True})
+                ```
+
+        Args:
+            labels: JSON-compatible immutable content labels to merge.
+
+        Returns:
+            None: The pending content-label mapping is updated in place.
+
+        Notes:
+            Later values replace earlier values for the same exact key.
+        """
+        self._ensure_open()
+        if not isinstance(labels, Mapping):
+            raise TypeError("labels must be a mapping")
+        self._content_labels.update(labels)
+
+    def add_occurrence_labels(self, labels: Mapping[str, Any]) -> None:
+        """Merge execution labels into the pending artifact occurrence.
+
+        These labels describe this production event and do not modify immutable
+        content metadata.
+
+        Examples:
+            Add a workflow stage:
+                ```python
+                writer.add_occurrence_labels({"stage": "final"})
+                ```
+
+            Extend occurrence metadata:
+                ```python
+                writer.add_occurrence_labels({"attempt": 1})
+                writer.add_occurrence_labels({"review": "accepted"})
+                ```
+
+        Args:
+            labels: JSON-compatible occurrence labels to merge.
+
+        Returns:
+            None: The pending occurrence-label mapping is updated in place.
+
+        Notes:
+            Later values replace earlier values for the same exact key.
+        """
+        self._ensure_open()
+        if not isinstance(labels, Mapping):
+            raise TypeError("labels must be a mapping")
+        self._occurrence_labels.update(labels)
+
+    def add_metrics(self, metrics: Mapping[str, float]) -> None:
+        """Merge finite numeric metrics into the pending artifact occurrence.
+
+        Metrics are recorded on the production occurrence and validated by the
+        canonical record before any repository mutation.
+
+        Examples:
+            Add one metric:
+                ```python
+                writer.add_metrics({"rows": 10.0})
+                ```
+
+            Replace a pending metric:
+                ```python
+                writer.add_metrics({"quality": 0.8})
+                writer.add_metrics({"quality": 0.9})
+                ```
+
+        Args:
+            metrics: Finite numeric occurrence metrics to merge.
+
+        Returns:
+            None: The pending metric mapping is updated in place.
+
+        Notes:
+            Later values replace earlier values for the same exact key.
+        """
+        self._ensure_open()
+        if not isinstance(metrics, Mapping):
+            raise TypeError("metrics must be a mapping")
+        self._metrics.update(metrics)
+
+    async def _close(self) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            await asyncio.to_thread(self._handle.close)
+            self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("artifact writer is closed")
 
 
 class CanonicalArtifactFacade:
@@ -140,6 +343,166 @@ class CanonicalArtifactFacade:
         self._artifact_id_factory = artifact_id_factory
         self._occurrence_id_factory = occurrence_id_factory
 
+    async def stage_path(self, suffix: str = "") -> str:
+        """Allocate one service-owned transient file for artifact production.
+
+        The returned path is outside durable provider identity and exists only as a
+        local producer convenience until it is ingested or explicitly removed.
+
+        Examples:
+            Stage a text file:
+                ```python
+                path = await facade.stage_path(".txt")
+                ```
+
+            Stage an extension-free file:
+                ```python
+                path = await facade.stage_path()
+                ```
+
+        Args:
+            suffix: Optional filename suffix without path separators or drive syntax.
+
+        Returns:
+            str: Absolute path to an existing empty transient file.
+
+        Notes:
+            Callers own unused staging paths; durable records never contain this path.
+        """
+        normalized = _staging_suffix(suffix)
+        return await asyncio.to_thread(_create_staging_file, normalized)
+
+    async def stage_dir(self, suffix: str = "") -> str:
+        """Allocate one service-owned transient directory for artifact production.
+
+        The directory is local staging only and does not establish artifact ownership,
+        authorization, or a provider blob locator.
+
+        Examples:
+            Stage a directory:
+                ```python
+                directory = await facade.stage_dir()
+                ```
+
+            Add a descriptive suffix:
+                ```python
+                directory = await facade.stage_dir("_frames")
+                ```
+
+        Args:
+            suffix: Optional directory suffix without path separators or drive syntax.
+
+        Returns:
+            str: Absolute path to an existing empty transient directory.
+
+        Notes:
+            Callers own unused staging directories and must remove them explicitly.
+        """
+        normalized = _staging_suffix(suffix)
+        return await asyncio.to_thread(
+            tempfile.mkdtemp,
+            normalized,
+            "aethergraph-artifact-",
+        )
+
+    @asynccontextmanager
+    async def writer(
+        self,
+        *,
+        kind: str,
+        media_type: str = "application/octet-stream",
+        planned_ext: str | None = None,
+        original_filename: str | None = None,
+        content_labels: Mapping[str, Any] | None = None,
+        occurrence_labels: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, float] | None = None,
+        pinned: bool = False,
+        artifact_id: str | None = None,
+        occurrence_id: str | None = None,
+        occurred_at: datetime | None = None,
+    ) -> AsyncIterator[CanonicalArtifactWriter]:
+        """Stage and commit one incrementally produced canonical artifact.
+
+        Bytes spool to a transient file with bounded memory use. Successful context
+        exit commits through the same blob, metadata, occurrence, search, and counter
+        path as direct streams; failure removes staging without a fallback write.
+
+        Examples:
+            Stream binary output:
+                ```python
+                async with facade.writer(kind="binary") as writer:
+                    await writer.write(b"payload")
+                ```
+
+            Attach normalized metadata:
+                ```python
+                async with facade.writer(
+                    kind="report",
+                    media_type="text/plain",
+                    planned_ext=".txt",
+                ) as writer:
+                    writer.add_labels({"category": "evidence"})
+                    writer.add_occurrence_labels({"stage": "final"})
+                    await writer.write(b"report")
+                receipt = writer.receipt
+                ```
+
+        Args:
+            kind: Exact canonical artifact kind.
+            media_type: Exact canonical media type.
+            planned_ext: Optional transient staging suffix.
+            original_filename: Optional descriptive filename without path authority.
+            content_labels: Optional initial immutable content metadata.
+            occurrence_labels: Optional initial execution-occurrence metadata.
+            metrics: Optional initial finite occurrence metrics.
+            pinned: Whether to create explicit pinned retention intent.
+            artifact_id: Optional stable artifact identity.
+            occurrence_id: Optional stable occurrence identity.
+            occurred_at: Optional stable UTC occurrence time for exact retries.
+
+        Returns:
+            AsyncIterator[CanonicalArtifactWriter]: Writer whose receipt is populated
+            only after successful context exit.
+
+        Notes:
+            The transient path is never exposed by the writer or persisted. Exact
+            retries still require caller-supplied stable identities and time.
+        """
+        staged = Path(await self.stage_path(planned_ext or ""))
+        handle = await asyncio.to_thread(staged.open, "wb")
+        stream = CanonicalArtifactWriter(staged, handle)
+        try:
+            if content_labels:
+                stream.add_labels(content_labels)
+            if occurrence_labels:
+                stream.add_occurrence_labels(occurrence_labels)
+            if metrics:
+                stream.add_metrics(metrics)
+            yield stream
+            await stream._close()
+            receipt = await self.write(
+                _file_chunks(staged),
+                kind=kind,
+                media_type=media_type,
+                original_filename=original_filename,
+                content_labels=stream._content_labels,
+                occurrence_labels=stream._occurrence_labels,
+                metrics=stream._metrics,
+                search_text=_searchable_description(
+                    kind,
+                    original_filename,
+                    stream._content_labels,
+                ),
+                pinned=pinned,
+                artifact_id=artifact_id,
+                occurrence_id=occurrence_id,
+                occurred_at=occurred_at,
+            )
+            stream._receipt = receipt
+        finally:
+            await stream._close()
+            await asyncio.to_thread(staged.unlink, missing_ok=True)
+
     async def write(
         self,
         chunks: AsyncIterable[bytes],
@@ -208,25 +571,24 @@ class CanonicalArtifactFacade:
         if not isinstance(pinned, bool):
             raise TypeError("pinned must be a boolean")
         now = occurred_at or self._now()
-        blob = await self._blobs.put(self.owner_scope, chunks)
+        resolved_artifact_id = artifact_id or self._artifact_id_factory()
+        resolved_occurrence_id = occurrence_id or self._occurrence_id_factory()
         record = ArtifactRecord(
-            artifact_id=artifact_id or self._artifact_id_factory(),
-            content_hash=blob.content_hash,
-            hash_algorithm=blob.hash_algorithm,
-            size_bytes=blob.size_bytes,
+            artifact_id=resolved_artifact_id,
+            content_hash="pending",
+            hash_algorithm="pending",
+            size_bytes=0,
             media_type=media_type,
             kind=kind,
-            blob_locator=blob.blob_locator,
+            blob_locator="pending",
             owner_scope=self.owner_scope,
             created_at=now,
             original_filename=original_filename,
-            provider_version=blob.provider_version,
             labels=dict(content_labels or {}),
         )
-        record = await self._artifacts.put(record)
         occurrence = ArtifactOccurrence(
-            occurrence_id=occurrence_id or self._occurrence_id_factory(),
-            artifact_id=record.artifact_id,
+            occurrence_id=resolved_occurrence_id,
+            artifact_id=resolved_artifact_id,
             scope=self.execution_scope,
             action=ArtifactAction.PRODUCED,
             occurred_at=now,
@@ -235,6 +597,17 @@ class CanonicalArtifactFacade:
             labels=dict(occurrence_labels or {}),
             metrics=dict(metrics or {}),
         )
+        _search_document(record, occurrence, search_text=search_text)
+        blob = await self._blobs.put(self.owner_scope, chunks)
+        record = replace(
+            record,
+            content_hash=blob.content_hash,
+            hash_algorithm=blob.hash_algorithm,
+            size_bytes=blob.size_bytes,
+            blob_locator=blob.blob_locator,
+            provider_version=blob.provider_version,
+        )
+        record = await self._artifacts.put(record)
         occurrence = await self._artifacts.record_occurrence(occurrence)
         retention = await self.pin(record.artifact_id, True) if pinned else None
         indexed_cursor = await self._search.upsert(
@@ -343,6 +716,195 @@ class CanonicalArtifactFacade:
         if cleanup:
             await asyncio.to_thread(source.unlink)
         return receipt
+
+    async def save_directory(
+        self,
+        path: str | Path,
+        *,
+        kind: str = "directory",
+        original_filename: str | None = None,
+        content_labels: Mapping[str, Any] | None = None,
+        occurrence_labels: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, float] | None = None,
+        pinned: bool = False,
+        cleanup: bool = False,
+        max_entries: int = _DEFAULT_DIRECTORY_ENTRIES,
+        max_total_bytes: int = _DEFAULT_DIRECTORY_BYTES,
+        artifact_id: str | None = None,
+        occurrence_id: str | None = None,
+        occurred_at: datetime | None = None,
+    ) -> ArtifactCommitReceipt:
+        """Package and persist one directory as deterministic canonical tar content.
+
+        Regular files and empty directories are sorted by POSIX relative path and
+        archived with normalized ownership, modes, and timestamps. Links and special
+        files fail closed before provider persistence.
+
+        Examples:
+            Save a generated directory:
+                ```python
+                receipt = await facade.save_directory("build-output")
+                ```
+
+            Consume explicit staging after success:
+                ```python
+                receipt = await facade.save_directory(
+                    staged_directory,
+                    kind="dataset",
+                    cleanup=True,
+                    pinned=True,
+                )
+                ```
+
+        Args:
+            path: Existing non-linked local source directory.
+            kind: Exact canonical artifact kind.
+            original_filename: Optional descriptive archive filename.
+            content_labels: Optional immutable content metadata.
+            occurrence_labels: Optional execution-occurrence metadata.
+            metrics: Optional finite occurrence metrics.
+            pinned: Whether to create explicit pinned retention intent.
+            cleanup: Delete only the exact source directory after complete success.
+            max_entries: Positive maximum combined file and directory entries.
+            max_total_bytes: Positive maximum total regular-file source bytes.
+            artifact_id: Optional stable artifact identity.
+            occurrence_id: Optional stable occurrence identity.
+            occurred_at: Optional stable UTC occurrence time for exact retries.
+
+        Returns:
+            ArtifactCommitReceipt: Canonical directory content and occurrence records.
+
+        Notes:
+            Directory bytes use canonical `tar.v1`; no source path, file timestamp,
+            platform ownership, or executable bit enters durable identity.
+        """
+        _positive_bound("max_entries", max_entries)
+        _positive_bound("max_total_bytes", max_total_bytes)
+        requested_source = Path(path)
+        is_junction = getattr(requested_source, "is_junction", lambda: False)
+        if requested_source.is_symlink() or is_junction():
+            raise ValueError("path must identify an existing non-linked directory")
+        source = requested_source.resolve(strict=True)
+        if not source.is_dir():
+            raise ValueError("path must identify an existing non-linked directory")
+        source_identity = source.stat(follow_symlinks=False)
+        staged = Path(await self.stage_path(".tar"))
+        try:
+            stats = await asyncio.to_thread(
+                write_directory_archive,
+                source,
+                staged,
+                max_entries=max_entries,
+                max_total_bytes=max_total_bytes,
+            )
+            labels = dict(content_labels or {})
+            labels[_DIRECTORY_FORMAT_LABEL] = _DIRECTORY_FORMAT
+            labels[_DIRECTORY_ENTRY_COUNT_LABEL] = stats.entry_count
+            labels[_DIRECTORY_FILE_COUNT_LABEL] = stats.file_count
+            labels[_DIRECTORY_TOTAL_BYTES_LABEL] = stats.total_bytes
+            filename = original_filename or f"{source.name}.tar"
+            receipt = await self.write(
+                _file_chunks(staged),
+                kind=kind,
+                media_type=_DIRECTORY_MEDIA_TYPE,
+                original_filename=filename,
+                content_labels=labels,
+                occurrence_labels=occurrence_labels,
+                metrics=metrics,
+                search_text=_searchable_description(kind, filename, labels),
+                pinned=pinned,
+                artifact_id=artifact_id,
+                occurrence_id=occurrence_id,
+                occurred_at=occurred_at,
+            )
+        finally:
+            await asyncio.to_thread(staged.unlink, missing_ok=True)
+        if cleanup:
+            current_identity = source.stat(follow_symlinks=False)
+            if not os.path.samestat(source_identity, current_identity):
+                raise StorageIntegrityError("Directory source identity changed before cleanup")
+            await asyncio.to_thread(shutil.rmtree, source)
+        return receipt
+
+    async def materialize_directory(
+        self,
+        artifact_id: str,
+        destination: str | Path,
+        *,
+        max_entries: int = _DEFAULT_DIRECTORY_ENTRIES,
+        max_total_bytes: int = _DEFAULT_DIRECTORY_BYTES,
+        max_archive_bytes: int = _DEFAULT_DIRECTORY_ARCHIVE_BYTES,
+    ) -> str:
+        """Safely materialize one bounded canonical directory artifact.
+
+        Metadata authorization and canonical format are checked before the archive is
+        streamed to transient staging. Extraction rejects links, special files,
+        absolute/traversal paths, duplicates, and file-as-parent collisions.
+
+        Examples:
+            Materialize with defaults:
+                ```python
+                path = await facade.materialize_directory("artifact-1", "output")
+                ```
+
+            Apply tighter resource bounds:
+                ```python
+                path = await facade.materialize_directory(
+                    "artifact-1",
+                    "output",
+                    max_entries=100,
+                    max_total_bytes=10_000_000,
+                )
+                ```
+
+        Args:
+            artifact_id: Exact stable directory artifact identity.
+            destination: New local directory path beneath an existing parent.
+            max_entries: Positive maximum combined file and directory entries.
+            max_total_bytes: Positive maximum total extracted regular-file bytes.
+            max_archive_bytes: Positive maximum transient archive bytes.
+
+        Returns:
+            str: Absolute path to the completely materialized new directory.
+
+        Notes:
+            Existing destinations are never merged or overwritten. Any extraction
+            failure removes only the new destination created by this call.
+        """
+        _positive_bound("max_entries", max_entries)
+        _positive_bound("max_total_bytes", max_total_bytes)
+        _positive_bound("max_archive_bytes", max_archive_bytes)
+        record = await self.get(artifact_id)
+        if record is None:
+            raise StorageNotFoundError(artifact_id)
+        if (
+            record.media_type != _DIRECTORY_MEDIA_TYPE
+            or record.labels.get(_DIRECTORY_FORMAT_LABEL) != _DIRECTORY_FORMAT
+        ):
+            raise StorageIntegrityError("Artifact is not a canonical directory archive")
+        if record.size_bytes > max_archive_bytes:
+            raise StorageCapacityError("Directory archive exceeds the explicit archive bound")
+
+        target = Path(destination).resolve(strict=False)
+        staged = Path(await self.stage_path(".tar"))
+        try:
+            total = await _write_chunks_to_file(
+                self._blobs.read(self.owner_scope, record.blob_locator),
+                staged,
+                max_bytes=max_archive_bytes,
+            )
+            if total != record.size_bytes:
+                raise StorageIntegrityError("Directory archive size does not match metadata")
+            await asyncio.to_thread(
+                extract_directory_archive,
+                staged,
+                target,
+                max_entries=max_entries,
+                max_total_bytes=max_total_bytes,
+            )
+        finally:
+            await asyncio.to_thread(staged.unlink, missing_ok=True)
+        return str(target)
 
     async def save_text(
         self,
@@ -881,6 +1443,48 @@ async def _file_chunks(path: Path, chunk_size: int = 1024 * 1024) -> AsyncIterat
             yield chunk
     finally:
         await asyncio.to_thread(handle.close)
+
+
+async def _write_chunks_to_file(
+    chunks: AsyncIterable[bytes],
+    path: Path,
+    *,
+    max_bytes: int,
+) -> int:
+    handle = await asyncio.to_thread(path.open, "wb")
+    total = 0
+    try:
+        async for chunk in chunks:
+            if not isinstance(chunk, bytes):
+                raise StorageIntegrityError("Blob provider yielded a non-bytes chunk")
+            total += len(chunk)
+            if total > max_bytes:
+                raise StorageCapacityError("Directory archive exceeds the explicit archive bound")
+            await asyncio.to_thread(handle.write, chunk)
+    finally:
+        await asyncio.to_thread(handle.close)
+    return total
+
+
+def _staging_suffix(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("staging suffix must be a string")
+    if len(value) > 128:
+        raise ValueError("staging suffix must not exceed 128 characters")
+    if "\x00" in value or "/" in value or "\\" in value or ":" in value:
+        raise ValueError("staging suffix must not contain path or drive syntax")
+    return value
+
+
+def _create_staging_file(suffix: str) -> str:
+    descriptor, path = tempfile.mkstemp(prefix="aethergraph-artifact-", suffix=suffix)
+    os.close(descriptor)
+    return path
+
+
+def _positive_bound(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
 
 
 def _searchable_description(
