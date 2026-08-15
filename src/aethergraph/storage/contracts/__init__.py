@@ -43,6 +43,17 @@ from .errors import (
     StorageTimeoutError,
     UnknownStorageProviderError,
 )
+from .integration import (
+    ExternalSessionBindingRecord,
+    ExternalSessionBindingRepository,
+    ExternalSessionBindingRequest,
+    ExternalSessionBindingResult,
+    IngressClaimRecord,
+    IngressClaimRequest,
+    IngressClaimResult,
+    IngressClaimStatus,
+    IngressIdempotencyRepository,
+)
 from .observations import (
     LLMCallAttempt,
     LLMCallDetail,
@@ -151,6 +162,15 @@ __all__ = [
     "EventQuery",
     "EventStore",
     "FrozenJson",
+    "ExternalSessionBindingRecord",
+    "ExternalSessionBindingRepository",
+    "ExternalSessionBindingRequest",
+    "ExternalSessionBindingResult",
+    "IngressClaimRecord",
+    "IngressClaimRequest",
+    "IngressClaimResult",
+    "IngressClaimStatus",
+    "IngressIdempotencyRepository",
     "DocumentQuery",
     "DocumentRecord",
     "DocumentStore",
