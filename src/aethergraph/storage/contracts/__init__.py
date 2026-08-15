@@ -1,6 +1,18 @@
 """Canonical contracts for selecting and opening AG storage providers."""
 
 from .capabilities import StorageCapabilities, StorageCapability
+from .control import (
+    RunQuery,
+    RunRecord,
+    RunRepository,
+    RunResultRecord,
+    RunResultRepository,
+    RunStatus,
+    SessionKind,
+    SessionQuery,
+    SessionRecord,
+    SessionRepository,
+)
 from .errors import (
     DuplicateStorageProviderError,
     StorageCapabilityError,
@@ -89,6 +101,12 @@ __all__ = [
     "MAX_STORAGE_PAGE_SIZE",
     "Page",
     "PageRequest",
+    "RunQuery",
+    "RunRecord",
+    "RunRepository",
+    "RunResultRecord",
+    "RunResultRepository",
+    "RunStatus",
     "KeyValueQuery",
     "KeyValueRecord",
     "KeyValueStore",
@@ -97,6 +115,10 @@ __all__ = [
     "SearchMode",
     "SearchQuery",
     "SearchResult",
+    "SessionKind",
+    "SessionQuery",
+    "SessionRecord",
+    "SessionRepository",
     "StateRecord",
     "SortDirection",
     "StateHistoryQuery",
