@@ -342,6 +342,43 @@ class LocalSQLiteDatabase:
 
         return await self._run(transactional)
 
+    async def read_transaction(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
+        """Run multiple provider reads against one consistent SQLite snapshot.
+
+        The synchronous callback executes on the serialized database worker inside a
+        deferred read transaction. The snapshot is always rolled back after the
+        callback so this primitive works through read-write and read-only handles.
+
+        Examples:
+            Read related rows consistently:
+                ```python
+                rows = await database.read_transaction(load_related_rows)
+                ```
+
+            Compute a dry-run preview:
+                ```python
+                preview = await database.read_transaction(compute_preview)
+                ```
+
+        Args:
+            operation: Synchronous provider-private callback receiving the connection.
+
+        Returns:
+            _T: Exact callback result from one consistent read snapshot.
+
+        Notes:
+            The callback must not write, retain the connection, or perform async work.
+        """
+
+        def transactional(connection: sqlite3.Connection) -> _T:
+            connection.execute("BEGIN")
+            try:
+                return operation(connection)
+            finally:
+                connection.rollback()
+
+        return await self._run(transactional)
+
     async def health(self) -> StorageHealth:
         """Run SQLite's bounded quick integrity check for this role.
 

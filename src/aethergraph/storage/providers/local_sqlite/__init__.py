@@ -24,6 +24,7 @@ from .manifest import (
     open_local_workspace_manifest,
     read_local_workspace_manifest,
 )
+from .observation_repository import LocalObservationRepository
 from .search_backend import LocalSearchBackend
 from .state_store import LocalStateStore
 from .supporting_stores import LocalDocumentStore, LocalKeyValueStore
@@ -41,6 +42,7 @@ __all__ = [
     "LocalDocumentStore",
     "LocalEventStore",
     "LocalKeyValueStore",
+    "LocalObservationRepository",
     "LocalRunRepository",
     "LocalRunResultRepository",
     "LocalSQLiteDatabase",
