@@ -80,6 +80,18 @@ class _Provider:
         return self.bundle  # type: ignore[return-value]
 
 
+class _RetryableCloseBundle(_Bundle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.remaining_failures = 1
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        if self.remaining_failures:
+            self.remaining_failures -= 1
+            raise StorageHealthError("durable flush failed")
+
+
 def _request(tmp_path: Path) -> StorageOpenRequest:
     return StorageOpenRequest(
         workspace_id="workspace-1",
@@ -180,6 +192,25 @@ async def test_composition_is_single_open_and_has_no_reselection(tmp_path: Path)
 
     assert provider.open_calls == 1
     await composition.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_bundle_close_remains_retryable(tmp_path: Path) -> None:
+    bundle = _RetryableCloseBundle()
+    composition, _provider = _composition(bundle)
+    await composition.open(_request(tmp_path))
+
+    with pytest.raises(StorageHealthError, match="durable flush failed"):
+        await composition.close()
+
+    assert bundle.close_calls == 1
+    assert (await composition.health()).ready is True
+
+    await composition.close()
+
+    assert bundle.close_calls == 2
+    with pytest.raises(StorageHealthError, match="no active bundle"):
+        await composition.health()
 
 
 @pytest.mark.asyncio

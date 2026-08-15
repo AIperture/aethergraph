@@ -129,10 +129,11 @@ class StorageComposition:
             return await self._bundle.health()
 
     async def close(self) -> None:
-        """Close the owned bundle at most once.
+        """Close the owned bundle successfully at most once.
 
         Closure is serialized with open and health operations. Calling close before
-        open is valid and permanently closes this lifecycle owner.
+        open is valid and permanently closes this lifecycle owner. A bundle-close
+        failure leaves the owner active so the exact same close can be retried.
 
         Examples:
             Close after runtime shutdown:
@@ -153,14 +154,15 @@ class StorageComposition:
             None: The bundle is closed or the owner was already closed.
 
         Notes:
-            Services must not close individual bundle stores.
+            Services must not close individual bundle stores. Failed durable flushes
+            are never converted into a closed composition state.
         """
         async with self._lock:
             if self._closed:
                 return
-            self._closed = True
             if self._bundle is not None:
                 await self._bundle.close()
+            self._closed = True
 
     def _validate_bundle(self, request: StorageOpenRequest, bundle: StorageBundle) -> None:
         if bundle.provider_name != request.selection.provider:
