@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from .capabilities import StorageCapabilities
 from .scope import StorageScope
 from .stores import ArtifactRepository, BlobStore, EventStore, SearchBackend, StateStore
+from .supporting import DocumentStore, KeyValueStore
 
 
 class StorageOpenMode(StrEnum):
@@ -142,6 +143,11 @@ class StorageBundle(Protocol):
     blobs: BlobStore
     artifacts: ArtifactRepository
     search: SearchBackend
+    kv: KeyValueStore
+    documents: DocumentStore
+    auth_grants: KeyValueStore
+    auth_invites: KeyValueStore
+    registry_manifests: DocumentStore
 
     async def health(self) -> StorageHealth:
         """Return current readiness for the already-open bundle.

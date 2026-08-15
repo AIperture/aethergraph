@@ -57,6 +57,14 @@ from .stores import (
     StateHistoryQuery,
     StateStore,
 )
+from .supporting import (
+    DocumentQuery,
+    DocumentRecord,
+    DocumentStore,
+    KeyValueQuery,
+    KeyValueRecord,
+    KeyValueStore,
+)
 
 __all__ = [
     "DuplicateStorageProviderError",
@@ -75,9 +83,15 @@ __all__ = [
     "EventQuery",
     "EventStore",
     "FrozenJson",
+    "DocumentQuery",
+    "DocumentRecord",
+    "DocumentStore",
     "MAX_STORAGE_PAGE_SIZE",
     "Page",
     "PageRequest",
+    "KeyValueQuery",
+    "KeyValueRecord",
+    "KeyValueStore",
     "SearchDocument",
     "SearchBackend",
     "SearchMode",
