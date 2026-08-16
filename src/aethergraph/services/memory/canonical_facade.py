@@ -32,6 +32,7 @@ from aethergraph.storage.contracts import (
 
 _MEMORY_CORPUS = "memory"
 _MEMORY_STATE_NAMESPACE_PREFIX = "memory.state"
+_MAX_HOT_EVENTS = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,8 @@ class CanonicalMemoryFacade:
             raise TypeError("hot_max_events must be an integer")
         if hot_max_events < 1:
             raise ValueError("hot_max_events must be positive")
+        if hot_max_events > _MAX_HOT_EVENTS:
+            raise ValueError(f"hot_max_events must not exceed {_MAX_HOT_EVENTS}")
         if isinstance(hot_ttl_seconds, bool) or not isinstance(hot_ttl_seconds, int | float):
             raise TypeError("hot_ttl_seconds must be numeric")
         if hot_ttl_seconds <= 0:
@@ -280,6 +283,34 @@ class CanonicalMemoryFacade:
         if query.scope != self.scope:
             raise ValueError("Memory query scope must exactly match the bound facade scope")
         return await self._events.query(query)
+
+    async def get_event(self, event_id: str) -> EventRecord | None:
+        """Read one exact canonical memory event by stable identity.
+
+        The lookup is constrained to the facade's immutable storage scope and never
+        interprets a provider cursor as an event identifier.
+
+        Examples:
+            Read an existing event:
+                ```python
+                event = await memory.get_event("event-1")
+                ```
+
+            Detect an absent event:
+                ```python
+                assert await memory.get_event("missing") is None
+                ```
+
+        Args:
+            event_id: Exact stable caller-owned event identity.
+
+        Returns:
+            EventRecord | None: Matching canonical event or `None` when absent.
+
+        Notes:
+            A miss does not consult hot cache, search projection, or another store.
+        """
+        return await self._events.get(self.scope, event_id)
 
     async def commit_state(
         self,

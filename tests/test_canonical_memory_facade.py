@@ -326,6 +326,7 @@ def test_canonical_memory_surface_has_no_legacy_identity_or_payload_aliases() ->
         "append_event",
         "append_many",
         "durable_query",
+        "get_event",
         "commit_state",
         "current_state",
         "state_history",

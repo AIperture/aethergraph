@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from time import monotonic
+from uuid import uuid4
 
 from aethergraph.services.canonical_storage_scope import (
     merge_storage_scope,
@@ -12,6 +14,9 @@ from aethergraph.services.canonical_storage_scope import (
 from aethergraph.storage.contracts import StorageBundle, StorageScope
 
 from .canonical_facade import CanonicalMemoryFacade
+from .canonical_public import CanonicalPublicMemoryFacade
+
+_MAX_HOT_EVENTS = 10_000
 
 
 class CanonicalMemoryFacadeFactory:
@@ -25,6 +30,8 @@ class CanonicalMemoryFacadeFactory:
         hot_max_events: int = 500,
         hot_ttl_seconds: float = 900.0,
         monotonic_clock: Callable[[], float] = monotonic,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        event_id_factory: Callable[[], str] = lambda: f"event-{uuid4().hex}",
     ) -> None:
         """Compose one memory factory from an already-open storage bundle.
 
@@ -48,6 +55,8 @@ class CanonicalMemoryFacadeFactory:
                     hot_max_events=100,
                     hot_ttl_seconds=60.0,
                     monotonic_clock=clock,
+                    clock=utc_clock.now,
+                    event_id_factory=lambda: "event-1",
                 )
                 ```
 
@@ -57,6 +66,8 @@ class CanonicalMemoryFacadeFactory:
             hot_max_events: Positive maximum events retained by each facade cache.
             hot_ttl_seconds: Positive insertion-age lifetime for facade cache entries.
             monotonic_clock: Monotonic cache-expiry clock shared by bound facades.
+            clock: Timezone-aware UTC event timestamp source for public facades.
+            event_id_factory: Stable non-empty public event identity source.
 
         Returns:
             None: The inactive-until-S9 factory is ready without provider I/O.
@@ -70,6 +81,8 @@ class CanonicalMemoryFacadeFactory:
             raise TypeError("hot_max_events must be an integer")
         if hot_max_events < 1:
             raise ValueError("hot_max_events must be positive")
+        if hot_max_events > _MAX_HOT_EVENTS:
+            raise ValueError(f"hot_max_events must not exceed {_MAX_HOT_EVENTS}")
         if isinstance(hot_ttl_seconds, bool) or not isinstance(hot_ttl_seconds, int | float):
             raise TypeError("hot_ttl_seconds must be numeric")
         if hot_ttl_seconds <= 0:
@@ -79,6 +92,8 @@ class CanonicalMemoryFacadeFactory:
         self._hot_max_events = hot_max_events
         self._hot_ttl_seconds = float(hot_ttl_seconds)
         self._monotonic_clock = monotonic_clock
+        self._clock = clock
+        self._event_id_factory = event_id_factory
 
     def for_execution(self, execution_scope: StorageScope) -> CanonicalMemoryFacade:
         """Bind one memory facade to an exact partial execution scope.
@@ -118,4 +133,54 @@ class CanonicalMemoryFacadeFactory:
             hot_max_events=self._hot_max_events,
             hot_ttl_seconds=self._hot_ttl_seconds,
             monotonic_clock=self._monotonic_clock,
+        )
+
+    def for_public_execution(
+        self,
+        execution_scope: StorageScope,
+        *,
+        logical_scope_id: str,
+        deprecated_app_id: str | None = None,
+    ) -> CanonicalPublicMemoryFacade:
+        """Bind stable public Memory behavior to one canonical execution scope.
+
+        The low-level facade and public DTO projection share the exact same bundle
+        stores. Logical bucket and deprecated App labels remain response metadata.
+
+        Examples:
+            Bind session Memory for `NodeContext`:
+                ```python
+                memory = factory.for_public_execution(
+                    StorageScope(session_id="session-1"),
+                    logical_scope_id="session:session-1",
+                )
+                ```
+
+            Bind optional deprecated App compatibility metadata:
+                ```python
+                memory = factory.for_public_execution(
+                    StorageScope(run_id="run-1"),
+                    logical_scope_id="run:run-1",
+                    deprecated_app_id="app-1",
+                )
+                ```
+
+        Args:
+            execution_scope: Partial canonical dimensions selected by runtime scope policy.
+            logical_scope_id: Stable public memory-bucket label, never provider scope.
+            deprecated_app_id: Optional explicitly deprecated response metadata.
+
+        Returns:
+            CanonicalPublicMemoryFacade: Stable public projection over one canonical facade.
+
+        Notes:
+            This method performs no provider lifecycle operation and deprecated App
+            metadata never affects the scope passed to provider stores.
+        """
+        return CanonicalPublicMemoryFacade(
+            canonical=self.for_execution(execution_scope),
+            logical_scope_id=logical_scope_id,
+            deprecated_app_id=deprecated_app_id,
+            clock=self._clock,
+            event_id_factory=self._event_id_factory,
         )

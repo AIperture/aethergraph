@@ -117,6 +117,12 @@ def test_memory_factory_rejects_owner_conflicts_and_performs_no_lifecycle_probe(
             bundle=bundle,  # type: ignore[arg-type]
             owner_scope=StorageScope(project_id="project-1", run_id="run-1"),
         )
+    with pytest.raises(ValueError, match="10000"):
+        CanonicalMemoryFacadeFactory(
+            bundle=bundle,  # type: ignore[arg-type]
+            owner_scope=StorageScope(project_id="project-1"),
+            hot_max_events=10_001,
+        )
 
     source = inspect.getsource(CanonicalMemoryFacadeFactory)
     assert "build_" not in source
