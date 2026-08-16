@@ -15,16 +15,23 @@ from aethergraph.storage.contracts import (
     EventQuery,
     EventRecord,
     EventStore,
+    FrozenJson,
     Page,
+    PageRequest,
     SearchBackend,
     SearchDocument,
     SearchMode,
     SearchQuery,
     SearchResult,
+    SortDirection,
+    StateHistoryQuery,
+    StateRecord,
+    StateStore,
     StorageScope,
 )
 
 _MEMORY_CORPUS = "memory"
+_MEMORY_STATE_NAMESPACE_PREFIX = "memory.state"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +50,7 @@ class CanonicalMemoryFacade:
         self,
         *,
         event_store: EventStore,
+        state_store: StateStore,
         search_backend: SearchBackend,
         scope: StorageScope,
         hot_max_events: int = 500,
@@ -59,6 +67,7 @@ class CanonicalMemoryFacade:
                 ```python
                 memory = CanonicalMemoryFacade(
                     event_store=bundle.memory_events,
+                    state_store=bundle.state,
                     search_backend=bundle.search,
                     scope=scope,
                 )
@@ -68,6 +77,7 @@ class CanonicalMemoryFacade:
                 ```python
                 memory = CanonicalMemoryFacade(
                     event_store=events,
+                    state_store=state,
                     search_backend=search,
                     scope=scope,
                     hot_max_events=100,
@@ -77,6 +87,7 @@ class CanonicalMemoryFacade:
 
         Args:
             event_store: Canonical authoritative memory event stream.
+            state_store: Canonical transactional memory-state repository.
             search_backend: Canonical exact-mode searchable projection.
             scope: Exact immutable memory ownership/execution scope.
             hot_max_events: Positive maximum records retained in process.
@@ -98,6 +109,7 @@ class CanonicalMemoryFacade:
         if hot_ttl_seconds <= 0:
             raise ValueError("hot_ttl_seconds must be positive")
         self._events = event_store
+        self._state = state_store
         self._search = search_backend
         self.scope = scope
         self._hot_max_events = hot_max_events
@@ -268,6 +280,159 @@ class CanonicalMemoryFacade:
         if query.scope != self.scope:
             raise ValueError("Memory query scope must exactly match the bound facade scope")
         return await self._events.query(query)
+
+    async def commit_state(
+        self,
+        *,
+        key: str,
+        value: FrozenJson,
+        expected_revision: int,
+        kind: str = "state.snapshot",
+        metadata: Mapping[str, FrozenJson] | None = None,
+    ) -> StateRecord:
+        """Commit one exact memory-state revision through canonical CAS.
+
+        The complete value is stored in a kind-specific namespace. The provider
+        atomically commits current state, retained history, and its audit/outbox row;
+        the facade does not duplicate the snapshot into the memory event stream.
+
+        Examples:
+            Create initial state:
+                ```python
+                stored = await memory.commit_state(
+                    key="agent:writer",
+                    value={"draft": 1},
+                    expected_revision=0,
+                )
+                ```
+
+            Advance a custom state family:
+                ```python
+                stored = await memory.commit_state(
+                    key="checkpoint",
+                    value={"step": 2},
+                    expected_revision=1,
+                    kind="workflow.checkpoint",
+                    metadata={"source": "planner"},
+                )
+                ```
+
+        Args:
+            key: Exact caller-owned state key within the memory scope.
+            value: Complete JSON-compatible state value.
+            expected_revision: Exact current revision, or zero for initial creation.
+            kind: Exact state family used to isolate the provider namespace.
+            metadata: Optional JSON-compatible audit metadata.
+
+        Returns:
+            StateRecord: Newly committed canonical state record.
+
+        Notes:
+            Conflicts propagate from `StateStore`; no retry, event append, legacy
+            lookup, or alternate persistence path is attempted.
+        """
+        return await self._state.compare_and_set(
+            self.scope,
+            _memory_state_namespace(kind),
+            _memory_state_key(key),
+            expected_revision,
+            value,
+            dict(metadata or {}),
+        )
+
+    async def current_state(
+        self,
+        *,
+        key: str,
+        kind: str = "state.snapshot",
+    ) -> StateRecord | None:
+        """Read one exact current memory-state record.
+
+        The lookup addresses canonical scope, state family, and key directly without
+        scanning memory events or consulting a legacy state-snapshot convention.
+
+        Examples:
+            Read current Agent state:
+                ```python
+                current = await memory.current_state(key="agent:writer")
+                ```
+
+            Read a custom state family:
+                ```python
+                checkpoint = await memory.current_state(
+                    key="checkpoint",
+                    kind="workflow.checkpoint",
+                )
+                ```
+
+        Args:
+            key: Exact caller-owned state key within the memory scope.
+            kind: Exact state family used to isolate the provider namespace.
+
+        Returns:
+            StateRecord | None: Current canonical record or `None` when absent.
+
+        Notes:
+            A durable miss remains a miss; there is no hot-cache or EventStore fallback.
+        """
+        return await self._state.get(
+            self.scope,
+            _memory_state_namespace(kind),
+            _memory_state_key(key),
+        )
+
+    async def state_history(
+        self,
+        *,
+        key: str,
+        kind: str = "state.snapshot",
+        limit: int = 50,
+        cursor: str | None = None,
+        order: SortDirection = SortDirection.DESCENDING,
+    ) -> Page[StateRecord]:
+        """Read one bounded opaque-cursor page of memory-state history.
+
+        Provider state history is the sole durable audit authority for snapshots.
+        Exact namespace and key filters apply before provider pagination.
+
+        Examples:
+            Read recent revisions:
+                ```python
+                page = await memory.state_history(key="agent:writer", limit=20)
+                ```
+
+            Continue oldest-first history:
+                ```python
+                page = await memory.state_history(
+                    key="agent:writer",
+                    cursor=previous.next_cursor,
+                    order=SortDirection.ASCENDING,
+                )
+                ```
+
+        Args:
+            key: Exact caller-owned state key within the memory scope.
+            kind: Exact state family used to isolate the provider namespace.
+            limit: Positive provider page bound.
+            cursor: Optional opaque continuation cursor from the same query.
+            order: Exact canonical revision-history ordering direction.
+
+        Returns:
+            Page[StateRecord]: Matching retained revisions and continuation cursor.
+
+        Notes:
+            Opaque cursors are passed through unchanged and are never parsed as local
+            SQLite row identifiers.
+        """
+        return await self._state.history(
+            StateHistoryQuery(
+                scope=self.scope,
+                namespace=_memory_state_namespace(kind),
+                key=_memory_state_key(key),
+                page=PageRequest(limit=limit, cursor=cursor),
+                order=order,
+            )
+        )
 
     async def recent_hot(
         self,
@@ -461,3 +626,15 @@ def _search_document(event: EventRecord) -> SearchDocument:
         tags=event.tags,
         metadata=metadata,
     )
+
+
+def _memory_state_namespace(kind: str) -> str:
+    if not isinstance(kind, str) or not kind.strip() or kind != kind.strip():
+        raise ValueError("Memory state kind must be a non-empty string")
+    return f"{_MEMORY_STATE_NAMESPACE_PREFIX}.{kind}"
+
+
+def _memory_state_key(key: str) -> str:
+    if not isinstance(key, str) or not key.strip() or key != key.strip():
+        raise ValueError("Memory state key must be a non-empty string")
+    return key

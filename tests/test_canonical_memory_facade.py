@@ -16,6 +16,7 @@ from aethergraph.storage.contracts import (
     SearchMode,
     SortDirection,
     StorageCapabilityError,
+    StorageConflictError,
     StorageOpenMode,
     StorageOpenRequest,
     StorageProviderSelection,
@@ -108,6 +109,7 @@ async def test_canonical_memory_commit_cache_search_and_retry_are_coherent(tmp_p
     bundle = _open_bundle(tmp_path)
     memory = CanonicalMemoryFacade(
         event_store=bundle.memory_events,
+        state_store=bundle.state,
         search_backend=bundle.search,
         scope=_scope(),
     )
@@ -152,6 +154,7 @@ async def test_canonical_memory_durable_query_is_cursor_paged_and_hot_is_bounded
     bundle = _open_bundle(tmp_path)
     memory = CanonicalMemoryFacade(
         event_store=bundle.memory_events,
+        state_store=bundle.state,
         search_backend=bundle.search,
         scope=_scope(),
         hot_max_events=1,
@@ -187,6 +190,7 @@ async def test_canonical_memory_hot_ttl_never_falls_back_to_durable(tmp_path: Pa
     clock = _Monotonic()
     memory = CanonicalMemoryFacade(
         event_store=bundle.memory_events,
+        state_store=bundle.state,
         search_backend=bundle.search,
         scope=_scope(),
         hot_ttl_seconds=5.0,
@@ -210,6 +214,7 @@ async def test_canonical_memory_search_failure_is_visible_after_authoritative_co
     bundle = _open_bundle(tmp_path)
     memory = CanonicalMemoryFacade(
         event_store=bundle.memory_events,
+        state_store=bundle.state,
         search_backend=_FailingSearch(),  # type: ignore[arg-type]
         scope=_scope(),
     )
@@ -231,6 +236,7 @@ async def test_canonical_memory_concurrent_append_has_no_loss_or_hot_duplicates(
     bundle = _open_bundle(tmp_path)
     memory = CanonicalMemoryFacade(
         event_store=bundle.memory_events,
+        state_store=bundle.state,
         search_backend=bundle.search,
         scope=_scope(),
     )
@@ -255,6 +261,61 @@ async def test_canonical_memory_concurrent_append_has_no_loss_or_hot_duplicates(
         await bundle.close()
 
 
+@pytest.mark.asyncio
+async def test_canonical_memory_state_uses_one_atomic_state_authority(tmp_path: Path) -> None:
+    bundle = _open_bundle(tmp_path)
+    memory = CanonicalMemoryFacade(
+        event_store=bundle.memory_events,
+        state_store=bundle.state,
+        search_backend=bundle.search,
+        scope=_scope(),
+    )
+    try:
+        first = await memory.commit_state(
+            key="agent:writer",
+            value={"draft": 1},
+            expected_revision=0,
+            metadata={"source": "test"},
+        )
+        second = await memory.commit_state(
+            key="agent:writer",
+            value={"draft": 2},
+            expected_revision=1,
+        )
+
+        assert first.revision == 1
+        assert second.revision == 2
+        assert await memory.current_state(key="agent:writer") == second
+        oldest = await memory.state_history(
+            key="agent:writer",
+            limit=1,
+            order=SortDirection.ASCENDING,
+        )
+        newest = await memory.state_history(key="agent:writer", limit=1)
+        assert [record.revision for record in oldest.items] == [1]
+        assert [record.revision for record in newest.items] == [2]
+        assert oldest.next_cursor is not None
+
+        with pytest.raises(StorageConflictError):
+            await memory.commit_state(
+                key="agent:writer",
+                value={"draft": 3},
+                expected_revision=1,
+            )
+        with pytest.raises(ValueError, match="key"):
+            await memory.current_state(key=" agent:writer")
+        with pytest.raises(ValueError, match="kind"):
+            await memory.current_state(key="agent:writer", kind="state.snapshot ")
+
+        event_page = await memory.durable_query(EventQuery(scope=_scope()))
+        assert event_page.items == ()
+        commit_source = inspect.getsource(CanonicalMemoryFacade.commit_state)
+        assert "_events" not in commit_source
+        assert "append(" not in commit_source
+    finally:
+        await bundle.close()
+
+
 def test_canonical_memory_surface_has_no_legacy_identity_or_payload_aliases() -> None:
     event_fields = {item.name for item in fields(EventDraft)}
     assert {"app_id", "client_id", "tool", "embedding", "inputs", "outputs"}.isdisjoint(
@@ -265,6 +326,9 @@ def test_canonical_memory_surface_has_no_legacy_identity_or_payload_aliases() ->
         "append_event",
         "append_many",
         "durable_query",
+        "commit_state",
+        "current_state",
+        "state_history",
         "recent_hot",
         "search",
         "indexed_cursor",

@@ -125,6 +125,7 @@ def _open_bundle(root: Path):
 async def _memory_benchmark(bundle, samples: int) -> dict[str, Any]:
     memory = CanonicalMemoryFacade(
         event_store=bundle.memory_events,
+        state_store=bundle.state,
         search_backend=bundle.search,
         scope=_scope(),
     )
