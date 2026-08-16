@@ -148,6 +148,7 @@ async def test_run_artifact_receipts_are_atomic_idempotent_and_concurrent(
             runs.record_artifact(
                 initial.scope,
                 initial.run_id,
+                f"content-{index}",
                 f"occurrence-{index}",
                 NOW + timedelta(seconds=index),
             )
@@ -160,11 +161,31 @@ async def test_run_artifact_receipts_are_atomic_idempotent_and_concurrent(
     assert current.revision == 21
     assert current.first_artifact_at == NOW
     assert current.last_artifact_at == NOW + timedelta(seconds=19)
-    assert await runs.record_artifact(initial.scope, initial.run_id, "occurrence-0", NOW) == current
+    assert len(current.recent_artifact_ids) == 10
+    assert set(current.recent_artifact_ids) <= {f"content-{index}" for index in range(20)}
+    assert (
+        await runs.record_artifact(
+            initial.scope,
+            initial.run_id,
+            "content-0",
+            "occurrence-0",
+            NOW,
+        )
+        == current
+    )
     with pytest.raises(StorageIntegrityError, match="conflicts"):
         await runs.record_artifact(
             initial.scope,
             initial.run_id,
+            "different-content",
+            "occurrence-0",
+            NOW,
+        )
+    with pytest.raises(StorageIntegrityError, match="conflicts"):
+        await runs.record_artifact(
+            initial.scope,
+            initial.run_id,
+            "content-0",
             "occurrence-0",
             NOW + timedelta(days=1),
         )
@@ -172,11 +193,27 @@ async def test_run_artifact_receipts_are_atomic_idempotent_and_concurrent(
         await runs.record_artifact(
             StorageScope(project_id="other", run_id=initial.run_id),
             initial.run_id,
+            "foreign-content",
             "foreign",
             NOW,
         )
     assert len({record.revision for record in updates}) == 20
     await database.close()
+
+    reopened = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    reopened_runs = LocalRunRepository(database=reopened)
+    assert await reopened_runs.get(initial.scope, initial.run_id) == current
+    assert (
+        await reopened_runs.record_artifact(
+            initial.scope,
+            initial.run_id,
+            "content-0",
+            "occurrence-0",
+            NOW,
+        )
+        == current
+    )
+    await reopened.close()
 
 
 @pytest.mark.asyncio
@@ -493,7 +530,13 @@ async def test_read_only_control_repositories_read_and_reject_mutation(
     with pytest.raises(StorageReadOnlyError):
         await readonly_runs.create(_run("new"))
     with pytest.raises(StorageReadOnlyError):
-        await readonly_runs.record_artifact(running.scope, running.run_id, "occ", NOW)
+        await readonly_runs.record_artifact(
+            running.scope,
+            running.run_id,
+            "content",
+            "occ",
+            NOW,
+        )
     with pytest.raises(StorageReadOnlyError):
         await readonly_results.compare_and_set(
             RunResultRecord(

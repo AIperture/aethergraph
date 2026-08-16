@@ -69,6 +69,24 @@ def test_run_records_enforce_scope_lifecycle_and_counter_consistency() -> None:
         replace(running, status=RunStatus.FAILED)
     with pytest.raises(ValueError, match="artifact timestamps"):
         replace(running, artifact_count=1)
+    counted = replace(
+        running,
+        artifact_count=2,
+        first_artifact_at=NOW,
+        last_artifact_at=NOW,
+        recent_artifact_ids=("content-1", "content-1"),
+    )
+    assert counted.recent_artifact_ids == ("content-1", "content-1")
+    with pytest.raises(TypeError, match="immutable tuple"):
+        replace(counted, recent_artifact_ids=["content-1"])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="must not exceed artifact_count"):
+        replace(counted, artifact_count=1)
+    with pytest.raises(ValueError, match="at most ten"):
+        replace(
+            counted,
+            artifact_count=11,
+            recent_artifact_ids=tuple(f"content-{index}" for index in range(11)),
+        )
 
 
 def test_run_result_requires_success_and_deep_freezes_outputs() -> None:

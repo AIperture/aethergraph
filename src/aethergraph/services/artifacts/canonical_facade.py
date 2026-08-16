@@ -638,6 +638,7 @@ class CanonicalArtifactFacade:
             await self._runs.record_artifact(
                 self.execution_scope,
                 self.execution_scope.run_id,
+                record.artifact_id,
                 occurrence.occurrence_id,
                 occurrence.occurred_at,
             )

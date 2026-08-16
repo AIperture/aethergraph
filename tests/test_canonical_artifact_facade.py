@@ -315,6 +315,10 @@ async def test_public_occurrence_pages_filter_then_batch_hydrate(tmp_path: Path)
             pinned=True,
             occurred_at=NOW,
         )
+        run = await bundle.runs.get(first_execution, "run-1")
+        assert run is not None
+        assert run.artifact_count == 3
+        assert run.recent_artifact_ids == ("report-1", "draft-1", "report-2")
 
         query_args = {
             "scope": StorageScope(run_id="run-1"),

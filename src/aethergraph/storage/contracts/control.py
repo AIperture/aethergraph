@@ -60,6 +60,7 @@ class RunRecord:
     artifact_count: int = 0
     first_artifact_at: datetime | None = None
     last_artifact_at: datetime | None = None
+    recent_artifact_ids: tuple[str, ...] = ()
     result_available: bool = False
     result_updated_at: datetime | None = None
     schema_version: int = 1
@@ -110,6 +111,17 @@ class RunRecord:
             and self.first_artifact_at > self.last_artifact_at
         ):
             raise ValueError("first_artifact_at must not follow last_artifact_at")
+        if not isinstance(self.recent_artifact_ids, tuple):
+            raise TypeError("recent_artifact_ids must be an immutable tuple")
+        if any(
+            not isinstance(artifact_id, str) or not artifact_id.strip()
+            for artifact_id in self.recent_artifact_ids
+        ):
+            raise ValueError("recent_artifact_ids must contain non-empty strings")
+        if len(self.recent_artifact_ids) > 10:
+            raise ValueError("recent_artifact_ids must contain at most ten entries")
+        if len(self.recent_artifact_ids) > self.artifact_count:
+            raise ValueError("recent_artifact_ids must not exceed artifact_count")
         if self.result_available != (self.result_updated_at is not None):
             raise ValueError("result_available must match result_updated_at presence")
         if isinstance(self.schema_version, bool) or self.schema_version < 1:
@@ -368,28 +380,34 @@ class RunRepository(Protocol):
         self,
         scope: StorageScope,
         run_id: str,
+        artifact_id: str,
         occurrence_id: str,
         occurred_at: datetime,
     ) -> RunRecord:
         """Atomically count one idempotent artifact occurrence for a run.
 
-        The occurrence identity prevents double counting across retries. Count and
-        first/last timestamps update in the same transaction.
+        The occurrence identity prevents double counting across retries. Content
+        preview, count, and first/last timestamps update in the same transaction.
 
         Examples:
             Count produced content:
                 ```python
-                run = await runs.record_artifact(scope, run_id, occurrence_id, now)
+                run = await runs.record_artifact(
+                    scope, run_id, artifact_id, occurrence_id, now
+                )
                 ```
 
             Retry the same occurrence:
                 ```python
-                assert await runs.record_artifact(scope, run_id, occurrence_id, now) == run
+                assert await runs.record_artifact(
+                    scope, run_id, artifact_id, occurrence_id, now
+                ) == run
                 ```
 
         Args:
             scope: Canonical scope owning the run and occurrence.
             run_id: Exact stable run identifier.
+            artifact_id: Stable content identity retained in the bounded preview.
             occurrence_id: Stable artifact occurrence idempotency identity.
             occurred_at: Timezone-aware UTC occurrence time.
 
@@ -398,7 +416,7 @@ class RunRepository(Protocol):
 
         Notes:
             Missing runs raise `StorageNotFoundError`; duplicate occurrences do not
-            increment the count again.
+            increment or append again, and conflicting content or time fails.
         """
         ...
 

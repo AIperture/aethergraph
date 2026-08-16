@@ -53,6 +53,7 @@ CREATE TABLE local_runs (
     artifact_count INTEGER NOT NULL CHECK (artifact_count >= 0),
     first_artifact_at TEXT,
     last_artifact_at TEXT,
+    recent_artifact_ids_json TEXT NOT NULL,
     result_available INTEGER NOT NULL CHECK (result_available IN (0, 1)),
     result_updated_at TEXT,
     schema_version INTEGER NOT NULL CHECK (schema_version > 0)
@@ -82,6 +83,7 @@ _CREATE_RUN_ARTIFACT_OCCURRENCES = """
 CREATE TABLE local_run_artifact_occurrences (
     run_id TEXT NOT NULL REFERENCES local_runs(run_id) ON DELETE CASCADE,
     occurrence_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
     PRIMARY KEY(run_id, occurrence_id)
 )
@@ -358,28 +360,34 @@ class LocalRunRepository:
         self,
         scope: StorageScope,
         run_id: str,
+        artifact_id: str,
         occurrence_id: str,
         occurred_at: datetime,
     ) -> RunRecord:
         """Atomically count one idempotent authorized run artifact occurrence.
 
-        The occurrence receipt and revised count/first/last timestamps commit in one
-        transaction; exact retry returns the latest current run without incrementing.
+        The occurrence receipt, bounded content preview, count, and first/last
+        timestamps commit in one transaction; exact retry returns the current run.
 
         Examples:
             Count produced content:
                 ```python
-                run = await runs.record_artifact(scope, run_id, occurrence_id, now)
+                run = await runs.record_artifact(
+                    scope, run_id, artifact_id, occurrence_id, now
+                )
                 ```
 
             Retry the receipt:
                 ```python
-                assert await runs.record_artifact(scope, run_id, occurrence_id, now) == run
+                assert await runs.record_artifact(
+                    scope, run_id, artifact_id, occurrence_id, now
+                ) == run
                 ```
 
         Args:
             scope: Canonical caller scope constraining the run.
             run_id: Exact stable run identity.
+            artifact_id: Stable content identity retained in the bounded preview.
             occurrence_id: Stable artifact occurrence identity.
             occurred_at: Exact UTC occurrence timestamp.
 
@@ -387,10 +395,11 @@ class LocalRunRepository:
             RunRecord: Current run after idempotent counting.
 
         Notes:
-            Reusing an occurrence identity with another timestamp is an integrity error.
+            Reusing an occurrence with different content or time is an integrity error.
         """
         self._require_writable()
         _nonempty("run_id", run_id)
+        _nonempty("artifact_id", artifact_id)
         _nonempty("occurrence_id", occurrence_id)
         _utc(occurred_at)
 
@@ -405,23 +414,27 @@ class LocalRunRepository:
                 raise StorageNotFoundError(run_id)
             receipt = connection.execute(
                 """
-                SELECT occurred_at FROM local_run_artifact_occurrences
+                SELECT artifact_id, occurred_at FROM local_run_artifact_occurrences
                 WHERE run_id = ? AND occurrence_id = ?
                 """,
                 (run_id, occurrence_id),
             ).fetchone()
             if receipt is not None:
-                if str(receipt[0]) != occurred_at.isoformat():
+                if (
+                    str(receipt["artifact_id"]) != artifact_id
+                    or str(receipt["occurred_at"]) != occurred_at.isoformat()
+                ):
                     raise StorageIntegrityError("Run artifact occurrence identity conflicts")
                 return current
             connection.execute(
                 """
-                INSERT INTO local_run_artifact_occurrences(run_id, occurrence_id, occurred_at)
-                VALUES (?, ?, ?)
+                INSERT INTO local_run_artifact_occurrences(
+                    run_id, occurrence_id, artifact_id, occurred_at
+                ) VALUES (?, ?, ?, ?)
                 """,
-                (run_id, occurrence_id, occurred_at.isoformat()),
+                (run_id, occurrence_id, artifact_id, occurred_at.isoformat()),
             )
-            updated = _run_with_artifact(current, occurred_at)
+            updated = _run_with_artifact(current, artifact_id, occurred_at)
             _update_run(connection, updated)
             return updated
 
@@ -1027,9 +1040,9 @@ def _insert_run(connection: sqlite3.Connection, record: RunRecord) -> None:
             run_id, graph_id, tenant_id, project_id, org_id, user_id, session_id,
             node_id, agent_id, scope_key, kind, status, revision, started_at,
             finished_at, tags_json, error, metadata_json, artifact_count,
-            first_artifact_at, last_artifact_at, result_available,
-            result_updated_at, schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            first_artifact_at, last_artifact_at, recent_artifact_ids_json,
+            result_available, result_updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _run_values(record),
     )
@@ -1044,8 +1057,8 @@ def _update_run(connection: sqlite3.Connection, record: RunRecord) -> None:
             session_id = ?, node_id = ?, agent_id = ?, scope_key = ?, kind = ?,
             status = ?, revision = ?, started_at = ?, finished_at = ?, tags_json = ?,
             error = ?, metadata_json = ?, artifact_count = ?, first_artifact_at = ?,
-            last_artifact_at = ?, result_available = ?, result_updated_at = ?,
-            schema_version = ?
+            last_artifact_at = ?, recent_artifact_ids_json = ?, result_available = ?,
+            result_updated_at = ?, schema_version = ?
         WHERE run_id = ?
         """,
         (*values[1:], values[0]),
@@ -1075,6 +1088,7 @@ def _run_values(record: RunRecord) -> tuple[object, ...]:
         record.artifact_count,
         record.first_artifact_at.isoformat() if record.first_artifact_at else None,
         record.last_artifact_at.isoformat() if record.last_artifact_at else None,
+        _json(record.recent_artifact_ids),
         int(record.result_available),
         record.result_updated_at.isoformat() if record.result_updated_at else None,
         record.schema_version,
@@ -1098,6 +1112,10 @@ def _run(row: sqlite3.Row) -> RunRecord:
             artifact_count=int(row["artifact_count"]),
             first_artifact_at=_optional_time(row["first_artifact_at"]),
             last_artifact_at=_optional_time(row["last_artifact_at"]),
+            recent_artifact_ids=tuple(
+                str(value)
+                for value in _json_list(row["recent_artifact_ids_json"], "recent artifact ids")
+            ),
             result_available=bool(row["result_available"]),
             result_updated_at=_optional_time(row["result_updated_at"]),
             schema_version=int(row["schema_version"]),
@@ -1134,12 +1152,17 @@ def _run_immutable(record: RunRecord) -> tuple[object, ...]:
         record.artifact_count,
         record.first_artifact_at,
         record.last_artifact_at,
+        record.recent_artifact_ids,
         record.result_available,
         record.result_updated_at,
     )
 
 
-def _run_with_artifact(record: RunRecord, occurred_at: datetime) -> RunRecord:
+def _run_with_artifact(
+    record: RunRecord,
+    artifact_id: str,
+    occurred_at: datetime,
+) -> RunRecord:
     from dataclasses import replace
 
     return replace(
@@ -1152,6 +1175,7 @@ def _run_with_artifact(record: RunRecord, occurred_at: datetime) -> RunRecord:
         last_artifact_at=(
             max(record.last_artifact_at, occurred_at) if record.last_artifact_at else occurred_at
         ),
+        recent_artifact_ids=(*record.recent_artifact_ids, artifact_id)[-10:],
     )
 
 
