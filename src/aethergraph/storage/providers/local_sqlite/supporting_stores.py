@@ -43,7 +43,7 @@ CREATE TABLE local_key_values (
 """
 _CREATE_KV_EXPIRY_INDEX = """
 CREATE INDEX ix_local_key_values_expiry
-ON local_key_values(namespace, expires_at, scope_identity, key)
+ON local_key_values(scope_identity, namespace, expires_at, key)
 """
 _CREATE_DOCUMENTS = """
 CREATE TABLE local_documents (
@@ -342,6 +342,72 @@ class LocalKeyValueStore:
                 else None
             ),
         )
+
+    async def purge_expired(
+        self,
+        scope: StorageScope,
+        namespace: str,
+        limit: int,
+    ) -> int:
+        """Physically purge one bounded exact-scope batch of expired values.
+
+        Intro:
+            Selects expired identities through the supporting-store expiry index and
+            deletes that bounded set in one provider transaction.
+
+        Examples:
+            Purge expired runtime values:
+            ```python
+            removed = await store.purge_expired(scope, "runtime.kv", 100)
+            ```
+
+            Confirm a drained namespace:
+            ```python
+            assert await store.purge_expired(scope, "runtime.kv", 100) == 0
+            ```
+
+        Args:
+            scope: Exact canonical owner scope.
+            namespace: Exact logical namespace.
+            limit: Maximum expired records to delete.
+
+        Returns:
+            int: Number of provider rows physically deleted.
+
+        Notes:
+            The provider clock is authoritative. Other scopes and namespaces remain
+            untouched, and read-only bundles reject the maintenance operation.
+        """
+        self._require_writable()
+        _identity(namespace, "purge")
+        if isinstance(limit, bool) or not 1 <= limit <= 1_000:
+            raise ValueError("limit must be between 1 and 1000")
+        scope_identity = _scope_identity(scope)
+        now = _now(self._clock).isoformat()
+
+        def commit(connection: sqlite3.Connection) -> int:
+            keys = connection.execute(
+                """
+                SELECT key FROM local_key_values INDEXED BY ix_local_key_values_expiry
+                WHERE scope_identity = ? AND namespace = ?
+                  AND expires_at IS NOT NULL AND expires_at <= ?
+                ORDER BY expires_at ASC, key ASC
+                LIMIT ?
+                """,
+                (scope_identity, namespace, now, limit),
+            ).fetchall()
+            if not keys:
+                return 0
+            connection.executemany(
+                """
+                DELETE FROM local_key_values
+                WHERE scope_identity = ? AND namespace = ? AND key = ?
+                """,
+                ((scope_identity, namespace, str(row["key"])) for row in keys),
+            )
+            return len(keys)
+
+        return await self._database.transaction(commit)
 
     def _require_writable(self) -> None:
         if self._mode is StorageOpenMode.READ_ONLY:

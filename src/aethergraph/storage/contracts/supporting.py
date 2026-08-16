@@ -245,6 +245,43 @@ class KeyValueStore(Protocol):
         """
         ...
 
+    async def purge_expired(
+        self,
+        scope: StorageScope,
+        namespace: str,
+        limit: int,
+    ) -> int:
+        """Physically purge a bounded number of expired values.
+
+        Intro:
+            Performs explicit maintenance inside one exact canonical scope and
+            namespace after normal reads have already hidden expired values.
+
+        Examples:
+            Purge one maintenance batch:
+            ```python
+            removed = await store.purge_expired(scope, "runtime.kv", 100)
+            ```
+
+            Drain another bounded namespace independently:
+            ```python
+            removed = await store.purge_expired(scope, "auth.invites", 25)
+            ```
+
+        Args:
+            scope: Canonical owner scope constraining physical deletion.
+            namespace: Exact provider-owned logical namespace.
+            limit: Maximum expired records to remove in this operation.
+
+        Returns:
+            int: Number of expired records physically removed.
+
+        Notes:
+            Providers use their authoritative clock. This is never an unbounded
+            vacuum, cross-scope sweep, or service-owned database operation.
+        """
+        ...
+
 
 class DocumentStore(Protocol):
     """Revisioned scoped JSON document repository with stable cursor queries."""

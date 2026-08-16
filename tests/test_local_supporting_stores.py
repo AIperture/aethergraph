@@ -113,6 +113,36 @@ async def test_key_value_cas_ttl_and_stable_prefix_pagination(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_key_value_purges_expired_rows_in_bounded_exact_scope_batches(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    clock = _Clock()
+    store = LocalKeyValueStore(database=database, clock=clock)
+    scope = StorageScope(project_id="project-1")
+    other_scope = StorageScope(project_id="project-2")
+    expiry = NOW + timedelta(seconds=1)
+    for key in ("a", "b"):
+        await store.compare_and_set(scope, "runtime.kv", key, 0, {"key": key}, expiry)
+    await store.compare_and_set(scope, "other", "c", 0, {}, expiry)
+    await store.compare_and_set(other_scope, "runtime.kv", "d", 0, {}, expiry)
+    await store.compare_and_set(scope, "runtime.kv", "live", 0, {})
+    clock.value = NOW + timedelta(seconds=2)
+
+    assert await store.purge_expired(scope, "runtime.kv", 1) == 1
+    assert await store.purge_expired(scope, "runtime.kv", 1) == 1
+    assert await store.purge_expired(scope, "runtime.kv", 1) == 0
+    remaining = await database.fetch_all(
+        "SELECT scope_identity, namespace, key FROM local_key_values ORDER BY key"
+    )
+
+    assert {str(row["key"]) for row in remaining} == {"c", "d", "live"}
+    with pytest.raises(ValueError, match="between 1 and 1000"):
+        await store.purge_expired(scope, "runtime.kv", 0)
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_key_value_concurrent_create_has_one_winner(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     store = LocalKeyValueStore(database=database, clock=_Clock())
@@ -233,9 +263,24 @@ async def test_supporting_schema_uses_canonical_identity_and_indexed_queries(
             ('{"project_id":"project-1"}', "registry", "kind", '"agent"'),
         )
     )
+    expiry_plan = " ".join(
+        str(row["detail"])
+        for row in await database.fetch_all(
+            """
+            EXPLAIN QUERY PLAN SELECT key FROM local_key_values
+            INDEXED BY ix_local_key_values_expiry
+            WHERE scope_identity = ? AND namespace = ?
+              AND expires_at IS NOT NULL AND expires_at <= ?
+            ORDER BY expires_at, key LIMIT ?
+            """,
+            ('{"project_id":"project-1"}', "runtime.kv", NOW.isoformat(), 10),
+        )
+    )
     assert "sqlite_autoindex_local_key_values_1" in kv_plan
+    assert "ix_local_key_values_expiry" in expiry_plan
     assert "ix_local_document_metadata_value" in document_plan
     assert "SCAN local_key_values" not in kv_plan
+    assert "SCAN local_key_values" not in expiry_plan
     assert "SCAN local_document_metadata" not in document_plan
     await database.close()
 
@@ -262,6 +307,8 @@ async def test_read_only_supporting_stores_read_and_reject_mutation(tmp_path: Pa
         await readonly_kv.compare_and_set(scope, "runtime", "other", 0, {})
     with pytest.raises(StorageReadOnlyError):
         await readonly_kv.delete(scope, "runtime", "key", 1)
+    with pytest.raises(StorageReadOnlyError):
+        await readonly_kv.purge_expired(scope, "runtime", 10)
     with pytest.raises(StorageReadOnlyError):
         await readonly_documents.compare_and_set(scope, "registry", "other", 0, {}, 1)
     with pytest.raises(StorageReadOnlyError):
