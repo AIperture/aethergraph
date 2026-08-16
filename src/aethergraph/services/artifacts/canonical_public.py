@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 import json
 import mimetypes
-from pathlib import PurePosixPath
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 from urllib.parse import unquote, urlparse
+import warnings
 
 from aethergraph.contracts.services.artifacts import Artifact
-from aethergraph.storage.contracts import SearchMode
+from aethergraph.storage.contracts import (
+    ArtifactMetricOrder,
+    Page,
+    PageRequest,
+    SearchMode,
+)
 
 from .canonical_facade import (
     ArtifactCommitReceipt,
@@ -19,9 +26,12 @@ from .canonical_facade import (
     CanonicalArtifactWriter,
     PublicArtifactSearchHit,
 )
+from .types import ArtifactContent
 
 _CONTENT_PREFIX = "/api/v1/artifacts/"
 _CONTENT_SUFFIX = "/content"
+_DEFAULT_READ_LIMIT = 64 * 1024 * 1024
+_MAX_PUBLIC_PAGE_SIZE = 500
 
 
 class CanonicalPublicArtifactFacade:
@@ -133,6 +143,219 @@ class CanonicalPublicArtifactFacade:
             Unused staging directories remain caller-owned transient state.
         """
         return await self.canonical.stage_dir(suffix)
+
+    async def save_directory(
+        self,
+        path: str,
+        *,
+        kind: str = "directory",
+        tags: list[str] | None = None,
+        labels: dict[str, Any] | None = None,
+        metrics: dict[str, float] | None = None,
+        suggested_uri: str | None = None,
+        name: str | None = None,
+        pin: bool = False,
+        cleanup: bool = False,
+        max_entries: int = 10_000,
+        max_total_bytes: int = 1024 * 1024 * 1024,
+    ) -> Artifact:
+        """Persist one directory as a bounded deterministic canonical archive.
+
+        The canonical service validates the source tree, rejects links and special
+        files, normalizes archive metadata, and commits one immutable Artifact.
+
+        Examples:
+            Save a generated directory:
+                ```python
+                artifact = await artifacts.save_directory("build", kind="bundle")
+                ```
+
+            Consume an explicitly staged directory:
+                ```python
+                artifact = await artifacts.save_directory(
+                    staged,
+                    tags=["final"],
+                    cleanup=True,
+                    pin=True,
+                )
+                ```
+
+        Args:
+            path: Existing non-linked local source directory.
+            kind: Exact canonical Artifact kind.
+            tags: Optional unique public content tags.
+            labels: Optional immutable public content labels.
+            metrics: Optional finite occurrence metrics.
+            suggested_uri: Optional legacy descriptive name source, never a locator.
+            name: Optional exact descriptive archive filename.
+            pin: Whether to create explicit pinned retention intent.
+            cleanup: Delete only the exact source directory after complete success.
+            max_entries: Positive maximum combined file and directory entries.
+            max_total_bytes: Positive maximum total regular-file source bytes.
+
+        Returns:
+            Artifact: Frozen public Artifact DTO for the committed directory occurrence.
+
+        Notes:
+            Directory content uses canonical `tar.v1`; provider paths and source
+            filesystem metadata never enter public identity.
+        """
+        filename = _filename(name=name, suggested_uri=suggested_uri)
+        receipt = await self.canonical.save_directory(
+            path,
+            kind=kind,
+            original_filename=filename,
+            content_labels=_content_labels(tags=tags, labels=labels, filename=filename),
+            metrics=metrics,
+            pinned=pin,
+            cleanup=cleanup,
+            max_entries=max_entries,
+            max_total_bytes=max_total_bytes,
+        )
+        return self._project(receipt)
+
+    async def ingest_file(
+        self,
+        staged_path: str,
+        *,
+        kind: str,
+        tags: list[str] | None = None,
+        mime: str | None = None,
+        labels: dict[str, Any] | None = None,
+        metrics: dict[str, float] | None = None,
+        suggested_uri: str | None = None,
+        name: str | None = None,
+        pin: bool = False,
+    ) -> Artifact:
+        """Consume one staged file through canonical file persistence.
+
+        This compatibility name delegates exactly once to `save_file` with successful
+        source cleanup and never selects a legacy Artifact store.
+
+        Examples:
+            Ingest staged output:
+                ```python
+                artifact = await artifacts.ingest_file(staged, kind="report")
+                ```
+
+            Ingest labeled output:
+                ```python
+                artifact = await artifacts.ingest_file(
+                    staged,
+                    kind="dataset",
+                    tags=["verified"],
+                )
+                ```
+
+        Args:
+            staged_path: Existing local producer file consumed after success.
+            kind: Exact canonical Artifact kind.
+            tags: Optional unique public content tags.
+            mime: Optional exact media type; inferred from filename when absent.
+            labels: Optional immutable public content labels.
+            metrics: Optional finite occurrence metrics.
+            suggested_uri: Optional legacy descriptive name source, never a locator.
+            name: Optional exact descriptive filename.
+            pin: Whether to create explicit pinned retention intent.
+
+        Returns:
+            Artifact: Frozen public Artifact DTO for the committed occurrence.
+
+        Notes:
+            `ingest_file` is deprecated compatibility vocabulary; use `save_file`
+            with `cleanup=True`. The alias has no independent persistence behavior.
+        """
+        warnings.warn(
+            "CanonicalPublicArtifactFacade.ingest_file() is deprecated; "
+            "use save_file(..., cleanup=True)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.save_file(
+            staged_path,
+            kind=kind,
+            tags=tags,
+            mime=mime,
+            labels=labels,
+            metrics=metrics,
+            suggested_uri=suggested_uri,
+            name=name,
+            pin=pin,
+            cleanup=True,
+        )
+
+    async def ingest_dir(
+        self,
+        staged_dir: str,
+        *,
+        kind: str = "directory",
+        tags: list[str] | None = None,
+        labels: dict[str, Any] | None = None,
+        metrics: dict[str, float] | None = None,
+        suggested_uri: str | None = None,
+        name: str | None = None,
+        pin: bool = False,
+        max_entries: int = 10_000,
+        max_total_bytes: int = 1024 * 1024 * 1024,
+    ) -> Artifact:
+        """Consume one staged directory through canonical directory persistence.
+
+        This compatibility name delegates exactly once to `save_directory` with
+        successful source cleanup and deterministic archive construction.
+
+        Examples:
+            Ingest staged output:
+                ```python
+                artifact = await artifacts.ingest_dir(staged)
+                ```
+
+            Ingest a bounded dataset:
+                ```python
+                artifact = await artifacts.ingest_dir(
+                    staged,
+                    kind="dataset",
+                    max_entries=500,
+                )
+                ```
+
+        Args:
+            staged_dir: Existing non-linked local source directory consumed after success.
+            kind: Exact canonical Artifact kind.
+            tags: Optional unique public content tags.
+            labels: Optional immutable public content labels.
+            metrics: Optional finite occurrence metrics.
+            suggested_uri: Optional legacy descriptive name source, never a locator.
+            name: Optional exact descriptive archive filename.
+            pin: Whether to create explicit pinned retention intent.
+            max_entries: Positive maximum combined file and directory entries.
+            max_total_bytes: Positive maximum total regular-file source bytes.
+
+        Returns:
+            Artifact: Frozen public Artifact DTO for the committed directory occurrence.
+
+        Notes:
+            `ingest_dir` is deprecated compatibility vocabulary; use
+            `save_directory(..., cleanup=True)`.
+        """
+        warnings.warn(
+            "CanonicalPublicArtifactFacade.ingest_dir() is deprecated; "
+            "use save_directory(..., cleanup=True)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return await self.save_directory(
+            staged_dir,
+            kind=kind,
+            tags=tags,
+            labels=labels,
+            metrics=metrics,
+            suggested_uri=suggested_uri,
+            name=name,
+            pin=pin,
+            cleanup=True,
+            max_entries=max_entries,
+            max_total_bytes=max_total_bytes,
+        )
 
     @asynccontextmanager
     async def writer(
@@ -516,6 +739,230 @@ class CanonicalPublicArtifactFacade:
         """
         return json.loads(await self.load_text_by_id(artifact_id, encoding=encoding, errors=errors))
 
+    async def load_content(
+        self,
+        artifact_id: str,
+        *,
+        encoding: str = "utf-8",
+        errors: str = "strict",
+        max_bytes: int = _DEFAULT_READ_LIMIT,
+    ) -> ArtifactContent:
+        """Load one Artifact through an explicit canonical content-mode policy.
+
+        JSON and text classification uses only immutable kind and media-type metadata;
+        every other Artifact remains bytes. Canonical hydration enforces the byte bound.
+
+        Examples:
+            Load structured content:
+                ```python
+                content = await artifacts.load_content("artifact-1")
+                assert content.mode == "json"
+                ```
+
+            Apply a smaller hydration bound:
+                ```python
+                content = await artifacts.load_content(
+                    "artifact-2",
+                    max_bytes=1024,
+                )
+                ```
+
+        Args:
+            artifact_id: Exact stable canonical Artifact identity.
+            encoding: Text codec used for JSON or text decoding.
+            errors: Exact decode error policy.
+            max_bytes: Positive maximum complete content bytes permitted in memory.
+
+        Returns:
+            ArtifactContent: Typed JSON, text, or complete bytes with its public DTO.
+
+        Notes:
+            Unknown kinds and media types are bytes by explicit policy. Content is
+            never truncated, reclassified by filename, or retried through another backend.
+        """
+        artifact = await self.get_by_id(artifact_id)
+        if artifact is None:
+            raise FileNotFoundError(f"Artifact {artifact_id} not found")
+        payload = await self.canonical.load_bytes(artifact_id, max_bytes=max_bytes)
+        mode = _content_mode(artifact)
+        if mode == "json":
+            return ArtifactContent(
+                artifact=artifact,
+                mode="json",
+                json=json.loads(payload.decode(encoding, errors=errors)),
+            )
+        if mode == "text":
+            return ArtifactContent(
+                artifact=artifact,
+                mode="text",
+                text=payload.decode(encoding, errors=errors),
+            )
+        return ArtifactContent(artifact=artifact, mode="bytes", data=payload)
+
+    async def as_local_file_by_id(
+        self,
+        artifact_id: str,
+        *,
+        max_bytes: int = _DEFAULT_READ_LIMIT,
+    ) -> str:
+        """Materialize one bounded canonical Artifact into a new staging file.
+
+        The public identity is authorized before canonical bytes are copied into a
+        service-owned transient file; no provider locator becomes caller-visible.
+
+        Examples:
+            Materialize a report:
+                ```python
+                path = await artifacts.as_local_file_by_id("artifact-1")
+                ```
+
+            Apply a smaller content bound:
+                ```python
+                path = await artifacts.as_local_file_by_id(
+                    "artifact-2",
+                    max_bytes=1_000_000,
+                )
+                ```
+
+        Args:
+            artifact_id: Exact stable canonical Artifact identity.
+            max_bytes: Positive maximum complete content bytes permitted locally.
+
+        Returns:
+            str: Absolute path to a new complete transient file.
+
+        Notes:
+            The caller owns the returned transient file. URI/path-based localizers and
+            direct provider paths are intentionally not part of this facade.
+        """
+        artifact = await self.get_by_id(artifact_id)
+        if artifact is None:
+            raise FileNotFoundError(f"Artifact {artifact_id} not found")
+        payload = await self.canonical.load_bytes(artifact_id, max_bytes=max_bytes)
+        suffix = _artifact_suffix(artifact)
+        staged = Path(await self.stage_path(suffix))
+        completed = False
+        try:
+            await asyncio.to_thread(staged.write_bytes, payload)
+            completed = True
+        finally:
+            if not completed:
+                await asyncio.to_thread(staged.unlink, missing_ok=True)
+        return str(staged.resolve(strict=True))
+
+    async def materialize_directory(
+        self,
+        artifact_id: str,
+        destination: str,
+        *,
+        max_entries: int = 10_000,
+        max_total_bytes: int = 1024 * 1024 * 1024,
+        max_archive_bytes: int = 2 * 1024 * 1024 * 1024,
+    ) -> str:
+        """Safely materialize one canonical directory into an explicit destination.
+
+        Public occurrence authorization precedes bounded canonical archive extraction.
+        The destination must be new and its existing parent remains caller-controlled.
+
+        Examples:
+            Materialize a directory:
+                ```python
+                path = await artifacts.materialize_directory(
+                    "artifact-1", "output"
+                )
+                ```
+
+            Apply tighter extraction bounds:
+                ```python
+                path = await artifacts.materialize_directory(
+                    "artifact-1",
+                    "output",
+                    max_entries=100,
+                    max_total_bytes=10_000_000,
+                )
+                ```
+
+        Args:
+            artifact_id: Exact stable canonical directory Artifact identity.
+            destination: New local directory path beneath an existing parent.
+            max_entries: Positive maximum combined file and directory entries.
+            max_total_bytes: Positive maximum extracted regular-file bytes.
+            max_archive_bytes: Positive maximum transient archive bytes.
+
+        Returns:
+            str: Absolute path to the completely materialized new directory.
+
+        Notes:
+            Existing destinations are never merged or overwritten. Extraction failure
+            removes only the new destination created by this call.
+        """
+        if await self.get_by_id(artifact_id) is None:
+            raise FileNotFoundError(f"Artifact {artifact_id} not found")
+        return await self.canonical.materialize_directory(
+            artifact_id,
+            destination,
+            max_entries=max_entries,
+            max_total_bytes=max_total_bytes,
+            max_archive_bytes=max_archive_bytes,
+        )
+
+    async def as_local_dir_by_id(
+        self,
+        artifact_id: str,
+        *,
+        max_entries: int = 10_000,
+        max_total_bytes: int = 1024 * 1024 * 1024,
+        max_archive_bytes: int = 2 * 1024 * 1024 * 1024,
+    ) -> str:
+        """Materialize one canonical directory into new transient staging.
+
+        A service-owned parent is allocated and canonical extraction creates one new
+        child destination without exposing archive or provider locations.
+
+        Examples:
+            Materialize directory content:
+                ```python
+                path = await artifacts.as_local_dir_by_id("artifact-1")
+                ```
+
+            Apply tighter extraction bounds:
+                ```python
+                path = await artifacts.as_local_dir_by_id(
+                    "artifact-1",
+                    max_entries=100,
+                )
+                ```
+
+        Args:
+            artifact_id: Exact stable canonical directory Artifact identity.
+            max_entries: Positive maximum combined file and directory entries.
+            max_total_bytes: Positive maximum extracted regular-file bytes.
+            max_archive_bytes: Positive maximum transient archive bytes.
+
+        Returns:
+            str: Absolute path to a completely materialized transient directory.
+
+        Notes:
+            The caller owns the returned staging parent and content. Arbitrary URI/path
+            directory conversion is intentionally retired.
+        """
+        parent = Path(await self.stage_dir("-materialized"))
+        destination = parent / "content"
+        completed = False
+        try:
+            result = await self.materialize_directory(
+                artifact_id,
+                str(destination),
+                max_entries=max_entries,
+                max_total_bytes=max_total_bytes,
+                max_archive_bytes=max_archive_bytes,
+            )
+            completed = True
+            return result
+        finally:
+            if not completed:
+                await asyncio.to_thread(parent.rmdir)
+
     async def load_bytes(self, uri: str) -> bytes:
         """Load canonical Artifact bytes from an AG public URI.
 
@@ -624,6 +1071,189 @@ class CanonicalPublicArtifactFacade:
             Invalid public URIs, decode errors, and JSON errors propagate directly.
         """
         return json.loads(await self.load_text(uri, encoding=encoding, errors=errors))
+
+    async def query_public_artifacts(
+        self,
+        page: PageRequest | None = None,
+        *,
+        kind: str | None = None,
+        tags: Sequence[str] | None = None,
+        labels: Mapping[str, Any] | None = None,
+        pinned: bool | None = None,
+        metric: str | None = None,
+        metric_order: ArtifactMetricOrder | None = None,
+    ) -> Page[Artifact]:
+        """Query one bounded cursor page in the exact bound execution scope.
+
+        The canonical repository applies structured filters before bounded batch
+        hydration and returns its opaque continuation cursor unchanged.
+
+        Examples:
+            Query recent public Artifacts:
+                ```python
+                page = await artifacts.query_public_artifacts()
+                ```
+
+            Continue a filtered query:
+                ```python
+                page = await artifacts.query_public_artifacts(
+                    PageRequest(limit=25, cursor=cursor),
+                    kind="report",
+                    tags=["final"],
+                )
+                ```
+
+        Args:
+            page: Optional bounded opaque cursor request, capped at 500 records.
+            kind: Optional exact immutable Artifact kind.
+            tags: Optional tags every immutable Artifact must contain.
+            labels: Optional exact immutable content-label filters.
+            pinned: Optional current retention-state filter.
+            metric: Optional exact occurrence metric key used for indexed ranking.
+            metric_order: Required maximum/minimum ranking direction with `metric`.
+
+        Returns:
+            Page[Artifact]: Frozen public DTOs and the exact provider cursor.
+
+        Notes:
+            Scope is fixed at construction. Deprecated App metadata is projection-only,
+            and no offset pagination or legacy Artifact index is available.
+        """
+        requested = page or PageRequest()
+        if requested.limit > _MAX_PUBLIC_PAGE_SIZE:
+            raise ValueError(
+                f"public Artifact page limit must be between 1 and {_MAX_PUBLIC_PAGE_SIZE}"
+            )
+        return await self.canonical.query_public_artifacts(
+            requested,
+            tags=_tags(tags),
+            kind=kind,
+            labels=labels,
+            pinned=pinned,
+            metric=metric,
+            metric_order=metric_order,
+            deprecated_app_id=self._deprecated_app_id,
+        )
+
+    async def list(
+        self,
+        *,
+        kind: str | None = None,
+        tags: Sequence[str] | None = None,
+        filters: Mapping[str, Any] | None = None,
+        pinned: bool | None = None,
+        limit: int = 100,
+    ) -> list[Artifact]:
+        """List one bounded first page in the exact bound execution scope.
+
+        This convenience projection performs one structured canonical query and returns
+        its items; callers needing continuation use `query_public_artifacts` directly.
+
+        Examples:
+            List recent Artifacts:
+                ```python
+                rows = await artifacts.list()
+                ```
+
+            List pinned reports:
+                ```python
+                rows = await artifacts.list(
+                    kind="report",
+                    tags=["final"],
+                    pinned=True,
+                    limit=25,
+                )
+                ```
+
+        Args:
+            kind: Optional exact immutable Artifact kind.
+            tags: Optional tags every immutable Artifact must contain.
+            filters: Optional exact immutable content-label filters.
+            pinned: Optional current retention-state filter.
+            limit: Positive result bound, at most 500.
+
+        Returns:
+            list[Artifact]: Frozen public DTOs from the first provider page.
+
+        Notes:
+            Legacy level and node widening are retired because this facade is already
+            bound to one exact execution scope; results never cross that boundary.
+        """
+        page = await self.query_public_artifacts(
+            PageRequest(limit=limit),
+            kind=kind,
+            tags=tags,
+            labels=filters,
+            pinned=pinned,
+        )
+        return list(page.items)
+
+    async def best(
+        self,
+        *,
+        kind: str,
+        metric: str,
+        metric_mode: Literal["max", "min"],
+        tags: Sequence[str] | None = None,
+        filters: Mapping[str, Any] | None = None,
+        pinned: bool | None = None,
+    ) -> Artifact | None:
+        """Return the best exact-scope Artifact for one occurrence metric.
+
+        Provider-side metric ranking and structured filtering occur before one-record
+        public hydration; ties follow the repository's stable occurrence order.
+
+        Examples:
+            Select maximum quality:
+                ```python
+                artifact = await artifacts.best(
+                    kind="model",
+                    metric="quality",
+                    metric_mode="max",
+                )
+                ```
+
+            Select minimum loss with tags:
+                ```python
+                artifact = await artifacts.best(
+                    kind="model",
+                    metric="loss",
+                    metric_mode="min",
+                    tags=["validated"],
+                )
+                ```
+
+        Args:
+            kind: Exact immutable Artifact kind.
+            metric: Exact occurrence metric key.
+            metric_mode: Required `max` or `min` provider ranking direction.
+            tags: Optional tags every immutable Artifact must contain.
+            filters: Optional exact immutable content-label filters.
+            pinned: Optional current retention-state filter.
+
+        Returns:
+            Artifact | None: Best matching frozen DTO, or `None` when no row matches.
+
+        Notes:
+            Ranking has no client-side scan, numeric coercion, default direction, or
+            fallback to creation order.
+        """
+        if metric_mode == "max":
+            order = ArtifactMetricOrder.MAXIMUM
+        elif metric_mode == "min":
+            order = ArtifactMetricOrder.MINIMUM
+        else:
+            raise ValueError("metric_mode must be exactly 'max' or 'min'")
+        page = await self.query_public_artifacts(
+            PageRequest(limit=1),
+            kind=kind,
+            tags=tags,
+            labels=filters,
+            pinned=pinned,
+            metric=metric,
+            metric_order=order,
+        )
+        return page.items[0] if page.items else None
 
     async def search_public_artifacts(
         self,
@@ -781,6 +1411,25 @@ def _exact_filename(value: str) -> None:
 def _media_type(value: str | None) -> str:
     guessed = mimetypes.guess_type(value or "")[0]
     return guessed or "application/octet-stream"
+
+
+def _content_mode(artifact: Artifact) -> Literal["json", "text", "bytes"]:
+    kind = artifact.kind or ""
+    media_type = artifact.mime or ""
+    if kind == "json" or media_type == "application/json" or media_type.endswith("+json"):
+        return "json"
+    if kind in {"text", "log", "note"} or media_type.startswith("text/"):
+        return "text"
+    return "bytes"
+
+
+def _artifact_suffix(artifact: Artifact) -> str:
+    labels = artifact.labels or {}
+    filename = labels.get("filename")
+    if filename is None:
+        return ""
+    _exact_filename(filename)
+    return PurePosixPath(filename).suffix
 
 
 def _artifact_id(uri: str) -> str:

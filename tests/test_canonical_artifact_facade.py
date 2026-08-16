@@ -365,6 +365,8 @@ async def test_public_occurrence_pages_filter_then_batch_hydrate(tmp_path: Path)
             artifact_id="report-1",
         )
         assert without_compatibility.items[0].app_id is None
+        with pytest.raises(ValueError, match="500"):
+            await first_facade.query_public_artifacts(PageRequest(limit=501))
     finally:
         await bundle.close()
 

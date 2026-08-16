@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from aethergraph.contracts.services.viz import VizEvent, VizMode
@@ -394,7 +395,9 @@ class VizFacade:
 
         # Use ArtifactFacade.writer to store the image
         async with self.artifacts.writer(kind=kind, planned_ext=".png") as w:
-            w.write(data)
+            write_result = w.write(data)
+            if inspect.isawaitable(write_result):
+                await write_result
             if labels:
                 w.add_labels(labels)
         art = self.artifacts.last_artifact

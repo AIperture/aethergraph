@@ -11,6 +11,7 @@ from aethergraph.services.artifacts import (
     CanonicalPublicArtifactFacade,
 )
 from aethergraph.storage.contracts import (
+    PageRequest,
     SearchMode,
     StorageOpenMode,
     StorageOpenRequest,
@@ -211,6 +212,123 @@ async def test_public_factory_projects_runtime_write_read_and_search_core(tmp_pa
         await bundle.close()
 
 
+@pytest.mark.asyncio
+async def test_public_factory_projects_directory_content_and_structured_helpers(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    artifact_ids = iter(f"artifact-{index}" for index in range(1, 7))
+    occurrence_ids = iter(f"occurrence-{index}" for index in range(1, 7))
+    factory = CanonicalArtifactFacadeFactory(
+        bundle=bundle,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+        artifact_id_factory=lambda: next(artifact_ids),
+        occurrence_id_factory=lambda: next(occurrence_ids),
+    )
+    artifacts = factory.for_public_execution(
+        StorageScope(graph_id="graph-1", node_id="node-1"),
+        deprecated_app_id="app-legacy",
+    )
+    source_dir = tmp_path / "source-directory"
+    source_dir.mkdir()
+    (source_dir / "nested").mkdir()
+    (source_dir / "nested" / "value.txt").write_text("directory value", encoding="utf-8")
+    binary_path = tmp_path / "payload.bin"
+    binary_path.write_bytes(b"\x00\x01binary")
+    staged_path = tmp_path / "staged.txt"
+    staged_path.write_text("consumed staging", encoding="utf-8")
+    try:
+        directory = await artifacts.save_directory(
+            str(source_dir),
+            name="bundle.tar",
+            tags=["final"],
+        )
+        structured = await artifacts.save_json({"status": "ok"}, name="result.json")
+        high = await artifacts.save_text(
+            "high quality",
+            kind="report",
+            tags=["ranked"],
+            metrics={"quality": 0.9},
+        )
+        low = await artifacts.save_text(
+            "low quality",
+            kind="report",
+            tags=["ranked"],
+            metrics={"quality": 0.2},
+        )
+        binary = await artifacts.save_file(
+            str(binary_path),
+            kind="binary",
+            name="payload.bin",
+            cleanup=False,
+        )
+        with pytest.warns(DeprecationWarning, match="save_file"):
+            ingested = await artifacts.ingest_file(staged_path.as_posix(), kind="note")
+
+        assert source_dir.is_dir()
+        assert not staged_path.exists()
+        assert directory.labels["filename"] == "bundle.tar"
+        assert directory.app_id == "app-legacy"
+        assert ingested.kind == "note"
+
+        destination = tmp_path / "materialized"
+        assert await artifacts.materialize_directory(
+            directory.artifact_id,
+            str(destination),
+        ) == str(destination.resolve())
+        assert (destination / "nested" / "value.txt").read_text(encoding="utf-8") == (
+            "directory value"
+        )
+        transient_dir = Path(await artifacts.as_local_dir_by_id(directory.artifact_id))
+        assert (transient_dir / "nested" / "value.txt").read_text(encoding="utf-8") == (
+            "directory value"
+        )
+
+        local_binary = Path(await artifacts.as_local_file_by_id(binary.artifact_id))
+        assert local_binary.read_bytes() == b"\x00\x01binary"
+        assert (await artifacts.load_content(structured.artifact_id)).json == {"status": "ok"}
+        assert (await artifacts.load_content(high.artifact_id)).text == "high quality"
+        binary_content = await artifacts.load_content(binary.artifact_id)
+        assert binary_content.mode == "bytes"
+        assert binary_content.data == b"\x00\x01binary"
+
+        page = await artifacts.query_public_artifacts(
+            PageRequest(limit=2),
+            kind="report",
+            tags=["ranked"],
+        )
+        assert len(page.items) == 2
+        assert all(item.app_id == "app-legacy" for item in page.items)
+        assert {item.artifact_id for item in await artifacts.list(kind="report")} == {
+            high.artifact_id,
+            low.artifact_id,
+        }
+        assert (
+            await artifacts.best(
+                kind="report",
+                metric="quality",
+                metric_mode="max",
+                tags=["ranked"],
+            )
+            == high
+        )
+        assert (
+            await artifacts.best(
+                kind="report",
+                metric="quality",
+                metric_mode="min",
+                tags=["ranked"],
+            )
+            == low
+        )
+        with pytest.raises(ValueError, match="500"):
+            await artifacts.query_public_artifacts(PageRequest(limit=501))
+    finally:
+        await bundle.close()
+
+
 def test_factory_public_docstrings_follow_service_contract() -> None:
     for name in ("__init__", "for_execution", "for_owner", "for_public_execution"):
         docstring = inspect.getdoc(getattr(CanonicalArtifactFacadeFactory, name)) or ""
@@ -223,6 +341,9 @@ def test_factory_public_docstrings_follow_service_contract() -> None:
         CanonicalPublicArtifactFacade.__init__,
         CanonicalPublicArtifactFacade.stage_path,
         CanonicalPublicArtifactFacade.stage_dir,
+        CanonicalPublicArtifactFacade.save_directory,
+        CanonicalPublicArtifactFacade.ingest_file,
+        CanonicalPublicArtifactFacade.ingest_dir,
         CanonicalPublicArtifactFacade.writer,
         CanonicalPublicArtifactFacade.save_file,
         CanonicalPublicArtifactFacade.save_text,
@@ -231,9 +352,16 @@ def test_factory_public_docstrings_follow_service_contract() -> None:
         CanonicalPublicArtifactFacade.load_bytes_by_id,
         CanonicalPublicArtifactFacade.load_text_by_id,
         CanonicalPublicArtifactFacade.load_json_by_id,
+        CanonicalPublicArtifactFacade.load_content,
+        CanonicalPublicArtifactFacade.as_local_file_by_id,
+        CanonicalPublicArtifactFacade.materialize_directory,
+        CanonicalPublicArtifactFacade.as_local_dir_by_id,
         CanonicalPublicArtifactFacade.load_bytes,
         CanonicalPublicArtifactFacade.load_text,
         CanonicalPublicArtifactFacade.load_json,
+        CanonicalPublicArtifactFacade.query_public_artifacts,
+        CanonicalPublicArtifactFacade.list,
+        CanonicalPublicArtifactFacade.best,
         CanonicalPublicArtifactFacade.search_public_artifacts,
         CanonicalPublicArtifactFacade.pin,
     ):
@@ -249,3 +377,22 @@ def test_factory_public_docstrings_follow_service_contract() -> None:
     assert "suggested_uri" in source
     assert "deprecated_app_id" in inspect.signature(CanonicalPublicArtifactFacade).parameters
     assert "app_id" not in inspect.signature(CanonicalPublicArtifactFacade).parameters
+
+
+def test_public_facade_retires_locator_and_ambiguous_legacy_helpers() -> None:
+    for name in (
+        "as_local_file",
+        "as_local_dir",
+        "to_local_path",
+        "to_local_file",
+        "to_local_dir",
+        "load_artifact",
+        "load_artifact_bytes",
+        "load_artifact_dir",
+        "search",
+        "stage",
+        "ingest",
+        "save",
+        "tmp_path",
+    ):
+        assert not hasattr(CanonicalPublicArtifactFacade, name)

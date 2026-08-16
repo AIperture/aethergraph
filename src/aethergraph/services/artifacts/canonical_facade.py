@@ -1705,8 +1705,14 @@ class CanonicalArtifactFacade:
             Hydration performs no single-record loop, exposes no blob locator, and
             never reconstructs deprecated `client_id` metadata.
         """
+        requested_page = page or PageRequest()
+        if requested_page.limit > _MAX_PUBLIC_SEARCH_HYDRATION:
+            raise ValueError(
+                "public Artifact page limit must be between 1 and "
+                f"{_MAX_PUBLIC_SEARCH_HYDRATION} for hydration"
+            )
         occurrences = await self.query_occurrences(
-            page,
+            requested_page,
             scope=scope,
             artifact_id=artifact_id,
             kind=kind,
