@@ -19,7 +19,16 @@ class _FakeMemoryFacade:
     def __init__(self) -> None:
         self.calls = []
 
-    async def record_chat(self, role, text, *, tags=None, data=None, severity=2, signal=None):
+    async def append_chat_turn(
+        self,
+        role,
+        text,
+        *,
+        tags=None,
+        data=None,
+        severity=2,
+        signal=None,
+    ):
         self.calls.append(
             {
                 "role": role,
