@@ -5,10 +5,9 @@ from dataclasses import dataclass
 import inspect
 from typing import Any
 
-from aethergraph.contracts.services.viz import VizEvent, VizMode
+from aethergraph.contracts.services.viz import VizEvent, VizEventSink, VizMode
 from aethergraph.services.artifacts.facade import Artifact, ArtifactFacade
 from aethergraph.services.scope.scope import Scope
-from aethergraph.services.viz.viz_service import VizService
 
 
 @dataclass
@@ -16,7 +15,7 @@ class VizFacade:
     """
     High-level facade for visualization operations within a given Scope.
 
-    - Wraps VizService and ArtifactFacade.
+    - Wraps a Viz event sink and ArtifactFacade.
     - Knows about Scope to auto-fill provenance and tenant fields.
 
     Usage pattern in ctx.viz:
@@ -37,7 +36,7 @@ class VizFacade:
     tool_name: str
     tool_version: str
 
-    viz_service: VizService
+    viz_service: VizEventSink
     scope: Scope | None = None
     artifacts: ArtifactFacade | None = None
 

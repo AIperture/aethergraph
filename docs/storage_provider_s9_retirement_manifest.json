@@ -10,6 +10,7 @@
     {"path": "src/aethergraph/services/container/default_container.py", "symbol": "SQLiteKVSync", "count": 2},
     {"path": "src/aethergraph/services/container/default_container.py", "symbol": "SQLiteObservationStore", "count": 1},
     {"path": "src/aethergraph/services/container/default_container.py", "symbol": "SQLiteTriggerStore", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "VizService", "count": 1},
     {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_artifact_index", "count": 1},
     {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_artifact_store", "count": 1},
     {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_continuation_store", "count": 1},
@@ -60,6 +61,7 @@
   "whole_module_retirements": [
     "src/aethergraph/observability/retention.py",
     "src/aethergraph/observability/sqlite_store.py",
+    "src/aethergraph/services/viz/viz_service.py",
     "src/aethergraph/storage/continuation_store/kvdoc_cont.py",
     "src/aethergraph/storage/continuation_store/timer_leases.py",
     "src/aethergraph/storage/docstore/fs_doc.py",
