@@ -582,6 +582,70 @@ class LocalRunResultRepository:
         run_scope = _run_scope(rows[0])
         return _result(rows[0], run_scope) if _scope_authorizes(run_scope, scope) else None
 
+    async def delete(
+        self,
+        scope: StorageScope,
+        run_id: str,
+        expected_revision: int,
+    ) -> bool:
+        """Atomically delete an authorized result and clear its run marker.
+
+        Result removal and the owning run revision/availability update share one
+        control-database transaction.
+
+        Examples:
+            Delete a corrupt output:
+                ```python
+                deleted = await results.delete(scope, run_id, result.revision)
+                ```
+
+            Detect an absent output:
+                ```python
+                assert not await results.delete(scope, "missing", 1)
+                ```
+
+        Args:
+            scope: Canonical caller scope constraints.
+            run_id: Exact stable run identity.
+            expected_revision: Exact current result revision required.
+
+        Returns:
+            bool: `True` when deleted, or `False` when absent or unauthorized.
+
+        Notes:
+            Authorization is checked before revision comparison. Stale authorized
+            expectations raise `StorageConflictError`.
+        """
+        self._require_writable()
+        _delete_revision(expected_revision)
+        _nonempty("run_id", run_id)
+
+        def commit(connection: sqlite3.Connection) -> bool:
+            run_row = connection.execute(
+                "SELECT * FROM local_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if run_row is None:
+                return False
+            run = _run(run_row)
+            if not _scope_authorizes(run.scope, scope):
+                return False
+            result_row = connection.execute(
+                "SELECT revision FROM local_run_results WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            if result_row is None:
+                return False
+            current_revision = int(result_row["revision"])
+            if current_revision != expected_revision:
+                raise StorageConflictError(
+                    "Run result revision conflict: "
+                    f"expected {expected_revision}, found {current_revision}"
+                )
+            connection.execute("DELETE FROM local_run_results WHERE run_id = ?", (run_id,))
+            _update_run(connection, _clear_run_result(run))
+            return True
+
+        return await self._database.transaction(commit)
+
     def _require_writable(self) -> None:
         if self._mode is StorageOpenMode.READ_ONLY:
             raise StorageReadOnlyError("Local run result repository is read-only")
@@ -732,6 +796,63 @@ class LocalSessionRepository:
                 raise StorageIntegrityError("Session updated_at must be monotonic")
             _update_session(connection, record)
             return record
+
+        return await self._database.transaction(commit)
+
+    async def delete(
+        self,
+        scope: StorageScope,
+        session_id: str,
+        expected_revision: int,
+    ) -> bool:
+        """Delete one authorized current session using revision CAS.
+
+        SQLite foreign-key cascading removes only the deleted session's provider-
+        owned artifact occurrence receipts.
+
+        Examples:
+            Delete a session:
+                ```python
+                deleted = await sessions.delete(scope, session_id, session.revision)
+                ```
+
+            Detect an absent session:
+                ```python
+                assert not await sessions.delete(scope, "missing", 1)
+                ```
+
+        Args:
+            scope: Canonical caller scope constraints.
+            session_id: Exact stable session identity.
+            expected_revision: Exact current session revision required.
+
+        Returns:
+            bool: `True` when deleted, or `False` when absent or unauthorized.
+
+        Notes:
+            Authorization is checked before revision comparison. Stale authorized
+            expectations raise `StorageConflictError`.
+        """
+        self._require_writable()
+        _delete_revision(expected_revision)
+        _nonempty("session_id", session_id)
+
+        def commit(connection: sqlite3.Connection) -> bool:
+            row = connection.execute(
+                "SELECT * FROM local_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            current = _session(row)
+            if not _scope_authorizes(current.scope, scope):
+                return False
+            if current.revision != expected_revision:
+                raise StorageConflictError(
+                    "Session revision conflict: "
+                    f"expected {expected_revision}, found {current.revision}"
+                )
+            connection.execute("DELETE FROM local_sessions WHERE session_id = ?", (session_id,))
+            return True
 
         return await self._database.transaction(commit)
 
@@ -1045,6 +1166,17 @@ def _replace_run_result(record: RunRecord, updated_at: datetime) -> RunRecord:
     )
 
 
+def _clear_run_result(record: RunRecord) -> RunRecord:
+    from dataclasses import replace
+
+    return replace(
+        record,
+        revision=record.revision + 1,
+        result_available=False,
+        result_updated_at=None,
+    )
+
+
 def _result(row: sqlite3.Row, scope: StorageScope) -> RunResultRecord:
     try:
         return RunResultRecord(
@@ -1215,6 +1347,15 @@ def _next_revision(revision: int, expected_revision: int) -> None:
         raise ValueError("expected_revision must be an integer")
     if expected_revision < 0 or revision != expected_revision + 1:
         raise ValueError("record revision must equal expected_revision plus one")
+
+
+def _delete_revision(expected_revision: int) -> None:
+    if (
+        isinstance(expected_revision, bool)
+        or not isinstance(expected_revision, int)
+        or expected_revision < 1
+    ):
+        raise ValueError("expected_revision must be a positive integer")
 
 
 def _optional_time(value: object) -> datetime | None:

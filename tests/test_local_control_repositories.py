@@ -257,6 +257,67 @@ async def test_result_rejects_non_successful_or_cross_scope_run(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_result_delete_is_scoped_revisioned_atomic_and_restart_durable(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    runs = LocalRunRepository(database=database)
+    results = LocalRunResultRepository(database=database)
+    running = _run("run-delete")
+    await runs.create(running)
+    completed = replace(
+        running,
+        revision=2,
+        status=RunStatus.SUCCEEDED,
+        finished_at=NOW + timedelta(seconds=1),
+    )
+    await runs.compare_and_set(completed, 1)
+    result = RunResultRecord(
+        run_id=completed.run_id,
+        graph_id=completed.graph_id,
+        scope=completed.scope,
+        status=RunStatus.SUCCEEDED,
+        outputs={"answer": 42},
+        revision=1,
+        created_at=NOW + timedelta(seconds=2),
+        updated_at=NOW + timedelta(seconds=2),
+        source="runtime",
+    )
+    await results.compare_and_set(result, 0)
+
+    assert not await results.delete(StorageScope(project_id="other"), result.run_id, 1)
+    with pytest.raises(StorageConflictError):
+        await results.delete(result.scope, result.run_id, 2)
+    assert await results.delete(result.scope, result.run_id, 1)
+    assert not await results.delete(result.scope, result.run_id, 1)
+    assert await results.get(result.scope, result.run_id) is None
+    cleared = await runs.get(result.scope, result.run_id)
+    assert cleared is not None
+    assert cleared.revision == 4
+    assert cleared.result_available is False
+    assert cleared.result_updated_at is None
+
+    recreated = replace(
+        result,
+        outputs={"answer": 43},
+        updated_at=NOW + timedelta(seconds=3),
+    )
+    await results.compare_and_set(recreated, 0)
+    await database.close()
+
+    reopened = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    reopened_runs = LocalRunRepository(database=reopened)
+    reopened_results = LocalRunResultRepository(database=reopened)
+    assert await reopened_results.get(result.scope, result.run_id) == recreated
+    remarked = await reopened_runs.get(result.scope, result.run_id)
+    assert remarked is not None
+    assert remarked.revision == 5
+    assert remarked.result_available is True
+    assert remarked.result_updated_at == recreated.updated_at
+    await reopened.close()
+
+
+@pytest.mark.asyncio
 async def test_session_cas_query_and_artifact_receipts(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     sessions = LocalSessionRepository(database=database)
@@ -306,6 +367,52 @@ async def test_session_cas_query_and_artifact_receipts(tmp_path: Path) -> None:
         await sessions.compare_and_set(replace(counted, revision=4, artifact_count=2), 3)
     assert await sessions.get(StorageScope(project_id="other"), renamed.session_id) is None
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_session_delete_is_scoped_revisioned_and_cascades_only_receipts(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    runs = LocalRunRepository(database=database)
+    sessions = LocalSessionRepository(database=database)
+    session = _session("session-delete")
+    await sessions.create(session)
+    counted = await sessions.record_artifact(
+        session.scope,
+        session.session_id,
+        "occurrence-1",
+        NOW + timedelta(seconds=1),
+    )
+    related_run = _run("run-preserved")
+    related_run = replace(
+        related_run,
+        scope=replace(related_run.scope, session_id=session.session_id),
+    )
+    await runs.create(related_run)
+
+    assert not await sessions.delete(
+        StorageScope(project_id="other"), counted.session_id, counted.revision
+    )
+    with pytest.raises(StorageConflictError):
+        await sessions.delete(counted.scope, counted.session_id, 1)
+    assert await sessions.delete(counted.scope, counted.session_id, counted.revision)
+    assert not await sessions.delete(counted.scope, counted.session_id, counted.revision)
+    assert await sessions.get(counted.scope, counted.session_id) is None
+    receipts = await database.fetch_all(
+        "SELECT occurrence_id FROM local_session_artifact_occurrences WHERE session_id = ?",
+        (counted.session_id,),
+    )
+    assert receipts == ()
+    assert await runs.get(related_run.scope, related_run.run_id) == related_run
+    await database.close()
+
+    reopened = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    reopened_runs = LocalRunRepository(database=reopened)
+    reopened_sessions = LocalSessionRepository(database=reopened)
+    assert await reopened_sessions.get(counted.scope, counted.session_id) is None
+    assert await reopened_runs.get(related_run.scope, related_run.run_id) == related_run
+    await reopened.close()
 
 
 @pytest.mark.asyncio
@@ -388,7 +495,11 @@ async def test_read_only_control_repositories_read_and_reject_mutation(
             0,
         )
     with pytest.raises(StorageReadOnlyError):
+        await readonly_results.delete(running.scope, running.run_id, 1)
+    with pytest.raises(StorageReadOnlyError):
         await readonly_sessions.create(_session("new"))
+    with pytest.raises(StorageReadOnlyError):
+        await readonly_sessions.delete(session.scope, session.session_id, session.revision)
     await readonly_database.close()
 
 

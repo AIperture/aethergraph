@@ -464,6 +464,43 @@ class RunResultRepository(Protocol):
         """
         ...
 
+    async def delete(
+        self,
+        scope: StorageScope,
+        run_id: str,
+        expected_revision: int,
+    ) -> bool:
+        """Atomically delete one exact result and clear its run marker.
+
+        Deletion is canonical-scope constrained and revision guarded so recovery
+        tooling cannot erase a newer successful output accidentally.
+
+        Examples:
+            Delete a corrupt output:
+                ```python
+                deleted = await results.delete(scope, run_id, result.revision)
+                ```
+
+            Detect an absent output:
+                ```python
+                assert not await results.delete(scope, "missing", 1)
+                ```
+
+        Args:
+            scope: Canonical owner/execution scope constraining deletion.
+            run_id: Exact stable run identifier.
+            expected_revision: Exact current result revision required.
+
+        Returns:
+            bool: `True` when deleted, or `False` when absent or unauthorized.
+
+        Notes:
+            The provider advances the owning run revision and clears its result
+            availability fields in the same transaction. Stale expectations raise
+            `StorageConflictError`.
+        """
+        ...
+
 
 class SessionRepository(Protocol):
     """Transactional repository for canonical sessions and artifact counters."""
@@ -559,6 +596,42 @@ class SessionRepository(Protocol):
 
         Notes:
             Stale expectations raise `StorageConflictError`.
+        """
+        ...
+
+    async def delete(
+        self,
+        scope: StorageScope,
+        session_id: str,
+        expected_revision: int,
+    ) -> bool:
+        """Delete one exact current session using revision CAS.
+
+        The operation preserves unrelated runs and artifacts while provider-owned
+        session artifact occurrence receipts are removed transactionally.
+
+        Examples:
+            Delete a session:
+                ```python
+                deleted = await sessions.delete(scope, session_id, session.revision)
+                ```
+
+            Detect an absent session:
+                ```python
+                assert not await sessions.delete(scope, "missing", 1)
+                ```
+
+        Args:
+            scope: Canonical owner/session scope constraining deletion.
+            session_id: Exact stable session identifier.
+            expected_revision: Exact current session revision required.
+
+        Returns:
+            bool: `True` when deleted, or `False` when absent or unauthorized.
+
+        Notes:
+            Stale expectations raise `StorageConflictError`; scope is never
+            broadened after an absent or unauthorized lookup.
         """
         ...
 
