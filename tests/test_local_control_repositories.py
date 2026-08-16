@@ -365,8 +365,23 @@ async def test_session_cas_query_and_artifact_receipts(tmp_path: Path) -> None:
     )
     with pytest.raises(StorageIntegrityError, match="provider-owned"):
         await sessions.compare_and_set(replace(counted, revision=4, artifact_count=2), 3)
+    cleared = replace(
+        counted,
+        revision=4,
+        updated_at=NOW + timedelta(minutes=3),
+        title="",
+        external_reference="",
+    )
+    assert await sessions.compare_and_set(cleared, 3) == cleared
+    with pytest.raises(StorageConflictError):
+        await sessions.compare_and_set(cleared, 3)
     assert await sessions.get(StorageScope(project_id="other"), renamed.session_id) is None
     await database.close()
+
+    reopened = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    reopened_sessions = LocalSessionRepository(database=reopened)
+    assert await reopened_sessions.get(cleared.scope, cleared.session_id) == cleared
+    await reopened.close()
 
 
 @pytest.mark.asyncio

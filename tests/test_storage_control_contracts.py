@@ -104,6 +104,7 @@ def test_session_records_enforce_scope_time_and_artifact_consistency() -> None:
     )
 
     assert session.metadata["channel"] == "ui"
+    assert replace(session, title="", external_reference="").title == ""
     assert "app_id" not in {item.name for item in fields(SessionRecord)}
     with pytest.raises(ValueError, match="agree"):
         replace(session, artifact_count=1)

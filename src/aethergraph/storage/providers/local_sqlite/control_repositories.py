@@ -1302,7 +1302,6 @@ def _session_immutable(record: SessionRecord) -> tuple[object, ...]:
         record.scope,
         record.created_at,
         record.source,
-        record.external_reference,
         record.artifact_count,
         record.last_artifact_at,
     )

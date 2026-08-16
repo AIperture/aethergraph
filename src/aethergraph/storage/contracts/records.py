@@ -26,6 +26,11 @@ def _optional_nonempty(name: str, value: str | None) -> None:
         _nonempty(name, value)
 
 
+def _optional_text(name: str, value: str | None) -> None:
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or None")
+
+
 def _positive_version(value: int) -> None:
     if isinstance(value, bool) or value < 1:
         raise ValueError("schema_version must be a positive integer")

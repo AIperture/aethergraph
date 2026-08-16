@@ -9,7 +9,15 @@ from enum import StrEnum
 from typing import Protocol
 
 from .pagination import Page, PageRequest
-from .records import FrozenJson, _freeze_json, _freeze_mapping, _nonempty, _optional_nonempty, _utc
+from .records import (
+    FrozenJson,
+    _freeze_json,
+    _freeze_mapping,
+    _nonempty,
+    _optional_nonempty,
+    _optional_text,
+    _utc,
+)
 from .scope import StorageScope
 
 
@@ -182,9 +190,9 @@ class SessionRecord:
         _utc("updated_at", self.updated_at)
         if self.updated_at < self.created_at:
             raise ValueError("updated_at must not precede created_at")
-        _optional_nonempty("title", self.title)
+        _optional_text("title", self.title)
         _nonempty("source", self.source)
-        _optional_nonempty("external_reference", self.external_reference)
+        _optional_text("external_reference", self.external_reference)
         if isinstance(self.artifact_count, bool) or self.artifact_count < 0:
             raise ValueError("artifact_count must be a non-negative integer")
         if self.last_artifact_at is not None:
@@ -573,8 +581,8 @@ class SessionRepository(Protocol):
     ) -> SessionRecord:
         """Atomically replace a session with its exact next revision.
 
-        Mutable title/metadata and updated time commit together. Artifact counters use
-        their dedicated idempotent transaction method.
+        Mutable title, external reference, metadata, and updated time commit together.
+        Artifact counters use their dedicated idempotent transaction method.
 
         Examples:
             Rename a session:
