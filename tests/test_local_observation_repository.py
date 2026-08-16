@@ -415,6 +415,15 @@ async def test_purge_is_bounded_target_aware_and_excludes_pinned_trace(tmp_path:
     )
     assert executed.deleted_observations == 4
     assert await repository.get(SCOPE, "obs-0") is not None
+    no_op = await repository.purge(
+        ObservationPurgeRequest(
+            scope=SCOPE,
+            trace_id="missing",
+            dry_run=False,
+        )
+    )
+    assert not no_op.dry_run
+    assert no_op.deleted_observations == 0
     await database.close()
 
 

@@ -3,6 +3,7 @@ from .agent_events import (
     emit_agent_event,
     register_default_agent_event_types,
 )
+from .canonical_retention import ProviderRetentionJanitor
 from .canonical_runtime_output import (
     CanonicalRuntimeOutputSink,
     bind_canonical_runtime_output,
@@ -77,6 +78,7 @@ __all__ = [
     "ObservabilityWorkspaceError",
     "PurgeResult",
     "ProviderObservationService",
+    "ProviderRetentionJanitor",
     "RetentionJanitor",
     "RetentionPolicy",
     "SQLiteObservationStore",

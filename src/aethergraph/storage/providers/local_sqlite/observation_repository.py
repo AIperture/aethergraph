@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime
 import hashlib
 import json
@@ -1490,8 +1491,10 @@ def _purge(
                     low = middle + 1
             candidate_ids = candidate_ids[:low]
     preview = _purge_accounting(connection, candidate_ids)
-    if not execute or not candidate_ids:
+    if not execute:
         return preview
+    if not candidate_ids:
+        return replace(preview, dry_run=False)
 
     placeholders = ",".join("?" for _ in candidate_ids)
     manifest_rows = connection.execute(
