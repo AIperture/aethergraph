@@ -9,9 +9,10 @@ from aethergraph.config.storage_provider import (
     LocalSQLiteProviderOptions,
     StorageProviderSettings,
 )
+from aethergraph.storage.provider_markers import BUILTIN_LOCAL_CONTINUATION_SECRET_REF
 from aethergraph.storage.providers.local_sqlite import LocalStorageProvider
 
-_SECRET_REF = "secret://storage/continuations"
+_SECRET_REF = BUILTIN_LOCAL_CONTINUATION_SECRET_REF
 _SECRET = b"provider-settings-test-secret-32bytes"
 
 
@@ -51,7 +52,6 @@ def test_local_provider_settings_are_typed_exact_and_provider_validated() -> Non
             "profile": " ",
             "options": {"continuation_token_secret_ref": _SECRET_REF},
         },
-        {"provider": "local.sqlite", "options": {}},
         {
             "provider": "local.sqlite",
             "options": {"continuation_token_secret_ref": f" {_SECRET_REF}"},
@@ -92,6 +92,20 @@ def test_external_provider_options_are_copied_without_local_interpretation() -> 
     assert selection.provider == "company.external"
     assert selection.config == {"cluster": "primary", "routing": {"region": "west"}}
     assert settings.profile == "production"
+
+
+def test_builtin_local_settings_supply_only_the_fixed_derivation_reference() -> None:
+    settings = StorageProviderSettings(provider="local.sqlite")
+
+    assert isinstance(settings.options, LocalSQLiteProviderOptions)
+    assert settings.options.continuation_token_secret_ref == _SECRET_REF
+    assert settings.to_selection().config["continuation_token_secret_ref"] == _SECRET_REF
+
+    with pytest.raises(ValidationError, match="workspace-bound auth-signing derivation"):
+        StorageProviderSettings(
+            provider="local.sqlite",
+            options={"continuation_token_secret_ref": "secret://legacy/continuations"},
+        )
 
 
 def test_provider_settings_are_frozen_and_exclude_deprecated_identity_and_paths() -> None:

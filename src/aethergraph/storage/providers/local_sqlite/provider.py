@@ -277,9 +277,11 @@ class LocalStorageProvider:
     ) -> None:
         """Capture resolved composition dependencies without persisting credentials.
 
-        Composition resolves the configured continuation secret asynchronously before
-        registering this provider factory. Synchronous provider open then validates
-        that the captured reference exactly matches the immutable provider selection.
+        Trusted composition obtains continuation material before registering this
+        provider factory. The built-in AG path derives it synchronously from already
+        resolved authentication material; async-native callers may resolve an opaque
+        reference first. Synchronous provider open then validates that the captured
+        reference exactly matches the immutable provider selection.
 
         Examples:
             Construct a lexical-only local provider:
@@ -308,8 +310,9 @@ class LocalStorageProvider:
             None: A provider factory product ready for side-effect-free config validation.
 
         Notes:
-            Secret bytes are retained in process only and never written to the manifest,
-            SQLite databases, logs, or provider diagnostics.
+            The provider never resolves or derives credentials. Secret bytes are
+            retained in process only and never written to the manifest, SQLite
+            databases, logs, or provider diagnostics.
         """
         if (
             not isinstance(continuation_token_secret_ref, str)

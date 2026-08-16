@@ -9,6 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aethergraph.storage.contracts import StorageProviderSelection
+from aethergraph.storage.provider_markers import BUILTIN_LOCAL_CONTINUATION_SECRET_REF
 
 _DEPRECATED_IDENTITY_OPTION_KEYS = frozenset({"app_id", "application_id", "client_id"})
 
@@ -19,7 +20,10 @@ class LocalSQLiteProviderOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     busy_timeout_ms: int = Field(default=5_000, ge=1, le=120_000)
-    continuation_token_secret_ref: str = Field(min_length=1)
+    continuation_token_secret_ref: str = Field(
+        default=BUILTIN_LOCAL_CONTINUATION_SECRET_REF,
+        min_length=1,
+    )
     durability: Literal["normal", "full"] = "normal"
     runtime_output_max_pending_frames: int = Field(default=10_000, ge=1, le=1_000_000)
     search_max_candidates: int = Field(default=10_000, ge=1_000, le=100_000)
@@ -29,6 +33,11 @@ class LocalSQLiteProviderOptions(BaseModel):
     def _validate_secret_reference(cls, value: str) -> str:
         if value != value.strip():
             raise ValueError("continuation_token_secret_ref must be exact without whitespace")
+        if value != BUILTIN_LOCAL_CONTINUATION_SECRET_REF:
+            raise ValueError(
+                "built-in local continuation_token_secret_ref must select the "
+                "workspace-bound auth-signing derivation"
+            )
         return value
 
 
@@ -85,9 +94,6 @@ class StorageProviderSettings(BaseModel):
                 ```python
                 settings = StorageProviderSettings(
                     provider="local.sqlite",
-                    options={
-                        "continuation_token_secret_ref": "secret://continuations",
-                    },
                 )
                 selection = settings.to_selection()
                 ```
