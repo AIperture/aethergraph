@@ -20,6 +20,9 @@ from aethergraph.storage.contracts import (
     EventDraft,
     EventQuery,
     EventStore,
+    ObservationLLMSummaryQuery,
+    ObservationRepository,
+    ObservationTraceSummaryQuery,
     PageRequest,
     SearchBackend,
     SearchDocument,
@@ -77,6 +80,46 @@ async def check_event_store_conformance(store: EventStore) -> None:
     )
     assert [row.event_id for row in page_two.items] == ["event-1"]
     assert page_two.next_cursor is None
+
+
+async def check_observation_summary_conformance(
+    observations: ObservationRepository,
+) -> None:
+    scope = StorageScope(project_id="project-1", run_id="summary-run-1")
+    trace = await observations.summarize_traces(
+        ObservationTraceSummaryQuery(
+            scope=scope,
+            occurred_at_or_after=NOW,
+            occurred_at_or_before=NOW,
+            trace_id_limit=1,
+            failing_service_limit=1,
+        )
+    )
+    llm = await observations.summarize_llm_calls(
+        ObservationLLMSummaryQuery(
+            scope=scope,
+            occurred_at_or_after=NOW,
+            occurred_at_or_before=NOW,
+            model_limit=1,
+        )
+    )
+
+    assert trace.span_count == 2
+    assert trace.error_count == 1
+    assert trace.total_duration_ms == 12
+    assert trace.trace_id_count == 2
+    assert trace.trace_ids == ("trace-a",)
+    assert trace.trace_ids_truncated
+    assert dict(trace.top_failing_services) == {"runner": 1}
+    assert trace.latest_error_at == NOW
+    assert llm.total_calls == 2
+    assert llm.total_prompt_tokens == 5
+    assert llm.total_completion_tokens == 3
+    assert llm.total_tokens == 8
+    assert llm.error_count == 1
+    assert llm.model_count == 2
+    assert dict(llm.by_model) == {"model-a": 1}
+    assert llm.by_model_truncated
 
 
 async def check_state_store_conformance(store: StateStore) -> None:

@@ -538,6 +538,8 @@ def test_get_run_trace_summary(client: TestClient) -> None:
     assert data["span_count"] == 2
     assert data["error_count"] == 1
     assert data["top_failing_services"]["runner"] == 1
+    assert data["trace_id_count"] == 1
+    assert data["trace_ids_truncated"] is False
 
 
 def test_get_run_llm_calls(client: TestClient) -> None:
@@ -549,6 +551,19 @@ def test_get_run_llm_calls(client: TestClient) -> None:
     assert item["messages"] is None
     assert item["raw_text"] is None
     assert item["trace_payload"] is None
+
+
+def test_get_run_llm_summary_reports_truthful_breakdown_metadata(client: TestClient) -> None:
+    resp = client.get("/api/v1/inspect/runs/run-1/llm-summary")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_calls"] == 2
+    assert data["total_prompt_tokens"] == 9
+    assert data["total_completion_tokens"] == 6
+    assert data["total_tokens"] == 15
+    assert data["error_count"] == 1
+    assert data["model_count"] == 2
+    assert data["by_model_truncated"] is False
 
 
 def test_get_llm_call_detail_includes_full_payload(client: TestClient) -> None:

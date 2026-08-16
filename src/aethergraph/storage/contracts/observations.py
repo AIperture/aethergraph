@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, cast
 
 from .pagination import Page, PageRequest
 from .records import (
@@ -607,6 +607,140 @@ class LLMCallQuery:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ObservationTraceSummaryQuery:
+    """Bound one provider-side trace aggregation to exact canonical scope and time."""
+
+    scope: StorageScope
+    occurred_at_or_after: datetime | None = None
+    occurred_at_or_before: datetime | None = None
+    trace_id_limit: int = 100
+    failing_service_limit: int = 5
+
+    def __post_init__(self) -> None:
+        _summary_bounds(self.occurred_at_or_after, self.occurred_at_or_before)
+        _summary_limit("trace_id_limit", self.trace_id_limit)
+        _summary_limit("failing_service_limit", self.failing_service_limit)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ObservationTraceSummaryRecord:
+    """Bounded aggregate-only trace statistics for one exact canonical query."""
+
+    span_count: int
+    error_count: int
+    total_duration_ms: int
+    trace_id_count: int
+    trace_ids: tuple[str, ...] = ()
+    trace_ids_truncated: bool = False
+    top_failing_services: Mapping[str, int] = field(default_factory=dict)
+    latest_error_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("span_count", "error_count", "total_duration_ms", "trace_id_count"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.error_count > self.span_count:
+            raise ValueError("error_count must not exceed span_count")
+        if not isinstance(self.trace_ids, tuple):
+            raise TypeError("trace_ids must be an immutable tuple")
+        if len(set(self.trace_ids)) != len(self.trace_ids):
+            raise ValueError("trace_ids must not contain duplicates")
+        if any(not isinstance(value, str) or not value.strip() for value in self.trace_ids):
+            raise ValueError("trace_ids must contain non-empty strings")
+        if self.trace_id_count < len(self.trace_ids):
+            raise ValueError("trace_id_count must cover returned trace_ids")
+        if self.trace_ids_truncated is not (self.trace_id_count > len(self.trace_ids)):
+            raise ValueError("trace_ids_truncated must match trace_id_count")
+        if self.latest_error_at is not None:
+            _utc("latest_error_at", self.latest_error_at)
+        if (self.error_count == 0) is not (self.latest_error_at is None):
+            raise ValueError("latest_error_at must match error_count")
+        failures = _positive_counts(
+            "top_failing_services",
+            self.top_failing_services,
+        )
+        if sum(failures.values()) > self.error_count:
+            raise ValueError("top_failing_services must not exceed error_count")
+        object.__setattr__(self, "top_failing_services", failures)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ObservationLLMSummaryQuery:
+    """Bound one provider-side LLM aggregation to exact canonical scope and time."""
+
+    scope: StorageScope
+    occurred_at_or_after: datetime | None = None
+    occurred_at_or_before: datetime | None = None
+    model_limit: int = 100
+
+    def __post_init__(self) -> None:
+        _summary_bounds(self.occurred_at_or_after, self.occurred_at_or_before)
+        _summary_limit("model_limit", self.model_limit)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ObservationLLMSummaryRecord:
+    """Bounded aggregate-only LLM statistics for one exact canonical query."""
+
+    total_calls: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    error_count: int
+    model_count: int
+    by_model: Mapping[str, int] = field(default_factory=dict)
+    by_model_truncated: bool = False
+
+    def __post_init__(self) -> None:
+        for name in (
+            "total_calls",
+            "total_prompt_tokens",
+            "total_completion_tokens",
+            "total_tokens",
+            "error_count",
+            "model_count",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.error_count > self.total_calls:
+            raise ValueError("error_count must not exceed total_calls")
+        models = _positive_counts("by_model", self.by_model)
+        if self.model_count < len(models):
+            raise ValueError("model_count must cover returned by_model entries")
+        if self.by_model_truncated is not (self.model_count > len(models)):
+            raise ValueError("by_model_truncated must match model_count")
+        if sum(models.values()) > self.total_calls:
+            raise ValueError("by_model counts must not exceed total_calls")
+        object.__setattr__(self, "by_model", models)
+
+
+def _summary_bounds(after: datetime | None, before: datetime | None) -> None:
+    if after is not None:
+        _utc("occurred_at_or_after", after)
+    if before is not None:
+        _utc("occurred_at_or_before", before)
+    if after is not None and before is not None and after > before:
+        raise ValueError("summary time bounds are reversed")
+
+
+def _summary_limit(name: str, value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 500:
+        raise ValueError(f"{name} must be between 1 and 500")
+
+
+def _positive_counts(name: str, values: Mapping[str, int]) -> Mapping[str, int]:
+    normalized: dict[str, int] = {}
+    for key, value in values.items():
+        _nonempty(f"{name} key", key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} values must be positive integers")
+        normalized[key] = value
+    return cast(Mapping[str, int], _freeze_mapping(normalized, path=name))
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ObservationPurgeRequest:
     """Bounded retention deletion request with explicit preview behavior."""
 
@@ -1030,6 +1164,88 @@ class ObservationRepository(Protocol):
         Notes:
             Attempts are loaded without per-row correlated queries; retained prompt
             and response content is excluded.
+        """
+        ...
+
+    async def summarize_traces(
+        self,
+        query: ObservationTraceSummaryQuery,
+    ) -> ObservationTraceSummaryRecord:
+        """Aggregate trace observations inside the provider with bounded breakdowns.
+
+        Intro:
+            Exact scope and time predicates apply before aggregate counts, duration,
+            error statistics, and deterministic capped breakdown selection.
+
+        Examples:
+            Summarize one run:
+                ```python
+                summary = await observations.summarize_traces(
+                    ObservationTraceSummaryQuery(scope=run_scope)
+                )
+                ```
+
+            Apply a time window and smaller identity cap:
+                ```python
+                summary = await observations.summarize_traces(
+                    ObservationTraceSummaryQuery(
+                        scope=run_scope,
+                        occurred_at_or_after=start,
+                        trace_id_limit=25,
+                    )
+                )
+                ```
+
+        Args:
+            query: Exact canonical scope, time bounds, and breakdown caps.
+
+        Returns:
+            ObservationTraceSummaryRecord: Aggregate-only counts and bounded breakdowns.
+
+        Notes:
+            Captured content, provider locators, deprecated App identity, raw rows,
+            and unbounded identity collections are absent from this operation.
+        """
+        ...
+
+    async def summarize_llm_calls(
+        self,
+        query: ObservationLLMSummaryQuery,
+    ) -> ObservationLLMSummaryRecord:
+        """Aggregate LLM call metadata inside the provider with bounded models.
+
+        Intro:
+            Exact scope and time predicates apply before call, token, error, and
+            deterministic capped model-count aggregation.
+
+        Examples:
+            Summarize one run:
+                ```python
+                summary = await observations.summarize_llm_calls(
+                    ObservationLLMSummaryQuery(scope=run_scope)
+                )
+                ```
+
+            Apply a time window and smaller model cap:
+                ```python
+                summary = await observations.summarize_llm_calls(
+                    ObservationLLMSummaryQuery(
+                        scope=run_scope,
+                        occurred_at_or_before=end,
+                        model_limit=25,
+                    )
+                )
+                ```
+
+        Args:
+            query: Exact canonical scope, time bounds, and model cap.
+
+        Returns:
+            ObservationLLMSummaryRecord: Aggregate-only usage and bounded model counts.
+
+        Notes:
+            Prompt, response, trace content, provider locators, deprecated App
+            identity, and unbounded model collections are absent from this operation.
         """
         ...
 

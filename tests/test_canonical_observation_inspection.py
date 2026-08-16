@@ -96,7 +96,12 @@ async def test_canonical_trace_reader_uses_promoted_filters_and_provider_cursor(
             "trace-runner",
             category="service_operation",
             occurred_at=NOW,
-            attributes={"service": "runner", "operation": "submit", "phase": "end"},
+            attributes={
+                "service": "runner",
+                "operation": "submit",
+                "phase": "end",
+                "duration_ms": 7,
+            },
         )
     )
     await service.append_observation(
@@ -104,7 +109,15 @@ async def test_canonical_trace_reader_uses_promoted_filters_and_provider_cursor(
             "trace-memory",
             category="trace",
             occurred_at=NOW + timedelta(seconds=1),
-            attributes={"service": "memory", "operation": "search", "phase": "end"},
+            status="error",
+            severity="error",
+            attributes={
+                "service": "memory",
+                "operation": "search",
+                "phase": "end",
+                "duration_ms": 5,
+                "error": {"type": "RuntimeError", "message": "failed"},
+            },
         )
     )
     reader = CanonicalInspectionReader(service)
@@ -117,6 +130,15 @@ async def test_canonical_trace_reader_uses_promoted_filters_and_provider_cursor(
     assert [item.operation for item in filtered.items] == ["submit"]
     assert filtered.items[0].scope.model_dump()["app_id"] == "legacy-app"
     assert "compatibility_metadata" not in filtered.items[0].payload
+    summary = await reader.summarize_traces("run-1")
+    assert summary.span_count == 2
+    assert summary.error_count == 1
+    assert summary.total_duration_ms == 12
+    assert summary.trace_ids == ["trace-1"]
+    assert summary.trace_id_count == 1
+    assert not summary.trace_ids_truncated
+    assert summary.top_failing_services == {"memory": 1}
+    assert summary.latest_error_ts == (NOW + timedelta(seconds=1)).timestamp()
     with pytest.raises(StorageConfigurationError, match="mismatched"):
         await reader.list_traces(
             service=["runner"],
@@ -173,6 +195,14 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
     assert detail.raw_text == "hello back"
     assert detail.trace_payload == {"step": "done"}
     assert detail.reasoning_effort == "low"
+    summary = await reader.summarize_llm_calls("run-1")
+    assert summary.total_calls == 1
+    assert summary.total_prompt_tokens == 2
+    assert summary.total_completion_tokens == 2
+    assert summary.total_tokens == 4
+    assert summary.by_model == {"gpt-test": 1}
+    assert summary.model_count == 1
+    assert not summary.by_model_truncated
     with pytest.raises(ObservabilityNotFoundError, match="not found"):
         await reader.get_llm_call("call-1", required_run_id="other")
     await database.close()
@@ -224,6 +254,10 @@ async def test_canonical_log_reader_bounds_enrichment_and_identity(tmp_path: Pat
     assert [item.message for item in page.items] == ["failed"]
     assert page.items[0].run_status == "failed"
     assert page.items[0].trace_status == "error"
+    errors = await reader.list_logs(levels=("warning", "error", "critical"))
+    assert [item.message for item in errors.items] == ["failed"]
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await reader.list_logs(level="error", levels=("critical",))
 
     hidden = CanonicalInspectionReader(
         service,
@@ -240,6 +274,8 @@ def test_canonical_inspection_public_docstrings_are_strict() -> None:
         CanonicalInspectionReader.list_traces,
         CanonicalInspectionReader.list_llm_calls,
         CanonicalInspectionReader.get_llm_call,
+        CanonicalInspectionReader.summarize_traces,
+        CanonicalInspectionReader.summarize_llm_calls,
         CanonicalInspectionReader.list_logs,
     )
     for method in methods:

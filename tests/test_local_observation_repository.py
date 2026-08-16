@@ -7,6 +7,10 @@ import inspect
 from pathlib import Path
 
 import pytest
+from storage_conformance.suite import (
+    NOW as CONFORMANCE_NOW,
+    check_observation_summary_conformance,
+)
 
 from aethergraph.storage.contracts import (
     LLMCallAttempt,
@@ -14,6 +18,7 @@ from aethergraph.storage.contracts import (
     LLMCallQuery,
     ObservationCaptureMode,
     ObservationDraft,
+    ObservationLLMSummaryQuery,
     ObservationPurgeRequest,
     ObservationQuery,
     ObservationResourceLink,
@@ -23,6 +28,7 @@ from aethergraph.storage.contracts import (
     ObservationScopeUsageQuery,
     ObservationSeverity,
     ObservationStatus,
+    ObservationTraceSummaryQuery,
     ObservationUsageDimension,
     PageRequest,
     StorageConfigurationError,
@@ -71,6 +77,7 @@ def _observation(
     status: ObservationStatus = ObservationStatus.OK,
     severity: ObservationSeverity = ObservationSeverity.INFO,
     producer: str | None = "aethergraph.runtime",
+    attributes: dict | None = None,
     retention_class: str = "standard",
     resource_links: tuple[ObservationResourceLink, ...] = (),
 ) -> ObservationDraft:
@@ -86,7 +93,9 @@ def _observation(
         status=status,
         severity=severity,
         producer=producer,
-        attributes={"index": observation_id, "nested": {"ok": True}},
+        attributes=(
+            {"index": observation_id, "nested": {"ok": True}} if attributes is None else attributes
+        ),
         resource_links=resource_links,
         retention_class=retention_class,
     )
@@ -103,6 +112,8 @@ def _llm_call(
     capture_mode: ObservationCaptureMode = ObservationCaptureMode.FULL,
     provider: str = "openai",
     model: str = "gpt-test",
+    usage: dict | None = None,
+    error_type: str | None = None,
     captured_request: object = None,
     captured_response: object = None,
     trace_payload: object = None,
@@ -121,6 +132,7 @@ def _llm_call(
             category="llm",
             occurred_at=occurred_at,
             trace_id=trace_id,
+            status=(ObservationStatus.ERROR if error_type is not None else ObservationStatus.OK),
         ),
         call_type="chat",
         provider=provider,
@@ -129,8 +141,10 @@ def _llm_call(
         profile_name="default",
         call_name="answer",
         request_options={"temperature": 0},
-        usage={"input_tokens": 5, "output_tokens": 3},
+        usage={"input_tokens": 5, "output_tokens": 3} if usage is None else usage,
         latency_ms=25,
+        error_type=error_type,
+        error_message="failed" if error_type is not None else None,
         prompt_manifest_id=manifest_id,
         request_preview={"messages": 1},
         response_preview={"chars": 2},
@@ -149,6 +163,226 @@ def _llm_call(
             ),
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_provider_side_trace_summary_is_scoped_bounded_and_legacy_ordered(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    other_scope = replace(SCOPE, run_id="other-run", scope_key="other-scope")
+    await repository.append_many(
+        (
+            _observation(
+                "outside-window",
+                occurred_at=NOW - timedelta(seconds=1),
+                attributes={"duration_ms": 100, "error": {"type": "Old"}},
+            ),
+            _observation(
+                "trace-z",
+                occurred_at=NOW,
+                trace_id="trace-z",
+                producer="runner",
+                status=ObservationStatus.ERROR,
+                attributes={"duration_ms": 7, "error": {"type": "RuntimeError"}},
+            ),
+            _observation(
+                "trace-a",
+                occurred_at=NOW + timedelta(seconds=1),
+                trace_id="trace-a",
+                producer=None,
+                status=ObservationStatus.ERROR,
+                attributes={
+                    "duration_ms": 11,
+                    "service": "runner",
+                    "error": {"type": "ValueError"},
+                },
+            ),
+            _observation(
+                "run-fallback",
+                occurred_at=NOW + timedelta(seconds=2),
+                trace_id=None,
+                attributes={"duration_ms": 3},
+            ),
+            _observation(
+                "ignored-log",
+                category="log",
+                occurred_at=NOW + timedelta(seconds=2),
+                attributes={"duration_ms": 200, "error": {"type": "Ignored"}},
+            ),
+            _observation(
+                "other-run",
+                scope=other_scope,
+                occurred_at=NOW + timedelta(seconds=2),
+                attributes={"duration_ms": 300, "error": {"type": "Ignored"}},
+            ),
+        )
+    )
+
+    summary = await repository.summarize_traces(
+        ObservationTraceSummaryQuery(
+            scope=StorageScope(project_id="project-1", run_id="run-1"),
+            occurred_at_or_after=NOW,
+            occurred_at_or_before=NOW + timedelta(seconds=2),
+            trace_id_limit=2,
+            failing_service_limit=1,
+        )
+    )
+
+    assert summary.span_count == 3
+    assert summary.error_count == 2
+    assert summary.total_duration_ms == 21
+    assert summary.trace_id_count == 3
+    assert summary.trace_ids == ("run-1", "trace-a")
+    assert summary.trace_ids_truncated
+    assert dict(summary.top_failing_services) == {"runner": 2}
+    assert summary.latest_error_at == NOW + timedelta(seconds=1)
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_side_llm_summary_preserves_token_and_model_semantics(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    await repository.append_llm_call(
+        _llm_call(
+            "outside",
+            occurred_at=NOW - timedelta(seconds=1),
+            model="outside",
+            usage={"total_tokens": 1000},
+        )
+    )
+    await repository.append_llm_call(
+        _llm_call(
+            "alias",
+            occurred_at=NOW,
+            model="model-z",
+            usage={"input_tokens": 5, "output_tokens": 3},
+        )
+    )
+    await repository.append_llm_call(
+        _llm_call(
+            "direct",
+            occurred_at=NOW + timedelta(seconds=1),
+            model="model-a",
+            usage={"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 20},
+            error_type="ProviderError",
+        )
+    )
+    await repository.append_llm_call(
+        _llm_call(
+            "newest",
+            occurred_at=NOW + timedelta(seconds=2),
+            model="model-z",
+            usage={"input_tokens": 2, "output_tokens": 1, "total_tokens": 0},
+        )
+    )
+
+    query = ObservationLLMSummaryQuery(
+        scope=StorageScope(project_id="project-1", run_id="run-1"),
+        occurred_at_or_after=NOW,
+        model_limit=1,
+    )
+    summary = await repository.summarize_llm_calls(query)
+    fallback = await repository.summarize_llm_calls(
+        replace(query, occurred_at_or_after=NOW + timedelta(seconds=2))
+    )
+
+    assert summary.total_calls == 3
+    assert summary.total_prompt_tokens == 14
+    assert summary.total_completion_tokens == 8
+    assert summary.total_tokens == 20
+    assert summary.error_count == 1
+    assert summary.model_count == 2
+    assert dict(summary.by_model) == {"model-z": 2}
+    assert summary.by_model_truncated
+    assert fallback.total_tokens == 3
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_summary_high_cardinality_returns_exact_count_and_bounded_ids(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    await repository.append_many(
+        tuple(
+            _observation(
+                f"cardinality-{index:03d}",
+                trace_id=f"trace-{index:03d}",
+                occurred_at=NOW + timedelta(milliseconds=index),
+                attributes={"duration_ms": 1},
+            )
+            for index in range(125)
+        )
+    )
+
+    summary = await repository.summarize_traces(
+        ObservationTraceSummaryQuery(scope=StorageScope(project_id="project-1", run_id="run-1"))
+    )
+
+    assert summary.span_count == 125
+    assert summary.trace_id_count == 125
+    assert len(summary.trace_ids) == 100
+    assert summary.trace_ids[:2] == ("trace-000", "trace-001")
+    assert summary.trace_ids[-1] == "trace-099"
+    assert summary.trace_ids_truncated
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_local_observation_summaries_pass_shared_provider_conformance(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    scope = replace(SCOPE, run_id="summary-run-1", scope_key="summary-scope")
+    await repository.append_many(
+        (
+            _observation(
+                "conformance-trace-a",
+                scope=scope,
+                occurred_at=CONFORMANCE_NOW,
+                trace_id="trace-a",
+                producer="runner",
+                status=ObservationStatus.ERROR,
+                attributes={"duration_ms": 7, "error": {"type": "RuntimeError"}},
+            ),
+            _observation(
+                "conformance-trace-b",
+                scope=scope,
+                occurred_at=CONFORMANCE_NOW,
+                trace_id="trace-b",
+                attributes={"duration_ms": 5},
+            ),
+        )
+    )
+    await repository.append_llm_call(
+        _llm_call(
+            "conformance-a",
+            scope=scope,
+            occurred_at=CONFORMANCE_NOW,
+            model="model-a",
+            usage={"input_tokens": 2, "output_tokens": 1},
+        )
+    )
+    await repository.append_llm_call(
+        _llm_call(
+            "conformance-b",
+            scope=scope,
+            occurred_at=CONFORMANCE_NOW,
+            model="model-b",
+            usage={"prompt_tokens": 3, "completion_tokens": 2},
+            error_type="ProviderError",
+        )
+    )
+
+    await check_observation_summary_conformance(repository)
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -603,6 +837,12 @@ async def test_read_only_observation_repository_allows_reads_and_dry_run_only(
     assert (await repository.query(ObservationQuery(scope=SCOPE))).items
     assert await repository.get_llm_call(SCOPE, call.llm_call_id) is not None
     assert (await repository.query_llm_calls(LLMCallQuery(scope=SCOPE))).items
+    assert (
+        await repository.summarize_traces(ObservationTraceSummaryQuery(scope=SCOPE))
+    ).span_count == 0
+    assert (
+        await repository.summarize_llm_calls(ObservationLLMSummaryQuery(scope=SCOPE))
+    ).total_calls == 1
     assert (await repository.storage_stats(SCOPE)).llm_calls == 1
     assert (
         await repository.query_scope_usage(
@@ -692,6 +932,26 @@ async def test_observation_schema_has_no_legacy_identity_and_promoted_query_inde
             "ORDER BY updated_at DESC, sequence DESC LIMIT ?",
             ("project-1", 1, 0, 10),
         ),
+        "trace_summary": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM local_observations o "
+            "WHERE o.project_id = ? AND o.run_id = ? "
+            "AND o.category IN ('service_operation', 'trace') "
+            "AND o.occurred_at >= ?",
+            ("project-1", "run-1", NOW.isoformat()),
+        ),
+        "llm_summary": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM local_llm_calls l "
+            "JOIN local_observations o ON o.observation_id = l.observation_id "
+            "WHERE o.project_id = ? AND o.run_id = ? AND o.occurred_at >= ?",
+            ("project-1", "run-1", NOW.isoformat()),
+        ),
+        "error_logs": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT * FROM local_observations o "
+            "WHERE o.project_id = ? AND o.category = 'log' "
+            "AND o.severity IN ('warning', 'error', 'critical') "
+            "ORDER BY o.occurred_at DESC, o.sequence DESC LIMIT ?",
+            ("project-1", 100),
+        ),
     }
     details = {name: " ".join(str(row[3]) for row in rows) for name, rows in plans.items()}
     assert "ix_local_observations_run_time" in details["run"]
@@ -703,6 +963,9 @@ async def test_observation_schema_has_no_legacy_identity_and_promoted_query_inde
     assert "ix_local_observation_management_trace" in details["management"]
     assert "ix_local_observations_project_trace_time" in details["usage"]
     assert "ix_local_observation_management_visibility" in details["management_visibility"]
+    assert "ix_local_observations_project_run_time" in details["trace_summary"]
+    assert "ix_local_observations_project_run_time" in details["llm_summary"]
+    assert "ix_local_observations_category_time" in details["error_logs"]
     await database.close()
 
 

@@ -15,6 +15,8 @@ from aethergraph.storage.contracts import (
     LLMCallRecord,
     ObservationCaptureMode,
     ObservationDraft,
+    ObservationLLMSummaryQuery,
+    ObservationLLMSummaryRecord,
     ObservationPurgeRequest,
     ObservationPurgeResult,
     ObservationQuery,
@@ -29,6 +31,8 @@ from aethergraph.storage.contracts import (
     ObservationSeverity,
     ObservationStatus,
     ObservationStorageStats,
+    ObservationTraceSummaryQuery,
+    ObservationTraceSummaryRecord,
     ObservationUsageDimension,
     StorageBundle,
     StorageScope,
@@ -214,6 +218,50 @@ def test_llm_queries_attempts_and_errors_fail_closed() -> None:
                 ),
             ),
         )
+
+
+def test_observation_summary_contracts_are_bounded_truthful_and_immutable() -> None:
+    trace_query = ObservationTraceSummaryQuery(
+        scope=SCOPE,
+        occurred_at_or_after=NOW - timedelta(minutes=1),
+        occurred_at_or_before=NOW,
+        trace_id_limit=25,
+        failing_service_limit=3,
+    )
+    trace_summary = ObservationTraceSummaryRecord(
+        span_count=4,
+        error_count=2,
+        total_duration_ms=30,
+        trace_id_count=3,
+        trace_ids=("trace-1", "trace-2"),
+        trace_ids_truncated=True,
+        top_failing_services={"runner": 2},
+        latest_error_at=NOW,
+    )
+    llm_query = ObservationLLMSummaryQuery(scope=SCOPE, model_limit=10)
+    llm_summary = ObservationLLMSummaryRecord(
+        total_calls=5,
+        total_prompt_tokens=20,
+        total_completion_tokens=10,
+        total_tokens=30,
+        error_count=1,
+        model_count=2,
+        by_model={"model-a": 4},
+        by_model_truncated=True,
+    )
+
+    assert trace_query.trace_id_limit == 25
+    assert trace_summary.trace_ids_truncated
+    assert llm_query.model_limit == 10
+    assert llm_summary.by_model_truncated
+    with pytest.raises(TypeError):
+        trace_summary.top_failing_services["other"] = 1  # type: ignore[index]
+    with pytest.raises(ValueError, match="between 1 and 500"):
+        replace(trace_query, trace_id_limit=501)
+    with pytest.raises(ValueError, match="must match trace_id_count"):
+        replace(trace_summary, trace_ids_truncated=False)
+    with pytest.raises(ValueError, match="must match model_count"):
+        replace(llm_summary, by_model_truncated=False)
 
 
 def test_retention_records_are_bounded_revisioned_and_provider_neutral() -> None:

@@ -12,6 +12,7 @@ from storage_conformance.suite import (
     check_artifact_repository_conformance,
     check_blob_store_conformance,
     check_event_store_conformance,
+    check_observation_summary_conformance,
     check_search_backend_conformance,
     check_state_store_conformance,
 )
@@ -105,6 +106,7 @@ async def test_external_provider_passes_shared_store_and_composition_conformance
     await check_blob_store_conformance(bundle.blobs)
     await check_artifact_repository_conformance(bundle.artifacts, bundle.blobs)
     await check_search_backend_conformance(bundle.search)
+    await check_observation_summary_conformance(bundle.observations)
 
     graph_scope = StorageScope(
         tenant_id="tenant-1",

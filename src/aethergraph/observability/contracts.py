@@ -81,6 +81,8 @@ class TraceEventListResponse(BaseModel):
 class TraceSummary(BaseModel):
     run_id: str
     trace_ids: list[str] = Field(default_factory=list)
+    trace_id_count: int = 0
+    trace_ids_truncated: bool = False
     span_count: int = 0
     error_count: int = 0
     total_duration_ms: int = 0
@@ -160,6 +162,8 @@ class LLMSummary(BaseModel):
     total_tokens: int = 0
     error_count: int = 0
     by_model: dict[str, int] = Field(default_factory=dict)
+    model_count: int = 0
+    by_model_truncated: bool = False
 
 
 class InspectLogError(BaseModel):

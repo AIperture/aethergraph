@@ -20,6 +20,8 @@ from ...contracts import (
     LLMCallRecord,
     ObservationCaptureMode,
     ObservationDraft,
+    ObservationLLMSummaryQuery,
+    ObservationLLMSummaryRecord,
     ObservationPurgeRequest,
     ObservationPurgeResult,
     ObservationQuery,
@@ -33,6 +35,8 @@ from ...contracts import (
     ObservationSeverity,
     ObservationStatus,
     ObservationStorageStats,
+    ObservationTraceSummaryQuery,
+    ObservationTraceSummaryRecord,
     ObservationUsageDimension,
     Page,
     StorageConfigurationError,
@@ -717,6 +721,91 @@ class LocalObservationRepository:
             return Page(items=records, next_cursor=next_cursor)
 
         return await self._database.read_transaction(read)
+
+    async def summarize_traces(
+        self,
+        query: ObservationTraceSummaryQuery,
+    ) -> ObservationTraceSummaryRecord:
+        """Aggregate scoped trace statistics with deterministic bounded breakdowns.
+
+        Intro:
+            One provider read transaction applies canonical scope/category/time
+            predicates before SQL aggregation and capped ordering.
+
+        Examples:
+            Summarize one run:
+                ```python
+                summary = await repository.summarize_traces(
+                    ObservationTraceSummaryQuery(scope=run_scope)
+                )
+                ```
+
+            Limit returned trace identities:
+                ```python
+                summary = await repository.summarize_traces(
+                    ObservationTraceSummaryQuery(
+                        scope=run_scope,
+                        trace_id_limit=25,
+                    )
+                )
+                ```
+
+        Args:
+            query: Exact canonical scope, time bounds, and breakdown caps.
+
+        Returns:
+            ObservationTraceSummaryRecord: Aggregate-only trace statistics.
+
+        Notes:
+            Trace identities retain the legacy lexical order. Failing services order
+            by count, latest occurrence, then name to preserve deterministic ties.
+        """
+        return await self._database.read_transaction(
+            lambda connection: _summarize_traces(connection, query)
+        )
+
+    async def summarize_llm_calls(
+        self,
+        query: ObservationLLMSummaryQuery,
+    ) -> ObservationLLMSummaryRecord:
+        """Aggregate scoped LLM usage with deterministic bounded model counts.
+
+        Intro:
+            One provider read transaction joins metadata to authorized observations,
+            applies time predicates, and computes counts without hydrating content.
+
+        Examples:
+            Summarize one run:
+                ```python
+                summary = await repository.summarize_llm_calls(
+                    ObservationLLMSummaryQuery(scope=run_scope)
+                )
+                ```
+
+            Limit returned models:
+                ```python
+                summary = await repository.summarize_llm_calls(
+                    ObservationLLMSummaryQuery(
+                        scope=run_scope,
+                        model_limit=25,
+                    )
+                )
+                ```
+
+        Args:
+            query: Exact canonical scope, time bounds, and model cap.
+
+        Returns:
+            ObservationLLMSummaryRecord: Aggregate-only LLM usage statistics.
+
+        Notes:
+            Models order by latest occurrence then exact name to retain legacy map
+            insertion order. Captured prompt, response, and trace fragments are
+            never read.
+        """
+        return await self._database.read_transaction(
+            lambda connection: _summarize_llm_calls(connection, query)
+        )
 
     async def purge(self, request: ObservationPurgeRequest) -> ObservationPurgeResult:
         """Preview or execute one bounded pin-aware retention transaction.
@@ -1810,6 +1899,121 @@ def _query_scope_usage(
             int(anchor["latest_sequence"]),
         )
     return Page(items=records, next_cursor=next_cursor)
+
+
+def _summarize_traces(
+    connection: sqlite3.Connection,
+    query: ObservationTraceSummaryQuery,
+) -> ObservationTraceSummaryRecord:
+    clauses, values = _scope_filters(query.scope, alias="o")
+    clauses.append("o.category IN ('service_operation', 'trace')")
+    if query.occurred_at_or_after is not None:
+        clauses.append("o.occurred_at >= ?")
+        values.append(query.occurred_at_or_after.isoformat())
+    if query.occurred_at_or_before is not None:
+        clauses.append("o.occurred_at <= ?")
+        values.append(query.occurred_at_or_before.isoformat())
+    where = " AND ".join(clauses)
+    error_expression = "json_type(o.attributes_json, '$.error') = 'object'"
+    aggregate = connection.execute(
+        "SELECT COUNT(*) AS span_count, "
+        f"SUM(CASE WHEN {error_expression} THEN 1 ELSE 0 END) AS error_count, "
+        "SUM(CAST(COALESCE(json_extract(o.attributes_json, '$.duration_ms'), 0) "
+        "AS INTEGER)) AS total_duration_ms, "
+        "COUNT(DISTINCT COALESCE(o.trace_id, o.run_id)) AS trace_id_count, "
+        f"MAX(CASE WHEN {error_expression} THEN o.occurred_at END) AS latest_error_at "
+        "FROM local_observations o WHERE " + where,
+        values,
+    ).fetchone()
+    trace_rows = connection.execute(
+        "SELECT COALESCE(o.trace_id, o.run_id) AS trace_identity "
+        "FROM local_observations o WHERE "
+        + where
+        + " AND COALESCE(o.trace_id, o.run_id) IS NOT NULL "
+        "GROUP BY trace_identity ORDER BY trace_identity ASC LIMIT ?",
+        (*values, query.trace_id_limit),
+    ).fetchall()
+    failure_rows = connection.execute(
+        "SELECT COALESCE(NULLIF(o.producer, ''), "
+        "NULLIF(json_extract(o.attributes_json, '$.service'), ''), 'runtime') AS service, "
+        "COUNT(*) AS failure_count, MAX(o.occurred_at) AS latest_at "
+        "FROM local_observations o WHERE " + where + f" AND {error_expression} GROUP BY service "
+        "ORDER BY failure_count DESC, latest_at DESC, service ASC LIMIT ?",
+        (*values, query.failing_service_limit),
+    ).fetchall()
+    trace_id_count = int(aggregate["trace_id_count"] or 0)
+    error_count = int(aggregate["error_count"] or 0)
+    latest_error = aggregate["latest_error_at"]
+    return ObservationTraceSummaryRecord(
+        span_count=int(aggregate["span_count"] or 0),
+        error_count=error_count,
+        total_duration_ms=int(aggregate["total_duration_ms"] or 0),
+        trace_id_count=trace_id_count,
+        trace_ids=tuple(str(row["trace_identity"]) for row in trace_rows),
+        trace_ids_truncated=trace_id_count > len(trace_rows),
+        top_failing_services={
+            str(row["service"]): int(row["failure_count"]) for row in failure_rows
+        },
+        latest_error_at=datetime.fromisoformat(str(latest_error)) if latest_error else None,
+    )
+
+
+def _summarize_llm_calls(
+    connection: sqlite3.Connection,
+    query: ObservationLLMSummaryQuery,
+) -> ObservationLLMSummaryRecord:
+    clauses, values = _scope_filters(query.scope, alias="o")
+    if query.occurred_at_or_after is not None:
+        clauses.append("o.occurred_at >= ?")
+        values.append(query.occurred_at_or_after.isoformat())
+    if query.occurred_at_or_before is not None:
+        clauses.append("o.occurred_at <= ?")
+        values.append(query.occurred_at_or_before.isoformat())
+    where = " AND ".join(clauses)
+    prompt_tokens = (
+        "COALESCE(NULLIF(CAST(json_extract(l.usage_json, '$.prompt_tokens') AS INTEGER), 0), "
+        "CAST(json_extract(l.usage_json, '$.input_tokens') AS INTEGER), 0)"
+    )
+    completion_tokens = (
+        "COALESCE(NULLIF(CAST(json_extract(l.usage_json, '$.completion_tokens') AS INTEGER), 0), "
+        "CAST(json_extract(l.usage_json, '$.output_tokens') AS INTEGER), 0)"
+    )
+    aggregate = connection.execute(
+        "SELECT COUNT(*) AS total_calls, "
+        f"SUM({prompt_tokens}) AS prompt_tokens, "
+        f"SUM({completion_tokens}) AS completion_tokens, "
+        "SUM(CAST(COALESCE(json_extract(l.usage_json, '$.total_tokens'), 0) AS INTEGER)) "
+        "AS total_tokens, "
+        "SUM(CASE WHEN l.error_type IS NOT NULL AND l.error_type <> '' THEN 1 ELSE 0 END) "
+        "AS error_count, COUNT(DISTINCT l.model) AS model_count "
+        "FROM local_llm_calls l JOIN local_observations o "
+        "ON o.observation_id = l.observation_id WHERE " + where,
+        values,
+    ).fetchone()
+    model_rows = connection.execute(
+        "SELECT l.model, COUNT(*) AS call_count, MAX(o.occurred_at) AS latest_at "
+        "FROM local_llm_calls l "
+        "JOIN local_observations o ON o.observation_id = l.observation_id WHERE "
+        + where
+        + " GROUP BY l.model ORDER BY latest_at DESC, l.model ASC LIMIT ?",
+        (*values, query.model_limit),
+    ).fetchall()
+    prompt_total = int(aggregate["prompt_tokens"] or 0)
+    completion_total = int(aggregate["completion_tokens"] or 0)
+    total_tokens = int(aggregate["total_tokens"] or 0)
+    if total_tokens == 0:
+        total_tokens = prompt_total + completion_total
+    model_count = int(aggregate["model_count"] or 0)
+    return ObservationLLMSummaryRecord(
+        total_calls=int(aggregate["total_calls"] or 0),
+        total_prompt_tokens=prompt_total,
+        total_completion_tokens=completion_total,
+        total_tokens=total_tokens,
+        error_count=int(aggregate["error_count"] or 0),
+        model_count=model_count,
+        by_model={str(row["model"]): int(row["call_count"]) for row in model_rows},
+        by_model_truncated=model_count > len(model_rows),
+    )
 
 
 def _usage_logical_bytes(

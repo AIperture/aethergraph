@@ -182,6 +182,8 @@ async def get_run_trace_summary(
     return TraceSummary(
         run_id=run_id,
         trace_ids=trace_ids,
+        trace_id_count=len(trace_ids),
+        trace_ids_truncated=False,
         span_count=len(events),
         error_count=sum(1 for event in events if event.error is not None),
         total_duration_ms=int(sum(int(event.duration_ms or 0) for event in events)),
@@ -303,6 +305,8 @@ async def get_run_llm_summary(
         total_tokens=total_tokens,
         error_count=error_count,
         by_model=dict(by_model),
+        model_count=len(by_model),
+        by_model_truncated=False,
     )
 
 

@@ -13,6 +13,10 @@ from test_storage_focused_protocols import (
 )
 
 from aethergraph.storage.contracts import (
+    ObservationLLMSummaryQuery,
+    ObservationLLMSummaryRecord,
+    ObservationTraceSummaryQuery,
+    ObservationTraceSummaryRecord,
     StorageBundle,
     StorageCapabilities,
     StorageCapability,
@@ -37,6 +41,50 @@ class StoreHandle:
 class SharedResource:
     close_calls: int = 0
     closed: bool = False
+
+
+@dataclass(slots=True)
+class DeterministicExternalObservationRepository:
+    """Filesystem-free typed aggregate surface for external-provider conformance."""
+
+    trace_queries: list[ObservationTraceSummaryQuery]
+    llm_queries: list[ObservationLLMSummaryQuery]
+
+    def __init__(self) -> None:
+        self.trace_queries = []
+        self.llm_queries = []
+
+    async def summarize_traces(
+        self,
+        query: ObservationTraceSummaryQuery,
+    ) -> ObservationTraceSummaryRecord:
+        self.trace_queries.append(query)
+        return ObservationTraceSummaryRecord(
+            span_count=2,
+            error_count=1,
+            total_duration_ms=12,
+            trace_id_count=2,
+            trace_ids=("trace-a",),
+            trace_ids_truncated=True,
+            top_failing_services={"runner": 1},
+            latest_error_at=query.occurred_at_or_after,
+        )
+
+    async def summarize_llm_calls(
+        self,
+        query: ObservationLLMSummaryQuery,
+    ) -> ObservationLLMSummaryRecord:
+        self.llm_queries.append(query)
+        return ObservationLLMSummaryRecord(
+            total_calls=2,
+            total_prompt_tokens=5,
+            total_completion_tokens=3,
+            total_tokens=8,
+            error_count=1,
+            model_count=2,
+            by_model={"model-a": 1},
+            by_model_truncated=True,
+        )
 
 
 class DeterministicExternalBundle:
@@ -75,6 +123,7 @@ class DeterministicExternalBundle:
         self.blobs = _BlobStore()
         self.artifacts = _ArtifactRepository(self.blobs)
         self.search = _SearchBackend()
+        self.observations = DeterministicExternalObservationRepository()
         for name in (
             "kv",
             "documents",
@@ -87,7 +136,6 @@ class DeterministicExternalBundle:
             "continuations",
             "continuation_leases",
             "triggers",
-            "observations",
             "ingress_idempotency",
             "external_session_bindings",
             "inbound_events",

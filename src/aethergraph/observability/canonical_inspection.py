@@ -11,10 +11,12 @@ from aethergraph.storage.contracts import (
     LLMCallDetail,
     LLMCallQuery,
     LLMCallRecord as CanonicalLLMCallRecord,
+    ObservationLLMSummaryQuery,
     ObservationQuery,
     ObservationRecord as CanonicalObservationRecord,
     ObservationSeverity,
     ObservationStatus,
+    ObservationTraceSummaryQuery,
     PageRequest,
     StorageScope,
 )
@@ -30,9 +32,11 @@ from .contracts import (
     LLMCallAttempt,
     LLMCallListResponse,
     LLMCallRecord,
+    LLMSummary,
     TraceErrorInfo,
     TraceEvent,
     TraceEventListResponse,
+    TraceSummary,
 )
 from .inspection import (
     ObservabilityIdentity,
@@ -314,6 +318,140 @@ class CanonicalInspectionReader:
             raise ObservabilityNotFoundError("LLM call not found")
         return _llm(detail.record, detail=detail)
 
+    async def summarize_traces(
+        self,
+        run_id: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        trace_id_limit: int = 100,
+        failing_service_limit: int = 5,
+    ) -> TraceSummary:
+        """Summarize one run with a bounded provider-side trace aggregation.
+
+        Intro:
+            The provider computes scalar totals and deterministic bounded breakdowns
+            without hydrating or cursor-draining individual trace observations.
+
+        Examples:
+            Summarize one run:
+                ```python
+                summary = await reader.summarize_traces("run-1")
+                ```
+
+            Bound both returned breakdowns:
+                ```python
+                summary = await reader.summarize_traces(
+                    "run-1",
+                    trace_id_limit=25,
+                    failing_service_limit=3,
+                )
+                ```
+
+        Args:
+            run_id: Exact canonical run scope to aggregate.
+            since: Optional inclusive occurrence lower bound.
+            until: Optional inclusive occurrence upper bound.
+            trace_id_limit: Maximum deterministic trace identities returned.
+            failing_service_limit: Maximum failing-service counters returned.
+
+        Returns:
+            TraceSummary: Exact totals plus bounded, truthfully marked breakdowns.
+
+        Notes:
+            A hidden or incompatible owner scope returns an empty summary. No legacy
+            observation store or compatibility fallback is consulted.
+        """
+        scope = self._scope(run_id=run_id)
+        if scope is None:
+            return TraceSummary(run_id=run_id)
+        summary = await self.service.repository.summarize_traces(
+            ObservationTraceSummaryQuery(
+                scope=scope,
+                occurred_at_or_after=since,
+                occurred_at_or_before=until,
+                trace_id_limit=trace_id_limit,
+                failing_service_limit=failing_service_limit,
+            )
+        )
+        return TraceSummary(
+            run_id=run_id,
+            trace_ids=list(summary.trace_ids),
+            trace_id_count=summary.trace_id_count,
+            trace_ids_truncated=summary.trace_ids_truncated,
+            span_count=summary.span_count,
+            error_count=summary.error_count,
+            total_duration_ms=summary.total_duration_ms,
+            top_failing_services=dict(summary.top_failing_services),
+            latest_error_ts=(
+                summary.latest_error_at.timestamp() if summary.latest_error_at is not None else None
+            ),
+        )
+
+    async def summarize_llm_calls(
+        self,
+        run_id: str,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        model_limit: int = 100,
+    ) -> LLMSummary:
+        """Summarize one run with a bounded provider-side LLM aggregation.
+
+        Intro:
+            The provider computes exact call, token, error, and model totals without
+            hydrating captured request or response content.
+
+        Examples:
+            Summarize one run:
+                ```python
+                summary = await reader.summarize_llm_calls("run-1")
+                ```
+
+            Bound the returned model breakdown:
+                ```python
+                summary = await reader.summarize_llm_calls(
+                    "run-1",
+                    model_limit=20,
+                )
+                ```
+
+        Args:
+            run_id: Exact canonical run scope to aggregate.
+            since: Optional inclusive occurrence lower bound.
+            until: Optional inclusive occurrence upper bound.
+            model_limit: Maximum deterministic model counters returned.
+
+        Returns:
+            LLMSummary: Exact totals plus a bounded, truthfully marked model breakdown.
+
+        Notes:
+            A hidden or incompatible owner scope returns an empty summary. No captured
+            content, legacy store, or compatibility fallback is consulted.
+        """
+        scope = self._scope(run_id=run_id)
+        if scope is None:
+            return LLMSummary(run_id=run_id)
+        summary = await self.service.repository.summarize_llm_calls(
+            ObservationLLMSummaryQuery(
+                scope=scope,
+                occurred_at_or_after=since,
+                occurred_at_or_before=until,
+                model_limit=model_limit,
+            )
+        )
+        return LLMSummary(
+            run_id=run_id,
+            total_calls=summary.total_calls,
+            total_prompt_tokens=summary.total_prompt_tokens,
+            total_completion_tokens=summary.total_completion_tokens,
+            total_tokens=summary.total_tokens,
+            error_count=summary.error_count,
+            by_model=dict(summary.by_model),
+            model_count=summary.model_count,
+            by_model_truncated=summary.by_model_truncated,
+        )
+
     async def list_logs(
         self,
         *,
@@ -326,6 +464,7 @@ class CanonicalInspectionReader:
         graph_id: str | None = None,
         node_id: str | None = None,
         level: str | None = None,
+        levels: tuple[str, ...] | None = None,
         logger: str | None = None,
         run_status: str | None = None,
         trace_status: str | None = None,
@@ -361,6 +500,7 @@ class CanonicalInspectionReader:
             graph_id: Optional exact canonical graph scope.
             node_id: Optional exact canonical node scope.
             level: Optional exact canonical log severity.
+            levels: Optional exact canonical log severity set.
             logger: Optional exact promoted logger producer.
             run_status: Optional page-bounded enriched run-status filter.
             trace_status: Optional page-bounded trace-status filter.
@@ -371,8 +511,9 @@ class CanonicalInspectionReader:
             InspectLogListResponse: Presented page with provider continuation cursor.
 
         Notes:
-            Deprecated App and enriched status filters may produce a sparse page; the
-            provider cursor remains authoritative and can continue the query safely.
+            `level` and `levels` are mutually exclusive. Deprecated App and enriched
+            status filters may produce a sparse page; the provider cursor remains
+            authoritative and can continue the query safely.
         """
         scope = self._scope(
             run_id=run_id,
@@ -383,7 +524,10 @@ class CanonicalInspectionReader:
         )
         if scope is None:
             return InspectLogListResponse(items=[], next_cursor=None)
-        severities = (ObservationSeverity(level),) if level is not None else ()
+        if level is not None and levels is not None:
+            raise ValueError("level and levels are mutually exclusive")
+        severity_values = levels or ((level,) if level is not None else ())
+        severities = tuple(ObservationSeverity(value) for value in severity_values)
         page = await self.service.repository.query(
             ObservationQuery(
                 scope=scope,
