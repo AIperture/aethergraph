@@ -7,6 +7,11 @@ from .canonical_runtime_output import (
     CanonicalRuntimeOutputSink,
     bind_canonical_runtime_output,
 )
+from .canonical_service import (
+    CanonicalObservationService,
+    ProviderObservationService,
+    bind_canonical_observation_service,
+)
 from .facade import (
     ActiveObservabilityScopeError,
     ObservabilityFacade,
@@ -53,6 +58,7 @@ __all__ = [
     "AgentEventTypeRegistry",
     "CaptureMode",
     "CanonicalRuntimeOutputSink",
+    "CanonicalObservationService",
     "InspectionPresenter",
     "LLMObservationRecord",
     "LegacyObservabilityCleanupResult",
@@ -70,6 +76,7 @@ __all__ = [
     "ObservabilityUnavailableError",
     "ObservabilityWorkspaceError",
     "PurgeResult",
+    "ProviderObservationService",
     "RetentionJanitor",
     "RetentionPolicy",
     "SQLiteObservationStore",
@@ -77,6 +84,7 @@ __all__ = [
     "StorageStats",
     "cleanup_legacy_observability",
     "bind_canonical_runtime_output",
+    "bind_canonical_observation_service",
     "emit_agent_event",
     "extract_metrics",
     "open_active_observability_facade",
