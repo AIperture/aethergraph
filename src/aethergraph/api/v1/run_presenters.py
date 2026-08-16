@@ -5,14 +5,6 @@ from typing import Any
 from aethergraph.api.v1.schemas.runs import RunErrorInfo, RunSummary
 
 
-def extract_app_id_from_tags(tags: list[str]) -> str | None:
-    for tag in tags:
-        if tag.startswith("client:") or tag.startswith("flow:"):
-            continue
-        return tag
-    return None
-
-
 def registry_graph_meta(reg: Any, *, kind: str | None, graph_id: str) -> tuple[str | None, bool]:
     if reg is None:
         return (None, False)
@@ -46,7 +38,7 @@ def build_run_error_info(meta: dict[str, Any] | None, error: str | None) -> RunE
 def to_run_summary(rec: Any, *, reg: Any, flow_id_override: str | None = None) -> RunSummary:
     flow_id, entrypoint = registry_graph_meta(reg, kind=rec.kind, graph_id=rec.graph_id)
     effective_flow_id = flow_id_override or rec.meta.get("flow_id") or flow_id
-    app_id = rec.app_id or rec.meta.get("app_id") or extract_app_id_from_tags(rec.tags)
+    app_id = rec.app_id
 
     return RunSummary(
         run_id=rec.run_id,

@@ -47,9 +47,10 @@ async def create_run(
 
     app_vis = None
     app_imp = None
+    deprecated_app_id = body.model_dump(include={"app_id"})["app_id"]
     reg = scoped_registry(identity)
-    if body.app_id and reg is not None:
-        app_meta = reg.get_meta(nspace="app", name=body.app_id, include_global=True)
+    if deprecated_app_id and reg is not None:
+        app_meta = reg.get_meta(nspace="app", name=deprecated_app_id, include_global=True)
         if app_meta:
             app_vis = app_meta.get("run_visibility")
             app_imp = app_meta.get("run_importance")
@@ -68,7 +69,7 @@ async def create_run(
             visibility=body.visibility or app_vis or RunVisibility.normal,
             importance=body.importance or app_imp or RunImportance.normal,
             agent_id=body.agent_id or None,
-            app_id=body.app_id or None,
+            app_id=deprecated_app_id or None,
             app_name=body.app_name or None,
             run_config=body.run_config or {},
         )
