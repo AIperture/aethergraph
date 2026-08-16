@@ -3,6 +3,7 @@ from .agent_events import (
     emit_agent_event,
     register_default_agent_event_types,
 )
+from .canonical_inspection import CanonicalInspectionReader
 from .canonical_retention import ProviderRetentionJanitor
 from .canonical_runtime_output import (
     CanonicalRuntimeOutputSink,
@@ -60,6 +61,7 @@ __all__ = [
     "CaptureMode",
     "CanonicalRuntimeOutputSink",
     "CanonicalObservationService",
+    "CanonicalInspectionReader",
     "InspectionPresenter",
     "LLMObservationRecord",
     "LegacyObservabilityCleanupResult",
