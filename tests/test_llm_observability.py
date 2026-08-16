@@ -9,6 +9,7 @@ from aethergraph.config.config import AppSettings, LLMUsageQuotaSettings
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.observability import (
     LLMObservationRecord,
+    ObservabilityFacade,
     ObservationPolicy,
 )
 from aethergraph.observability.canonical_inspection import CanonicalInspectionReader
@@ -275,7 +276,13 @@ async def test_default_container_uses_sqlite_without_legacy_observability_sinks(
     assert not hasattr(container, "tracer")
     page = await container.storage_services.inspection().list_llm_calls()
     assert page.items[0].provider == "openai"
-    assert isinstance(container.observability, CanonicalInspectionReader)
+    assert isinstance(container.observability, ObservabilityFacade)
+    assert await container.observability.list_runs(limit=10_000, offset=0) == []
+    assert await container.observability.list_suppressed_scopes() == {
+        "session_id": set(),
+        "run_id": set(),
+        "trace_id": set(),
+    }
     assert await container.metering.get_overview() == {
         "llm_calls": 1,
         "llm_prompt_tokens": 9,

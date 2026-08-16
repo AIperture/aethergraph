@@ -26,9 +26,9 @@ from aethergraph.observability import (
     StdLoggerService,
     register_default_agent_event_types,
 )
-from aethergraph.observability.canonical_inspection import CanonicalInspectionReader
 from aethergraph.observability.canonical_retention import ProviderRetentionJanitor
 from aethergraph.observability.canonical_service import CanonicalObservationService
+from aethergraph.observability.workspace import ObservabilityFacade
 from aethergraph.server.admission import RunBurstLimiter
 from aethergraph.server.security.credentials import EnvironmentSecretStore, resolve_auth_secret
 from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
@@ -181,7 +181,7 @@ class DefaultContainer:
 
     # optional llm service
     llm: LLMService | None = None
-    observability: CanonicalInspectionReader | None = None
+    observability: ObservabilityFacade | None = None
     observation_sink: CanonicalObservationService | None = None
     retention_janitor: ProviderRetentionJanitor | None = None
     embed_service: EmbeddingService | None = None
@@ -591,7 +591,7 @@ def build_default_container(
         viz_service=services.viz,
         memory_factory=services.memory_factory,
         llm=llm_service,
-        observability=services.inspection(),
+        observability=services.observability(),
         observation_sink=services.observations,
         retention_janitor=retention_janitor,
         embed_service=embed_service,

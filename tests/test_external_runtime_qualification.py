@@ -145,7 +145,7 @@ def _bind_all_runtime_services(bundle: StorageBundle) -> tuple[object, ...]:
         services.artifact_factory,
         services.graph_state,
         services.agent_state(execution_scope),
-        services.inspection(),
+        services.observability(),
     )
 
 
@@ -600,6 +600,7 @@ def test_canonical_storage_service_binding_is_scoped_bundle_hidden_and_documente
         bind_canonical_storage_services,
         CanonicalStorageServices.agent_state,
         CanonicalStorageServices.inspection,
+        CanonicalStorageServices.observability,
     ):
         docstring = inspect.getdoc(public_api)
         assert docstring is not None

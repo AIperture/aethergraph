@@ -21,6 +21,10 @@ from aethergraph.observability.canonical_service import (
 )
 from aethergraph.observability.inspection import ObservabilityIdentity
 from aethergraph.observability.policy import ObservationPolicy
+from aethergraph.observability.workspace import (
+    ObservabilityFacade,
+    _bind_runtime_observability,
+)
 from aethergraph.services.agent_state.canonical_facade import CanonicalAgentStateFacade
 from aethergraph.services.artifacts.canonical_factory import CanonicalArtifactFacadeFactory
 from aethergraph.services.auth.canonical_store import (
@@ -89,6 +93,7 @@ class CanonicalStorageServices:
     memory_factory: CanonicalMemoryFacadeFactory
     artifact_factory: CanonicalArtifactFacadeFactory
     graph_state: CanonicalGraphStateStore
+    _bundle: StorageBundle = field(repr=False)
     _state_store: StateStore = field(repr=False)
     _owner_scope: StorageScope = field(repr=False)
 
@@ -170,6 +175,54 @@ class CanonicalStorageServices:
         return CanonicalInspectionReader(
             self.observations,
             identity=identity,
+            run_status_resolver=run_status_resolver,
+        )
+
+    def observability(
+        self,
+        *,
+        identity: ObservabilityIdentity | None = None,
+        run_status_resolver: RunStatusResolver | None = None,
+    ) -> ObservabilityFacade:
+        """Bind the full public observability facade to this live runtime bundle.
+
+        Intro:
+            Combines generic Inspect reads with canonical run, Engine-event,
+            suppression, and prompt-manifest reads over the same already-open bundle.
+            The returned facade borrows provider lifecycle from `EmbeddedRuntime`.
+
+        Examples:
+            Bind the local runtime boundary consumed by Engine:
+                ```python
+                facade = services.observability()
+                ```
+
+            Bind one authenticated cloud identity:
+                ```python
+                facade = services.observability(
+                    identity=ObservabilityIdentity(
+                        mode="cloud", user_id="user-1", org_id="org-1"
+                    )
+                )
+                ```
+
+        Args:
+            identity: Optional exact read identity; omission selects local semantics.
+            run_status_resolver: Optional bounded status enrichment for Inspect pages.
+
+        Returns:
+            ObservabilityFacade: Full storage-neutral live runtime read facade.
+
+        Notes:
+            Construction performs no I/O, selection, fallback, open, or close. Calling
+            `close` on the borrowed facade does not close the runtime-owned bundle.
+        """
+        exact_identity = identity or ObservabilityIdentity()
+        return _bind_runtime_observability(
+            bundle=self._bundle,
+            owner_scope=self._owner_scope,
+            identity=exact_identity,
+            service=self.observations,
             run_status_resolver=run_status_resolver,
         )
 
@@ -313,6 +366,7 @@ def bind_canonical_storage_services(
             event_store=bundle.events,
             run_repository=bundle.runs,
         ),
+        _bundle=bundle,
         _state_store=bundle.state,
         _owner_scope=owner_scope,
     )

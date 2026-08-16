@@ -9,8 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from aethergraph.config.storage_provider import StorageProviderSettings
-from aethergraph.observability.canonical_inspection import CanonicalInspectionReader
-from aethergraph.observability.canonical_service import ProviderObservationService
+from aethergraph.observability.canonical_inspection import (
+    CanonicalInspectionReader,
+    RunStatusResolver,
+)
+from aethergraph.observability.canonical_service import (
+    CanonicalObservationService,
+    ProviderObservationService,
+)
 from aethergraph.observability.inspection import (
     ObservabilityIdentity,
     ObservabilityUnavailableError,
@@ -31,6 +37,7 @@ from aethergraph.storage.contracts import (
     PageRequest,
     RunQuery,
     SortDirection,
+    StorageBundle,
     StorageCapability,
     StorageError,
     StorageOpenMode,
@@ -58,27 +65,33 @@ class _UnavailableHistoricalSecrets:
         )
 
 
-class _ProviderObservabilityWorkspace:
+class _CanonicalObservabilityFacade:
     def __init__(
         self,
         *,
-        composition: StorageComposition,
+        composition: StorageComposition | None,
         owner_scope: StorageScope,
         identity: ObservabilityIdentity,
         run_statuses: Mapping[str, str],
+        runtime_bundle: StorageBundle | None = None,
+        reader: CanonicalInspectionReader | None = None,
     ) -> None:
+        if (composition is None) == (runtime_bundle is None):
+            raise ValueError("exactly one observability bundle owner is required")
         self._composition = composition
+        self._runtime_bundle = runtime_bundle
         self._owner_scope = owner_scope
         self._identity = identity
         self._run_status_overrides = dict(run_statuses)
-        self._reader: CanonicalInspectionReader | None = None
+        self._reader = reader
 
     async def close(self) -> None:
-        """Close the exactly selected historical provider composition.
+        """Close an owned historical provider composition.
 
         Intro:
-            Releases the one prepared or ready read-only bundle and is safe before
-            the first query as well as after successful reads.
+            Releases the one prepared or ready read-only bundle. A live runtime facade
+            borrows its already-open bundle, so close deliberately leaves runtime
+            lifecycle with `EmbeddedRuntime`.
 
         Examples:
             Close after a Studio read:
@@ -92,16 +105,23 @@ class _ProviderObservabilityWorkspace:
                 await facade.close()
                 ```
 
+            Leave a live runtime bundle owned by its runtime:
+                ```python
+                await runtime.observability_reader().close()
+                await runtime.close()
+                ```
+
         Args:
             None.
 
         Returns:
-            None: The selected composition is closed or was already closed.
+            None: Owned history is closed; a borrowed live bundle is unchanged.
 
         Notes:
-            Close never selects, opens, or retries through another provider.
+            Close never selects, opens, retries through, or closes a borrowed provider.
         """
-        await self._composition.close()
+        if self._composition is not None:
+            await self._composition.close()
 
     async def list_inspect_traces(self, **filters: Any):
         """List canonical trace observations through the stable Studio boundary.
@@ -517,6 +537,9 @@ class _ProviderObservabilityWorkspace:
         return self._reader
 
     async def _bundle(self):
+        if self._runtime_bundle is not None:
+            return self._runtime_bundle
+        assert self._composition is not None
         try:
             bundle = await self._composition.start()
         except StorageError as exc:
@@ -566,12 +589,37 @@ class _ProviderObservabilityWorkspace:
             return None
 
 
+def _bind_runtime_observability(
+    *,
+    bundle: StorageBundle,
+    owner_scope: StorageScope,
+    service: CanonicalObservationService,
+    identity: ObservabilityIdentity | None = None,
+    run_status_resolver: RunStatusResolver | None = None,
+) -> _CanonicalObservabilityFacade:
+    """Bind the full observability facade to one borrowed live runtime bundle."""
+    exact_identity = identity or ObservabilityIdentity()
+    facade = _CanonicalObservabilityFacade(
+        composition=None,
+        runtime_bundle=bundle,
+        owner_scope=owner_scope,
+        identity=exact_identity,
+        run_statuses={},
+    )
+    facade._reader = CanonicalInspectionReader(
+        service,
+        identity=exact_identity,
+        run_status_resolver=run_status_resolver or facade._resolve_run_statuses,
+    )
+    return facade
+
+
 def open_observability_workspace(
     workspace_root: str | Path,
     *,
     identity: ObservabilityIdentity | None = None,
     run_statuses: Mapping[str, str] | None = None,
-) -> _ProviderObservabilityWorkspace:
+) -> _CanonicalObservabilityFacade:
     """Prepare the exact manifested provider for historical observability reads.
 
     Intro:
@@ -600,7 +648,7 @@ def open_observability_workspace(
         run_statuses: Optional catalog-owned status overlay for Inspect enrichment.
 
     Returns:
-        _ProviderObservabilityWorkspace: Stable async read facade owning one provider.
+        ObservabilityFacade: Stable async read facade owning one provider.
 
     Notes:
         Unmanifested, malformed, unsupported, or non-local workspaces fail directly.
@@ -646,7 +694,7 @@ def open_observability_workspace(
         raise ObservabilityWorkspaceError(
             "AetherGraph manifested observability workspace could not be opened"
         ) from exc
-    return _ProviderObservabilityWorkspace(
+    return _CanonicalObservabilityFacade(
         composition=composition,
         owner_scope=manifest.owner_scope,
         identity=identity or ObservabilityIdentity(),
@@ -756,9 +804,10 @@ def _plain_json(value: Any) -> Any:
     return value
 
 
-# Stable Plan 1 annotation/import boundary. This aliases only the provider-backed
-# historical reader; the retired SQLite-owning facade module is not restored.
-ObservabilityFacade = _ProviderObservabilityWorkspace
+# Stable Plan 1 annotation/import boundary. Historical readers own one read-only
+# composition; live readers borrow one runtime-owned canonical bundle. The retired
+# SQLite-owning facade module is not restored.
+ObservabilityFacade = _CanonicalObservabilityFacade
 
 
 __all__ = ["ObservabilityFacade", "open_observability_workspace"]
