@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 from datetime import UTC, datetime
 import hashlib
 import json
-from typing import Any, Literal
+import math
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from aethergraph.contracts.services.memory import Event
@@ -22,6 +23,10 @@ from aethergraph.storage.contracts import (
 )
 
 from .canonical_facade import CanonicalMemoryFacade
+from .canonical_prompt import CanonicalPromptMemoryMixin
+
+if TYPE_CHECKING:
+    from aethergraph.contracts.services.llm import LLMClientProtocol
 
 _COMPATIBILITY_METADATA = "compatibility_metadata"
 _DEPRECATED_APP_ID = "app_id"
@@ -32,7 +37,7 @@ _STATE_SERVICE_CONTEXT = "service_context"
 _STATE_PUBLIC_METADATA = "public_metadata"
 
 
-class CanonicalPublicMemoryFacade:
+class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
     """Project stable public Memory events onto one canonical facade."""
 
     def __init__(
@@ -41,6 +46,8 @@ class CanonicalPublicMemoryFacade:
         canonical: CanonicalMemoryFacade,
         logical_scope_id: str,
         deprecated_app_id: str | None = None,
+        llm: LLMClientProtocol | None = None,
+        default_signal_threshold: float = 0.0,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         event_id_factory: Callable[[], str] = lambda: f"event-{uuid4().hex}",
     ) -> None:
@@ -64,6 +71,8 @@ class CanonicalPublicMemoryFacade:
                     canonical=canonical,
                     logical_scope_id="run:run-1",
                     deprecated_app_id="app-1",
+                    llm=llm,
+                    default_signal_threshold=0.25,
                     clock=clock.now,
                     event_id_factory=lambda: "event-1",
                 )
@@ -73,6 +82,8 @@ class CanonicalPublicMemoryFacade:
             canonical: Exact canonical event/state/search facade for this scope.
             logical_scope_id: Stable public memory-bucket label; never provider scope.
             deprecated_app_id: Optional explicitly deprecated compatibility metadata.
+            llm: Optional explicitly injected LLM client for requested distillation.
+            default_signal_threshold: Finite default distillation signal threshold.
             clock: Timezone-aware UTC event timestamp source.
             event_id_factory: Stable non-empty event identity source.
 
@@ -93,11 +104,19 @@ class CanonicalPublicMemoryFacade:
             or deprecated_app_id != deprecated_app_id.strip()
         ):
             raise ValueError("deprecated_app_id must be a non-empty exact string when supplied")
+        if (
+            isinstance(default_signal_threshold, bool)
+            or not isinstance(default_signal_threshold, int | float)
+            or not math.isfinite(default_signal_threshold)
+        ):
+            raise ValueError("default_signal_threshold must be a finite number")
         self.canonical = canonical
         self.scope = canonical.scope
         self.memory_scope_id = logical_scope_id
         self.timeline_id = logical_scope_id
         self._deprecated_app_id = deprecated_app_id
+        self.llm = llm
+        self.default_signal_threshold = float(default_signal_threshold)
         self._clock = clock
         self._event_id_factory = event_id_factory
 
@@ -242,12 +261,13 @@ class CanonicalPublicMemoryFacade:
         """
         if role not in {"user", "assistant", "system", "tool"}:
             raise ValueError(f"Unsupported chat role: {role!r}")
+        chat_tags = _tags(tags)
         return await self.append_event(
             kind="chat.turn",
             stage=role,
             text=text,
             data={"role": role, **dict(data or {})},
-            tags=list(_tags(["chat", *(tags or [])])),
+            tags=list(_tags(["chat", *chat_tags])),
             severity=severity,
             signal=signal,
         )
@@ -426,7 +446,7 @@ class CanonicalPublicMemoryFacade:
             `use_persistence=False` does not select a cache or fallback path; canonical
             `StateStore` is the sole state authority in both cases.
         """
-        _state_level(level)
+        _memory_level(level)
         record = await self.canonical.current_state(key=key, kind=kind)
         if record is None or not _state_has_tags(record, _tags(tags)):
             return None
@@ -529,7 +549,7 @@ class CanonicalPublicMemoryFacade:
             State history is never reconstructed from `EventStore` and never triggers
             a legacy or cache fallback.
         """
-        _state_level(level)
+        _memory_level(level)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1_000:
             raise ValueError("limit must be between 1 and 1000")
         required_tags = _tags(tags)
@@ -546,6 +566,7 @@ class CanonicalPublicMemoryFacade:
         kinds: list[str] | None = None,
         tags: list[str] | None = None,
         limit: int = 50,
+        level: str | None = None,
         use_persistence: bool = False,
         since: str | None = None,
         until: str | None = None,
@@ -588,6 +609,7 @@ class CanonicalPublicMemoryFacade:
             kinds: Optional exact event kinds.
             tags: Optional tags every event must contain.
             limit: Positive result bound.
+            level: Recognized compatibility scope level for the already-bound facade.
             use_persistence: Select durable canonical events instead of hot cache.
             since: Optional inclusive timezone-aware ISO lower time bound.
             until: Optional inclusive timezone-aware ISO upper time bound.
@@ -611,6 +633,9 @@ class CanonicalPublicMemoryFacade:
             integer provider row IDs and unbounded reads are not used.
         """
         _query_bound(limit=limit, offset=offset)
+        _memory_level(level)
+        normalized_kinds = _terms("Memory kinds", kinds)
+        normalized_tags = _tags(tags)
         if order_dir not in {"asc", "desc"}:
             raise ValueError("order_dir must be 'asc' or 'desc'")
         if client_id is not None:
@@ -631,8 +656,8 @@ class CanonicalPublicMemoryFacade:
         if not use_persistence:
             hot = await self.canonical.recent_hot(
                 limit=_MAX_QUERY_EVENTS,
-                kinds=tuple(kinds or ()),
-                tags=tuple(tags or ()),
+                kinds=normalized_kinds,
+                tags=normalized_tags,
             )
             records = [
                 record
@@ -649,8 +674,8 @@ class CanonicalPublicMemoryFacade:
             records = records[offset : offset + limit]
         else:
             records = await self._durable_records(
-                kinds=tuple(kinds or ()),
-                tags=tuple(tags or ()),
+                kinds=normalized_kinds,
+                tags=normalized_tags,
                 limit=limit,
                 offset=offset,
                 since=parsed_since,
@@ -667,6 +692,7 @@ class CanonicalPublicMemoryFacade:
         kinds: list[str] | None = None,
         tags: list[str] | None = None,
         limit: int = 50,
+        level: str | None = None,
         use_persistence: bool = False,
         return_event: bool = True,
     ) -> list[Any]:
@@ -694,6 +720,7 @@ class CanonicalPublicMemoryFacade:
             kinds: Optional exact event kinds.
             tags: Optional tags every event must contain.
             limit: Positive result bound.
+            level: Recognized compatibility scope level for the already-bound facade.
             use_persistence: Select durable canonical events instead of hot cache.
             return_event: Return Event DTOs when true, mappings otherwise.
 
@@ -707,6 +734,7 @@ class CanonicalPublicMemoryFacade:
             kinds=kinds,
             tags=tags,
             limit=limit,
+            level=level,
             use_persistence=use_persistence,
             return_event=return_event,
             order_dir="desc",
@@ -1034,7 +1062,7 @@ def _revision(value: int) -> None:
         raise ValueError("expected_revision must be a non-negative integer")
 
 
-def _state_level(value: str | None) -> None:
+def _memory_level(value: str | None) -> None:
     if value not in {None, "scope", "session", "run", "user", "org"}:
         raise ValueError("level must be a recognized Memory scope level when supplied")
 
@@ -1092,11 +1120,22 @@ def _text(data: Any) -> str | None:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)[:6_000]
 
 
-def _tags(values: list[str] | None) -> tuple[str, ...]:
+def _tags(values: Sequence[str] | None) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise TypeError("Memory tags must be a sequence of exact strings, not a string")
     tags = tuple(dict.fromkeys(values or ()))
     if any(not isinstance(tag, str) or not tag.strip() or tag != tag.strip() for tag in tags):
         raise ValueError("Memory tags must contain exact non-empty strings")
     return tags
+
+
+def _terms(name: str, values: Sequence[str] | None) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise TypeError(f"{name} must be a sequence of exact strings, not a string")
+    terms = tuple(dict.fromkeys(values or ()))
+    if any(not isinstance(term, str) or not term.strip() or term != term.strip() for term in terms):
+        raise ValueError(f"{name} must contain exact non-empty strings")
+    return terms
 
 
 def _utc(value: datetime) -> datetime:

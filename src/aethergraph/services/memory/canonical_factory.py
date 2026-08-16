@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+import math
 from time import monotonic
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from aethergraph.services.canonical_storage_scope import (
@@ -15,6 +17,9 @@ from aethergraph.storage.contracts import StorageBundle, StorageScope
 
 from .canonical_facade import CanonicalMemoryFacade
 from .canonical_public import CanonicalPublicMemoryFacade
+
+if TYPE_CHECKING:
+    from aethergraph.contracts.services.llm import LLMClientProtocol
 
 _MAX_HOT_EVENTS = 10_000
 
@@ -29,6 +34,8 @@ class CanonicalMemoryFacadeFactory:
         owner_scope: StorageScope,
         hot_max_events: int = 500,
         hot_ttl_seconds: float = 900.0,
+        default_signal_threshold: float = 0.0,
+        llm: LLMClientProtocol | None = None,
         monotonic_clock: Callable[[], float] = monotonic,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         event_id_factory: Callable[[], str] = lambda: f"event-{uuid4().hex}",
@@ -54,6 +61,8 @@ class CanonicalMemoryFacadeFactory:
                     owner_scope=StorageScope(project_id="project-1"),
                     hot_max_events=100,
                     hot_ttl_seconds=60.0,
+                    default_signal_threshold=0.25,
+                    llm=llm,
                     monotonic_clock=clock,
                     clock=utc_clock.now,
                     event_id_factory=lambda: "event-1",
@@ -65,6 +74,8 @@ class CanonicalMemoryFacadeFactory:
             owner_scope: Exact trusted provider ownership scope.
             hot_max_events: Positive maximum events retained by each facade cache.
             hot_ttl_seconds: Positive insertion-age lifetime for facade cache entries.
+            default_signal_threshold: Finite default public distillation threshold.
+            llm: Optional explicitly injected client for requested LLM distillation.
             monotonic_clock: Monotonic cache-expiry clock shared by bound facades.
             clock: Timezone-aware UTC event timestamp source for public facades.
             event_id_factory: Stable non-empty public event identity source.
@@ -87,10 +98,18 @@ class CanonicalMemoryFacadeFactory:
             raise TypeError("hot_ttl_seconds must be numeric")
         if hot_ttl_seconds <= 0:
             raise ValueError("hot_ttl_seconds must be positive")
+        if (
+            isinstance(default_signal_threshold, bool)
+            or not isinstance(default_signal_threshold, int | float)
+            or not math.isfinite(default_signal_threshold)
+        ):
+            raise ValueError("default_signal_threshold must be a finite number")
         self._bundle = bundle
         self.owner_scope = owner_scope
         self._hot_max_events = hot_max_events
         self._hot_ttl_seconds = float(hot_ttl_seconds)
+        self._default_signal_threshold = float(default_signal_threshold)
+        self._llm = llm
         self._monotonic_clock = monotonic_clock
         self._clock = clock
         self._event_id_factory = event_id_factory
@@ -181,6 +200,8 @@ class CanonicalMemoryFacadeFactory:
             canonical=self.for_execution(execution_scope),
             logical_scope_id=logical_scope_id,
             deprecated_app_id=deprecated_app_id,
+            llm=self._llm,
+            default_signal_threshold=self._default_signal_threshold,
             clock=self._clock,
             event_id_factory=self._event_id_factory,
         )

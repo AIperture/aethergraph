@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,7 @@ from aethergraph.services.memory import (
     CanonicalMemoryFacadeFactory,
     CanonicalPublicMemoryFacade,
 )
+from aethergraph.services.memory.canonical_prompt import CanonicalPromptMemoryMixin
 from aethergraph.storage.contracts import (
     EventQuery,
     StorageOpenMode,
@@ -49,6 +51,16 @@ class _Identities:
 class _Secrets:
     async def resolve(self, reference: str) -> str | bytes:
         raise AssertionError(f"provider must not resolve {reference!r}")
+
+
+class _LLM:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls: list[tuple[list[dict], dict]] = []
+
+    async def chat(self, messages: list[dict], **kwargs):
+        self.calls.append((messages, kwargs))
+        return self.response, {"input_tokens": 10, "output_tokens": 5}
 
 
 @dataclass
@@ -189,6 +201,14 @@ async def test_public_memory_query_and_alias_failures_are_direct(tmp_path: Path)
             await memory.query_events(order_dir="sideways")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="tags"):
             await memory.append_event(kind="invalid", data={}, tags=[" bad"])
+        with pytest.raises(ValueError, match="chat role"):
+            await memory.append_chat_turn("visitor", "hello")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="tags"):
+            await memory.append_chat_turn("user", "hello", tags="chat")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="kinds"):
+            await memory.query_events(kinds="chat.turn")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="tags"):
+            await memory.query_events(tags="chat")  # type: ignore[arg-type]
         assert await memory.get_event("missing") is None
     finally:
         await bundle.close()
@@ -366,6 +386,203 @@ async def test_public_memory_preserves_active_agent_state_facade_revision_behavi
         await bundle.close()
 
 
+@pytest.mark.asyncio
+async def test_public_memory_prompt_segments_are_canonical_and_chronological(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    memory = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=StorageScope(tenant_id="tenant-1", project_id="project-1"),
+        clock=clock.now,
+        event_id_factory=_Identities(),
+    ).for_public_execution(
+        StorageScope(session_id="session-1", run_id="run-1"),
+        logical_scope_id="session:session-1",
+    )
+    try:
+        await memory.record_chat_user("first", tags=["session.chat"])
+        await memory.append_chat_turn("assistant", "second", tags=["session.chat"])
+        await memory.append_event(
+            kind="tool_result",
+            data={"tool": "search"},
+            tool="search",
+            text="three hits",
+            inputs=[{"query": "first"}],
+            outputs=[{"count": 3}],
+            tags=["verified"],
+        )
+        assert await memory.recent_chat() == [
+            {"role": "user", "text": "first"},
+            {"role": "assistant", "text": "second"},
+        ]
+
+        summary = await memory.distill_long_term(
+            include_kinds=["chat.turn"],
+            include_tags=["chat"],
+            use_llm=False,
+        )
+        segments = await memory.build_prompt_segments(
+            recent_chat_limit=10,
+            include_recent_tools=True,
+            tool="search",
+            tool_limit=5,
+            use_persistence=True,
+        )
+
+        assert summary["source_event_ids"] == ["event-1", "event-2"]
+        assert summary["text"] == "[user] first\n[assistant] second"
+        tool_timestamp = segments["recent_tools"][0]["ts"]
+        assert datetime.fromisoformat(tool_timestamp).tzinfo is not None
+        assert segments == {
+            "long_term": "[user] first\n[assistant] second",
+            "recent_chat": [
+                {"role": "user", "text": "first"},
+                {"role": "assistant", "text": "second"},
+            ],
+            "recent_tools": [
+                {
+                    "ts": tool_timestamp,
+                    "tool": "search",
+                    "message": "three hits",
+                    "inputs": [{"query": "first"}],
+                    "outputs": [{"count": 3}],
+                    "tags": ["verified"],
+                }
+            ],
+        }
+        stored = await memory.get_latest_summary()
+        assert stored is not None
+        assert stored["event_id"] == summary["event_id"]
+        assert await memory.record_state("prompt-state", {"ready": True})
+        assert await memory.get_latest_state("prompt-state") == {"ready": True}
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_public_memory_prompt_failures_do_not_become_empty_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    memory = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=StorageScope(project_id="project-1"),
+        clock=clock.now,
+    ).for_public_execution(
+        StorageScope(run_id="run-1"),
+        logical_scope_id="run:run-1",
+    )
+    try:
+
+        async def fail_query(_query):
+            raise RuntimeError("provider unavailable")
+
+        monkeypatch.setattr(memory.canonical, "durable_query", fail_query)
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            await memory.list_summaries()
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            await memory.build_prompt_segments()
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_public_memory_llm_distillation_is_explicit_and_strict(tmp_path: Path) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    factory = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=StorageScope(project_id="project-1"),
+        clock=clock.now,
+    )
+    missing = factory.for_public_execution(
+        StorageScope(run_id="run-missing"),
+        logical_scope_id="run:run-missing",
+    )
+    malformed_llm = _LLM("not-json")
+    malformed = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=StorageScope(project_id="project-1"),
+        llm=malformed_llm,
+        clock=clock.now,
+    ).for_public_execution(
+        StorageScope(run_id="run-malformed"),
+        logical_scope_id="run:run-malformed",
+    )
+    strict_llm = _LLM(
+        json.dumps(
+            {
+                "summary": "A concise summary.",
+                "key_facts": ["one"],
+                "open_loops": [],
+            }
+        )
+    )
+    strict = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=StorageScope(project_id="project-1"),
+        llm=strict_llm,
+        clock=clock.now,
+    ).for_public_execution(
+        StorageScope(run_id="run-strict"),
+        logical_scope_id="run:run-strict",
+    )
+    try:
+        await missing.append_chat_turn("user", "missing client")
+        await malformed.append_chat_turn("user", "malformed output")
+        await strict.append_chat_turn("user", "strict output")
+
+        with pytest.raises(RuntimeError, match="LLM client not configured"):
+            await missing.distill_summary(use_llm=True)
+        with pytest.raises(json.JSONDecodeError):
+            await malformed.distill_summary(use_llm=True)
+        summary = await strict.distill_summary(use_llm=True)
+
+        assert summary["summary"] == "A concise summary."
+        assert strict_llm.calls[0][1] == {"output_format": "json"}
+        assert await malformed.list_summaries() == []
+        assert (await strict.list_summaries())[0]["event_id"] == summary["event_id"]
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_public_memory_prompt_bounds_and_metadata_conflicts_fail_directly(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    memory = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=StorageScope(project_id="project-1"),
+        clock=clock.now,
+    ).for_public_execution(
+        StorageScope(run_id="run-1"),
+        logical_scope_id="run:run-1",
+    )
+    try:
+        await memory.append_chat_turn("user", "hello")
+        assert await memory.recent_chat(limit=0) == []
+        with pytest.raises(TypeError, match="roles"):
+            await memory.recent_chat(roles="user")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="tags"):
+            await memory.recent_chat(tags="chat")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="level"):
+            await memory.query_events(level="application")
+        with pytest.raises(ValueError, match="level"):
+            await memory.recent_events(level="application")
+        with pytest.raises(ValueError, match="max_events"):
+            await memory.distill_summary(max_events=0)
+        with pytest.raises(ValueError, match="conflicts"):
+            await memory.distill_summary(extra_data={"num_events": 99})
+    finally:
+        await bundle.close()
+
+
 def test_public_memory_docstrings_and_surface_are_explicit() -> None:
     for member in (
         CanonicalPublicMemoryFacade.__init__,
@@ -379,6 +596,14 @@ def test_public_memory_docstrings_and_surface_are_explicit() -> None:
         CanonicalPublicMemoryFacade.query_events,
         CanonicalPublicMemoryFacade.recent_events,
         CanonicalPublicMemoryFacade.event_to_dict,
+        CanonicalPublicMemoryFacade.recent_chat,
+        CanonicalPublicMemoryFacade.list_summaries,
+        CanonicalPublicMemoryFacade.get_latest_summary,
+        CanonicalPublicMemoryFacade.distill_summary,
+        CanonicalPublicMemoryFacade.build_prompt_segments,
+        CanonicalPublicMemoryFacade.record_state,
+        CanonicalPublicMemoryFacade.record_chat_user,
+        CanonicalPublicMemoryFacade.distill_long_term,
         CanonicalMemoryFacadeFactory.for_public_execution,
     ):
         docstring = inspect.getdoc(member) or ""
@@ -395,3 +620,7 @@ def test_public_memory_docstrings_and_surface_are_explicit() -> None:
     assert "after_id" not in source
     assert "before_id" not in source
     assert "EventLog" not in source
+    prompt_source = inspect.getsource(CanonicalPromptMemoryMixin)
+    assert "except Exception" not in prompt_source
+    assert "getattr(" not in prompt_source
+    assert "ScopedIndices" not in prompt_source
