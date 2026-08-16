@@ -4,6 +4,8 @@ from typing import Any
 from aethergraph.contracts.services.metering import MeteringService, MeteringStore
 from aethergraph.services.scope.scope import Scope
 
+_MAX_METERING_QUERY = 10_000
+
 
 class EventLogMeteringService(MeteringService):
     """
@@ -106,7 +108,7 @@ class EventLogMeteringService(MeteringService):
             since=cutoff,
             until=None,
             kinds=kinds,
-            limit=None,
+            limit=_MAX_METERING_QUERY,
             user_id=store_user,
             org_id=store_org,
         )
