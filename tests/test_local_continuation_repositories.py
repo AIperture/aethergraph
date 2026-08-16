@@ -230,7 +230,9 @@ async def test_lease_claim_contention_retry_reclaim_and_terminal_receipt(tmp_pat
 
     claims = await asyncio.gather(*(leases.claim(request) for _ in range(20)))
     assert sum(claim is not None for claim in claims) == 1
-    lease = next(claim for claim in claims if claim is not None)
+    claimed = next(claim for claim in claims if claim is not None)
+    assert claimed.reclaimed is False
+    lease = claimed.record
     assert lease.attempts == lease.revision == 1
     regressed = request.now - timedelta(seconds=1)
     with pytest.raises(StorageIntegrityError, match="clock moved backward"):
@@ -260,7 +262,7 @@ async def test_lease_claim_contention_retry_reclaim_and_terminal_receipt(tmp_pat
         )
         is None
     )
-    reclaimed = await leases.claim(
+    retried = await leases.claim(
         replace(
             request,
             worker_id="worker-2",
@@ -268,7 +270,8 @@ async def test_lease_claim_contention_retry_reclaim_and_terminal_receipt(tmp_pat
             lease_until=retry_time + timedelta(seconds=30),
         )
     )
-    assert reclaimed is not None
+    assert retried is not None and retried.reclaimed is False
+    reclaimed = retried.record
     assert reclaimed.attempts == 2 and reclaimed.revision == 3
     assert reclaimed.worker_id == "worker-2"
     delivered_at = retry_time + timedelta(seconds=1)
@@ -310,6 +313,8 @@ async def test_lease_identity_scope_renewal_and_cursor_query(tmp_path: Path) -> 
         _claim_request("cont-2", fire_id="fire-2", now=NOW + timedelta(minutes=1, seconds=1))
     )
     assert first is not None and second is not None
+    first = first.record
+    second = second.record
     assert await leases.get(StorageScope(project_id="other"), first.fire_id) is None
     renewed = replace(
         first,
@@ -424,6 +429,7 @@ async def test_read_only_repositories_read_and_reject_mutation(tmp_path: Path) -
     )
     claim = await leases.claim(_claim_request("cont-1"))
     assert claim is not None
+    claim = claim.record
     await writable.close()
 
     readonly = _database(tmp_path, StorageOpenMode.READ_ONLY)

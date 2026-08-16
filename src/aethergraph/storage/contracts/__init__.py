@@ -2,6 +2,7 @@
 
 from .capabilities import StorageCapabilities, StorageCapability
 from .continuations import (
+    ClaimedContinuationLease,
     ContinuationCorrelator,
     ContinuationDraft,
     ContinuationLeaseQuery,
@@ -167,6 +168,7 @@ __all__ = [
     "BlobRange",
     "BlobStore",
     "BlobWriteResult",
+    "ClaimedContinuationLease",
     "ContinuationCorrelator",
     "ContinuationDraft",
     "ContinuationLeaseQuery",

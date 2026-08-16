@@ -454,6 +454,7 @@ class LocalTriggerRepository:
             ).fetchall()
             for row in retry_rows:
                 current_claim = _claim(row)
+                reclaimed = current_claim.status is TriggerClaimStatus.LEASED
                 trigger_row = connection.execute(
                     "SELECT * FROM local_triggers WHERE trigger_id = ?",
                     (current_claim.trigger_id,),
@@ -475,7 +476,13 @@ class LocalTriggerRepository:
                     last_error=None,
                 )
                 _update_claim(connection, renewed)
-                claimed.append(ClaimedTrigger(trigger=trigger, claim=renewed))
+                claimed.append(
+                    ClaimedTrigger(
+                        trigger=trigger,
+                        claim=renewed,
+                        reclaimed=reclaimed,
+                    )
+                )
 
             remaining = request.limit - len(claimed)
             if remaining <= 0:

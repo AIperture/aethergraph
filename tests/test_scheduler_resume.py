@@ -38,7 +38,10 @@ class _Store:
         self.continuation = _continuation()
         self.deleted: list[tuple[str, str]] = []
 
-    async def get_by_id(self, continuation_id: str) -> Continuation | None:
+    async def get_by_id(
+        self, run_id: str, node_id: str, continuation_id: str
+    ) -> Continuation | None:
+        del run_id, node_id
         if self.continuation and self.continuation.continuation_id == continuation_id:
             return self.continuation
         return None

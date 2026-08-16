@@ -1,25 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
 
-
-@dataclass(frozen=True)
-class TimerLease:
-    fire_id: str
-    continuation_id: str
-    run_id: str
-    node_id: str
-    scheduled_for: float
-    worker_id: str | None
-    status: str
-    lease_until: float | None
-    attempts: int
-    next_attempt_at: float | None
-    last_error: str | None
-    reclaimed: bool = False
+from aethergraph.services.continuations.timer_lease import TimerLease, TimerLeaseStatus
 
 
 class SQLiteContinuationTimerLeaseStore:
@@ -50,11 +35,37 @@ class SQLiteContinuationTimerLeaseStore:
                     status TEXT NOT NULL,
                     lease_until REAL,
                     attempts INTEGER NOT NULL,
+                    revision INTEGER NOT NULL,
                     next_attempt_at REAL,
                     last_error TEXT,
+                    finished_at REAL,
                     updated_at REAL NOT NULL
                 )
                 """)
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(continuation_timer_leases_v2)"
+                ).fetchall()
+            }
+            if "revision" not in columns:
+                connection.execute(
+                    """
+                    ALTER TABLE continuation_timer_leases_v2
+                    ADD COLUMN revision INTEGER NOT NULL DEFAULT 1
+                    """
+                )
+            if "finished_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE continuation_timer_leases_v2 ADD COLUMN finished_at REAL"
+                )
+                connection.execute(
+                    """
+                    UPDATE continuation_timer_leases_v2
+                    SET finished_at = updated_at
+                    WHERE status IN ('delivered', 'dead_letter')
+                    """
+                )
             connection.execute("""
                 CREATE INDEX IF NOT EXISTS idx_continuation_timer_retry_v2
                 ON continuation_timer_leases_v2(status, next_attempt_at, lease_until)
@@ -67,19 +78,32 @@ class SQLiteContinuationTimerLeaseStore:
             continuation_id=str(row["continuation_id"]),
             run_id=str(row["run_id"]),
             node_id=str(row["node_id"]),
-            scheduled_for=float(row["scheduled_for"]),
+            scheduled_for=datetime.fromtimestamp(float(row["scheduled_for"]), tz=UTC),
             worker_id=str(row["worker_id"]) if row["worker_id"] is not None else None,
-            status=str(row["status"]),
-            lease_until=float(row["lease_until"]) if row["lease_until"] is not None else None,
+            status=TimerLeaseStatus(str(row["status"])),
+            lease_until=(
+                datetime.fromtimestamp(float(row["lease_until"]), tz=UTC)
+                if row["lease_until"] is not None
+                else None
+            ),
             attempts=int(row["attempts"]),
+            revision=int(row["revision"]),
+            updated_at=datetime.fromtimestamp(float(row["updated_at"]), tz=UTC),
             next_attempt_at=(
-                float(row["next_attempt_at"]) if row["next_attempt_at"] is not None else None
+                datetime.fromtimestamp(float(row["next_attempt_at"]), tz=UTC)
+                if row["next_attempt_at"] is not None
+                else None
             ),
             last_error=str(row["last_error"]) if row["last_error"] is not None else None,
+            finished_at=(
+                datetime.fromtimestamp(float(row["finished_at"]), tz=UTC)
+                if row["finished_at"] is not None
+                else None
+            ),
             reclaimed=reclaimed,
         )
 
-    def claim(
+    async def claim(
         self,
         *,
         fire_id: str,
@@ -101,7 +125,7 @@ class SQLiteContinuationTimerLeaseStore:
         Examples:
             Claim a new fire:
             ```python
-            lease = store.claim(
+            lease = await store.claim(
                 fire_id="fire-1",
                 continuation_id="cont-1",
                 run_id="run-1",
@@ -115,7 +139,7 @@ class SQLiteContinuationTimerLeaseStore:
 
             Detect a competing worker:
             ```python
-            if store.claim(
+            if await store.claim(
                 fire_id="fire-1",
                 continuation_id="cont-1",
                 run_id="run-1",
@@ -160,8 +184,9 @@ class SQLiteContinuationTimerLeaseStore:
                     INSERT INTO continuation_timer_leases_v2 (
                         fire_id, continuation_id, run_id, node_id, scheduled_for,
                         worker_id, status,
-                        lease_until, attempts, next_attempt_at, last_error, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'leased', ?, 1, NULL, NULL, ?)
+                        lease_until, attempts, revision, next_attempt_at, last_error,
+                        finished_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'leased', ?, 1, 1, NULL, NULL, NULL, ?)
                     """,
                     (
                         fire_id,
@@ -218,7 +243,8 @@ class SQLiteContinuationTimerLeaseStore:
                 """
                 UPDATE continuation_timer_leases_v2
                 SET worker_id = ?, status = 'leased', lease_until = ?,
-                    attempts = attempts + 1, next_attempt_at = NULL, updated_at = ?
+                    attempts = attempts + 1, revision = revision + 1,
+                    next_attempt_at = NULL, finished_at = NULL, updated_at = ?
                 WHERE fire_id = ?
                 """,
                 (worker_id, lease_until_ts, now_ts, fire_id),
@@ -235,7 +261,7 @@ class SQLiteContinuationTimerLeaseStore:
         finally:
             connection.close()
 
-    def complete(self, *, fire_id: str, worker_id: str, now: datetime) -> bool:
+    async def complete(self, lease: TimerLease, *, now: datetime) -> bool:
         """Mark one worker-owned timer fire delivered.
 
         Intro:
@@ -245,18 +271,17 @@ class SQLiteContinuationTimerLeaseStore:
         Examples:
             Complete a successful delivery:
             ```python
-            changed = store.complete(fire_id="fire-1", worker_id="worker-a", now=now)
+            changed = await store.complete(lease, now=now)
             ```
 
             Detect stale ownership:
             ```python
-            if not store.complete(fire_id="fire-1", worker_id="old-worker", now=now):
+            if not await store.complete(stale, now=now):
                 print("lease no longer owned")
             ```
 
         Args:
-            fire_id: Stable scheduled occurrence identity.
-            worker_id: Worker expected to own the active lease.
+            lease: Exact worker-owned lease and expected revision.
             now: Injected current UTC time.
 
         Returns:
@@ -270,18 +295,25 @@ class SQLiteContinuationTimerLeaseStore:
                 """
                 UPDATE continuation_timer_leases_v2
                 SET status = 'delivered', worker_id = NULL, lease_until = NULL,
-                    next_attempt_at = NULL, last_error = NULL, updated_at = ?
+                    next_attempt_at = NULL, last_error = NULL, finished_at = ?,
+                    revision = revision + 1, updated_at = ?
                 WHERE fire_id = ? AND worker_id = ? AND status = 'leased'
+                  AND revision = ?
                 """,
-                (now.timestamp(), fire_id, worker_id),
+                (
+                    now.timestamp(),
+                    now.timestamp(),
+                    lease.fire_id,
+                    lease.worker_id,
+                    lease.revision,
+                ),
             )
             return cursor.rowcount == 1
 
-    def record_failure(
+    async def record_failure(
         self,
+        lease: TimerLease,
         *,
-        fire_id: str,
-        worker_id: str,
         now: datetime,
         next_attempt_at: datetime | None,
         error: str,
@@ -296,9 +328,8 @@ class SQLiteContinuationTimerLeaseStore:
         Examples:
             Schedule a retry:
             ```python
-            store.record_failure(
-                fire_id="fire-1",
-                worker_id="worker-a",
+            await store.record_failure(
+                lease,
                 now=now,
                 next_attempt_at=retry_at,
                 error="scheduler unavailable",
@@ -308,9 +339,8 @@ class SQLiteContinuationTimerLeaseStore:
 
             Dead-letter an exhausted fire:
             ```python
-            store.record_failure(
-                fire_id="fire-1",
-                worker_id="worker-a",
+            await store.record_failure(
+                lease,
                 now=now,
                 next_attempt_at=None,
                 error="retry limit reached",
@@ -319,8 +349,7 @@ class SQLiteContinuationTimerLeaseStore:
             ```
 
         Args:
-            fire_id: Stable scheduled occurrence identity.
-            worker_id: Worker expected to own the active lease.
+            lease: Exact worker-owned lease and expected revision.
             now: Injected current UTC time.
             next_attempt_at: Next eligible UTC delivery time, or `None` for dead letter.
             error: Bounded failure description.
@@ -339,21 +368,25 @@ class SQLiteContinuationTimerLeaseStore:
                 """
                 UPDATE continuation_timer_leases_v2
                 SET status = ?, worker_id = NULL, lease_until = NULL,
-                    next_attempt_at = ?, last_error = ?, updated_at = ?
+                    next_attempt_at = ?, last_error = ?, finished_at = ?,
+                    revision = revision + 1, updated_at = ?
                 WHERE fire_id = ? AND worker_id = ? AND status = 'leased'
+                  AND revision = ?
                 """,
                 (
                     status,
                     next_ts,
                     error[:1000],
+                    now.timestamp() if dead_letter else None,
                     now.timestamp(),
-                    fire_id,
-                    worker_id,
+                    lease.fire_id,
+                    lease.worker_id,
+                    lease.revision,
                 ),
             )
             return cursor.rowcount == 1
 
-    def get(self, fire_id: str) -> TimerLease | None:
+    async def get(self, run_id: str, node_id: str, fire_id: str) -> TimerLease | None:
         """Read one durable timer lease or receipt.
 
         Intro:
@@ -363,27 +396,32 @@ class SQLiteContinuationTimerLeaseStore:
         Examples:
             Inspect a delivered fire:
             ```python
-            receipt = store.get("fire-1")
+            receipt = await store.get("run-1", "node-1", "fire-1")
             assert receipt is not None and receipt.status == "delivered"
             ```
 
             Detect an unknown fire:
             ```python
-            assert store.get("missing") is None
+            assert await store.get("run-1", "node-1", "missing") is None
             ```
 
         Args:
+            run_id: Exact durable run identity.
+            node_id: Exact waiting node identity.
             fire_id: Stable scheduled occurrence identity.
 
         Returns:
             TimerLease | None: Persisted state, or `None` when unknown.
 
         Notes:
-            `TimerLease.reclaimed` is always `False` for ordinary reads.
+            Scope mismatch returns `None`; `reclaimed` is `False` for ordinary reads.
         """
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM continuation_timer_leases_v2 WHERE fire_id = ?",
-                (fire_id,),
+                """
+                SELECT * FROM continuation_timer_leases_v2
+                WHERE fire_id = ? AND run_id = ? AND node_id = ?
+                """,
+                (fire_id, run_id, node_id),
             ).fetchone()
         return self._from_row(row) if row is not None else None

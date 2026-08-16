@@ -61,7 +61,11 @@ class MultiSchedulerResumeBus(ResumeBus):
             explicit errors. Before successful dispatch, the durable
             continuation remains available for retry or recovery.
         """
-        current = await self.store.get_by_id(continuation.continuation_id)
+        current = await self.store.get_by_id(
+            continuation.run_id,
+            continuation.node_id,
+            continuation.continuation_id,
+        )
         if current is None or current.revision != continuation.revision or current.closed:
             raise PermissionError("Continuation is no longer waiting")
         continuation = current

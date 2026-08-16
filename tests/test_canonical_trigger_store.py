@@ -279,7 +279,7 @@ async def test_canonical_claim_transitions_and_receipts_survive_restart(tmp_path
     assert len(retried) == 1
     assert retried[0].fire_id == failed.fire_id
     assert retried[0].attempts == 2
-    assert retried[0].reclaimed is True
+    assert retried[0].reclaimed is False
     await reopened.close()
 
 

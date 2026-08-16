@@ -73,7 +73,7 @@ async def test_runtime_store_create_is_atomic_tokenless_and_revisioned(tmp_path,
         assert created.token not in raw
         assert "legacy-app" in raw
         reopened = FSContinuationStore(tmp_path / "continuations", secret=b"runtime-secret")
-        assert await reopened.get_by_id("cont-1") == closed
+        assert await reopened.get_by_id("run-1", "node-1", "cont-1") == closed
 
 
 @pytest.mark.asyncio

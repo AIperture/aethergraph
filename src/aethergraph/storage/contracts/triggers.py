@@ -288,6 +288,7 @@ class ClaimedTrigger:
 
     trigger: TriggerRecord
     claim: TriggerClaimRecord
+    reclaimed: bool = False
 
     def __post_init__(self) -> None:
         if self.trigger.trigger_id != self.claim.trigger_id:
@@ -296,6 +297,8 @@ class ClaimedTrigger:
             raise ValueError("trigger and claim scopes must match")
         if self.claim.status is not TriggerClaimStatus.LEASED:
             raise ValueError("claimed trigger must contain a leased claim")
+        if not isinstance(self.reclaimed, bool):
+            raise TypeError("reclaimed must be a boolean")
 
 
 class TriggerRepository(Protocol):
@@ -480,7 +483,8 @@ class TriggerRepository(Protocol):
 
         Notes:
             A `None` scope is an explicit trusted runtime-wide scan, not a fallback
-            after a scoped miss. Providers require atomic claim capability.
+            after a scoped miss. `reclaimed` is authored atomically and distinguishes
+            stale-lease recovery from an ordinary retry.
         """
         ...
 

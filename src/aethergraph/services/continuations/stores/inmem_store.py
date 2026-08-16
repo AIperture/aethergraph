@@ -134,7 +134,9 @@ class InMemoryContinuationStore:
             continuation_id = self._by_run_node.get((run_id, node_id))
             return self._records.get(continuation_id) if continuation_id else None
 
-    async def get_by_id(self, continuation_id: str) -> Continuation | None:
+    async def get_by_id(
+        self, run_id: str, node_id: str, continuation_id: str
+    ) -> Continuation | None:
         """Read one current record by stable continuation identity.
 
         Intro:
@@ -143,14 +145,16 @@ class InMemoryContinuationStore:
         Examples:
             Read a candidate:
             ```python
-            wait = await store.get_by_id("cont-1")
+            wait = await store.get_by_id("run-1", "node-1", "cont-1")
             ```
             Detect absence:
             ```python
-            assert await store.get_by_id("missing") is None
+            assert await store.get_by_id("run-1", "node-1", "missing") is None
             ```
 
         Args:
+            run_id: Exact run identity.
+            node_id: Exact node identity.
             continuation_id: Stable continuation identity.
 
         Returns:
@@ -160,7 +164,10 @@ class InMemoryContinuationStore:
             No token index participates in this trusted lookup.
         """
         with self._lock:
-            return self._records.get(continuation_id)
+            record = self._records.get(continuation_id)
+            if record is None or (record.run_id, record.node_id) != (run_id, node_id):
+                return None
+            return record
 
     async def resolve_token(self, token: str) -> Continuation | None:
         """Resolve an external bearer token through its protected digest.

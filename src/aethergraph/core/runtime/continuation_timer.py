@@ -7,15 +7,15 @@ from hashlib import sha256
 import logging
 import uuid
 
-from aethergraph.contracts.services.continuations import AsyncContinuationStore
+from aethergraph.contracts.services.continuations import (
+    AsyncContinuationLeaseStore,
+    AsyncContinuationStore,
+)
 from aethergraph.observability import OperationObserver, resolve_operation_observer
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.continuation import Continuation, ContinuationQuery
+from aethergraph.services.continuations.timer_lease import TimerLease
 from aethergraph.services.resume.router import ResumeRouter
-from aethergraph.storage.continuation_store.timer_leases import (
-    SQLiteContinuationTimerLeaseStore,
-    TimerLease,
-)
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class ContinuationTimerService:
         self,
         *,
         continuation_store: AsyncContinuationStore,
-        lease_store: SQLiteContinuationTimerLeaseStore,
+        lease_store: AsyncContinuationLeaseStore,
         resume_router: ResumeRouter,
         clock: SystemClock,
         worker_id: str | None = None,
@@ -174,7 +174,7 @@ class ContinuationTimerService:
         due = [self._due_continuation(value) for value in page.items]
         processed = 0
         for candidate in due:
-            lease = self.lease_store.claim(
+            lease = await self.lease_store.claim(
                 fire_id=candidate.fire_id,
                 continuation_id=candidate.continuation.continuation_id,
                 run_id=candidate.continuation.run_id,
@@ -240,9 +240,8 @@ class ContinuationTimerService:
                 self.retry_base_s * (2 ** max(0, lease.attempts - 1)),
             )
             next_attempt_at = None if dead_letter else now + timedelta(seconds=retry_delay)
-            changed = self.lease_store.record_failure(
-                fire_id=candidate.fire_id,
-                worker_id=self.worker_id,
+            changed = await self.lease_store.record_failure(
+                lease,
                 now=now,
                 next_attempt_at=next_attempt_at,
                 error=f"{type(exc).__name__}: {exc}",
@@ -258,11 +257,7 @@ class ContinuationTimerService:
             await self._observe(operation, candidate=candidate, lease=lease, error=exc)
             return
 
-        changed = self.lease_store.complete(
-            fire_id=candidate.fire_id,
-            worker_id=self.worker_id,
-            now=now,
-        )
+        changed = await self.lease_store.complete(lease, now=now)
         if not changed:
             raise RuntimeError(
                 "Continuation timer lease ownership lost for "

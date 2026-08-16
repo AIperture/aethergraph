@@ -104,7 +104,9 @@ class KVDocContinuationStore(InMemoryContinuationStore, AsyncContinuationStore):
         await self._ensure_loaded()
         return await super().get(run_id, node_id)
 
-    async def get_by_id(self, continuation_id: str) -> Continuation | None:
+    async def get_by_id(
+        self, run_id: str, node_id: str, continuation_id: str
+    ) -> Continuation | None:
         """Read one record by stable continuation identity.
 
         Intro:
@@ -113,14 +115,16 @@ class KVDocContinuationStore(InMemoryContinuationStore, AsyncContinuationStore):
         Examples:
             Read a timer candidate:
             ```python
-            wait = await store.get_by_id("cont-1")
+            wait = await store.get_by_id("run-1", "node-1", "cont-1")
             ```
             Detect absence:
             ```python
-            assert await store.get_by_id("missing") is None
+            assert await store.get_by_id("run-1", "node-1", "missing") is None
             ```
 
         Args:
+            run_id: Exact run identity.
+            node_id: Exact node identity.
             continuation_id: Stable continuation identity.
 
         Returns:
@@ -130,7 +134,7 @@ class KVDocContinuationStore(InMemoryContinuationStore, AsyncContinuationStore):
             No bearer token is required for trusted internal lookup.
         """
         await self._ensure_loaded()
-        return await super().get_by_id(continuation_id)
+        return await super().get_by_id(run_id, node_id, continuation_id)
 
     async def resolve_token(self, token: str) -> Continuation | None:
         """Resolve an external token through the protected manifest index.

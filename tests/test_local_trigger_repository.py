@@ -173,6 +173,27 @@ async def test_multi_worker_due_claim_is_atomic_and_advances_schedule(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_expired_trigger_lease_reports_exact_reclaim_evidence(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalTriggerRepository(database=database)
+    await repository.create(_trigger("trigger-stale"))
+    initial = (await repository.claim_due(_request(limit=1)))[0]
+
+    recovered = await repository.claim_due(
+        _request(
+            now=initial.claim.lease_until + timedelta(seconds=1),
+            worker_id="recovery-worker",
+            limit=1,
+        )
+    )
+
+    assert len(recovered) == 1
+    assert recovered[0].claim.fire_id == initial.claim.fire_id
+    assert recovered[0].reclaimed is True
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_retry_reclaim_precedes_new_due_and_delivery_updates_trigger(
     tmp_path: Path,
 ) -> None:
@@ -197,6 +218,7 @@ async def test_retry_reclaim_precedes_new_due_and_delivery_updates_trigger(
     batch = await repository.claim_due(_request(now=retry_at, worker_id="worker-2", limit=1))
     assert len(batch) == 1
     reclaimed = batch[0]
+    assert reclaimed.reclaimed is False
     assert reclaimed.claim.fire_id == initial.claim.fire_id
     assert reclaimed.claim.attempts == 2
     assert reclaimed.claim.revision == 3

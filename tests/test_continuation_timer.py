@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import sqlite3
 from typing import Any
 
 import pytest
@@ -170,7 +171,7 @@ async def test_deadline_timer_delivers_once_and_persists_receipt(tmp_path: Path)
         continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    receipt = timer.lease_store.get(fire_id)
+    receipt = await timer.lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None and receipt.status == "delivered"
     assert [record.name for record in sink.records] == ["claim", "delivery"]
 
@@ -271,7 +272,7 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
         continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    first_claim = lease_store.claim(
+    first_claim = await lease_store.claim(
         fire_id=fire_id,
         continuation_id=continuation.continuation_id,
         run_id=continuation.run_id,
@@ -294,7 +295,7 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
 
     assert await restarted.run_once() == 1
 
-    receipt = lease_store.get(fire_id)
+    receipt = await lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None
     assert receipt.status == "delivered"
     assert receipt.attempts == 2
@@ -346,7 +347,7 @@ async def test_absent_scheduler_retries_without_consuming_continuation(tmp_path:
         continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    receipt = timer.lease_store.get(fire_id)
+    receipt = await timer.lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None
     assert receipt.status == "retry"
 
@@ -374,7 +375,7 @@ async def test_retry_limit_dead_letters_and_preserves_continuation(tmp_path: Pat
         continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    receipt = timer.lease_store.get(fire_id)
+    receipt = await timer.lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None
     assert receipt.status == "dead_letter"
     assert await store.get(continuation.run_id, continuation.node_id) is not None
@@ -397,6 +398,46 @@ async def test_timer_start_and_shutdown_are_idempotent(tmp_path: Path) -> None:
     await timer.stop()
     await timer.stop()
     assert timer._task is None
+
+
+@pytest.mark.asyncio
+async def test_timer_lease_schema_upgrade_preserves_terminal_receipts(tmp_path: Path) -> None:
+    path = tmp_path / "timer-leases.db"
+    now = datetime(2026, 8, 13, tzinfo=UTC)
+    with sqlite3.connect(path) as connection:
+        connection.execute("""
+            CREATE TABLE continuation_timer_leases_v2 (
+                fire_id TEXT PRIMARY KEY,
+                continuation_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                scheduled_for REAL NOT NULL,
+                worker_id TEXT,
+                status TEXT NOT NULL,
+                lease_until REAL,
+                attempts INTEGER NOT NULL,
+                next_attempt_at REAL,
+                last_error TEXT,
+                updated_at REAL NOT NULL
+            )
+            """)
+        connection.execute(
+            """
+            INSERT INTO continuation_timer_leases_v2 (
+                fire_id, continuation_id, run_id, node_id, scheduled_for,
+                worker_id, status, lease_until, attempts, next_attempt_at,
+                last_error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, 'delivered', NULL, 2, NULL, NULL, ?)
+            """,
+            ("fire-old", "cont-old", "run-old", "node-old", now.timestamp(), now.timestamp()),
+        )
+
+    store = SQLiteContinuationTimerLeaseStore(path)
+    receipt = await store.get("run-old", "node-old", "fire-old")
+
+    assert receipt is not None
+    assert receipt.revision == 1
+    assert receipt.finished_at == now
 
 
 def test_legacy_wakeup_boundary_is_deleted() -> None:

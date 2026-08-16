@@ -14,6 +14,7 @@ from aethergraph.services.continuations.continuation import (
     Correlator,
     CreatedContinuation,
 )
+from aethergraph.services.continuations.timer_lease import TimerLease
 
 
 class AsyncContinuationStore(Protocol):
@@ -74,7 +75,9 @@ class AsyncContinuationStore(Protocol):
         """
         ...
 
-    async def get_by_id(self, continuation_id: str) -> Continuation | None:
+    async def get_by_id(
+        self, run_id: str, node_id: str, continuation_id: str
+    ) -> Continuation | None:
         """Read one continuation by stable identity.
 
         Intro:
@@ -83,14 +86,16 @@ class AsyncContinuationStore(Protocol):
         Examples:
             Read a timer candidate:
             ```python
-            wait = await store.get_by_id("cont-1")
+            wait = await store.get_by_id("run-1", "node-1", "cont-1")
             ```
             Detect absence:
             ```python
-            assert await store.get_by_id("missing") is None
+            assert await store.get_by_id("run-1", "node-1", "missing") is None
             ```
 
         Args:
+            run_id: Exact run identity.
+            node_id: Exact node identity.
             continuation_id: Stable continuation identity.
 
         Returns:
@@ -245,5 +250,164 @@ class AsyncContinuationStore(Protocol):
 
         Notes:
             Implementations must not replace indexed filters with unbounded global scans.
+        """
+        ...
+
+
+class AsyncContinuationLeaseStore(Protocol):
+    """Asynchronous provider-neutral timer claim and receipt boundary."""
+
+    async def claim(
+        self,
+        *,
+        fire_id: str,
+        continuation_id: str,
+        run_id: str,
+        node_id: str,
+        scheduled_for: datetime,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> TimerLease | None:
+        """Atomically claim one scheduled continuation occurrence.
+
+        Intro:
+            Creates, retries, or reclaims one exact provider-owned lease.
+
+        Examples:
+            Claim a due occurrence:
+            ```python
+            lease = await store.claim(
+                fire_id=fire_id, continuation_id=wait_id, run_id=run_id,
+                node_id=node_id, scheduled_for=scheduled_for,
+                worker_id=worker_id, now=now, lease_until=lease_until,
+            )
+            ```
+
+            Detect contention:
+            ```python
+            assert await store.claim(**request) is None
+            ```
+
+        Args:
+            fire_id: Stable scheduled occurrence identity.
+            continuation_id: Stable continuation identity.
+            run_id: Exact run identity.
+            node_id: Exact node identity.
+            scheduled_for: Exact timezone-aware occurrence time.
+            worker_id: Claiming worker identity.
+            now: Injected timezone-aware transition time.
+            lease_until: Time after which another worker may reclaim.
+
+        Returns:
+            TimerLease | None: Worker-owned lease or `None` when ineligible.
+
+        Notes:
+            Raw continuation tokens never participate in claim identity.
+        """
+        ...
+
+    async def complete(self, lease: TimerLease, *, now: datetime) -> bool:
+        """Atomically mark one owned lease delivered.
+
+        Intro:
+            Uses the lease revision and worker identity to retain a terminal receipt.
+
+        Examples:
+            Complete delivery:
+            ```python
+            changed = await store.complete(lease, now=now)
+            ```
+
+            Detect lost ownership:
+            ```python
+            assert not await store.complete(stale, now=now)
+            ```
+
+        Args:
+            lease: Exact current worker-owned lease.
+            now: Injected timezone-aware completion time.
+
+        Returns:
+            bool: Whether the terminal transition committed.
+
+        Notes:
+            Delivered receipts remain durable and immutable.
+        """
+        ...
+
+    async def record_failure(
+        self,
+        lease: TimerLease,
+        *,
+        now: datetime,
+        next_attempt_at: datetime | None,
+        error: str,
+        dead_letter: bool,
+    ) -> bool:
+        """Atomically record retry or terminal delivery failure.
+
+        Intro:
+            Releases an owned lease into bounded backoff or a dead-letter receipt.
+
+        Examples:
+            Schedule retry:
+            ```python
+            changed = await store.record_failure(
+                lease, now=now, next_attempt_at=retry_at,
+                error="unavailable", dead_letter=False,
+            )
+            ```
+
+            Dead-letter exhaustion:
+            ```python
+            changed = await store.record_failure(
+                lease, now=now, next_attempt_at=None,
+                error="exhausted", dead_letter=True,
+            )
+            ```
+
+        Args:
+            lease: Exact current worker-owned lease.
+            now: Injected timezone-aware transition time.
+            next_attempt_at: Next eligible time or `None` for dead letter.
+            error: Bounded failure description.
+            dead_letter: Whether to terminalize instead of retry.
+
+        Returns:
+            bool: Whether the exact owned-lease transition committed.
+
+        Notes:
+            Continuation lifecycle is unchanged when delivery fails.
+        """
+        ...
+
+    async def get(self, run_id: str, node_id: str, fire_id: str) -> TimerLease | None:
+        """Read one lease or retained receipt.
+
+        Intro:
+            Returns diagnostic state without changing ownership or retry eligibility.
+
+        Examples:
+            Read a receipt:
+            ```python
+            receipt = await store.get("run-1", "node-1", "fire-1")
+            ```
+
+            Detect absence:
+            ```python
+            assert await store.get("run-1", "node-1", "missing") is None
+            ```
+
+        Args:
+            run_id: Exact run identity.
+            node_id: Exact node identity.
+            fire_id: Stable occurrence identity.
+
+        Returns:
+            TimerLease | None: Current lease/receipt or `None`.
+
+        Notes:
+            Exact run/node identity prevents diagnostics from becoming a global scan.
         """
         ...

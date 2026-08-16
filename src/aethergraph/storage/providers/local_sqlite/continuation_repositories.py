@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 
 from ...contracts import (
+    ClaimedContinuationLease,
     ContinuationCorrelator,
     ContinuationDraft,
     ContinuationLeaseQuery,
@@ -168,10 +169,19 @@ class LocalContinuationRepository:
     async def create(self, draft: ContinuationDraft) -> CreatedContinuation:
         """Atomically create a continuation and all initial lookup indexes.
 
+        Intro:
+            Mints one bearer token and commits only its protected digest with the
+            tokenless record and initial correlator indexes.
+
         Examples:
             Create a wait:
                 ```python
                 created = await repository.create(draft)
+                ```
+
+            Publish the one-time token:
+                ```python
+                await channel.publish_wait(token=created.token)
                 ```
 
         Args:
@@ -201,6 +211,7 @@ class LocalContinuationRepository:
             next_wakeup_at=draft.next_wakeup_at,
             channel=draft.channel,
             correlators=draft.correlators,
+            attempts=draft.attempts,
             schema_version=draft.schema_version,
         )
 
@@ -471,27 +482,39 @@ class LocalContinuationLeaseRepository:
         self._database = database
         self._mode = database.mode
 
-    async def claim(self, request: ContinuationLeaseRequest) -> ContinuationLeaseRecord | None:
+    async def claim(self, request: ContinuationLeaseRequest) -> ClaimedContinuationLease | None:
         """Atomically create, retry, or reclaim one eligible timer fire.
+
+        Intro:
+            Claims one exact occurrence and returns provider-authored reclaim
+            evidence from the same transaction.
 
         Examples:
             Claim an occurrence:
                 ```python
-                lease = await repository.claim(request)
+                claimed = await repository.claim(request)
+                lease = claimed.record if claimed is not None else None
+                ```
+
+            Observe stale-lease recovery:
+                ```python
+                claimed = await repository.claim(recovery_request)
+                assert claimed is not None and claimed.reclaimed
                 ```
 
         Args:
             request: Exact occurrence, worker, clock, and lease interval.
 
         Returns:
-            ContinuationLeaseRecord | None: Worker-owned lease or `None`.
+            ClaimedContinuationLease | None: Worker-owned lease with exact reclaim
+            evidence, or `None`.
 
         Notes:
             Terminal receipts, active leases, and delayed retries are not claimable.
         """
         self._require_writable()
 
-        def commit(connection: sqlite3.Connection) -> ContinuationLeaseRecord | None:
+        def commit(connection: sqlite3.Connection) -> ClaimedContinuationLease | None:
             continuation_row = connection.execute(
                 "SELECT * FROM local_continuations WHERE continuation_id = ?",
                 (request.continuation_id,),
@@ -526,7 +549,7 @@ class LocalContinuationLeaseRepository:
                     lease_until=request.lease_until,
                 )
                 _insert_lease(connection, claimed)
-                return claimed
+                return ClaimedContinuationLease(record=claimed)
             current = _lease(row)
             if (
                 current.continuation_id != request.continuation_id
@@ -553,6 +576,7 @@ class LocalContinuationLeaseRepository:
                 and current.next_attempt_at > request.now
             ):
                 return None
+            reclaimed = current.status is ContinuationLeaseStatus.LEASED
             claimed = replace(
                 current,
                 status=ContinuationLeaseStatus.LEASED,
@@ -566,7 +590,7 @@ class LocalContinuationLeaseRepository:
                 finished_at=None,
             )
             _update_lease(connection, claimed)
-            return claimed
+            return ClaimedContinuationLease(record=claimed, reclaimed=reclaimed)
 
         return await self._database.transaction(commit)
 

@@ -65,6 +65,7 @@ class ContinuationDraft:
     next_wakeup_at: datetime | None = None
     channel: str | None = None
     correlators: tuple[ContinuationCorrelator, ...] = ()
+    attempts: int = 0
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -83,6 +84,8 @@ class ContinuationDraft:
             deadline=self.deadline,
             next_wakeup_at=self.next_wakeup_at,
         )
+        if isinstance(self.attempts, bool) or self.attempts < 0:
+            raise ValueError("attempts must be a non-negative integer")
         object.__setattr__(
             self,
             "resume_schema",
@@ -351,6 +354,20 @@ class ContinuationLeaseRecord:
             raise ValueError("schema_version must be a positive integer")
 
 
+@dataclass(frozen=True, slots=True)
+class ClaimedContinuationLease:
+    """Worker-owned lease plus exact stale-lease reclamation evidence."""
+
+    record: ContinuationLeaseRecord
+    reclaimed: bool = False
+
+    def __post_init__(self) -> None:
+        if self.record.status is not ContinuationLeaseStatus.LEASED:
+            raise ValueError("claimed continuation lease must contain a leased record")
+        if not isinstance(self.reclaimed, bool):
+            raise TypeError("reclaimed must be a boolean")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ContinuationLeaseQuery:
     """Bounded lease/receipt query using canonical scope and opaque cursor."""
@@ -569,11 +586,12 @@ class ContinuationRepository(Protocol):
 class ContinuationLeaseRepository(Protocol):
     """Durable provider-owned claims and receipts for continuation timers."""
 
-    async def claim(self, request: ContinuationLeaseRequest) -> ContinuationLeaseRecord | None:
+    async def claim(self, request: ContinuationLeaseRequest) -> ClaimedContinuationLease | None:
         """Atomically create, retry, or reclaim one eligible timer fire.
 
-        A delivered or dead-lettered receipt, active lease, or backoff-delayed retry
-        returns no claim. Each successful claim advances attempts and revision.
+        Intro:
+            A delivered or dead-lettered receipt, active lease, or backoff-delayed retry
+            returns no claim. Each successful claim advances attempts and revision.
 
         Examples:
             Claim a due fire:
@@ -591,7 +609,8 @@ class ContinuationLeaseRepository(Protocol):
             request: Exact occurrence, worker, clock, and lease interval.
 
         Returns:
-            ContinuationLeaseRecord | None: Worker-owned lease or `None` if ineligible.
+            ClaimedContinuationLease | None: Worker-owned lease with exact reclaim
+            evidence, or `None` if ineligible.
 
         Notes:
             Claim and stale-lease reclamation are one provider transaction; raw

@@ -817,7 +817,7 @@ def _to_legacy_claim(claimed: ClaimedTrigger) -> TriggerClaim:
         worker_id=str(claimed.claim.worker_id),
         lease_until=claimed.claim.lease_until,  # type: ignore[arg-type]
         attempts=claimed.claim.attempts,
-        reclaimed=claimed.claim.attempts > 1,
+        reclaimed=claimed.reclaimed,
     )
 
 
