@@ -79,14 +79,34 @@ class SessionStore(Protocol):
         self,
         session_id: str,
         *,
+        occurrence_id: str,
         created_at: datetime | None = None,
     ) -> None:
-        """
-        Update artifact-related stats for a session:
+        """Count one exact artifact occurrence for a session.
 
-          - increment artifact_count
-          - update last_artifact_at
+        The stable artifact identity makes retry behavior explicit while preserving
+        the frozen no-op behavior for an absent session.
 
-        No-op if session_id does not exist.
+        Examples:
+            Count an artifact:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+            Retry the same occurrence:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+        Args:
+            session_id: Exact session identity to update.
+            occurrence_id: Stable artifact occurrence idempotency identity.
+            created_at: Optional artifact creation time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its session was absent.
+
+        Notes:
+            Reusing one artifact identity with a different timestamp fails directly.
         """
         ...

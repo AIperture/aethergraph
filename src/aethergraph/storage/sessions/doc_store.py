@@ -199,3 +199,62 @@ class DocSessionStore(SessionStore):
     async def delete(self, session_id: str) -> None:
         async with self._lock:
             await self._ds.delete(self._doc_id(session_id))
+
+    async def record_artifact(
+        self,
+        session_id: str,
+        *,
+        occurrence_id: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        """Count one stable document-backed session artifact occurrence.
+
+        Receipt state stays nested in the session document and is excluded from the
+        public Session projection.
+
+        Examples:
+            Count an artifact:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+            Replay the receipt:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+        Args:
+            session_id: Exact session identity to update.
+            occurrence_id: Stable artifact occurrence identity.
+            created_at: Optional artifact creation time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its session was absent.
+
+        Notes:
+            Reusing an artifact identity with another timestamp raises `ValueError`.
+        """
+        if not isinstance(occurrence_id, str) or not occurrence_id.strip():
+            raise ValueError("occurrence_id must be a non-empty string")
+        occurred_at = created_at or datetime.now(UTC)
+        occurred_text = _encode_dt(occurred_at)
+        doc_id = self._doc_id(session_id)
+        async with self._lock:
+            doc = await self._ds.get(doc_id)
+            if doc is None:
+                return
+            receipts = doc.setdefault("_artifact_occurrences", {})
+            if not isinstance(receipts, dict):
+                raise ValueError("Session artifact receipts are malformed")
+            previous = receipts.get(occurrence_id)
+            if previous is not None:
+                if previous != occurred_text:
+                    raise ValueError("Session artifact occurrence identity conflicts")
+                return
+            receipts[occurrence_id] = occurred_text
+            doc["artifact_count"] = int(doc.get("artifact_count") or 0) + 1
+            last_artifact_at = _decode_dt(doc.get("last_artifact_at"))
+            doc["last_artifact_at"] = _encode_dt(max(occurred_at, last_artifact_at or occurred_at))
+            updated_at = _decode_dt(doc.get("updated_at"))
+            doc["updated_at"] = _encode_dt(max(occurred_at, updated_at or occurred_at))
+            await self._ds.put(doc_id, doc)

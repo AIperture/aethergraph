@@ -126,6 +126,17 @@ class SQLiteRunStoreSync:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_runs_session_started ON runs(session_id, started_at DESC)"
         )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_artifact_occurrences (
+                run_id TEXT NOT NULL,
+                occurrence_id TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                occurred_at REAL NOT NULL,
+                PRIMARY KEY(run_id, occurrence_id)
+            )
+            """
+        )
 
         self._lock = threading.RLock()
 
@@ -282,64 +293,101 @@ class SQLiteRunStoreSync:
         run_id: str,
         *,
         artifact_id: str,
+        occurrence_id: str,
         created_at: datetime | None = None,
         max_recent: int = 10,
     ) -> None:
+        """Atomically count one stable SQLite run artifact occurrence.
+
+        The receipt keeps content and occurrence identities distinct while its run
+        counters and recent-artifact preview update in the same transaction.
+
+        Examples:
+            Count an occurrence:
+                ```python
+                runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+            Replay the occurrence:
+                ```python
+                runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+        Args:
+            run_id: Exact run identity to update.
+            artifact_id: Stable content artifact identity.
+            occurrence_id: Stable occurrence idempotency identity.
+            created_at: Optional occurrence time; defaults to current UTC.
+            max_recent: Positive bound for retained content artifact identities.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its run was absent.
+
+        Notes:
+            Reusing an occurrence with different content or time raises `ValueError`.
         """
-        Optional API used by ArtifactFacade._record via getattr(..., 'record_artifact', None).
-
-        Updates artifact-related metadata:
-
-          - artifact_count
-          - first_artifact_at
-          - last_artifact_at
-          - recent_artifact_ids (bounded to `max_recent`)
-
-        No-op if the run does not exist.
-        """
+        _artifact_identity(artifact_id, occurrence_id)
+        if isinstance(max_recent, bool) or not isinstance(max_recent, int) or max_recent < 1:
+            raise ValueError("max_recent must be a positive integer")
+        occurred_at = created_at or datetime.now(UTC)
+        occurred_ts = _dt_to_ts(occurred_at)
+        assert occurred_ts is not None
         with self._lock:
-            row = self._db.execute(
-                "SELECT data_json FROM runs WHERE run_id = ?",
-                (run_id,),
-            ).fetchone()
-
-            if not row:
-                return
-
-            # Decode current RunRecord from JSON
-            data = json.loads(row[0])
-            record = _decode_run(data)
-
-            # Choose timestamp
-            ts = created_at or datetime.now(UTC)
-
-            # Update stats
-            record.artifact_count = (record.artifact_count or 0) + 1
-
-            if record.first_artifact_at is None or ts < record.first_artifact_at:
-                record.first_artifact_at = ts
-
-            if record.last_artifact_at is None or ts > record.last_artifact_at:
-                record.last_artifact_at = ts
-
-            # Maintain a small rolling window of recent IDs
-            if artifact_id:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute(
+                    "SELECT data_json FROM runs WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if row is None:
+                    self._db.execute("COMMIT")
+                    return
+                receipt = self._db.execute(
+                    """
+                    SELECT artifact_id, occurred_at FROM run_artifact_occurrences
+                    WHERE run_id = ? AND occurrence_id = ?
+                    """,
+                    (run_id, occurrence_id),
+                ).fetchone()
+                if receipt is not None:
+                    if str(receipt[0]) != artifact_id or float(receipt[1]) != occurred_ts:
+                        raise ValueError("Run artifact occurrence identity conflicts")
+                    self._db.execute("COMMIT")
+                    return
+                self._db.execute(
+                    """
+                    INSERT INTO run_artifact_occurrences(
+                        run_id, occurrence_id, artifact_id, occurred_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (run_id, occurrence_id, artifact_id, occurred_ts),
+                )
+                record = _decode_run(json.loads(row[0]))
+                record.artifact_count = (record.artifact_count or 0) + 1
+                record.first_artifact_at = min(
+                    occurred_at,
+                    record.first_artifact_at or occurred_at,
+                )
+                record.last_artifact_at = max(
+                    occurred_at,
+                    record.last_artifact_at or occurred_at,
+                )
                 recent = list(record.recent_artifact_ids or [])
                 recent.append(artifact_id)
                 record.recent_artifact_ids = recent[-max_recent:]
-
-            # Re-encode and persist JSON
-            new_data = _encode_run(record)
-            payload = json.dumps(new_data, ensure_ascii=False)
-
-            self._db.execute(
-                """
-                UPDATE runs
-                SET data_json = ?
-                WHERE run_id = ?
-                """,
-                (payload, run_id),
-            )
+                payload = json.dumps(_encode_run(record), ensure_ascii=False)
+                self._db.execute(
+                    "UPDATE runs SET data_json = ? WHERE run_id = ?",
+                    (payload, run_id),
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
 
 
 class SQLiteRunStore(RunStore):
@@ -406,15 +454,51 @@ class SQLiteRunStore(RunStore):
         run_id: str,
         *,
         artifact_id: str,
+        occurrence_id: str,
         created_at: datetime | None = None,
     ) -> None:
-        """
-        Async façade for artifact stats update.
-        Called from ArtifactFacade._record via getattr(..., 'record_artifact', None).
+        """Count one stable SQLite run artifact occurrence asynchronously.
+
+        The async boundary delegates both content and occurrence identities to the
+        transactional synchronous store.
+
+        Examples:
+            Count an occurrence:
+                ```python
+                await runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+            Replay the occurrence:
+                ```python
+                await runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+        Args:
+            run_id: Exact run identity to update.
+            artifact_id: Stable content artifact identity.
+            occurrence_id: Stable occurrence idempotency identity.
+            created_at: Optional occurrence time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its run was absent.
+
+        Notes:
+            Collision and transaction errors propagate from the synchronous store.
         """
         await asyncio.to_thread(
             self._sync.record_artifact,
             run_id,
             artifact_id=artifact_id,
+            occurrence_id=occurrence_id,
             created_at=created_at,
         )
+
+
+def _artifact_identity(artifact_id: str, occurrence_id: str) -> None:
+    for name, value in (("artifact_id", artifact_id), ("occurrence_id", occurrence_id)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")

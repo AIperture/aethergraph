@@ -266,7 +266,7 @@ class DocRunStore(RunStore):
         # RunStore that pushes filtering + sorting + LIMIT/OFFSET (or keyset) into SQL.
         if not hasattr(self._ds, "list"):
             raise RuntimeError(
-                "Underlying DocStore does not implement list(); " "cannot support RunStore.list()."
+                "Underlying DocStore does not implement list(); cannot support RunStore.list()."
             )
 
         async with self._lock:
@@ -299,3 +299,78 @@ class DocRunStore(RunStore):
         if limit is not None:
             records = records[:limit]
         return records
+
+    async def record_artifact(
+        self,
+        run_id: str,
+        *,
+        artifact_id: str,
+        occurrence_id: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        """Count one stable document-backed run artifact occurrence.
+
+        Receipt state remains nested in the run document while content identities
+        continue to populate the bounded recent-artifact preview.
+
+        Examples:
+            Count an occurrence:
+                ```python
+                await runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+            Replay the occurrence:
+                ```python
+                await runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+        Args:
+            run_id: Exact run identity to update.
+            artifact_id: Stable content artifact identity.
+            occurrence_id: Stable occurrence idempotency identity.
+            created_at: Optional occurrence time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its run was absent.
+
+        Notes:
+            Reusing an occurrence with different content or time raises `ValueError`.
+        """
+        _artifact_identity(artifact_id, occurrence_id)
+        occurred_at = created_at or datetime.now(UTC)
+        occurred_text = _encode_dt(occurred_at)
+        doc_id = self._doc_id(run_id)
+        async with self._lock:
+            doc = await self._ds.get(doc_id)
+            if doc is None:
+                return
+            receipts = doc.setdefault("_artifact_occurrences", {})
+            if not isinstance(receipts, dict):
+                raise ValueError("Run artifact receipts are malformed")
+            receipt = {"artifact_id": artifact_id, "occurred_at": occurred_text}
+            previous = receipts.get(occurrence_id)
+            if previous is not None:
+                if previous != receipt:
+                    raise ValueError("Run artifact occurrence identity conflicts")
+                return
+            receipts[occurrence_id] = receipt
+            doc["artifact_count"] = int(doc.get("artifact_count") or 0) + 1
+            first_artifact_at = _decode_dt(doc.get("first_artifact_at"))
+            last_artifact_at = _decode_dt(doc.get("last_artifact_at"))
+            doc["first_artifact_at"] = _encode_dt(
+                min(occurred_at, first_artifact_at or occurred_at)
+            )
+            doc["last_artifact_at"] = _encode_dt(max(occurred_at, last_artifact_at or occurred_at))
+            recent = list(doc.get("recent_artifact_ids") or [])
+            doc["recent_artifact_ids"] = [*recent, artifact_id][-10:]
+            await self._ds.put(doc_id, doc)
+
+
+def _artifact_identity(artifact_id: str, occurrence_id: str) -> None:
+    for name, value in (("artifact_id", artifact_id), ("occurrence_id", occurrence_id)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")

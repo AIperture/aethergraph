@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
+from uuid import uuid4
 import warnings
 
 from aethergraph.contracts.services.artifacts import Artifact, AsyncArtifactStore
@@ -275,6 +276,7 @@ class ArtifactFacade:
         created_at_ts = created_dt.timestamp()
 
         # 2) Record in index + occurrence log
+        a.occurrence_id = a.occurrence_id or uuid4().hex
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
         self.last_artifact = a
@@ -372,6 +374,7 @@ class ArtifactFacade:
                 await record_artifact(
                     a.run_id,
                     artifact_id=a.artifact_id,
+                    occurrence_id=a.occurrence_id,
                     created_at=created_dt,
                 )
 
@@ -383,6 +386,7 @@ class ArtifactFacade:
             if callable(sess_record_artifact):
                 await sess_record_artifact(
                     session_id,
+                    occurrence_id=a.occurrence_id,
                     created_at=created_dt,
                 )
 
@@ -1977,6 +1981,7 @@ class ArtifactFacade:
         Returns:
             None: Updates index/occurrence state.
         """
+        a.occurrence_id = a.occurrence_id or uuid4().hex
         await self.index.upsert(a)
         await self.index.record_occurrence(a)
         self.last_artifact = a

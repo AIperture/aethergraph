@@ -10,6 +10,7 @@ from aethergraph.core.runtime.run_types import SessionKind
 class InMemorySessionStore(SessionStore):
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
+        self._artifact_occurrences: dict[str, dict[str, datetime]] = {}
         self._lock = asyncio.Lock()  # TODO: confirm async lock is fine bc this will only be used inside uvicorn process with UI.
 
     async def create(
@@ -52,6 +53,7 @@ class InMemorySessionStore(SessionStore):
                 updated_at=now,
             )
             self._sessions[resolved_session_id] = sess
+            self._artifact_occurrences[resolved_session_id] = {}
             return sess
 
     async def get(self, session_id: str) -> Session | None:
@@ -125,3 +127,59 @@ class InMemorySessionStore(SessionStore):
     async def delete(self, session_id: str) -> None:
         async with self._lock:
             self._sessions.pop(session_id, None)
+            self._artifact_occurrences.pop(session_id, None)
+
+    async def record_artifact(
+        self,
+        session_id: str,
+        *,
+        occurrence_id: str,
+        created_at: datetime | None = None,
+    ) -> None:
+        """Count one stable in-memory session artifact occurrence.
+
+        The receipt map gives ephemeral storage the same retry and collision behavior
+        expected by the canonical projection.
+
+        Examples:
+            Count an artifact:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+            Replay the receipt:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+        Args:
+            session_id: Exact session identity to update.
+            occurrence_id: Stable artifact occurrence identity.
+            created_at: Optional artifact creation time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its session was absent.
+
+        Notes:
+            Reusing an artifact identity with another timestamp raises `ValueError`.
+        """
+        if not isinstance(occurrence_id, str) or not occurrence_id.strip():
+            raise ValueError("occurrence_id must be a non-empty string")
+        occurred_at = created_at or datetime.now(UTC)
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+            receipts = self._artifact_occurrences.setdefault(session_id, {})
+            previous = receipts.get(occurrence_id)
+            if previous is not None:
+                if previous != occurred_at:
+                    raise ValueError("Session artifact occurrence identity conflicts")
+                return
+            receipts[occurrence_id] = occurred_at
+            session.artifact_count += 1
+            session.last_artifact_at = max(
+                occurred_at,
+                session.last_artifact_at or occurred_at,
+            )
+            session.updated_at = max(session.updated_at, occurred_at)

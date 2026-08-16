@@ -123,6 +123,16 @@ class SQLiteSessionStoreSync:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_kind_updated ON sessions(kind, updated_at DESC)"
         )
+        self._db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_artifact_occurrences (
+                session_id TEXT NOT NULL,
+                occurrence_id TEXT NOT NULL,
+                occurred_at REAL NOT NULL,
+                PRIMARY KEY(session_id, occurrence_id)
+            )
+            """
+        )
 
         self._lock = threading.RLock()
 
@@ -231,10 +241,20 @@ class SQLiteSessionStoreSync:
 
     def delete(self, session_id: str) -> None:
         with self._lock:
-            self._db.execute(
-                "DELETE FROM sessions WHERE session_id = ?",
-                (session_id,),
-            )
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                self._db.execute(
+                    "DELETE FROM session_artifact_occurrences WHERE session_id = ?",
+                    (session_id,),
+                )
+                self._db.execute(
+                    "DELETE FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                )
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
 
     def list_for_user(
         self,
@@ -301,29 +321,83 @@ class SQLiteSessionStoreSync:
         self,
         session_id: str,
         *,
+        occurrence_id: str,
         created_at: datetime | None = None,
     ) -> None:
+        """Atomically count one stable SQLite session artifact occurrence.
+
+        Receipt insertion and the public session counters commit together under one
+        immediate write transaction.
+
+        Examples:
+            Count an artifact:
+                ```python
+                sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+            Replay the receipt:
+                ```python
+                sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+        Args:
+            session_id: Exact session identity to update.
+            occurrence_id: Stable artifact occurrence identity.
+            created_at: Optional artifact creation time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its session was absent.
+
+        Notes:
+            Reusing an artifact identity with another timestamp raises `ValueError`.
         """
-        Optional API used by ArtifactFacade._record via getattr(..., 'record_artifact').
-        Updates artifact_count + last_artifact_at + updated_at.
-        """
-        sess = self.get(session_id)
-        if not sess:
-            return
-
-        ts = created_at or datetime.now(UTC)
-
-        sess.artifact_count = (sess.artifact_count or 0) + 1
-        if sess.last_artifact_at is None or ts > sess.last_artifact_at:
-            sess.last_artifact_at = ts
-
-        # For UI, bump updated_at as well
-        if ts > sess.updated_at:
-            sess.updated_at = ts
-        else:
-            sess.updated_at = datetime.now(UTC)
-
-        self._upsert(sess)
+        if not isinstance(occurrence_id, str) or not occurrence_id.strip():
+            raise ValueError("occurrence_id must be a non-empty string")
+        occurred_at = created_at or datetime.now(UTC)
+        occurred_ts = _dt_to_ts(occurred_at)
+        assert occurred_ts is not None
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute(
+                    "SELECT data_json FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    self._db.execute("COMMIT")
+                    return
+                receipt = self._db.execute(
+                    """
+                    SELECT occurred_at FROM session_artifact_occurrences
+                    WHERE session_id = ? AND occurrence_id = ?
+                    """,
+                    (session_id, occurrence_id),
+                ).fetchone()
+                if receipt is not None:
+                    if float(receipt[0]) != occurred_ts:
+                        raise ValueError("Session artifact occurrence identity conflicts")
+                    self._db.execute("COMMIT")
+                    return
+                self._db.execute(
+                    """
+                    INSERT INTO session_artifact_occurrences(
+                        session_id, occurrence_id, occurred_at
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (session_id, occurrence_id, occurred_ts),
+                )
+                session = _doc_to_session(json.loads(row[0]))
+                session.artifact_count = (session.artifact_count or 0) + 1
+                session.last_artifact_at = max(
+                    occurred_at,
+                    session.last_artifact_at or occurred_at,
+                )
+                session.updated_at = max(session.updated_at, occurred_at)
+                self._upsert(session)
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
 
 
 class SQLiteSessionStore(SessionStore):
@@ -409,14 +483,39 @@ class SQLiteSessionStore(SessionStore):
         self,
         session_id: str,
         *,
+        occurrence_id: str,
         created_at: datetime | None = None,
     ) -> None:
-        """
-        Optional method, called via getattr(..., 'record_artifact', None)
-        from ArtifactFacade._record.
+        """Count one stable SQLite session artifact occurrence asynchronously.
+
+        The async boundary delegates the exact identity and timestamp to the
+        transactional synchronous store.
+
+        Examples:
+            Count an artifact:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+            Replay the receipt:
+                ```python
+                await sessions.record_artifact("session-1", occurrence_id="occurrence-1")
+                ```
+
+        Args:
+            session_id: Exact session identity to update.
+            occurrence_id: Stable artifact occurrence identity.
+            created_at: Optional artifact creation time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its session was absent.
+
+        Notes:
+            Collision and transaction errors propagate from the synchronous store.
         """
         await asyncio.to_thread(
             self._sync.record_artifact,
             session_id,
+            occurrence_id=occurrence_id,
             created_at=created_at,
         )
