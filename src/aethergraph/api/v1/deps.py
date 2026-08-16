@@ -6,7 +6,7 @@ from fastapi import Depends, Header, HTTPException, Request, status  # type: ign
 from pydantic import BaseModel, Field  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
-from aethergraph.services.auth.authn import AuthnService, DemoGrant
+from aethergraph.services.auth.authn import AuthenticationRejected, AuthnService, DemoGrant
 from aethergraph.services.auth.authz import AuthZService
 from aethergraph.services.scope.tenant import registry_tenant_from_identity
 
@@ -88,19 +88,58 @@ async def get_identity(
     x_client_id: str | None = Header(None, alias="X-Client-ID"),
     x_mode: str | None = Header(None, alias="X-Mode"),
 ) -> RequestIdentity:
+    """Resolve one HTTP request into the public request-identity contract.
+
+    Intro:
+        The dependency normalizes headers, cookie state, and deployment policy through
+        the configured Authn service before projecting one API identity.
+
+    Examples:
+        Resolve through FastAPI dependency injection:
+            ```python
+            identity = await get_identity(request)
+            ```
+
+        Supply explicit proxy header values in a direct test:
+            ```python
+            identity = await get_identity(
+                request,
+                x_user_id="user-1",
+                x_org_id="org-1",
+            )
+            ```
+
+    Args:
+        request: Incoming FastAPI request with query and cookie state.
+        x_user_id: Optional trusted `X-User-ID` header value.
+        x_org_id: Optional trusted `X-Org-ID` header value.
+        x_roles: Optional comma-separated trusted `X-Roles` header value.
+        x_client_id: Optional deprecated `X-Client-ID` compatibility value.
+        x_mode: Optional `X-Mode` compatibility value.
+
+    Returns:
+        RequestIdentity: Normalized cloud, demo, or local request identity.
+
+    Notes:
+        A rejected presented session maps to HTTP 401 and cannot continue through
+        another authentication mode in the same request.
+    """
     deploy_mode = _get_deploy_mode()
     roles = x_roles.split(",") if x_roles else []
     client_id = x_client_id or request.query_params.get("client_id")
     authn = get_authn()
-    resolved = authn.resolve(
-        deploy_mode=deploy_mode,
-        session_id=request.cookies.get(authn.cookie_name),
-        client_id=client_id,
-        x_user_id=x_user_id,
-        x_org_id=x_org_id,
-        roles=roles,
-        x_mode=x_mode,
-    )
+    try:
+        resolved = authn.resolve(
+            deploy_mode=deploy_mode,
+            session_id=request.cookies.get(authn.cookie_name),
+            client_id=client_id,
+            x_user_id=x_user_id,
+            x_org_id=x_org_id,
+            roles=roles,
+            x_mode=x_mode,
+        )
+    except AuthenticationRejected as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     if resolved.mode == "cloud_proxy":
         return RequestIdentity(
             user_id=resolved.user_id,

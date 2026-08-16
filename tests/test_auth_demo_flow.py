@@ -13,7 +13,7 @@ from aethergraph.api.v1 import (
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.config.config import AppSettings
 from aethergraph.server.app_factory import create_app
-from aethergraph.services.auth.authn import AuthnService, DemoGrant
+from aethergraph.services.auth.authn import AuthenticationRejected, AuthnService, DemoGrant
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
 
@@ -67,6 +67,41 @@ def test_same_grant_creates_distinct_guest_users(auth_client: TestClient) -> Non
     sess_b = authn.create_demo_session(grant=grant)
     assert sess_a.user_id != sess_b.user_id
     assert sess_a.org_id == sess_b.org_id == "org-demo"
+
+
+def test_revoked_demo_session_fails_closed_without_public_demo_fallback(
+    auth_client: TestClient,
+) -> None:
+    _create_invite_and_redeem(auth_client)
+    authn = auth_client.app.state.container.authn
+    authn.revoke_grant("grant-1")
+
+    response = auth_client.get(
+        "/api/v1/whoami",
+        headers={"X-Client-ID": "browser-123", "X-Mode": "demo"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Demo session grant is no longer valid"
+
+
+def test_missing_demo_session_grant_is_deleted_and_rejected() -> None:
+    authn = AuthnService(secret="test-secret")
+    grant = DemoGrant(grant_id="grant-1", org_id="org-1")
+    session = authn.create_demo_session(grant=grant)
+    authn.delete_grant(grant.grant_id)
+
+    with pytest.raises(AuthenticationRejected, match="no longer valid"):
+        authn.resolve(
+            deploy_mode="demo",
+            session_id=session.session_id,
+            client_id="browser-1",
+            x_user_id=None,
+            x_org_id=None,
+            x_mode="demo",
+        )
+
+    assert authn.get_session(session.session_id) is None
 
 
 def test_cloud_proxy_headers_resolve_identity(auth_client: TestClient) -> None:

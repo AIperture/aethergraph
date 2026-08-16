@@ -15,6 +15,10 @@ log = logging.getLogger(__name__)
 AuthSessionMode = Literal["local", "demo_guest", "cloud_proxy"]
 
 
+class AuthenticationRejected(ValueError):
+    """Reject one presented authentication state without selecting another mode."""
+
+
 class DemoGrant(BaseModel):
     grant_id: str
     org_id: str
@@ -320,10 +324,59 @@ class AuthnService:
         roles: list[str] | None = None,
         x_mode: str | None = None,
     ) -> ResolvedAuth:
+        """Resolve one request into an exact authenticated or local identity mode.
+
+        Intro:
+            Request credentials are evaluated in authored precedence order. A presented
+            demo session must still reference a valid grant or resolution fails closed.
+
+        Examples:
+            Resolve a cloud-proxy request:
+                ```python
+                resolved = authn.resolve(
+                    deploy_mode="cloud",
+                    session_id=None,
+                    client_id=None,
+                    x_user_id="user-1",
+                    x_org_id="org-1",
+                )
+                ```
+
+            Resolve a stored demo session:
+                ```python
+                resolved = authn.resolve(
+                    deploy_mode="demo",
+                    session_id=session.session_id,
+                    client_id="browser-1",
+                    x_user_id=None,
+                    x_org_id=None,
+                )
+                ```
+
+        Args:
+            deploy_mode: Exact configured deployment mode.
+            session_id: Optional presented demo-session cookie identity.
+            client_id: Optional deprecated client compatibility identity.
+            x_user_id: Optional trusted cloud-proxy user identity.
+            x_org_id: Optional trusted cloud-proxy organization identity.
+            roles: Optional trusted cloud-proxy roles.
+            x_mode: Optional explicit request mode compatibility value.
+
+        Returns:
+            ResolvedAuth: Exact resolved request authentication state.
+
+        Notes:
+            A missing, expired, or revoked grant for a presented unexpired demo
+            session raises `AuthenticationRejected`; resolution never falls through
+            to cloud, public-demo, or local mode for that request.
+        """
         roles = roles or []
         sess = self.get_session(session_id)
         if sess is not None:
             grant = self.get_grant(sess.grant_id)
+            if grant is None:
+                self.delete_session(sess.session_id)
+                raise AuthenticationRejected("Demo session grant is no longer valid")
             return ResolvedAuth(
                 mode="demo_guest",
                 auth_source="demo_guest_session",
