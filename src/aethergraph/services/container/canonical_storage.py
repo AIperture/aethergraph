@@ -186,12 +186,12 @@ def bind_canonical_storage_services(
     memory_hot_ttl_seconds: float = 900.0,
     memory_signal_threshold: float = 0.0,
 ) -> CanonicalStorageServices:
-    """Bind the complete inactive storage-service graph to one coherent bundle.
+    """Bind the complete runtime storage-service graph to one coherent bundle.
 
     Intro:
-        Centralizes every provider-backed runtime projection that can be composed
-        before the S9 atomic activation. Request and execution identities remain
-        factories on the returned aggregate rather than global mutable state.
+        Centralizes every provider-backed runtime projection. Request and execution
+        identities remain factories on the returned aggregate rather than global
+        mutable state.
 
     Examples:
         Bind a ready local bundle:

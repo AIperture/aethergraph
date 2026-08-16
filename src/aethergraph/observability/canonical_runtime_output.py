@@ -295,8 +295,8 @@ def bind_canonical_runtime_output(
     """Bind runtime-output capture to the exact canonical bundle field.
 
     The factory performs no provider selection, filesystem access, capture-proxy
-    installation, or I/O. S9 composition may install the returned focused sink into
-    the existing capture boundary after the bundle is ready.
+    installation, or I/O. Runtime composition installs the returned focused sink
+    after the bundle is ready.
 
     Examples:
         Bind production composition inputs:

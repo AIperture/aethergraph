@@ -1,4 +1,4 @@
-"""Benchmark canonical S5 occurrence queries and public artifact-page hydration."""
+"""Benchmark canonical occurrence queries and public artifact-page hydration."""
 
 from __future__ import annotations
 
@@ -322,7 +322,7 @@ async def _run(samples: int) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Run and print the reproducible S5 artifact benchmark.
+    """Run and print the reproducible canonical artifact benchmark.
 
     The command creates one temporary manifested local provider, seeds normalized
     content/retention/occurrence state, measures indexed queries and complete frozen

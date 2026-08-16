@@ -1,4 +1,4 @@
-"""Benchmark canonical S4 memory and Agent-state paths against the frozen S0 shapes."""
+"""Benchmark canonical provider-backed memory and Agent-state paths."""
 
 from __future__ import annotations
 
@@ -252,7 +252,7 @@ async def _run(samples: int, contenders: int) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Run and print the reproducible S4 state/memory benchmark.
+    """Run and print the reproducible canonical state/memory benchmark.
 
     Parses bounded workload sizes, creates a temporary manifested provider workspace,
     records latency/correctness/resource evidence, checkpoints it, and removes it.

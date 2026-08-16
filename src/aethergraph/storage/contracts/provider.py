@@ -192,8 +192,8 @@ class StorageBundle(Protocol):
             StorageHealth: Current readiness and a bounded diagnostic detail.
 
         Notes:
-            Focused typed store fields are added as their S1 protocols are normalized;
-            untyped service lookup is intentionally absent.
+            Every runtime repository is exposed as a focused typed field; untyped
+            service lookup is intentionally absent.
         """
         ...
 

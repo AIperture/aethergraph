@@ -1,4 +1,4 @@
-"""Benchmark canonical S6 indexing and all exact local search modes."""
+"""Benchmark canonical indexing and every exact local search mode."""
 
 from __future__ import annotations
 
@@ -265,7 +265,7 @@ async def _run(samples: int) -> dict[str, Any]:
 
 
 def main() -> None:
-    """Run and print the reproducible canonical S6 search benchmark.
+    """Run and print the reproducible canonical search benchmark.
 
     The benchmark creates one manifested local provider, measures synchronous exact
     indexing plus structural/semantic/lexical/hybrid queries, verifies normalized tag

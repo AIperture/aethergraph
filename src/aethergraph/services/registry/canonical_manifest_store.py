@@ -406,8 +406,8 @@ def bind_canonical_registration_manifest_store(
 ) -> CanonicalRegistrationManifestStore:
     """Bind registry persistence to the bundle's exact manifest document field.
 
-    The binding is construction-only and leaves current `DefaultContainer` registry
-    composition authoritative until the S9 atomic cut.
+    The binding is construction-only; `DefaultContainer` owns provider selection,
+    readiness, publication, and shutdown.
 
     Examples:
         Bind production composition inputs:

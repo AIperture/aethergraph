@@ -37,7 +37,7 @@ def bind_canonical_integration_persistence(
 
     The binding exposes the existing focused service protocols while claims,
     bindings, accepted ingress, and semantic events flow through their exact bundle
-    repositories. It performs no I/O and leaves the active installer unchanged.
+    repositories. It performs no I/O or provider lifecycle work.
 
     Examples:
         Bind production composition inputs:
@@ -67,7 +67,7 @@ def bind_canonical_integration_persistence(
         CanonicalIntegrationPersistence: Focused service-facing store projections.
 
     Notes:
-        This S7 binding does not select or open a provider, resolve a path, activate
+        This binding does not select or open a provider, resolve a path, activate
         `DefaultContainer`, retry another store, or accept deprecated App metadata.
     """
     return CanonicalIntegrationPersistence(

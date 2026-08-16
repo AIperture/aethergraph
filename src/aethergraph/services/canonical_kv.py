@@ -700,7 +700,7 @@ def bind_canonical_key_value_facade(
     """Bind the general KV facade to the exact bundle repository.
 
     Intro:
-        Constructs one inactive scoped facade without provider selection, local path
+        Constructs one active scoped facade without provider selection, local path
         resolution, cache layering, I/O, or lifecycle transfer.
 
     Examples:

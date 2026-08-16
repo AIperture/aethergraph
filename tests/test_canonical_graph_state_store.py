@@ -9,7 +9,6 @@ import pytest
 
 from aethergraph.contracts.services.state_stores import GraphSnapshot, GraphStateStore, StateEvent
 from aethergraph.services.state_stores.canonical_store import CanonicalGraphStateStore
-from aethergraph.services.state_stores.json_store import JsonGraphStateStore
 from aethergraph.services.state_stores.scope import scope_for_runtime_env
 from aethergraph.storage.contracts import (
     RunRecord,
@@ -117,7 +116,6 @@ def test_graph_state_public_docstrings_follow_required_format() -> None:
     for owner in (
         GraphStateStore,
         CanonicalGraphStateStore,
-        JsonGraphStateStore,
     ):
         for name in methods:
             docstring = inspect.getdoc(getattr(owner, name)) or ""

@@ -327,10 +327,7 @@ async def load_latest_snapshot_json(
     snap = await store.load_latest_snapshot(scope, run_id)
     if not snap:
         return None
-    # JsonGraphStateStore serializes GraphSnapshot via snap.__dict__
-    # load_latest_snapshot already returns a GraphSnapshot(**jsondict).
-    # Convert back to plain JSON-ish dict:
-
+    # Project the canonical service result back to the runtime's JSON-shaped payload.
     return {
         "run_id": snap.run_id,
         "graph_id": snap.graph_id,

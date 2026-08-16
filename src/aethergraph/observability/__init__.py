@@ -20,12 +20,6 @@ from .inspection import (
     ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
 )
-from .legacy_cleanup import (
-    LegacyObservabilityCleanupResult,
-    LegacyObservabilityReport,
-    cleanup_legacy_observability,
-    scan_legacy_observability,
-)
 from .logger import LoggingConfig, StdLoggerService
 from .metering import CanonicalMeteringService
 from .models import (
@@ -54,8 +48,6 @@ __all__ = [
     "CanonicalObservationService",
     "CanonicalInspectionReader",
     "LLMObservationRecord",
-    "LegacyObservabilityCleanupResult",
-    "LegacyObservabilityReport",
     "LoggingConfig",
     "ObservationFilter",
     "ObservationPolicy",
@@ -74,14 +66,12 @@ __all__ = [
     "RetentionPolicy",
     "StdLoggerService",
     "StorageStats",
-    "cleanup_legacy_observability",
     "bind_canonical_runtime_output",
     "bind_canonical_observation_service",
     "emit_agent_event",
     "extract_metrics",
     "register_default_agent_event_types",
     "resolve_operation_observer",
-    "scan_legacy_observability",
     "summarize_payload",
     "open_observability_workspace",
     "CanonicalMeteringService",

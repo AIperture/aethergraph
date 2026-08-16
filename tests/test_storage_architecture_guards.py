@@ -11,6 +11,7 @@ from aethergraph.storage.contracts import StorageOpenRequest
 
 CONTRACT_ROOT = Path(__file__).parents[1] / "src" / "aethergraph" / "storage" / "contracts"
 STORAGE_ROOT = CONTRACT_ROOT.parent
+REPOSITORY_ROOT = CONTRACT_ROOT.parents[3]
 CANONICAL_FILES = (
     *sorted(CONTRACT_ROOT.glob("*.py")),
     CONTRACT_ROOT.parent / "composition.py",
@@ -130,3 +131,32 @@ def test_memory_contract_has_no_duplicate_vector_or_embedding_protocol() -> None
 
     assert "VectorIndex" not in class_names
     assert "EmbeddingsClient" not in class_names
+
+
+def test_final_storage_tree_has_no_migration_or_legacy_runtime_scaffolding() -> None:
+    retired_paths = (
+        "docs/storage_provider_s9_retirement_manifest.json",
+        "docs/storage_provider_migration_s0.md",
+        "docs/observability_legacy_cleanup.md",
+        "scripts/storage_provider_s0_baseline.py",
+        "src/aethergraph/cli/commands/observability.py",
+        "src/aethergraph/observability/legacy_cleanup.py",
+        "src/aethergraph/services/state_stores/json_store.py",
+        "tests/cli/test_observability_cli.py",
+        "tests/test_graph_state_store.py",
+        "tests/test_legacy_observability_cleanup.py",
+        "tests/test_storage_s9_retirement_manifest.py",
+    )
+
+    assert [path for path in retired_paths if (REPOSITORY_ROOT / path).exists()] == []
+
+
+def test_registration_cli_remains_api_only() -> None:
+    source = (REPOSITORY_ROOT / "src/aethergraph/cli/commands/register.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "FSDocStore" not in source
+    assert "RegistrationManifestStore" not in source
+    assert "_register_via_local" not in source
+    assert 'choices=["auto", "api", "local"]' not in source

@@ -714,7 +714,7 @@ def bind_canonical_continuation_store(
     """Bind the runtime continuation API to the bundle's exact repository field.
 
     Intro:
-        Constructs only an inactive service projection from an already-open bundle.
+        Constructs the active service projection from an already-open bundle.
 
     Examples:
         Bind production composition:
@@ -756,7 +756,7 @@ def bind_canonical_continuation_lease_store(
     """Bind timer delivery to the bundle's exact canonical lease field.
 
     Intro:
-        Constructs only an inactive timer-lease projection from the same open bundle.
+        Constructs the active timer-lease projection from the same open bundle.
 
     Examples:
         Bind production composition:

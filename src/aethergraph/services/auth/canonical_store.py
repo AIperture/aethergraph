@@ -255,7 +255,7 @@ class CanonicalAuthStore:
 
         Notes:
             Duplicate identities raise `StorageConflictError` directly; callers may
-            translate that domain outcome at the HTTP boundary during S9.
+            translate that domain outcome at the HTTP boundary.
         """
         record = await self._invite_repository.compare_and_set(
             self._owner_scope,
@@ -543,7 +543,7 @@ def bind_canonical_auth_store(
     """Bind canonical auth persistence to exact fields from one open bundle.
 
     Intro:
-        Constructs the inactive auth projection without provider selection, I/O,
+        Constructs the active auth projection without provider selection, I/O,
         lifecycle ownership, or legacy-store discovery.
 
     Examples:
@@ -570,7 +570,7 @@ def bind_canonical_auth_store(
         CanonicalAuthStore: Exact grant and invite service projection.
 
     Notes:
-        Binding has no fallback and does not activate the S9 composition path.
+        Binding has no fallback and does not own provider lifecycle.
     """
     return CanonicalAuthStore(
         grant_repository=bundle.auth_grants,

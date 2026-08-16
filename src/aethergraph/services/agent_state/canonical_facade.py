@@ -466,7 +466,8 @@ class CanonicalAgentStateFacade:
             None: The facade is ready without performing I/O.
 
         Notes:
-            S9 performs the one-cut runtime activation; this class has no legacy mode.
+            Runtime composition supplies the canonical state store; this class has no
+            alternate storage mode.
         """
         self._state = state_store
         self.scope = scope

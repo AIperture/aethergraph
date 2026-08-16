@@ -1,4 +1,4 @@
-"""Strict provider-selection settings prepared for the S9 composition cut."""
+"""Strict configuration for selecting one exact runtime storage provider."""
 
 from __future__ import annotations
 

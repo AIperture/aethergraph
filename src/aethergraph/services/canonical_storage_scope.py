@@ -1,4 +1,4 @@
-"""Shared trusted-scope rules for inactive canonical service projections."""
+"""Shared trusted-scope rules for canonical provider-backed services."""
 
 from __future__ import annotations
 

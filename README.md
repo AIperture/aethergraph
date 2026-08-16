@@ -104,6 +104,12 @@ semantic v2 Tool failures are documented in
 > In your **project root** (the directory where you run your Python entry point).
 > You can override with `AETHERGRAPH_ENV_FILE=/path/to/.env` if needed.
 
+Runtime persistence uses one exact storage provider. `local.sqlite` is the default;
+external providers must be registered explicitly by an embedding Host, and provider
+failure never falls back to local storage. Configuration, external injection,
+workspace-format compatibility, backup/restore, and the clean-cut history warning are
+documented in [Storage providers and workspace operations](docs/storage_providers.md).
+
 Reasoning defaults can be set per profile in `.env` and overridden per call:
 
 ```ini

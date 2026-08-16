@@ -47,7 +47,7 @@ _CANONICAL_SCOPE_NAMES = (
 
 
 class CanonicalObservationService(Protocol):
-    """Provider-neutral observation service contract prepared for S9 activation."""
+    """Provider-neutral observation service used by the active runtime."""
 
     repository: ObservationRepository
     owner_scope: StorageScope
@@ -265,8 +265,8 @@ def bind_canonical_observation_service(
 ) -> CanonicalObservationService:
     """Bind AG observation writes to the bundle's exact observation field.
 
-    The binding constructs only an inactive service projection and leaves current
-    `DefaultContainer` composition and SQLite observation ownership unchanged.
+    The binding projects the active observation service from the already-open
+    provider bundle without taking over lifecycle ownership.
 
     Examples:
         Bind production composition inputs:
@@ -293,7 +293,7 @@ def bind_canonical_observation_service(
         policy: AG observation capture and retention policy.
 
     Returns:
-        CanonicalObservationService: Provider-neutral inactive service projection.
+        CanonicalObservationService: Provider-neutral active service projection.
 
     Notes:
         The binding performs no selection, I/O, fallback, close, or secondary write.

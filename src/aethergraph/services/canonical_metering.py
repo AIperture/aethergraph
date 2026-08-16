@@ -253,8 +253,8 @@ def bind_canonical_metering_store(
     """Bind metering to the exact observation field of one bundle.
 
     Intro:
-        Constructs the inactive projection without provider selection, I/O, legacy
-        EventLog construction, or lifecycle transfer.
+        Constructs the active projection without provider selection, I/O, or
+        lifecycle transfer.
 
     Examples:
         Bind production composition inputs:
@@ -278,7 +278,7 @@ def bind_canonical_metering_store(
         CanonicalMeteringStore: Exact observation-backed metering projection.
 
     Notes:
-        Binding does not activate S9 or own bundle close.
+        Binding does not select storage or own bundle close.
     """
     return CanonicalMeteringStore(
         repository=bundle.observations,

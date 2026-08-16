@@ -642,8 +642,8 @@ def bind_canonical_trigger_store(
 ) -> CanonicalTriggerStore:
     """Bind the frozen trigger service to the bundle's exact trigger field.
 
-    The function constructs only a service projection and leaves the active SQLite
-    trigger installer and `DefaultContainer` unchanged until S9.
+    The function constructs the active service projection from the already-open
+    provider bundle without selecting storage or taking over lifecycle ownership.
 
     Examples:
         Bind production composition inputs:
