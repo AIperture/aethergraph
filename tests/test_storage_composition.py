@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import inspect
 from pathlib import Path
@@ -56,8 +57,10 @@ class _Bundle:
         )
         self.ready = ready
         self.close_calls = 0
+        self.health_calls = 0
 
     async def health(self) -> StorageHealth:
+        self.health_calls += 1
         return StorageHealth(ready=self.ready, detail="unavailable" if not self.ready else "ready")
 
     async def close(self) -> None:
@@ -81,8 +84,8 @@ class _Provider:
 
 
 class _RetryableCloseBundle(_Bundle):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, *, ready: bool = True) -> None:
+        super().__init__(ready=ready)
         self.remaining_failures = 1
 
     async def close(self) -> None:
@@ -124,6 +127,16 @@ def test_provider_construction_is_synchronous_while_bundle_lifecycle_is_async() 
     assert inspect.iscoroutinefunction(StorageBundle.close) is True
 
 
+def test_two_phase_composition_public_docstrings_follow_required_format() -> None:
+    for name in ("prepare", "start", "open", "health", "close"):
+        docstring = inspect.getdoc(getattr(StorageComposition, name)) or ""
+        assert docstring.index("Intro:") < docstring.index("Examples:")
+        assert docstring.index("Examples:") < docstring.index("Args:")
+        assert docstring.index("Args:") < docstring.index("Returns:")
+        assert docstring.index("Returns:") < docstring.index("Notes:")
+        assert docstring.count("```python") >= 2
+
+
 def test_composition_rejects_non_capability_requirements() -> None:
     with pytest.raises(TypeError, match="StorageCapability"):
         StorageComposition(
@@ -148,6 +161,42 @@ async def test_composition_opens_validates_and_closes_one_exact_bundle(tmp_path:
     assert provider.bundle.close_calls == 1
     with pytest.raises(StorageHealthError, match="no active bundle"):
         await composition.health()
+
+
+@pytest.mark.asyncio
+async def test_prepare_is_synchronous_and_start_is_idempotent(tmp_path: Path) -> None:
+    composition, provider = _composition(_Bundle())
+
+    bundle = composition.prepare(_request(tmp_path))
+
+    assert bundle is provider.bundle
+    assert provider.open_calls == 1
+    assert bundle.health_calls == 0
+    with pytest.raises(StorageHealthError, match="no active bundle"):
+        await composition.health()
+
+    first, second = await asyncio.gather(composition.start(), composition.start())
+
+    assert first is bundle
+    assert second is bundle
+    assert bundle.health_calls == 1
+    assert provider.open_calls == 1
+    await composition.close()
+
+
+@pytest.mark.asyncio
+async def test_prepared_bundle_can_close_without_readiness(tmp_path: Path) -> None:
+    composition, provider = _composition(_Bundle())
+    composition.prepare(_request(tmp_path))
+
+    await composition.close()
+    await composition.close()
+
+    assert provider.open_calls == 1
+    assert provider.bundle.health_calls == 0
+    assert provider.bundle.close_calls == 1
+    with pytest.raises(StorageHealthError, match="already closed"):
+        await composition.start()
 
 
 @pytest.mark.asyncio
@@ -205,6 +254,33 @@ async def test_failed_bundle_close_remains_retryable(tmp_path: Path) -> None:
 
     assert bundle.close_calls == 1
     assert (await composition.health()).ready is True
+
+    await composition.close()
+
+    assert bundle.close_calls == 2
+    with pytest.raises(StorageHealthError, match="no active bundle"):
+        await composition.health()
+
+
+@pytest.mark.asyncio
+async def test_failed_startup_cleanup_retains_exact_bundle_for_close_retry(
+    tmp_path: Path,
+) -> None:
+    bundle = _RetryableCloseBundle(ready=False)
+    composition, provider = _composition(bundle)
+    composition.prepare(_request(tmp_path))
+
+    with pytest.raises(StorageHealthError, match="cleanup must be retried"):
+        await composition.start()
+
+    assert provider.open_calls == 1
+    assert bundle.health_calls == 1
+    assert bundle.close_calls == 1
+    with pytest.raises(StorageHealthError, match="startup already failed"):
+        composition.prepare(_request(tmp_path))
+    with pytest.raises(StorageHealthError, match="startup already failed"):
+        await composition.start()
+    assert provider.open_calls == 1
 
     await composition.close()
 
