@@ -13,10 +13,6 @@ from test_storage_focused_protocols import (
 )
 
 from aethergraph.storage.contracts import (
-    ObservationLLMSummaryQuery,
-    ObservationLLMSummaryRecord,
-    ObservationTraceSummaryQuery,
-    ObservationTraceSummaryRecord,
     StorageBundle,
     StorageCapabilities,
     StorageCapability,
@@ -27,64 +23,30 @@ from aethergraph.storage.contracts import (
     StorageOpenRequest,
     StorageProviderSelection,
 )
+from storage_conformance.runtime_repositories import (
+    InMemoryContinuationLeaseRepository,
+    InMemoryContinuationRepository,
+    InMemoryDocumentStore,
+    InMemoryExternalSessionBindingRepository,
+    InMemoryInboundEventRepository,
+    InMemoryIngressIdempotencyRepository,
+    InMemoryKeyValueStore,
+    InMemoryObservationRepository,
+    InMemoryRunRepository,
+    InMemoryRunResultRepository,
+    InMemoryRuntimeOutputSink,
+    InMemorySemanticEventRepository,
+    InMemorySessionRepository,
+    InMemoryTriggerRepository,
+)
 
 EXTERNAL_PROVIDER_NAME = "test.external"
-
-
-@dataclass(frozen=True, slots=True)
-class StoreHandle:
-    name: str
-    resource: object
 
 
 @dataclass(slots=True)
 class SharedResource:
     close_calls: int = 0
     closed: bool = False
-
-
-@dataclass(slots=True)
-class DeterministicExternalObservationRepository:
-    """Filesystem-free typed aggregate surface for external-provider conformance."""
-
-    trace_queries: list[ObservationTraceSummaryQuery]
-    llm_queries: list[ObservationLLMSummaryQuery]
-
-    def __init__(self) -> None:
-        self.trace_queries = []
-        self.llm_queries = []
-
-    async def summarize_traces(
-        self,
-        query: ObservationTraceSummaryQuery,
-    ) -> ObservationTraceSummaryRecord:
-        self.trace_queries.append(query)
-        return ObservationTraceSummaryRecord(
-            span_count=2,
-            error_count=1,
-            total_duration_ms=12,
-            trace_id_count=2,
-            trace_ids=("trace-a",),
-            trace_ids_truncated=True,
-            top_failing_services={"runner": 1},
-            latest_error_at=query.occurred_at_or_after,
-        )
-
-    async def summarize_llm_calls(
-        self,
-        query: ObservationLLMSummaryQuery,
-    ) -> ObservationLLMSummaryRecord:
-        self.llm_queries.append(query)
-        return ObservationLLMSummaryRecord(
-            total_calls=2,
-            total_prompt_tokens=5,
-            total_completion_tokens=3,
-            total_tokens=8,
-            error_count=1,
-            model_count=2,
-            by_model={"model-a": 1},
-            by_model_truncated=True,
-        )
 
 
 class DeterministicExternalBundle:
@@ -95,6 +57,8 @@ class DeterministicExternalBundle:
         StorageCapability.ATOMIC_COMPARE_AND_SET,
         StorageCapability.ORDERED_APPEND,
         StorageCapability.MONOTONIC_CURSORS,
+        StorageCapability.TTL,
+        StorageCapability.LEASES,
         StorageCapability.BLOB_STREAMING,
         StorageCapability.BLOB_RANGE_READ,
         StorageCapability.SEARCH_STRUCTURAL,
@@ -110,12 +74,14 @@ class DeterministicExternalBundle:
         self,
         mode: StorageOpenMode,
         *,
+        clock,
         ready: bool,
         close_failures: int,
     ) -> None:
         self.mode = mode
         self.resource = SharedResource()
         self.ready = ready
+        self.health_calls = 0
         self.close_failures = close_failures
         self.events = _EventStore()
         self.memory_events = _EventStore()
@@ -123,28 +89,26 @@ class DeterministicExternalBundle:
         self.blobs = _BlobStore()
         self.artifacts = _ArtifactRepository(self.blobs)
         self.search = _SearchBackend()
-        self.observations = DeterministicExternalObservationRepository()
-        for name in (
-            "kv",
-            "documents",
-            "auth_grants",
-            "auth_invites",
-            "registry_manifests",
-            "runs",
-            "run_results",
-            "sessions",
-            "continuations",
-            "continuation_leases",
-            "triggers",
-            "ingress_idempotency",
-            "external_session_bindings",
-            "inbound_events",
-            "semantic_events",
-            "runtime_output",
-        ):
-            setattr(self, name, StoreHandle(name=name, resource=self.resource))
+        self.kv = InMemoryKeyValueStore(clock)
+        self.documents = InMemoryDocumentStore(clock)
+        self.auth_grants = InMemoryKeyValueStore(clock)
+        self.auth_invites = InMemoryKeyValueStore(clock)
+        self.registry_manifests = InMemoryDocumentStore(clock)
+        self.runs = InMemoryRunRepository()
+        self.run_results = InMemoryRunResultRepository()
+        self.sessions = InMemorySessionRepository()
+        self.continuations = InMemoryContinuationRepository()
+        self.continuation_leases = InMemoryContinuationLeaseRepository()
+        self.triggers = InMemoryTriggerRepository()
+        self.observations = InMemoryObservationRepository(clock)
+        self.ingress_idempotency = InMemoryIngressIdempotencyRepository()
+        self.external_session_bindings = InMemoryExternalSessionBindingRepository()
+        self.inbound_events = InMemoryInboundEventRepository()
+        self.semantic_events = InMemorySemanticEventRepository()
+        self.runtime_output = InMemoryRuntimeOutputSink()
 
     async def health(self) -> StorageHealth:
+        self.health_calls += 1
         if self.resource.closed:
             return StorageHealth(ready=False, detail="closed")
         return StorageHealth(ready=self.ready, detail="ready" if self.ready else "unavailable")
@@ -187,6 +151,7 @@ class DeterministicExternalProvider:
         self.open_calls += 1
         bundle = DeterministicExternalBundle(
             request.mode,
+            clock=request.clock,
             ready=self.ready,
             close_failures=self.close_failures,
         )

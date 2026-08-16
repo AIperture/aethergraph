@@ -20,8 +20,12 @@ from aethergraph.storage.contracts import (
     EventDraft,
     EventQuery,
     EventStore,
+    LLMCallDraft,
+    ObservationCaptureMode,
+    ObservationDraft,
     ObservationLLMSummaryQuery,
     ObservationRepository,
+    ObservationStatus,
     ObservationTraceSummaryQuery,
     PageRequest,
     SearchBackend,
@@ -37,6 +41,71 @@ from aethergraph.storage.contracts import (
 )
 
 NOW = datetime(2026, 8, 14, 12, tzinfo=UTC)
+
+
+async def seed_observation_summary_conformance(
+    observations: ObservationRepository,
+) -> None:
+    scope = StorageScope(project_id="project-1", run_id="summary-run-1")
+    await observations.append_many(
+        (
+            ObservationDraft(
+                observation_id="conformance-trace-a",
+                category="trace",
+                name="span-a",
+                summary="failed span",
+                occurred_at=NOW,
+                scope=scope,
+                trace_id="trace-a",
+                producer="runner",
+                status=ObservationStatus.ERROR,
+                attributes={"duration_ms": 7, "error": {"type": "RuntimeError"}},
+            ),
+            ObservationDraft(
+                observation_id="conformance-trace-b",
+                category="trace",
+                name="span-b",
+                summary="successful span",
+                occurred_at=NOW,
+                scope=scope,
+                trace_id="trace-b",
+                attributes={"duration_ms": 5},
+            ),
+        )
+    )
+    for call_id, model, usage, error_type in (
+        ("conformance-a", "model-a", {"input_tokens": 2, "output_tokens": 1}, None),
+        (
+            "conformance-b",
+            "model-b",
+            {"prompt_tokens": 3, "completion_tokens": 2},
+            "ProviderError",
+        ),
+    ):
+        await observations.append_llm_call(
+            LLMCallDraft(
+                llm_call_id=call_id,
+                observation=ObservationDraft(
+                    observation_id=f"conformance-llm-{call_id}",
+                    category="llm",
+                    name="chat",
+                    summary="LLM call",
+                    occurred_at=NOW,
+                    scope=scope,
+                    trace_id=f"llm-{call_id}",
+                    status=(
+                        ObservationStatus.ERROR if error_type is not None else ObservationStatus.OK
+                    ),
+                ),
+                call_type="chat",
+                provider="external-test",
+                model=model,
+                capture_mode=ObservationCaptureMode.OFF,
+                usage=usage,
+                error_type=error_type,
+                error_message="failed" if error_type is not None else None,
+            )
+        )
 
 
 def event(event_id: str, scope: StorageScope, *, topic: str = "memory") -> EventDraft:

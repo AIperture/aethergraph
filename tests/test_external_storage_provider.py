@@ -15,6 +15,7 @@ from storage_conformance.suite import (
     check_observation_summary_conformance,
     check_search_backend_conformance,
     check_state_store_conformance,
+    seed_observation_summary_conformance,
 )
 
 from aethergraph.contracts.services.state_stores import GraphSnapshot, StateEvent
@@ -106,6 +107,7 @@ async def test_external_provider_passes_shared_store_and_composition_conformance
     await check_blob_store_conformance(bundle.blobs)
     await check_artifact_repository_conformance(bundle.artifacts, bundle.blobs)
     await check_search_backend_conformance(bundle.search)
+    await seed_observation_summary_conformance(bundle.observations)
     await check_observation_summary_conformance(bundle.observations)
 
     graph_scope = StorageScope(
@@ -199,7 +201,7 @@ async def test_external_invalid_config_fails_without_open_or_files(tmp_path: Pat
     [
         (
             DeterministicExternalProvider(),
-            frozenset({StorageCapability.TTL}),
+            frozenset({StorageCapability.MIGRATIONS}),
             StorageCapabilityError,
         ),
         (
