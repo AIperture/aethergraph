@@ -48,6 +48,13 @@ class ObservationCaptureMode(StrEnum):
     FULL = "full"
 
 
+class ObservationUsageDimension(StrEnum):
+    """Canonical logical scope dimension used for bounded usage accounting."""
+
+    TRACE = "trace"
+    RUN = "run"
+
+
 class ObservationResourceRelation(StrEnum):
     """Canonical relationship from an observation to an external resource."""
 
@@ -92,6 +99,7 @@ class ObservationDraft:
     scope: StorageScope
     status: ObservationStatus = ObservationStatus.OK
     severity: ObservationSeverity = ObservationSeverity.INFO
+    producer: str | None = None
     trace_id: str | None = None
     turn_id: str | None = None
     parent_observation_id: str | None = None
@@ -113,6 +121,7 @@ class ObservationDraft:
             occurred_at=self.occurred_at,
             status=self.status,
             severity=self.severity,
+            producer=self.producer,
             trace_id=self.trace_id,
             turn_id=self.turn_id,
             parent_observation_id=self.parent_observation_id,
@@ -144,6 +153,7 @@ class ObservationRecord:
     cursor: str
     status: ObservationStatus = ObservationStatus.OK
     severity: ObservationSeverity = ObservationSeverity.INFO
+    producer: str | None = None
     trace_id: str | None = None
     turn_id: str | None = None
     parent_observation_id: str | None = None
@@ -165,6 +175,7 @@ class ObservationRecord:
             occurred_at=self.occurred_at,
             status=self.status,
             severity=self.severity,
+            producer=self.producer,
             trace_id=self.trace_id,
             turn_id=self.turn_id,
             parent_observation_id=self.parent_observation_id,
@@ -193,6 +204,7 @@ def _validate_observation(
     occurred_at: datetime,
     status: ObservationStatus,
     severity: ObservationSeverity,
+    producer: str | None,
     trace_id: str | None,
     turn_id: str | None,
     parent_observation_id: str | None,
@@ -217,6 +229,7 @@ def _validate_observation(
         raise TypeError("status must be an ObservationStatus")
     if not isinstance(severity, ObservationSeverity):
         raise TypeError("severity must be an ObservationSeverity")
+    _optional_nonempty("producer", producer)
     for field_name, value in (
         ("trace_id", trace_id),
         ("turn_id", turn_id),
@@ -248,6 +261,8 @@ class ObservationQuery:
     scope: StorageScope
     page: PageRequest = PageRequest()
     categories: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+    producers: tuple[str, ...] = ()
     statuses: tuple[ObservationStatus, ...] = ()
     severities: tuple[ObservationSeverity, ...] = ()
     trace_id: str | None = None
@@ -260,6 +275,8 @@ class ObservationQuery:
     def __post_init__(self) -> None:
         for name, values in (
             ("categories", self.categories),
+            ("names", self.names),
+            ("producers", self.producers),
             ("statuses", self.statuses),
             ("severities", self.severities),
         ):
@@ -267,8 +284,13 @@ class ObservationQuery:
                 raise TypeError(f"{name} must be an immutable tuple")
             if len(set(values)) != len(values):
                 raise ValueError(f"{name} must not contain duplicates")
-        if any(not isinstance(value, str) or not value.strip() for value in self.categories):
-            raise ValueError("categories must contain non-empty strings")
+        for name, values in (
+            ("categories", self.categories),
+            ("names", self.names),
+            ("producers", self.producers),
+        ):
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise ValueError(f"{name} must contain non-empty strings")
         if any(not isinstance(value, ObservationStatus) for value in self.statuses):
             raise TypeError("statuses must contain ObservationStatus values")
         if any(not isinstance(value, ObservationSeverity) for value in self.severities):
@@ -591,6 +613,10 @@ class ObservationPurgeRequest:
     scope: StorageScope
     dry_run: bool = True
     categories: tuple[str, ...] = ()
+    capture_modes: tuple[ObservationCaptureMode, ...] = ()
+    retention_classes: tuple[str, ...] = ()
+    severities: tuple[ObservationSeverity, ...] = ()
+    excluded_severities: tuple[ObservationSeverity, ...] = ()
     trace_id: str | None = None
     occurred_before: datetime | None = None
     expired_before: datetime | None = None
@@ -600,12 +626,33 @@ class ObservationPurgeRequest:
     def __post_init__(self) -> None:
         if not isinstance(self.dry_run, bool):
             raise TypeError("dry_run must be a boolean")
-        if not isinstance(self.categories, tuple):
-            raise TypeError("categories must be an immutable tuple")
-        if any(not isinstance(value, str) or not value.strip() for value in self.categories):
-            raise ValueError("categories must contain non-empty strings")
-        if len(set(self.categories)) != len(self.categories):
-            raise ValueError("categories must not contain duplicates")
+        for name, values in (
+            ("categories", self.categories),
+            ("capture_modes", self.capture_modes),
+            ("retention_classes", self.retention_classes),
+            ("severities", self.severities),
+            ("excluded_severities", self.excluded_severities),
+        ):
+            if not isinstance(values, tuple):
+                raise TypeError(f"{name} must be an immutable tuple")
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} must not contain duplicates")
+        for name, values in (
+            ("categories", self.categories),
+            ("retention_classes", self.retention_classes),
+        ):
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise ValueError(f"{name} must contain non-empty strings")
+        if any(not isinstance(value, ObservationCaptureMode) for value in self.capture_modes):
+            raise TypeError("capture_modes must contain ObservationCaptureMode values")
+        for name, values in (
+            ("severities", self.severities),
+            ("excluded_severities", self.excluded_severities),
+        ):
+            if any(not isinstance(value, ObservationSeverity) for value in values):
+                raise TypeError(f"{name} must contain ObservationSeverity values")
+        if set(self.severities) & set(self.excluded_severities):
+            raise ValueError("included and excluded severities must not overlap")
         _optional_nonempty("trace_id", self.trace_id)
         for name in ("occurred_before", "expired_before"):
             value = getattr(self, name)
@@ -698,6 +745,43 @@ class ObservationStorageStats:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ObservationScopeUsageRecord:
+    """Logical observation usage for one trace or run scope."""
+
+    dimension: ObservationUsageDimension
+    scope_id: str
+    latest_at: datetime
+    observation_count: int
+    logical_bytes: int
+    pinned: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dimension, ObservationUsageDimension):
+            raise TypeError("dimension must be an ObservationUsageDimension")
+        _nonempty("scope_id", self.scope_id)
+        _utc("latest_at", self.latest_at)
+        for name in ("observation_count", "logical_bytes"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not isinstance(self.pinned, bool):
+            raise TypeError("pinned must be a boolean")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ObservationScopeUsageQuery:
+    """Bounded logical usage query for one trace or run dimension."""
+
+    scope: StorageScope
+    dimension: ObservationUsageDimension
+    page: PageRequest = PageRequest()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.dimension, ObservationUsageDimension):
+            raise TypeError("dimension must be an ObservationUsageDimension")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ObservationScopeManagementRecord:
     """Revisioned retention and visibility policy for one logical scope key."""
 
@@ -733,6 +817,32 @@ class ObservationScopeManagementRecord:
             raise ValueError("tags must not contain duplicates")
         if self.expires_at is not None:
             _utc("expires_at", self.expires_at)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ObservationScopeManagementQuery:
+    """Bounded indexed query for explicit observation scope-management records."""
+
+    scope: StorageScope
+    page: PageRequest = PageRequest()
+    trace_id: str | None = None
+    pinned: bool | None = None
+    hidden: bool | None = None
+    deleted: bool | None = None
+    retention_classes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _optional_nonempty("trace_id", self.trace_id)
+        for name in ("pinned", "hidden", "deleted"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, bool):
+                raise TypeError(f"{name} must be a boolean when supplied")
+        if not isinstance(self.retention_classes, tuple):
+            raise TypeError("retention_classes must be an immutable tuple")
+        if len(set(self.retention_classes)) != len(self.retention_classes):
+            raise ValueError("retention_classes must not contain duplicates")
+        if any(not isinstance(value, str) or not value.strip() for value in self.retention_classes):
+            raise ValueError("retention_classes must contain non-empty strings")
 
 
 class ObservationRepository(Protocol):
@@ -977,6 +1087,85 @@ class ObservationRepository(Protocol):
 
         Notes:
             Physical filenames and SQLite WAL/SHM concepts are not canonical fields.
+        """
+        ...
+
+    async def query_scope_usage(
+        self,
+        query: ObservationScopeUsageQuery,
+    ) -> Page[ObservationScopeUsageRecord]:
+        """Query bounded logical observation usage by trace or run.
+
+        The provider computes logical bytes and observation counts for the requested
+        dimension before ordering by latest activity and applying cursor pagination.
+
+        Examples:
+            List the newest trace usage:
+                ```python
+                page = await observations.query_scope_usage(
+                    ObservationScopeUsageQuery(
+                        scope=scope,
+                        dimension=ObservationUsageDimension.TRACE,
+                    )
+                )
+                ```
+
+            Continue a run-usage page:
+                ```python
+                page = await observations.query_scope_usage(
+                    replace(query, page=PageRequest(limit=50, cursor=cursor))
+                )
+                ```
+
+        Args:
+            query: Canonical scope, trace-or-run dimension, and opaque page request.
+
+        Returns:
+            Page[ObservationScopeUsageRecord]: Logical usage records and continuation cursor.
+
+        Notes:
+            Results are logical provider accounting, not physical database allocation.
+            Unbounded scope lists and service-side broad scans are forbidden.
+        """
+        ...
+
+    async def query_scope_management(
+        self,
+        query: ObservationScopeManagementQuery,
+    ) -> Page[ObservationScopeManagementRecord]:
+        """Query a bounded page of explicit scope-management records.
+
+        Visibility, deletion, pin, trace, and retention-class predicates execute in
+        the provider before stable revision/update-time pagination.
+
+        Examples:
+            List suppressed scopes:
+                ```python
+                page = await observations.query_scope_management(
+                    ObservationScopeManagementQuery(scope=scope, deleted=True)
+                )
+                ```
+
+            List pinned forensic scopes:
+                ```python
+                page = await observations.query_scope_management(
+                    ObservationScopeManagementQuery(
+                        scope=scope,
+                        pinned=True,
+                        retention_classes=("forensic",),
+                    )
+                )
+                ```
+
+        Args:
+            query: Canonical scope, promoted management filters, and page request.
+
+        Returns:
+            Page[ObservationScopeManagementRecord]: Explicit records and continuation cursor.
+
+        Notes:
+            Missing policy remains absent; providers do not synthesize inherited or
+            default management records.
         """
         ...
 

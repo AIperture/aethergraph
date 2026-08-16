@@ -18,9 +18,12 @@ from aethergraph.storage.contracts import (
     ObservationQuery,
     ObservationResourceLink,
     ObservationResourceRelation,
+    ObservationScopeManagementQuery,
     ObservationScopeManagementRecord,
+    ObservationScopeUsageQuery,
     ObservationSeverity,
     ObservationStatus,
+    ObservationUsageDimension,
     PageRequest,
     StorageConfigurationError,
     StorageConflictError,
@@ -67,6 +70,8 @@ def _observation(
     trace_id: str | None = "trace-1",
     status: ObservationStatus = ObservationStatus.OK,
     severity: ObservationSeverity = ObservationSeverity.INFO,
+    producer: str | None = "aethergraph.runtime",
+    retention_class: str = "standard",
     resource_links: tuple[ObservationResourceLink, ...] = (),
 ) -> ObservationDraft:
     return ObservationDraft(
@@ -80,14 +85,17 @@ def _observation(
         turn_id="turn-1",
         status=status,
         severity=severity,
+        producer=producer,
         attributes={"index": observation_id, "nested": {"ok": True}},
         resource_links=resource_links,
+        retention_class=retention_class,
     )
 
 
 def _llm_call(
     llm_call_id: str,
     *,
+    scope: StorageScope = SCOPE,
     observation_id: str | None = None,
     manifest_id: str | None = None,
     occurred_at: datetime = NOW,
@@ -109,6 +117,7 @@ def _llm_call(
         llm_call_id=llm_call_id,
         observation=_observation(
             observation_id,
+            scope=scope,
             category="llm",
             occurred_at=occurred_at,
             trace_id=trace_id,
@@ -214,6 +223,14 @@ async def test_observation_query_filters_resource_without_duplicates_and_binds_c
 
     resource_page = await repository.query(ObservationQuery(scope=SCOPE, resource_key="artifact:1"))
     assert [item.observation_id for item in resource_page.items] == ["obs-old"]
+    producer_page = await repository.query(
+        ObservationQuery(
+            scope=SCOPE,
+            names=("name-obs-new",),
+            producers=("aethergraph.runtime",),
+        )
+    )
+    assert [item.observation_id for item in producer_page.items] == ["obs-new"]
     relation_page = await repository.query(
         ObservationQuery(
             scope=SCOPE,
@@ -402,6 +419,123 @@ async def test_purge_is_bounded_target_aware_and_excludes_pinned_trace(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_purge_filters_capture_retention_and_severity_in_provider(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    full = _llm_call("full", capture_mode=ObservationCaptureMode.FULL)
+    metadata = _llm_call("metadata", capture_mode=ObservationCaptureMode.METADATA)
+    await repository.append_llm_call(full)
+    await repository.append_llm_call(metadata)
+    await repository.append_many(
+        (
+            _observation(
+                "forensic-info",
+                retention_class="forensic",
+                severity=ObservationSeverity.INFO,
+            ),
+            _observation(
+                "forensic-error",
+                retention_class="forensic",
+                severity=ObservationSeverity.ERROR,
+            ),
+        )
+    )
+
+    capture = await repository.purge(
+        ObservationPurgeRequest(
+            scope=SCOPE,
+            capture_modes=(ObservationCaptureMode.FULL,),
+        )
+    )
+    assert capture.matching_observations == 1
+    retained = await repository.purge(
+        ObservationPurgeRequest(
+            scope=SCOPE,
+            retention_classes=("forensic",),
+            excluded_severities=(ObservationSeverity.ERROR,),
+        )
+    )
+    assert retained.matching_observations == 1
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_scope_usage_and_management_queries_are_bounded_and_cursor_bound(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    project_scope = StorageScope(project_id=SCOPE.project_id)
+    second_scope = replace(SCOPE, run_id="run-2", session_id="session-2")
+    shared = {
+        "captured_request": {"messages": ["shared"]},
+        "captured_response": {"text": "shared"},
+    }
+    await repository.append_llm_call(
+        _llm_call("usage-1", trace_id="trace-1", scope=SCOPE, **shared)
+    )
+    await repository.append_llm_call(
+        _llm_call(
+            "usage-2",
+            trace_id="trace-2",
+            scope=second_scope,
+            occurred_at=NOW + timedelta(seconds=1),
+            **shared,
+        )
+    )
+    pinned = ObservationScopeManagementRecord(
+        scope_key="trace:trace-1",
+        scope=project_scope,
+        revision=1,
+        updated_at=NOW,
+        trace_id="trace-1",
+        pinned=True,
+        hidden=True,
+    )
+    deleted = ObservationScopeManagementRecord(
+        scope_key="run:run-2",
+        scope=second_scope,
+        revision=1,
+        updated_at=NOW + timedelta(seconds=1),
+        deleted=True,
+    )
+    await repository.compare_and_set_scope_management(pinned, 0)
+    await repository.compare_and_set_scope_management(deleted, 0)
+
+    trace_query = ObservationScopeUsageQuery(
+        scope=project_scope,
+        dimension=ObservationUsageDimension.TRACE,
+        page=PageRequest(limit=1),
+    )
+    first = await repository.query_scope_usage(trace_query)
+    second = await repository.query_scope_usage(
+        replace(trace_query, page=PageRequest(limit=1, cursor=first.next_cursor))
+    )
+    usage = (*first.items, *second.items)
+    assert [item.scope_id for item in usage] == ["trace-2", "trace-1"]
+    assert all(item.logical_bytes > 0 and item.observation_count == 1 for item in usage)
+    assert usage[1].pinned
+    with pytest.raises(StorageConfigurationError, match="mismatched"):
+        await repository.query_scope_usage(
+            replace(
+                trace_query,
+                dimension=ObservationUsageDimension.RUN,
+                page=PageRequest(limit=1, cursor=first.next_cursor),
+            )
+        )
+
+    suppressed = await repository.query_scope_management(
+        ObservationScopeManagementQuery(scope=project_scope, hidden=True)
+    )
+    assert suppressed.items == (pinned,)
+    deleted_page = await repository.query_scope_management(
+        ObservationScopeManagementQuery(scope=project_scope, deleted=True)
+    )
+    assert deleted_page.items == (deleted,)
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_scope_management_cas_exact_identity_and_immutability(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     repository = LocalObservationRepository(database=database)
@@ -461,6 +595,17 @@ async def test_read_only_observation_repository_allows_reads_and_dry_run_only(
     assert await repository.get_llm_call(SCOPE, call.llm_call_id) is not None
     assert (await repository.query_llm_calls(LLMCallQuery(scope=SCOPE))).items
     assert (await repository.storage_stats(SCOPE)).llm_calls == 1
+    assert (
+        await repository.query_scope_usage(
+            ObservationScopeUsageQuery(
+                scope=SCOPE,
+                dimension=ObservationUsageDimension.TRACE,
+            )
+        )
+    ).items
+    assert not (
+        await repository.query_scope_management(ObservationScopeManagementQuery(scope=SCOPE))
+    ).items
     assert (await repository.purge(ObservationPurgeRequest(scope=SCOPE))).dry_run
     with pytest.raises(StorageReadOnlyError):
         await repository.append_many((_observation("new"),))
@@ -507,17 +652,48 @@ async def test_observation_schema_has_no_legacy_identity_and_promoted_query_inde
             "EXPLAIN QUERY PLAN SELECT * FROM local_llm_calls WHERE provider = ?",
             ("openai",),
         ),
+        "producer": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT * FROM local_observations "
+            "WHERE producer = ? ORDER BY occurred_at DESC, sequence DESC LIMIT ?",
+            ("aethergraph.runtime", 10),
+        ),
+        "name": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT * FROM local_observations "
+            "WHERE name = ? ORDER BY occurred_at DESC, sequence DESC LIMIT ?",
+            ("runner.execute", 10),
+        ),
+        "capture": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT * FROM local_llm_calls WHERE capture_mode = ?",
+            ("full",),
+        ),
         "management": await database.fetch_all(
             "EXPLAIN QUERY PLAN SELECT * FROM local_observation_scope_management "
             "WHERE trace_id = ? AND pinned = 1",
             ("trace-1",),
+        ),
+        "usage": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT trace_id, MAX(occurred_at), MAX(sequence) "
+            "FROM local_observations WHERE project_id = ? AND trace_id IS NOT NULL "
+            "GROUP BY trace_id",
+            ("project-1",),
+        ),
+        "management_visibility": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT * FROM local_observation_scope_management "
+            "WHERE project_id = ? AND hidden = ? AND deleted = ? "
+            "ORDER BY updated_at DESC, sequence DESC LIMIT ?",
+            ("project-1", 1, 0, 10),
         ),
     }
     details = {name: " ".join(str(row[3]) for row in rows) for name, rows in plans.items()}
     assert "ix_local_observations_run_time" in details["run"]
     assert "ix_local_observation_resources_lookup" in details["resource"]
     assert "ix_local_llm_calls_provider" in details["provider"]
+    assert "ix_local_observations_producer_time" in details["producer"]
+    assert "ix_local_observations_name_time" in details["name"]
+    assert "ix_local_llm_calls_capture" in details["capture"]
     assert "ix_local_observation_management_trace" in details["management"]
+    assert "ix_local_observations_project_trace_time" in details["usage"]
+    assert "ix_local_observation_management_visibility" in details["management_visibility"]
     await database.close()
 
 

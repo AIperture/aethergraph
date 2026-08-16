@@ -25,10 +25,14 @@ from ...contracts import (
     ObservationRecord,
     ObservationResourceLink,
     ObservationResourceRelation,
+    ObservationScopeManagementQuery,
     ObservationScopeManagementRecord,
+    ObservationScopeUsageQuery,
+    ObservationScopeUsageRecord,
     ObservationSeverity,
     ObservationStatus,
     ObservationStorageStats,
+    ObservationUsageDimension,
     Page,
     StorageConfigurationError,
     StorageConflictError,
@@ -73,6 +77,7 @@ CREATE TABLE local_observations (
     occurred_at TEXT NOT NULL,
     status TEXT NOT NULL,
     severity TEXT NOT NULL,
+    producer TEXT,
     trace_id TEXT,
     turn_id TEXT,
     parent_observation_id TEXT,
@@ -89,6 +94,14 @@ CREATE TABLE local_observations (
 _CREATE_OBSERVATION_PROJECT_INDEX = """
 CREATE INDEX ix_local_observations_project_time
 ON local_observations(tenant_id, project_id, occurred_at DESC, sequence DESC)
+"""
+_CREATE_OBSERVATION_PROJECT_TRACE_INDEX = """
+CREATE INDEX ix_local_observations_project_trace_time
+ON local_observations(project_id, trace_id, occurred_at DESC, sequence DESC)
+"""
+_CREATE_OBSERVATION_PROJECT_RUN_INDEX = """
+CREATE INDEX ix_local_observations_project_run_time
+ON local_observations(project_id, run_id, occurred_at DESC, sequence DESC)
 """
 _CREATE_OBSERVATION_RUN_INDEX = """
 CREATE INDEX ix_local_observations_run_time
@@ -109,6 +122,14 @@ ON local_observations(trace_id, occurred_at DESC, sequence DESC)
 _CREATE_OBSERVATION_CATEGORY_INDEX = """
 CREATE INDEX ix_local_observations_category_time
 ON local_observations(category, occurred_at DESC, sequence DESC)
+"""
+_CREATE_OBSERVATION_NAME_INDEX = """
+CREATE INDEX ix_local_observations_name_time
+ON local_observations(name, occurred_at DESC, sequence DESC)
+"""
+_CREATE_OBSERVATION_PRODUCER_INDEX = """
+CREATE INDEX ix_local_observations_producer_time
+ON local_observations(producer, occurred_at DESC, sequence DESC)
 """
 _CREATE_OBSERVATION_STATUS_INDEX = """
 CREATE INDEX ix_local_observations_status_time
@@ -193,6 +214,9 @@ CREATE INDEX ix_local_llm_calls_model ON local_llm_calls(model, observation_id)
 _CREATE_LLM_TYPE_INDEX = """
 CREATE INDEX ix_local_llm_calls_type ON local_llm_calls(call_type, observation_id)
 """
+_CREATE_LLM_CAPTURE_INDEX = """
+CREATE INDEX ix_local_llm_calls_capture ON local_llm_calls(capture_mode, observation_id)
+"""
 _CREATE_LLM_MANIFEST_INDEX = """
 CREATE INDEX ix_local_llm_calls_manifest ON local_llm_calls(prompt_manifest_id)
 """
@@ -215,6 +239,7 @@ CREATE TABLE local_llm_attempts (
 """
 _CREATE_MANAGEMENT = """
 CREATE TABLE local_observation_scope_management (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     scope_identity TEXT NOT NULL,
     management_key TEXT NOT NULL,
     tenant_id TEXT,
@@ -237,12 +262,24 @@ CREATE TABLE local_observation_scope_management (
     tags_json TEXT NOT NULL,
     retention_class TEXT NOT NULL,
     expires_at TEXT,
-    PRIMARY KEY(scope_identity, management_key)
+    UNIQUE(scope_identity, management_key)
 )
 """
 _CREATE_MANAGEMENT_TRACE_INDEX = """
 CREATE INDEX ix_local_observation_management_trace
 ON local_observation_scope_management(trace_id, pinned, scope_identity)
+"""
+_CREATE_MANAGEMENT_SCOPE_TIME_INDEX = """
+CREATE INDEX ix_local_observation_management_scope_time
+ON local_observation_scope_management(scope_identity, updated_at DESC, sequence DESC)
+"""
+_CREATE_MANAGEMENT_PROJECT_TIME_INDEX = """
+CREATE INDEX ix_local_observation_management_project_time
+ON local_observation_scope_management(project_id, updated_at DESC, sequence DESC)
+"""
+_CREATE_MANAGEMENT_VISIBILITY_INDEX = """
+CREATE INDEX ix_local_observation_management_visibility
+ON local_observation_scope_management(project_id, hidden, deleted, updated_at DESC, sequence DESC)
 """
 
 
@@ -363,6 +400,12 @@ class LocalObservationRepository:
         if query.categories:
             clauses.append(f"o.category IN ({','.join('?' for _ in query.categories)})")
             values.extend(query.categories)
+        if query.names:
+            clauses.append(f"o.name IN ({','.join('?' for _ in query.names)})")
+            values.extend(query.names)
+        if query.producers:
+            clauses.append(f"o.producer IN ({','.join('?' for _ in query.producers)})")
+            values.extend(query.producers)
         if query.statuses:
             clauses.append(f"o.status IN ({','.join('?' for _ in query.statuses)})")
             values.extend(status.value for status in query.statuses)
@@ -741,6 +784,120 @@ class LocalObservationRepository:
             lambda connection: _storage_stats(connection, scope)
         )
 
+    async def query_scope_usage(
+        self,
+        query: ObservationScopeUsageQuery,
+    ) -> Page[ObservationScopeUsageRecord]:
+        """Query bounded logical usage for trace or run scopes.
+
+        Scope grouping, newest-activity ordering, logical byte accounting, and pin
+        projection execute within one provider read transaction.
+
+        Examples:
+            List trace usage:
+                ```python
+                page = await repository.query_scope_usage(
+                    ObservationScopeUsageQuery(
+                        scope=scope,
+                        dimension=ObservationUsageDimension.TRACE,
+                    )
+                )
+                ```
+
+            Continue run usage:
+                ```python
+                page = await repository.query_scope_usage(next_query)
+                ```
+
+        Args:
+            query: Populated canonical scope, usage dimension, and page request.
+
+        Returns:
+            Page[ObservationScopeUsageRecord]: Logical usage and optional cursor.
+
+        Notes:
+            Captured fragments shared across scopes count once within each logical
+            scope, matching canonical per-scope accounting semantics.
+        """
+        return await self._database.read_transaction(
+            lambda connection: _query_scope_usage(connection, query)
+        )
+
+    async def query_scope_management(
+        self,
+        query: ObservationScopeManagementQuery,
+    ) -> Page[ObservationScopeManagementRecord]:
+        """Query bounded explicit scope-management records.
+
+        Canonical scope, trace, pin, visibility, deletion, and retention filters run
+        in SQL before descending update-time pagination.
+
+        Examples:
+            List deleted policies:
+                ```python
+                page = await repository.query_scope_management(
+                    ObservationScopeManagementQuery(scope=scope, deleted=True)
+                )
+                ```
+
+            Continue pinned policies:
+                ```python
+                page = await repository.query_scope_management(next_query)
+                ```
+
+        Args:
+            query: Populated canonical scope, management filters, and page request.
+
+        Returns:
+            Page[ObservationScopeManagementRecord]: Explicit policies and optional cursor.
+
+        Notes:
+            The repository never synthesizes defaults or inherited management rows.
+        """
+        clauses, values = _management_scope_filters(query.scope, alias="m")
+        if query.trace_id is not None:
+            clauses.append("m.trace_id = ?")
+            values.append(query.trace_id)
+        for column in ("pinned", "hidden", "deleted"):
+            selected = getattr(query, column)
+            if selected is not None:
+                clauses.append(f"m.{column} = ?")
+                values.append(int(selected))
+        if query.retention_classes:
+            clauses.append(
+                "m.retention_class IN (" + ",".join("?" for _ in query.retention_classes) + ")"
+            )
+            values.extend(query.retention_classes)
+        fingerprint = _management_query_fingerprint(query)
+        if query.page.cursor:
+            timestamp, sequence = _decode_cursor(query.page.cursor, fingerprint)
+            clauses.append("(m.updated_at, m.sequence) < (?, ?)")
+            values.extend((timestamp, sequence))
+
+        def read(connection: sqlite3.Connection) -> Page[ObservationScopeManagementRecord]:
+            rows = connection.execute(
+                "SELECT m.* "
+                "FROM local_observation_scope_management m "
+                f"WHERE {' AND '.join(clauses)} "
+                "ORDER BY m.updated_at DESC, m.sequence DESC LIMIT ?",
+                (*values, query.page.limit + 1),
+            ).fetchall()
+            visible = rows[: query.page.limit]
+            next_cursor = None
+            if len(rows) > query.page.limit:
+                anchor = visible[-1]
+                next_cursor = _encode_cursor(
+                    fingerprint,
+                    str(anchor["updated_at"]),
+                    int(anchor["sequence"]),
+                )
+            return Page(
+                items=tuple(_management(row) for row in visible),
+                next_cursor=next_cursor,
+            )
+
+        return await self._database.read_transaction(read)
+
     async def get_scope_management(
         self, scope: StorageScope, scope_key: str
     ) -> ObservationScopeManagementRecord | None:
@@ -861,11 +1018,15 @@ def _install(database: LocalSQLiteDatabase) -> None:
         statements=(
             _CREATE_OBSERVATIONS,
             _CREATE_OBSERVATION_PROJECT_INDEX,
+            _CREATE_OBSERVATION_PROJECT_TRACE_INDEX,
+            _CREATE_OBSERVATION_PROJECT_RUN_INDEX,
             _CREATE_OBSERVATION_RUN_INDEX,
             _CREATE_OBSERVATION_SESSION_INDEX,
             _CREATE_OBSERVATION_GRAPH_INDEX,
             _CREATE_OBSERVATION_TRACE_INDEX,
             _CREATE_OBSERVATION_CATEGORY_INDEX,
+            _CREATE_OBSERVATION_NAME_INDEX,
+            _CREATE_OBSERVATION_PRODUCER_INDEX,
             _CREATE_OBSERVATION_STATUS_INDEX,
             _CREATE_OBSERVATION_SEVERITY_INDEX,
             _CREATE_RESOURCE_LINKS,
@@ -876,10 +1037,14 @@ def _install(database: LocalSQLiteDatabase) -> None:
             _CREATE_LLM_PROVIDER_INDEX,
             _CREATE_LLM_MODEL_INDEX,
             _CREATE_LLM_TYPE_INDEX,
+            _CREATE_LLM_CAPTURE_INDEX,
             _CREATE_LLM_MANIFEST_INDEX,
             _CREATE_ATTEMPTS,
             _CREATE_MANAGEMENT,
             _CREATE_MANAGEMENT_TRACE_INDEX,
+            _CREATE_MANAGEMENT_SCOPE_TIME_INDEX,
+            _CREATE_MANAGEMENT_PROJECT_TIME_INDEX,
+            _CREATE_MANAGEMENT_VISIBILITY_INDEX,
         ),
     )
 
@@ -901,11 +1066,11 @@ def _append_observation(
         INSERT INTO local_observations(
             observation_id, scope_identity, tenant_id, project_id, org_id, user_id,
             session_id, run_id, graph_id, node_id, agent_id, scope_key, category,
-            name, summary, occurred_at, status, severity, trace_id, turn_id,
+            name, summary, occurred_at, status, severity, producer, trace_id, turn_id,
             parent_observation_id, caused_by_observation_id, source_event_id,
             attributes_json, payload_fragment_id, retention_class, expires_at,
             schema_version, content_digest
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             draft.observation_id,
@@ -917,6 +1082,7 @@ def _append_observation(
             draft.occurred_at.isoformat(),
             draft.status.value,
             draft.severity.value,
+            draft.producer,
             draft.trace_id,
             draft.turn_id,
             draft.parent_observation_id,
@@ -963,6 +1129,7 @@ def _record_from_draft(draft: ObservationDraft, sequence: int) -> ObservationRec
         cursor=_observation_cursor(sequence),
         status=draft.status,
         severity=draft.severity,
+        producer=draft.producer,
         trace_id=draft.trace_id,
         turn_id=draft.turn_id,
         parent_observation_id=draft.parent_observation_id,
@@ -1020,6 +1187,7 @@ def _observation(
             cursor=_observation_cursor(int(row["sequence"])),
             status=ObservationStatus(str(row["status"])),
             severity=ObservationSeverity(str(row["severity"])),
+            producer=row["producer"],
             trace_id=row["trace_id"],
             turn_id=row["turn_id"],
             parent_observation_id=row["parent_observation_id"],
@@ -1386,6 +1554,22 @@ def _purge_candidates(
     if request.categories:
         clauses.append(f"o.category IN ({','.join('?' for _ in request.categories)})")
         values.extend(request.categories)
+    if request.capture_modes:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM local_llm_calls l "
+            "WHERE l.observation_id = o.observation_id "
+            f"AND l.capture_mode IN ({','.join('?' for _ in request.capture_modes)}))"
+        )
+        values.extend(mode.value for mode in request.capture_modes)
+    if request.retention_classes:
+        clauses.append(f"o.retention_class IN ({','.join('?' for _ in request.retention_classes)})")
+        values.extend(request.retention_classes)
+    if request.severities:
+        clauses.append(f"o.severity IN ({','.join('?' for _ in request.severities)})")
+        values.extend(severity.value for severity in request.severities)
+    if request.excluded_severities:
+        clauses.append(f"o.severity NOT IN ({','.join('?' for _ in request.excluded_severities)})")
+        values.extend(severity.value for severity in request.excluded_severities)
     if request.trace_id is not None:
         clauses.append("o.trace_id = ?")
         values.append(request.trace_id)
@@ -1397,18 +1581,9 @@ def _purge_candidates(
         values.append(request.expired_before.isoformat())
     clauses.append(
         "NOT EXISTS (SELECT 1 FROM local_observation_scope_management m "
-        "WHERE m.trace_id = o.trace_id AND m.pinned = 1 "
-        "AND (m.tenant_id IS NULL OR m.tenant_id = o.tenant_id) "
-        "AND (m.project_id IS NULL OR m.project_id = o.project_id) "
-        "AND (m.org_id IS NULL OR m.org_id = o.org_id) "
-        "AND (m.user_id IS NULL OR m.user_id = o.user_id) "
-        "AND (m.session_id IS NULL OR m.session_id = o.session_id) "
-        "AND (m.run_id IS NULL OR m.run_id = o.run_id) "
-        "AND (m.graph_id IS NULL OR m.graph_id = o.graph_id) "
-        "AND (m.node_id IS NULL OR m.node_id = o.node_id) "
-        "AND (m.agent_id IS NULL OR m.agent_id = o.agent_id) "
-        "AND (m.canonical_scope_key IS NULL "
-        "OR m.canonical_scope_key = o.scope_key))"
+        "WHERE m.pinned = 1 AND "
+        + _management_applies_clause(observation_alias="o", management_alias="m")
+        + ")"
     )
     rows = connection.execute(
         "SELECT o.observation_id FROM local_observations o "
@@ -1571,6 +1746,181 @@ def _manifest_bytes(
 
 def _row_bytes(row: sqlite3.Row) -> int:
     return sum(len(str(value).encode()) for value in row if value is not None)
+
+
+def _query_scope_usage(
+    connection: sqlite3.Connection,
+    query: ObservationScopeUsageQuery,
+) -> Page[ObservationScopeUsageRecord]:
+    column = "trace_id" if query.dimension is ObservationUsageDimension.TRACE else "run_id"
+    clauses, values = _scope_filters(query.scope, alias="o")
+    clauses.append(f"o.{column} IS NOT NULL")
+    fingerprint = _usage_query_fingerprint(query)
+    outer_clauses: list[str] = []
+    if query.page.cursor:
+        timestamp, sequence = _decode_cursor(query.page.cursor, fingerprint)
+        outer_clauses.append("(latest_at, latest_sequence) < (?, ?)")
+        values.extend((timestamp, sequence))
+    outer_where = f"WHERE {' AND '.join(outer_clauses)} " if outer_clauses else ""
+    rows = connection.execute(
+        "WITH grouped AS ("
+        f"SELECT o.{column} AS scope_id, MAX(o.occurred_at) AS latest_at, "
+        "MAX(o.sequence) AS latest_sequence, COUNT(*) AS observation_count "
+        "FROM local_observations o "
+        f"WHERE {' AND '.join(clauses)} GROUP BY o.{column}) "
+        "SELECT * FROM grouped "
+        + outer_where
+        + "ORDER BY latest_at DESC, latest_sequence DESC LIMIT ?",
+        (*values, query.page.limit + 1),
+    ).fetchall()
+    visible = rows[: query.page.limit]
+    scope_ids = tuple(str(row["scope_id"]) for row in visible)
+    logical_bytes = _usage_logical_bytes(
+        connection,
+        scope=query.scope,
+        dimension=query.dimension,
+        scope_ids=scope_ids,
+    )
+    pinned = _usage_pinned_scopes(
+        connection,
+        scope=query.scope,
+        dimension=query.dimension,
+        scope_ids=scope_ids,
+    )
+    records = tuple(
+        ObservationScopeUsageRecord(
+            dimension=query.dimension,
+            scope_id=str(row["scope_id"]),
+            latest_at=datetime.fromisoformat(str(row["latest_at"])),
+            observation_count=int(row["observation_count"]),
+            logical_bytes=logical_bytes[str(row["scope_id"])],
+            pinned=str(row["scope_id"]) in pinned,
+        )
+        for row in visible
+    )
+    next_cursor = None
+    if len(rows) > query.page.limit:
+        anchor = visible[-1]
+        next_cursor = _encode_cursor(
+            fingerprint,
+            str(anchor["latest_at"]),
+            int(anchor["latest_sequence"]),
+        )
+    return Page(items=records, next_cursor=next_cursor)
+
+
+def _usage_logical_bytes(
+    connection: sqlite3.Connection,
+    *,
+    scope: StorageScope,
+    dimension: ObservationUsageDimension,
+    scope_ids: tuple[str, ...],
+) -> dict[str, int]:
+    totals = dict.fromkeys(scope_ids, 0)
+    if not scope_ids:
+        return totals
+    column = "trace_id" if dimension is ObservationUsageDimension.TRACE else "run_id"
+    clauses, values = _scope_filters(scope, alias="o")
+    clauses.append(f"o.{column} IN ({','.join('?' for _ in scope_ids)})")
+    values.extend(scope_ids)
+    observations = connection.execute(
+        "SELECT o.* FROM local_observations o WHERE " + " AND ".join(clauses),
+        values,
+    ).fetchall()
+    observation_scopes = {str(row["observation_id"]): str(row[column]) for row in observations}
+    for row in observations:
+        totals[str(row[column])] += _row_bytes(row)
+    observation_ids = tuple(observation_scopes)
+    if not observation_ids:
+        return totals
+    placeholders = ",".join("?" for _ in observation_ids)
+    resource_rows = connection.execute(
+        "SELECT * FROM local_observation_resource_links WHERE observation_id IN ("
+        + placeholders
+        + ")",
+        observation_ids,
+    ).fetchall()
+    for row in resource_rows:
+        totals[observation_scopes[str(row["observation_id"])]] += _row_bytes(row)
+    llm_rows = connection.execute(
+        "SELECT * FROM local_llm_calls WHERE observation_id IN (" + placeholders + ")",
+        observation_ids,
+    ).fetchall()
+    call_scopes: dict[str, str] = {}
+    manifest_scopes: dict[str, set[str]] = {}
+    fragment_scopes: dict[str, set[str]] = {}
+    for row in llm_rows:
+        scope_id = observation_scopes[str(row["observation_id"])]
+        totals[scope_id] += _row_bytes(row)
+        call_scopes[str(row["llm_call_id"])] = scope_id
+        manifest_id = row["prompt_manifest_id"]
+        if manifest_id is not None:
+            manifest_scopes.setdefault(str(manifest_id), set()).add(scope_id)
+        response_fragment_id = row["response_fragment_id"]
+        if response_fragment_id is not None:
+            fragment_scopes.setdefault(str(response_fragment_id), set()).add(scope_id)
+    if call_scopes:
+        call_ids = tuple(call_scopes)
+        attempt_rows = connection.execute(
+            "SELECT * FROM local_llm_attempts WHERE llm_call_id IN ("
+            + ",".join("?" for _ in call_ids)
+            + ")",
+            call_ids,
+        ).fetchall()
+        for row in attempt_rows:
+            totals[call_scopes[str(row["llm_call_id"])]] += _row_bytes(row)
+    if manifest_scopes:
+        manifest_ids = tuple(manifest_scopes)
+        manifest_rows = connection.execute(
+            "SELECT * FROM local_observation_manifests WHERE manifest_id IN ("
+            + ",".join("?" for _ in manifest_ids)
+            + ")",
+            manifest_ids,
+        ).fetchall()
+        for row in manifest_rows:
+            manifest_id = str(row["manifest_id"])
+            for scope_id in manifest_scopes[manifest_id]:
+                totals[scope_id] += _row_bytes(row)
+            for name in ("request_fragment_id", "trace_fragment_id"):
+                fragment_id = row[name]
+                if fragment_id is not None:
+                    fragment_scopes.setdefault(str(fragment_id), set()).update(
+                        manifest_scopes[manifest_id]
+                    )
+    if fragment_scopes:
+        fragment_ids = tuple(fragment_scopes)
+        fragment_rows = connection.execute(
+            "SELECT fragment_id, byte_count FROM local_observation_fragments "
+            "WHERE fragment_id IN (" + ",".join("?" for _ in fragment_ids) + ")",
+            fragment_ids,
+        ).fetchall()
+        for row in fragment_rows:
+            for scope_id in fragment_scopes[str(row["fragment_id"])]:
+                totals[scope_id] += int(row["byte_count"])
+    return totals
+
+
+def _usage_pinned_scopes(
+    connection: sqlite3.Connection,
+    *,
+    scope: StorageScope,
+    dimension: ObservationUsageDimension,
+    scope_ids: tuple[str, ...],
+) -> set[str]:
+    if not scope_ids:
+        return set()
+    column = "trace_id" if dimension is ObservationUsageDimension.TRACE else "run_id"
+    clauses, values = _scope_filters(scope, alias="o")
+    clauses.append(f"o.{column} IN ({','.join('?' for _ in scope_ids)})")
+    values.extend(scope_ids)
+    rows = connection.execute(
+        f"SELECT DISTINCT o.{column} AS scope_id FROM local_observations o "
+        "JOIN local_observation_scope_management m ON m.pinned = 1 AND "
+        + _management_applies_clause(observation_alias="o", management_alias="m")
+        + f" WHERE {' AND '.join(clauses)}",
+        values,
+    ).fetchall()
+    return {str(row["scope_id"]) for row in rows}
 
 
 def _storage_stats(connection: sqlite3.Connection, scope: StorageScope) -> ObservationStorageStats:
@@ -1746,6 +2096,39 @@ def _scope_filters(scope: StorageScope, *, alias: str) -> tuple[list[str], list[
     return clauses, values
 
 
+def _management_scope_filters(
+    scope: StorageScope,
+    *,
+    alias: str,
+) -> tuple[list[str], list[object]]:
+    clauses: list[str] = []
+    values: list[object] = []
+    for name, value in scope.as_filter().items():
+        column = "canonical_scope_key" if name == "scope_key" else name
+        clauses.append(f"{alias}.{column} = ?")
+        values.append(value)
+    if not clauses:
+        raise StorageConfigurationError("Observation operations require populated scope")
+    return clauses, values
+
+
+def _management_applies_clause(*, observation_alias: str, management_alias: str) -> str:
+    scope_clauses = []
+    for name in _SCOPE_COLUMNS:
+        management_column = "canonical_scope_key" if name == "scope_key" else name
+        scope_clauses.append(
+            f"({management_alias}.{management_column} IS NULL "
+            f"OR {management_alias}.{management_column} = {observation_alias}.{name})"
+        )
+    return " AND ".join(
+        (
+            f"({management_alias}.trace_id IS NULL "
+            f"OR {management_alias}.trace_id = {observation_alias}.trace_id)",
+            *scope_clauses,
+        )
+    )
+
+
 def _next_revision(revision: int, expected_revision: int) -> None:
     if (
         isinstance(expected_revision, bool)
@@ -1810,6 +2193,7 @@ def _observation_digest(draft: ObservationDraft) -> str:
         "scope": draft.scope.as_filter(),
         "status": draft.status.value,
         "severity": draft.severity.value,
+        "producer": draft.producer,
         "trace_id": draft.trace_id,
         "turn_id": draft.turn_id,
         "parent_observation_id": draft.parent_observation_id,
@@ -1884,6 +2268,8 @@ def _observation_query_fingerprint(query: ObservationQuery) -> str:
         "kind": "observations",
         "scope": query.scope.as_filter(),
         "categories": list(query.categories),
+        "names": list(query.names),
+        "producers": list(query.producers),
         "statuses": [status.value for status in query.statuses],
         "severities": [severity.value for severity in query.severities],
         "trace_id": query.trace_id,
@@ -1910,6 +2296,30 @@ def _llm_query_fingerprint(query: LLMCallQuery) -> str:
         "statuses": [status.value for status in query.statuses],
         "occurred_at_or_after": _optional_iso(query.occurred_at_or_after),
         "occurred_at_or_before": _optional_iso(query.occurred_at_or_before),
+        "limit": query.page.limit,
+    }
+    return hashlib.sha256(_json(payload).encode()).hexdigest()[:24]
+
+
+def _usage_query_fingerprint(query: ObservationScopeUsageQuery) -> str:
+    payload = {
+        "kind": "observation-scope-usage",
+        "scope": query.scope.as_filter(),
+        "dimension": query.dimension.value,
+        "limit": query.page.limit,
+    }
+    return hashlib.sha256(_json(payload).encode()).hexdigest()[:24]
+
+
+def _management_query_fingerprint(query: ObservationScopeManagementQuery) -> str:
+    payload = {
+        "kind": "observation-scope-management",
+        "scope": query.scope.as_filter(),
+        "trace_id": query.trace_id,
+        "pinned": query.pinned,
+        "hidden": query.hidden,
+        "deleted": query.deleted,
+        "retention_classes": list(query.retention_classes),
         "limit": query.page.limit,
     }
     return hashlib.sha256(_json(payload).encode()).hexdigest()[:24]

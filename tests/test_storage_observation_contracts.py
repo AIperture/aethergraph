@@ -22,10 +22,14 @@ from aethergraph.storage.contracts import (
     ObservationRepository,
     ObservationResourceLink,
     ObservationResourceRelation,
+    ObservationScopeManagementQuery,
     ObservationScopeManagementRecord,
+    ObservationScopeUsageQuery,
+    ObservationScopeUsageRecord,
     ObservationSeverity,
     ObservationStatus,
     ObservationStorageStats,
+    ObservationUsageDimension,
     StorageBundle,
     StorageScope,
 )
@@ -57,6 +61,7 @@ def _observation(*, category: str = "trace") -> ObservationDraft:
         summary="runner finished",
         occurred_at=NOW,
         scope=SCOPE,
+        producer="aethergraph.runtime",
         trace_id="trace-1",
         attributes={"metrics": {"duration_ms": 12}, "tags": ["runtime"]},
         resource_links=(LINK,),
@@ -76,6 +81,7 @@ def _stored_observation(*, category: str = "trace") -> ObservationRecord:
         trace_id=draft.trace_id,
         attributes=draft.attributes,
         resource_links=draft.resource_links,
+        producer=draft.producer,
     )
 
 
@@ -86,6 +92,7 @@ def test_observation_records_are_scoped_ordered_and_deeply_immutable() -> None:
 
     assert draft.attributes["tags"] == ("runtime",)
     assert _stored_observation().cursor == "cursor-1"
+    assert draft.producer == "aethergraph.runtime"
     assert "app_id" not in {item.name for item in fields(ObservationRecord)}
     assert "application_id" not in {item.name for item in fields(ObservationDraft)}
     with pytest.raises(ValueError, match="duplicate identities"):
@@ -96,6 +103,8 @@ def test_observation_query_is_bounded_and_resource_indexed() -> None:
     query = ObservationQuery(
         scope=SCOPE,
         categories=("trace",),
+        names=("runner.execute",),
+        producers=("aethergraph.runtime",),
         statuses=(ObservationStatus.ERROR,),
         severities=(ObservationSeverity.ERROR,),
         trace_id="trace-1",
@@ -211,6 +220,9 @@ def test_retention_records_are_bounded_revisioned_and_provider_neutral() -> None
     request = ObservationPurgeRequest(
         scope=SCOPE,
         dry_run=True,
+        capture_modes=(ObservationCaptureMode.FULL,),
+        retention_classes=("forensic",),
+        excluded_severities=(ObservationSeverity.ERROR,),
         occurred_before=NOW,
         max_observations=100,
         target_reclaimed_bytes=1024,
@@ -242,10 +254,35 @@ def test_retention_records_are_bounded_revisioned_and_provider_neutral() -> None
         pinned=True,
         tags=("important",),
     )
+    usage_query = ObservationScopeUsageQuery(
+        scope=SCOPE,
+        dimension=ObservationUsageDimension.TRACE,
+    )
+    usage = ObservationScopeUsageRecord(
+        dimension=ObservationUsageDimension.TRACE,
+        scope_id="trace-1",
+        latest_at=NOW,
+        observation_count=2,
+        logical_bytes=500,
+        pinned=True,
+    )
+    management_query = ObservationScopeManagementQuery(
+        scope=SCOPE,
+        pinned=True,
+        retention_classes=("standard",),
+    )
 
     assert request.dry_run and preview.deleted_observations == 0
     assert stats.provider_metrics["allocated_bytes"] == 4096
     assert policy.pinned
+    assert usage_query.page.limit > 0 and usage.logical_bytes == 500
+    assert management_query.pinned is True
+    with pytest.raises(ValueError, match="must not overlap"):
+        replace(
+            request,
+            severities=(ObservationSeverity.ERROR,),
+            excluded_severities=(ObservationSeverity.ERROR,),
+        )
     with pytest.raises(ValueError, match="dry-run"):
         replace(preview, deleted_observations=1)
 
