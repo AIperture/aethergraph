@@ -12,6 +12,7 @@ from aethergraph.services.runner.facade import RunFacade
 from aethergraph.storage.contracts.scope import StorageScope
 from aethergraph.storage.runs.inmen_store import InMemoryRunStore
 from aethergraph.storage.runs.result_store import InMemoryRunResultStore
+from aethergraph.storage.runs.sqlite_run_store import SQLiteRunStore
 
 
 class Identity:
@@ -763,6 +764,60 @@ async def test_wait_run_return_outputs_uses_persisted_result_for_terminal_succes
     assert persisted is not None
     assert persisted.result_available is True
     assert persisted.result_updated_at is not None
+
+
+@pytest.mark.asyncio
+async def test_success_status_is_durable_before_result_save(
+    monkeypatch,
+    dummy_meter,
+    tmp_path,
+):
+    store = SQLiteRunStore(str(tmp_path / "runs.db"))
+
+    class OrderingResultStore(InMemoryRunResultStore):
+        observed_status = None
+
+        async def save(self, run_id, result) -> None:
+            durable = await store.get(run_id)
+            self.observed_status = durable.status if durable is not None else None
+            assert durable is not None
+            assert durable.status == RunStatus.succeeded
+            assert durable.finished_at is not None
+            assert "output_preview" in durable.meta
+            await super().save(run_id, result)
+
+    result_store = OrderingResultStore()
+    manager = RunManager(
+        run_store=store,
+        result_store=result_store,
+        registry=UnifiedRegistry(),
+    )
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        return {"out": 42}
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record, _, _, _ = await manager.start_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+        identity=Identity(user_id="u1", org_id="o1"),
+    )
+    waited, outputs = await manager.wait_run(record.run_id, return_outputs=True)
+    assert waited.status == RunStatus.succeeded
+    assert outputs == {"out": 42}
+    assert result_store.observed_status == RunStatus.succeeded
 
 
 @pytest.mark.asyncio

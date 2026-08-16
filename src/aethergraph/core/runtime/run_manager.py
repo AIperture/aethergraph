@@ -711,6 +711,14 @@ class RunManager:
                 logging.getLogger("aethergraph.runtime.run_manager").exception(
                     "Error creating output preview for run_id=%s", record.run_id
                 )
+            if self._store is not None:
+                await self._store.update_status(
+                    record.run_id,
+                    record.status,
+                    finished_at=record.finished_at,
+                    error=record.error,
+                    meta_update=dict(record.meta),
+                )
             await self._persist_run_result(
                 record=record,
                 outputs=outputs,
