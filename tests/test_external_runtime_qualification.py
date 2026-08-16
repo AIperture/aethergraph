@@ -13,6 +13,8 @@ from storage_conformance.external_provider import (
 )
 
 from aethergraph.config.storage_provider import StorageProviderSettings
+from aethergraph.observability.canonical_inspection import CanonicalInspectionReader
+from aethergraph.observability.canonical_runtime_output import bind_canonical_runtime_output
 from aethergraph.observability.canonical_service import bind_canonical_observation_service
 from aethergraph.observability.policy import ObservationPolicy
 from aethergraph.services.agent_state.canonical_facade import CanonicalAgentStateFacade
@@ -130,6 +132,19 @@ def _local_request(root: Path) -> StorageOpenRequest:
 
 
 def _bind_all_runtime_services(bundle: StorageBundle) -> tuple[object, ...]:
+    observations = bind_canonical_observation_service(
+        bundle=bundle,
+        owner_scope=OWNER,
+        policy=ObservationPolicy(capture_mode="off"),
+    )
+    execution_scope = StorageScope(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        run_id="run-qualification",
+        graph_id="graph-qualification",
+        node_id="node-qualification",
+        agent_id="agent-qualification",
+    )
     return (
         bind_canonical_key_value_facade(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
         bind_canonical_metering_store(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
@@ -148,15 +163,13 @@ def _bind_all_runtime_services(bundle: StorageBundle) -> tuple[object, ...]:
             owner_scope=OWNER,
             clock=_Clock().now,
         ),
-        bind_canonical_observation_service(
-            bundle=bundle,
-            owner_scope=OWNER,
-            policy=ObservationPolicy(capture_mode="off"),
-        ),
+        observations,
+        CanonicalInspectionReader(observations),
+        bind_canonical_runtime_output(bundle=bundle, owner_scope=OWNER),
         build_canonical_viz_service(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
         CanonicalMemoryFacadeFactory(bundle=bundle, owner_scope=OWNER),
         CanonicalArtifactFacadeFactory(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        CanonicalAgentStateFacade(state_store=bundle.state, scope=OWNER),
+        CanonicalAgentStateFacade(state_store=bundle.state, scope=execution_scope),
         CanonicalGraphStateStore(
             state_store=bundle.state,
             event_store=bundle.events,
@@ -238,8 +251,8 @@ async def test_local_and_external_runtime_composition_bind_the_complete_service_
 
     local_bundle = await local.open(_local_request(local_root))
     external_bundle = await external.open(_external_request(external_root))
-    assert len(_bind_all_runtime_services(local_bundle)) == 15
-    assert len(_bind_all_runtime_services(external_bundle)) == 15
+    assert len(_bind_all_runtime_services(local_bundle)) == 17
+    assert len(_bind_all_runtime_services(external_bundle)) == 17
     assert local_bundle.capabilities.supported >= RUNTIME_STORAGE_CAPABILITIES
     assert external_bundle.capabilities.supported >= RUNTIME_STORAGE_CAPABILITIES
     assert tuple(external_root.iterdir()) == ()
