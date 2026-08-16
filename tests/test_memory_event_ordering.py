@@ -271,6 +271,8 @@ def test_sqlite_state_cas_is_atomic_across_spawned_processes(tmp_path: Path) -> 
     barrier = context.Barrier(2)
     results = context.Queue()
     path = str(tmp_path / "events.db")
+    initialized = SQLiteEventLogSync(path)
+    initialized.close()
     processes = [
         context.Process(
             target=_sqlite_state_cas_process,
