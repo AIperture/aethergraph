@@ -18,6 +18,9 @@ from aethergraph.services.memory import (
 from aethergraph.services.memory.canonical_prompt import CanonicalPromptMemoryMixin
 from aethergraph.storage.contracts import (
     EventQuery,
+    SearchDocument,
+    SearchMode,
+    StorageIntegrityError,
     StorageOpenMode,
     StorageOpenRequest,
     StorageProviderSelection,
@@ -583,6 +586,69 @@ async def test_public_memory_prompt_bounds_and_metadata_conflicts_fail_directly(
         await bundle.close()
 
 
+@pytest.mark.asyncio
+async def test_public_memory_search_hydrates_exact_rank_and_rejects_stale_projection(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    memory = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=StorageScope(project_id="project-1"),
+        clock=clock.now,
+        event_id_factory=_Identities(),
+    ).for_public_execution(
+        StorageScope(run_id="run-1"),
+        logical_scope_id="run:run-1",
+        deprecated_app_id="app-legacy",
+    )
+    try:
+        first = await memory.append_chat_turn(
+            "user",
+            "canonical migration evidence",
+            tags=["verified"],
+        )
+        await memory.append_chat_turn("assistant", "unrelated response")
+
+        hits = await memory.search_events(
+            query="migration",
+            mode=SearchMode.LEXICAL,
+            tags=["chat", "verified"],
+        )
+
+        assert len(hits) == 1
+        assert hits[0].event == first
+        assert hits[0].event.app_id == "app-legacy"
+        assert hits[0].score > 0
+        assert hits[0].mode is SearchMode.LEXICAL
+
+        record = await memory.canonical.get_event(first.event_id)
+        assert record is not None
+        await bundle.search.upsert(
+            SearchDocument(
+                corpus="memory",
+                item_id=first.event_id,
+                text="stale projection",
+                scope=memory.scope,
+                occurred_at=record.occurred_at,
+                tags=("chat", "verified"),
+                metadata={
+                    "event_cursor": "stale-cursor",
+                    "kind": "chat.turn",
+                    "tags": ["chat", "verified"],
+                    "stage": "user",
+                },
+            )
+        )
+        with pytest.raises(StorageIntegrityError, match="stale"):
+            await memory.search_events(
+                query="stale",
+                mode=SearchMode.LEXICAL,
+            )
+    finally:
+        await bundle.close()
+
+
 def test_public_memory_docstrings_and_surface_are_explicit() -> None:
     for member in (
         CanonicalPublicMemoryFacade.__init__,
@@ -604,6 +670,7 @@ def test_public_memory_docstrings_and_surface_are_explicit() -> None:
         CanonicalPublicMemoryFacade.record_state,
         CanonicalPublicMemoryFacade.record_chat_user,
         CanonicalPublicMemoryFacade.distill_long_term,
+        CanonicalPublicMemoryFacade.search_events,
         CanonicalMemoryFacadeFactory.for_public_execution,
     ):
         docstring = inspect.getdoc(member) or ""

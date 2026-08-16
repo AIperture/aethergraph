@@ -518,6 +518,7 @@ class CanonicalMemoryFacade:
         query: str,
         mode: SearchMode,
         top_k: int = 10,
+        tags: tuple[str, ...] = (),
         metadata: Mapping[str, Any] | None = None,
         occurred_at_min: datetime | None = None,
         occurred_at_max: datetime | None = None,
@@ -547,6 +548,7 @@ class CanonicalMemoryFacade:
             query: Exact search text; structural mode may use an empty value.
             mode: Required search mode with no fallback.
             top_k: Positive provider result bound up to 1000.
+            tags: Optional tags every indexed event must contain.
             metadata: Optional exact indexed metadata filters.
             occurred_at_min: Optional inclusive UTC lower time bound.
             occurred_at_max: Optional inclusive UTC upper time bound.
@@ -565,6 +567,7 @@ class CanonicalMemoryFacade:
                 scope=self.scope,
                 query=query,
                 top_k=top_k,
+                tags=tags,
                 metadata=dict(metadata or {}),
                 occurred_at_min=occurred_at_min,
                 occurred_at_max=occurred_at_max,

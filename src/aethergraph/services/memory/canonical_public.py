@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 from datetime import UTC, datetime
@@ -17,9 +18,11 @@ from aethergraph.storage.contracts import (
     EventQuery,
     EventRecord,
     PageRequest,
+    SearchMode,
     SortDirection,
     StateRecord,
     StorageConflictError,
+    StorageIntegrityError,
 )
 
 from .canonical_facade import CanonicalMemoryFacade
@@ -35,6 +38,15 @@ _PAGE_SIZE = 500
 _MAX_STATE_CAS_RETRIES = 8
 _STATE_SERVICE_CONTEXT = "service_context"
 _STATE_PUBLIC_METADATA = "public_metadata"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PublicMemorySearchHit:
+    """One ranked canonical search result hydrated to a public Memory Event."""
+
+    event: Event
+    score: float
+    mode: SearchMode
 
 
 class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
@@ -739,6 +751,97 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             return_event=return_event,
             order_dir="desc",
         )
+
+    async def search_events(
+        self,
+        *,
+        query: str,
+        mode: SearchMode,
+        top_k: int = 10,
+        tags: Sequence[str] | None = None,
+        metadata: Mapping[str, Any] | None = None,
+        occurred_at_min: datetime | None = None,
+        occurred_at_max: datetime | None = None,
+        require_indexed_cursor: str | None = None,
+        level: str | None = None,
+    ) -> tuple[PublicMemorySearchHit, ...]:
+        """Search and hydrate ranked public Memory Events in one exact mode.
+
+        Search executes against the canonical projection, then every ranked identity
+        is authorized and hydrated from the exact bound authoritative EventStore scope.
+
+        Examples:
+            Search recent text lexically:
+                ```python
+                hits = await memory.search_events(
+                    query="migration",
+                    mode=SearchMode.LEXICAL,
+                )
+                ```
+
+            Require tags and a covering cursor:
+                ```python
+                hits = await memory.search_events(
+                    query="approved",
+                    mode=SearchMode.SEMANTIC,
+                    tags=["chat"],
+                    require_indexed_cursor=receipt.indexed_cursor,
+                )
+                ```
+
+        Args:
+            query: Exact search text; structural mode may use an empty value.
+            mode: Required canonical search mode with no inference or fallback.
+            top_k: Positive hydrated result bound up to 1000.
+            tags: Optional tags every indexed Event must contain.
+            metadata: Optional exact canonical search metadata filters.
+            occurred_at_min: Optional inclusive timezone-aware UTC lower time bound.
+            occurred_at_max: Optional inclusive timezone-aware UTC upper time bound.
+            require_indexed_cursor: Optional opaque covering search cursor requirement.
+            level: Recognized compatibility scope level for the already-bound facade.
+
+        Returns:
+            tuple[PublicMemorySearchHit, ...]: Provider-ranked hydrated public Events.
+
+        Notes:
+            Missing or stale search references raise `StorageIntegrityError`. Search
+            misses remain empty and capability failures never select a different mode.
+        """
+        _memory_level(level)
+        normalized_tags = _tags(tags)
+        results = await self.canonical.search(
+            query=query,
+            mode=mode,
+            top_k=top_k,
+            tags=normalized_tags,
+            metadata=metadata,
+            occurred_at_min=occurred_at_min,
+            occurred_at_max=occurred_at_max,
+            require_indexed_cursor=require_indexed_cursor,
+        )
+        records = await asyncio.gather(
+            *(self.canonical.get_event(result.item_id) for result in results)
+        )
+        hydrated: list[PublicMemorySearchHit] = []
+        for result, record in zip(results, records, strict=True):
+            if result.corpus != "memory" or result.mode is not mode:
+                raise StorageIntegrityError("Memory search result changed corpus or exact mode")
+            if record is None:
+                raise StorageIntegrityError(
+                    "Memory search result references a missing authoritative Event"
+                )
+            if result.metadata.get("event_cursor") != record.cursor:
+                raise StorageIntegrityError(
+                    "Memory search result references a stale authoritative Event cursor"
+                )
+            hydrated.append(
+                PublicMemorySearchHit(
+                    event=_public_event(record, self.memory_scope_id),
+                    score=result.score,
+                    mode=result.mode,
+                )
+            )
+        return tuple(hydrated)
 
     def event_to_dict(self, event: Event) -> dict[str, Any]:
         """Normalize one public Event DTO to the stable mapping surface.
