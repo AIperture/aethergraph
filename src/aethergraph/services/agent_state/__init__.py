@@ -3,18 +3,14 @@ from .canonical_facade import (
     CanonicalAgentStateHandle,
     project_agent_state_scope,
 )
-from .facade import (
+from .contracts import (
     AgentStateBackend,
     AgentStateConflictError,
-    AgentStateFacade,
-    AgentStateHandle,
 )
 
 __all__ = [
     "AgentStateBackend",
     "AgentStateConflictError",
-    "AgentStateFacade",
-    "AgentStateHandle",
     "CanonicalAgentStateFacade",
     "CanonicalAgentStateHandle",
     "project_agent_state_scope",

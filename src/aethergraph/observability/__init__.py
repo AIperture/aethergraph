@@ -4,7 +4,7 @@ from .agent_events import (
     register_default_agent_event_types,
 )
 from .canonical_inspection import CanonicalInspectionReader
-from .canonical_retention import ProviderRetentionJanitor
+from .canonical_retention import ProviderRetentionJanitor, RetentionPolicy
 from .canonical_runtime_output import (
     CanonicalRuntimeOutputSink,
     bind_canonical_runtime_output,
@@ -14,14 +14,7 @@ from .canonical_service import (
     ProviderObservationService,
     bind_canonical_observation_service,
 )
-from .facade import (
-    ActiveObservabilityScopeError,
-    ObservabilityFacade,
-    open_active_observability_facade,
-    open_observability_workspace,
-)
 from .inspection import (
-    InspectionPresenter,
     ObservabilityIdentity,
     ObservabilityNotFoundError,
     ObservabilityUnavailableError,
@@ -34,7 +27,7 @@ from .legacy_cleanup import (
     scan_legacy_observability,
 )
 from .logger import LoggingConfig, StdLoggerService
-from .metering import EventLogMeteringService
+from .metering import CanonicalMeteringService
 from .models import (
     CaptureMode,
     LLMObservationRecord,
@@ -52,17 +45,14 @@ from .operations import (
     summarize_payload,
 )
 from .policy import ObservationPolicy
-from .retention import RetentionJanitor, RetentionPolicy
-from .sqlite_store import SQLiteObservationStore
+from .workspace import ObservabilityFacade, open_observability_workspace
 
 __all__ = [
-    "ActiveObservabilityScopeError",
     "AgentEventTypeRegistry",
     "CaptureMode",
     "CanonicalRuntimeOutputSink",
     "CanonicalObservationService",
     "CanonicalInspectionReader",
-    "InspectionPresenter",
     "LLMObservationRecord",
     "LegacyObservabilityCleanupResult",
     "LegacyObservabilityReport",
@@ -73,17 +63,15 @@ __all__ = [
     "ObservationScope",
     "OperationObserver",
     "OperationSpan",
-    "ObservabilityFacade",
     "ObservabilityIdentity",
+    "ObservabilityFacade",
     "ObservabilityNotFoundError",
     "ObservabilityUnavailableError",
     "ObservabilityWorkspaceError",
     "PurgeResult",
     "ProviderObservationService",
     "ProviderRetentionJanitor",
-    "RetentionJanitor",
     "RetentionPolicy",
-    "SQLiteObservationStore",
     "StdLoggerService",
     "StorageStats",
     "cleanup_legacy_observability",
@@ -91,11 +79,10 @@ __all__ = [
     "bind_canonical_observation_service",
     "emit_agent_event",
     "extract_metrics",
-    "open_active_observability_facade",
-    "open_observability_workspace",
     "register_default_agent_event_types",
     "resolve_operation_observer",
     "scan_legacy_observability",
     "summarize_payload",
-    "EventLogMeteringService",
+    "open_observability_workspace",
+    "CanonicalMeteringService",
 ]

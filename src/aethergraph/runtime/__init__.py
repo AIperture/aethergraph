@@ -26,6 +26,7 @@ from aethergraph.core.runtime.runtime_services import (
     # external context service helpers
     register_context_service,
     register_llm_client,
+    uninstall_services,
 )
 from aethergraph.runtime.contracts import (
     RuntimeArtifactRecord,
@@ -56,6 +57,7 @@ from aethergraph.runtime.errors import (
 __all__ = [
     # general service management
     "install_services",
+    "uninstall_services",
     "ensure_services_installed",
     "current_services",
     # channel service helpers

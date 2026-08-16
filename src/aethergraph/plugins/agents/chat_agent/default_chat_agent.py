@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from aethergraph import NodeContext, graph_fn
+from aethergraph.storage.contracts import SearchMode
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -17,9 +17,9 @@ async def _maybe_distill_session(mem) -> None:
     Simple distillation policy (Layer 2 maintenance):
 
     - If we have "enough" chat turns, run a long-term summary.
-    - Uses non-LLM summarizer by default (use_llm=False).
-      The summary is stored in DocStore and also recorded as a memory event
-      via `record_raw`, so it becomes searchable by indices.
+    - Uses non-LLM summarization by default (use_llm=False).
+      The summary is appended once as a canonical memory event, so it remains
+      searchable through the selected provider.
     """
     recent_for_distill = await mem.recent_chat(limit=120)
     if len(recent_for_distill) < 80:
@@ -76,10 +76,10 @@ def _format_search_snippets(event_results, artifact_results, max_total: int = 8)
 
     # Events first
     for r in event_results:
-        meta = getattr(r, "metadata", None) or {}
-        kind = meta.get("kind", "event")
-        tags = meta.get("tags") or []
-        text = meta.get("preview") or ""
+        event = r.event
+        kind = event.kind or "event"
+        tags = event.tags or []
+        text = event.text or ""
 
         if not text:
             continue
@@ -93,14 +93,15 @@ def _format_search_snippets(event_results, artifact_results, max_total: int = 8)
     if len(lines) < max_total:
         remaining = max_total - len(lines)
         for r in artifact_results[:remaining]:
-            meta = getattr(r, "metadata", None) or {}
-            kind = meta.get("kind", "artifact")
+            artifact = r.artifact
+            meta = artifact.labels or {}
+            kind = artifact.kind or "artifact"
             name = (
                 meta.get("filename")
                 or meta.get("name")
                 or meta.get("path")
-                or meta.get("uri")
-                or r.item_id
+                or artifact.uri
+                or artifact.artifact_id
             )
             desc = meta.get("description") or meta.get("summary") or ""
             snippet = f"{name}: {desc[:160]}" if desc else name
@@ -147,7 +148,7 @@ async def default_chat_agent(
     llm = context.llm()
     chan = context.channel()
     mem = context.memory()
-    indices = context.indices()  # ScopedIndices
+    artifacts = context.artifacts()
 
     # test save state
     state_key = "test_state_key"
@@ -209,35 +210,20 @@ async def default_chat_agent(
     usage: dict[str, Any] = {}
 
     try:
-        # Scope-aware filtering: prefer this memory scope if present
-        scope_id = getattr(mem, "memory_scope_id", None) or None
-        filters: dict[str, Any] = {}
-        if scope_id:
-            filters["scope_id"] = scope_id
-
-        now_ts = time.time()
-        # Example: look back up to ~90 days. You can adjust this.
-        created_at_min = now_ts - 90 * 24 * 3600
-        created_at_max = now_ts
-
         # Always search events with the user's message as query (cheap, high value).
-        event_results = await indices.search_events(
+        event_results = await mem.search_events(
             query=message,
+            mode=SearchMode.LEXICAL,
             top_k=5,
-            filters=filters or None,
-            created_at_min=created_at_min,
-            created_at_max=created_at_max,
         )
 
         # Search artifacts only when the message/files/context suggests it.
         artifact_results = []
         if _should_search_artifacts(message, attachments):
-            artifact_results = await indices.search_artifacts(
+            artifact_results = await artifacts.search_public_artifacts(
                 query=message,
+                mode=SearchMode.LEXICAL,
                 top_k=5,
-                filters=filters or None,
-                created_at_min=created_at_min,
-                created_at_max=created_at_max,
             )
 
         search_snippet_block = _format_search_snippets(event_results, artifact_results)

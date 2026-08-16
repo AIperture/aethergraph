@@ -277,6 +277,7 @@ def test_canonical_inspection_public_docstrings_are_strict() -> None:
         CanonicalInspectionReader.summarize_traces,
         CanonicalInspectionReader.summarize_llm_calls,
         CanonicalInspectionReader.list_logs,
+        CanonicalInspectionReader.list_agent_events,
     )
     for method in methods:
         docstring = inspect.getdoc(method) or ""

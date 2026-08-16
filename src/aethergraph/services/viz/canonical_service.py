@@ -379,7 +379,7 @@ def build_canonical_viz_service(
         event_id_factory: Source of exact non-empty event identities.
 
     Returns:
-        CanonicalVizService: Inactive service over the bundle's runtime EventStore.
+        CanonicalVizService: Provider-backed service over the bundle's runtime EventStore.
 
     Notes:
         The returned service does not own bundle close and cannot select another store.

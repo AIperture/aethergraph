@@ -880,6 +880,10 @@ class InMemoryObservationRepository:
             and (not query.providers or detail.record.provider in query.providers)
             and (not query.models or detail.record.model in query.models)
             and (not query.call_types or detail.record.call_type in query.call_types)
+            and (
+                not query.prompt_manifest_ids
+                or detail.record.prompt_manifest_id in query.prompt_manifest_ids
+            )
             and (not query.statuses or detail.record.observation.status in query.statuses)
             and (
                 query.occurred_at_or_after is None

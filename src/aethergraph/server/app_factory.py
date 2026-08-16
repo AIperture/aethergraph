@@ -18,7 +18,7 @@ from aethergraph.api.v1.router import router as api_v1_router
 from aethergraph.config.config import AppSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-from aethergraph.core.runtime.runtime_services import install_services
+from aethergraph.core.runtime.runtime_services import install_services, uninstall_services
 
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec, emit_load_errors
@@ -98,44 +98,44 @@ def create_app(
         trigger_engine_task = None
         retention_stop = asyncio.Event()
         retention_task = None
-        if container.retention_janitor is not None:
-            retention_task = asyncio.create_task(
-                container.retention_janitor.run_forever(retention_stop)
-            )
-
-        await container.continuation_timer.start()
-        logger.info("ContinuationTimerService background task started")
-
-        # Start trigger engine if trigger_service is present
-        if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
-            trigger_engine: TriggerEngine = container.trigger_engine
-            trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
-            app.state.trigger_engine_task = trigger_engine_task
-            logger.info("TriggerEngine background task started")
-
-        if integration_manager is not None:
-            await integration_manager.start()
-
-        if development_container:
-            # Developer sidecars may replay mutable source registrations.
-            replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (
-                "1",
-                "true",
-                "yes",
-            )
-            replay_report = await container.registration_service.replay_registered_sources(
-                strict=replay_strict
-            )
-            logger.info(
-                "Registry replay complete: total=%s loaded=%s failed=%s",
-                replay_report.total,
-                replay_report.loaded,
-                replay_report.failed,
-            )
-            if replay_report.errors:
-                for err in replay_report.errors:
-                    logger.warning("Registry replay error: %s", err)
+        integration_started = False
         try:
+            await container.start_storage()
+            if container.retention_janitor is not None:
+                retention_task = asyncio.create_task(
+                    container.retention_janitor.run_forever(retention_stop)
+                )
+
+            await container.continuation_timer.start()
+            logger.info("ContinuationTimerService background task started")
+
+            if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
+                trigger_engine: TriggerEngine = container.trigger_engine
+                trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
+                app.state.trigger_engine_task = trigger_engine_task
+                logger.info("TriggerEngine background task started")
+
+            if integration_manager is not None:
+                await integration_manager.start()
+                integration_started = True
+
+            if development_container:
+                replay_strict = os.environ.get(
+                    "AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0"
+                ).lower() in ("1", "true", "yes")
+                replay_report = await container.registration_service.replay_registered_sources(
+                    strict=replay_strict
+                )
+                logger.info(
+                    "Registry replay complete: total=%s loaded=%s failed=%s",
+                    replay_report.total,
+                    replay_report.loaded,
+                    replay_report.failed,
+                )
+                if replay_report.errors:
+                    for err in replay_report.errors:
+                        logger.warning("Registry replay error: %s", err)
+
             # Hand control back to FastAPI / TestClient
             yield
         finally:
@@ -161,13 +161,23 @@ def create_app(
                         await trigger_engine_task
 
             # 3) Stop explicitly configured provider transports
-            if integration_manager is not None:
-                await integration_manager.stop()
+            if integration_manager is not None and integration_started:
+                try:
+                    await integration_manager.stop()
+                except Exception:
+                    logger.exception("Error stopping IntegrationManager")
 
             if retention_task is not None:
                 retention_stop.set()
                 with suppress(asyncio.CancelledError):
                     await retention_task
+
+            try:
+                await container.close_storage()
+            except Exception:
+                logger.exception("Error closing canonical storage")
+            finally:
+                uninstall_services(container)
 
     # Create app with lifespan
     app = FastAPI(

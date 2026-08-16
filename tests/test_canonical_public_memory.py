@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aethergraph.services.agent_state import AgentStateFacade
+from aethergraph.services.agent_state import CanonicalAgentStateFacade
 from aethergraph.services.memory import (
     CanonicalMemoryFacadeFactory,
     CanonicalPublicMemoryFacade,
@@ -286,7 +286,7 @@ async def test_public_memory_state_uses_state_current_history_without_event_dupl
 
 @pytest.mark.asyncio
 async def test_public_memory_state_conflicts_preserve_public_error(tmp_path: Path) -> None:
-    from aethergraph.contracts.storage.event_log import StateSnapshotConflictError
+    from aethergraph.services.memory.contracts import StateSnapshotConflictError
 
     clock = _Clock()
     bundle = _open_bundle(tmp_path, clock)
@@ -351,7 +351,7 @@ async def test_public_memory_unconditional_state_writes_retry_same_store_content
 
 
 @pytest.mark.asyncio
-async def test_public_memory_preserves_active_agent_state_facade_revision_behavior(
+async def test_public_memory_and_agent_state_use_separate_canonical_namespaces(
     tmp_path: Path,
 ) -> None:
     clock = _Clock()
@@ -365,7 +365,7 @@ async def test_public_memory_preserves_active_agent_state_facade_revision_behavi
         logical_scope_id="session:session-1",
     )
     try:
-        first = AgentStateFacade(memory=memory).bind(  # type: ignore[arg-type]
+        first = CanonicalAgentStateFacade(state_store=bundle.state, scope=memory.scope).bind(
             key="demo",
             model=_DemoState,
             default_factory=_DemoState,
@@ -374,7 +374,7 @@ async def test_public_memory_preserves_active_agent_state_facade_revision_behavi
         initial.count = 1
         await first.commit(initial, expected_revision=0)
 
-        second = AgentStateFacade(memory=memory).bind(  # type: ignore[arg-type]
+        second = CanonicalAgentStateFacade(state_store=bundle.state, scope=memory.scope).bind(
             key="demo",
             model=_DemoState,
             default_factory=_DemoState,
@@ -384,7 +384,8 @@ async def test_public_memory_preserves_active_agent_state_facade_revision_behavi
 
         assert loaded == _DemoState(count=1)
         assert second.revision == 2
-        assert await memory.get_latest_state("demo") == {"count": 2}
+        assert await memory.get_latest_state("demo") is None
+        assert await second.load(force=True) == _DemoState(count=2)
     finally:
         await bundle.close()
 

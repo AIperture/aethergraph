@@ -149,7 +149,7 @@ async def _run_local_async(*, graph_id: str, inputs: dict, workspace: str) -> di
     from aethergraph.api.v1.deps import RequestIdentity
     from aethergraph.config.loader import load_settings
     from aethergraph.core.runtime.run_types import RunOrigin
-    from aethergraph.core.runtime.runtime_services import install_services
+    from aethergraph.core.runtime.runtime_services import install_services, uninstall_services
     from aethergraph.services.channel._origin import _console_origin_binding
     from aethergraph.services.container.default_container import build_default_container
 
@@ -157,28 +157,36 @@ async def _run_local_async(*, graph_id: str, inputs: dict, workspace: str) -> di
     container = build_default_container(root=workspace, cfg=cfg)
     install_services(container)
     rm = container.run_manager
-
-    identity = RequestIdentity(user_id="local", org_id="local", mode="local")
-    session_id = f"cli-{uuid4().hex[:12]}"
-    origin_binding = _console_origin_binding(session_id=session_id, source="cli")
-    record, outputs, has_waits, continuations = await rm.run_and_wait(
-        graph_id,
-        inputs=inputs,
-        session_id=session_id,
-        identity=identity,
-        origin=RunOrigin.cli,
-        run_config={"origin_binding": origin_binding.model_dump(mode="json")},
-    )
-    return {
-        "run_id": record.run_id,
-        "graph_id": record.graph_id,
-        "status": record.status.value if hasattr(record.status, "value") else str(record.status),
-        "outputs": outputs,
-        "has_waits": has_waits,
-        "error": record.error,
-        "started_at": str(record.started_at),
-        "finished_at": str(record.finished_at),
-    }
+    await container.start_storage()
+    try:
+        identity = RequestIdentity(user_id="local", org_id="local", mode="local")
+        session_id = f"cli-{uuid4().hex[:12]}"
+        origin_binding = _console_origin_binding(session_id=session_id, source="cli")
+        record, outputs, has_waits, continuations = await rm.run_and_wait(
+            graph_id,
+            inputs=inputs,
+            session_id=session_id,
+            identity=identity,
+            origin=RunOrigin.cli,
+            run_config={"origin_binding": origin_binding.model_dump(mode="json")},
+        )
+        return {
+            "run_id": record.run_id,
+            "graph_id": record.graph_id,
+            "status": (
+                record.status.value if hasattr(record.status, "value") else str(record.status)
+            ),
+            "outputs": outputs,
+            "has_waits": has_waits,
+            "error": record.error,
+            "started_at": str(record.started_at),
+            "finished_at": str(record.finished_at),
+        }
+    finally:
+        try:
+            await container.close_storage()
+        finally:
+            uninstall_services(container)
 
 
 def _run_local(args: argparse.Namespace, *, graph_id: str, inputs: dict) -> int:

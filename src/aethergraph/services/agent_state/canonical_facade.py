@@ -8,7 +8,7 @@ import dataclasses
 import json
 from typing import Any, Generic, TypeVar, cast
 
-from aethergraph.services.agent_state.facade import (
+from aethergraph.services.agent_state.contracts import (
     AgentStateBackend,
     AgentStateConflictError,
 )
@@ -439,7 +439,7 @@ class CanonicalAgentStateFacade:
     """Bind typed Agent-state handles to one canonical provider store and base scope."""
 
     def __init__(self, *, state_store: StateStore, scope: StorageScope) -> None:
-        """Compose the inactive-until-S9 canonical Agent-state service.
+        """Compose the provider-backed canonical Agent-state service.
 
         Retains one provider store and canonical base scope without switching the active
         runtime, adapting a legacy store, or selecting storage dynamically.

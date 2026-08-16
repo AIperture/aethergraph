@@ -1,8 +1,9 @@
-"""Inactive provider-neutral observation retention projection for the S9 cut."""
+"""Provider-neutral canonical observation retention projection."""
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from aethergraph.services.canonical_storage_scope import merge_storage_scope
@@ -17,9 +18,51 @@ from aethergraph.storage.contracts import (
 )
 
 from .canonical_service import CanonicalObservationService
-from .retention import RetentionPolicy
 
 _PAGE_SIZE = 500
+
+
+@dataclass(frozen=True)
+class RetentionPolicy:
+    """Configure bounded provider-neutral observation retention.
+
+    Examples:
+        Use the default age and capacity limits:
+        ```python
+        policy = RetentionPolicy()
+        ```
+
+        Keep errors longer than ordinary observations:
+        ```python
+        policy = RetentionPolicy(max_age_days=14, error_max_age_days=90)
+        ```
+
+    Args:
+        max_age_days: Maximum age for non-error observations.
+        error_max_age_days: Maximum age for error and critical observations.
+        max_full_prompt_age_days: Maximum age for full prompt captures.
+        max_bytes_per_trace: Maximum retained logical bytes per trace.
+        max_total_bytes: Maximum retained logical bytes for the owner scope.
+        max_retained_traces: Maximum retained trace scopes.
+        max_retained_runs: Maximum retained run scopes.
+        max_observations_per_purge: Maximum rows requested per purge operation.
+
+    Returns:
+        RetentionPolicy: Immutable retention thresholds.
+
+    Notes:
+        Validation occurs when the policy is bound to a janitor. Providers remain
+        authoritative for pin checks, accounting, and the exact deletion set.
+    """
+
+    max_age_days: int = 30
+    error_max_age_days: int = 90
+    max_full_prompt_age_days: int = 3
+    max_bytes_per_trace: int = 64 * 1024 * 1024
+    max_total_bytes: int = 512 * 1024 * 1024
+    max_retained_traces: int = 10_000
+    max_retained_runs: int = 10_000
+    max_observations_per_purge: int = 1_000
 
 
 class ProviderRetentionJanitor:
@@ -61,7 +104,7 @@ class ProviderRetentionJanitor:
             scope_action_limit: Positive maximum scope purges attempted per pass.
 
         Returns:
-            None: The inactive-until-S9 janitor is ready.
+            None: The provider-backed janitor is ready.
 
         Notes:
             The service bundle owns repository lifecycle; the janitor never compacts
@@ -303,4 +346,4 @@ def _validate_policy(policy: RetentionPolicy) -> None:
         raise ValueError("error_max_age_days must not be shorter than max_age_days")
 
 
-__all__ = ["ProviderRetentionJanitor"]
+__all__ = ["ProviderRetentionJanitor", "RetentionPolicy"]

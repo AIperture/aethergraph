@@ -335,7 +335,7 @@ class CanonicalArtifactFacade:
             occurrence_id_factory: Stable occurrence identity factory.
 
         Returns:
-            None: The inactive-until-S9 canonical service is ready without I/O.
+            None: The provider-backed canonical service is ready without I/O.
 
         Notes:
             Every populated owner dimension must match execution scope. App/client

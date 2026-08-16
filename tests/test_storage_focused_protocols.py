@@ -80,13 +80,22 @@ class _EventStore:
             (
                 row
                 for row in self.rows
-                if row.event_id == event_id and _scope_key(row.scope) == _scope_key(scope)
+                if row.event_id == event_id
+                and all(
+                    getattr(row.scope, name) == value for name, value in scope.as_filter().items()
+                )
             ),
             None,
         )
 
     async def query(self, query: EventQuery) -> Page[EventRecord]:
-        rows = [row for row in self.rows if _scope_key(row.scope) == _scope_key(query.scope)]
+        rows = [
+            row
+            for row in self.rows
+            if all(
+                getattr(row.scope, name) == value for name, value in query.scope.as_filter().items()
+            )
+        ]
         if query.kinds:
             rows = [row for row in rows if row.kind in query.kinds]
         rows.sort(key=lambda row: int(row.cursor.split("-")[-1]), reverse=True)

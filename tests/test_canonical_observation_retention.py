@@ -8,10 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from aethergraph.observability.canonical_retention import ProviderRetentionJanitor
+from aethergraph.observability.canonical_retention import (
+    ProviderRetentionJanitor,
+    RetentionPolicy,
+)
 from aethergraph.observability.canonical_service import ProviderObservationService
 from aethergraph.observability.policy import ObservationPolicy
-from aethergraph.observability.retention import RetentionPolicy
 from aethergraph.storage.contracts import (
     LLMCallDraft,
     ObservationCaptureMode,

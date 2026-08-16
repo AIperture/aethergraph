@@ -1,33 +1,26 @@
 from __future__ import annotations
 
-from collections import Counter
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
 from aethergraph.observability import (
-    ActiveObservabilityScopeError,
-    ObservabilityFacade,
     ObservabilityIdentity,
     ObservabilityNotFoundError,
     ObservabilityUnavailableError,
 )
+from aethergraph.observability.canonical_inspection import CanonicalInspectionReader
 from aethergraph.observability.contracts import (
     AgentEventListResponse,
     AgentEventTypeListResponse,
     AgentEventTypeRecord,
     InspectLogListResponse,
-    InspectLogRecord,
     LLMCallListResponse,
     LLMCallRecord,
     LLMSummary,
     TraceEventListResponse,
     TraceSummary,
-)
-from aethergraph.observability.inspection import (
-    _matches_scope,
-    _paginate_rows,
 )
 
 from .deps import RequestIdentity, get_identity
@@ -54,19 +47,17 @@ def _observability_identity(identity: RequestIdentity) -> ObservabilityIdentity:
     )
 
 
-def _observability_facade(identity: RequestIdentity) -> ObservabilityFacade:
+def _observability_facade(identity: RequestIdentity) -> CanonicalInspectionReader:
     container = current_services()
-    facade = getattr(container, "observability", None)
-    if facade is None:
+    services = getattr(container, "storage_services", None)
+    if services is None:
         raise HTTPException(status_code=503, detail="Observability not configured")
-    return facade.for_identity(_observability_identity(identity))
+    return services.inspection(identity=_observability_identity(identity))
 
 
 def _observability_http_error(exc: Exception) -> HTTPException:
     if isinstance(exc, ObservabilityNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, ActiveObservabilityScopeError):
-        return HTTPException(status_code=409, detail=str(exc))
     return HTTPException(status_code=503, detail=str(exc))
 
 
@@ -98,7 +89,7 @@ async def get_run_trace(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceEventListResponse:
     await _get_run_or_404(run_id, identity)
-    return await _observability_facade(identity).list_inspect_traces(
+    return await _observability_facade(identity).list_traces(
         since=_parse_window(from_),
         until=_parse_window(to),
         run_id=run_id,
@@ -129,7 +120,7 @@ async def list_traces(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceEventListResponse:
     try:
-        return await _observability_facade(identity).list_inspect_traces(
+        return await _observability_facade(identity).list_traces(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -155,7 +146,7 @@ async def get_trace_by_id(
     limit: int = Query(100, ge=1, le=500),  # noqa: B008
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceEventListResponse:
-    return await _observability_facade(identity).list_inspect_traces(
+    return await _observability_facade(identity).list_traces(
         trace_id=trace_id, cursor=cursor, limit=limit
     )
 
@@ -168,27 +159,10 @@ async def get_run_trace_summary(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> TraceSummary:
     await _get_run_or_404(run_id, identity)
-    events = (
-        await _observability_facade(identity).list_inspect_traces(
-            since=_parse_window(from_),
-            until=_parse_window(to),
-            run_id=run_id,
-            limit=2_147_483_647,
-        )
-    ).items
-    trace_ids = sorted({event.trace_id for event in events if event.trace_id})
-    failing_services = Counter(event.service for event in events if event.error is not None)
-    latest_error_ts = max((event.ts for event in events if event.error is not None), default=None)
-    return TraceSummary(
+    return await _observability_facade(identity).summarize_traces(
         run_id=run_id,
-        trace_ids=trace_ids,
-        trace_id_count=len(trace_ids),
-        trace_ids_truncated=False,
-        span_count=len(events),
-        error_count=sum(1 for event in events if event.error is not None),
-        total_duration_ms=int(sum(int(event.duration_ms or 0) for event in events)),
-        top_failing_services=dict(failing_services.most_common(5)),
-        latest_error_ts=latest_error_ts,
+        since=_parse_window(from_),
+        until=_parse_window(to),
     )
 
 
@@ -202,7 +176,7 @@ async def get_run_llm_calls(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallListResponse:
     await _get_run_or_404(run_id, identity)
-    return await _observability_facade(identity).list_inspect_llm_calls(
+    return await _observability_facade(identity).list_llm_calls(
         run_id=run_id,
         since=_parse_window(from_),
         until=_parse_window(to),
@@ -234,7 +208,7 @@ async def list_llm_calls(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallListResponse:
     try:
-        return await _observability_facade(identity).list_inspect_llm_calls(
+        return await _observability_facade(identity).list_llm_calls(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -260,7 +234,7 @@ async def get_llm_call(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMCallRecord:
     try:
-        return await _observability_facade(identity).get_inspect_llm_call(call_id)
+        return await _observability_facade(identity).get_llm_call(call_id)
     except (ObservabilityUnavailableError, ObservabilityNotFoundError) as exc:
         raise _observability_http_error(exc) from exc
 
@@ -273,40 +247,10 @@ async def get_run_llm_summary(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> LLMSummary:
     await _get_run_or_404(run_id, identity)
-    items = (
-        await _observability_facade(identity).list_inspect_llm_calls(
-            run_id=run_id,
-            since=_parse_window(from_),
-            until=_parse_window(to),
-            limit=2_147_483_647,
-        )
-    ).items
-    by_model: Counter[str] = Counter()
-    prompt_tokens = 0
-    completion_tokens = 0
-    total_tokens = 0
-    error_count = 0
-    for item in items:
-        by_model[item.model] += 1
-        prompt_tokens += int(item.usage.get("prompt_tokens") or item.usage.get("input_tokens") or 0)
-        completion_tokens += int(
-            item.usage.get("completion_tokens") or item.usage.get("output_tokens") or 0
-        )
-        total_tokens += int(item.usage.get("total_tokens") or 0)
-        if item.error_type:
-            error_count += 1
-    if total_tokens == 0:
-        total_tokens = prompt_tokens + completion_tokens
-    return LLMSummary(
+    return await _observability_facade(identity).summarize_llm_calls(
         run_id=run_id,
-        total_calls=len(items),
-        total_prompt_tokens=prompt_tokens,
-        total_completion_tokens=completion_tokens,
-        total_tokens=total_tokens,
-        error_count=error_count,
-        by_model=dict(by_model),
-        model_count=len(by_model),
-        by_model_truncated=False,
+        since=_parse_window(from_),
+        until=_parse_window(to),
     )
 
 
@@ -321,7 +265,7 @@ async def get_run_logs(
 ) -> InspectLogListResponse:
     await _get_run_or_404(run_id, identity)
     try:
-        return await _observability_facade(identity).list_inspect_logs(
+        return await _observability_facade(identity).list_logs(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -355,7 +299,7 @@ async def list_logs(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> InspectLogListResponse:
     try:
-        return await _observability_facade(identity).list_inspect_logs(
+        return await _observability_facade(identity).list_logs(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,
@@ -416,31 +360,19 @@ async def get_errors(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> InspectLogListResponse:
     try:
-        records = (
-            await _observability_facade(identity).list_inspect_logs(
-                since=_parse_window(from_),
-                until=_parse_window(to),
-                limit=2_147_483_647,
-            )
-        ).items
-    except ObservabilityUnavailableError as exc:
-        raise _observability_http_error(exc) from exc
-    items: list[InspectLogRecord] = []
-    for record in records:
-        if record.level not in {"warning", "error", "critical"}:
-            continue
-        if not _matches_scope(
-            record.scope,
+        return await _observability_facade(identity).list_logs(
+            since=_parse_window(from_),
+            until=_parse_window(to),
             agent_id=agent_id,
             app_id=app_id,
             graph_id=graph_id,
-        ):
-            continue
-        if run_status and record.run_status != run_status:
-            continue
-        items.append(record)
-    page, next_cursor = _paginate_rows(items, cursor=cursor, limit=limit)
-    return InspectLogListResponse(items=page, next_cursor=next_cursor)
+            levels=("warning", "error", "critical"),
+            run_status=run_status,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ObservabilityUnavailableError as exc:
+        raise _observability_http_error(exc) from exc
 
 
 @router.get("/runs/{run_id}/agent-events", response_model=AgentEventListResponse)
@@ -514,7 +446,7 @@ async def list_agent_events(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> AgentEventListResponse:
     try:
-        return await _observability_facade(identity).list_inspect_agent_events(
+        return await _observability_facade(identity).list_agent_events(
             since=_parse_window(from_),
             until=_parse_window(to),
             run_id=run_id,

@@ -6,6 +6,7 @@ from typing import Any
 import uuid
 
 from aethergraph.core.runtime.runtime_metering import current_meter_context
+from aethergraph.observability.models import ObservationRecord, ObservationScope
 from aethergraph.server.security.redaction import sanitize_content, sanitize_text
 
 
@@ -103,14 +104,14 @@ async def emit_agent_event(
     payload_schema_version: int | None = 1,
     parent_event_id: str | None = None,
     caused_by_event_id: str | None = None,
-    event_log: Any | None = None,
+    observation_sink: Any | None = None,
 ) -> dict[str, Any]:
-    if event_log is None:
+    if observation_sink is None:
         from aethergraph.core.runtime.runtime_services import current_services
 
-        event_log = getattr(current_services(), "eventlog", None)
-    if event_log is None:
-        raise RuntimeError("Event log not available")
+        observation_sink = getattr(current_services(), "observation_sink", None)
+    if observation_sink is None:
+        raise RuntimeError("Observation sink not available")
 
     ctx = dict(current_meter_context.get() or {})
     scope = {
@@ -151,20 +152,29 @@ async def emit_agent_event(
             "caused_by_event_id": caused_by_event_id,
         },
     }
-    scope_id = (
-        scope.get("run_id")
-        or (f"session:{scope['session_id']}" if scope.get("session_id") else None)
-        or f"agent:{producer_name}"
+    await observation_sink.append_observation(
+        ObservationRecord(
+            observation_id=event_id,
+            category="agent_event",
+            name=event_type,
+            summary=envelope["summary"],
+            occurred_at=datetime.fromtimestamp(envelope["ts"], tz=UTC).isoformat(),
+            status="error" if status == "error" else "ok",
+            severity=status
+            if status in {"debug", "info", "warning", "error", "critical"}
+            else "info",
+            scope=ObservationScope.from_dimensions(ctx),
+            parent_observation_id=parent_event_id,
+            caused_by_observation_id=caused_by_event_id,
+            attributes={
+                "event_type": event_type,
+                "producer": envelope["producer"],
+                "status": status,
+                "tags": envelope["tags"],
+                "payload": envelope["payload"],
+                "payload_schema": envelope["payload_schema"],
+                "links": envelope["links"],
+            },
+        )
     )
-    row = {
-        "id": event_id,
-        "ts": envelope["ts"],
-        "scope_id": scope_id,
-        "kind": "agent_event",
-        "payload": envelope,
-        "tags": envelope["tags"],
-        "user_id": scope.get("user_id"),
-        "org_id": scope.get("org_id"),
-    }
-    await event_log.append(row)
     return envelope

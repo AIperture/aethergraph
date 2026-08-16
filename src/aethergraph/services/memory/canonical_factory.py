@@ -81,7 +81,7 @@ class CanonicalMemoryFacadeFactory:
             event_id_factory: Stable non-empty public event identity source.
 
         Returns:
-            None: The inactive-until-S9 factory is ready without provider I/O.
+            None: The provider-backed factory is ready without provider I/O.
 
         Notes:
             The owning `StorageComposition` retains lifecycle responsibility. App and
@@ -114,7 +114,12 @@ class CanonicalMemoryFacadeFactory:
         self._clock = clock
         self._event_id_factory = event_id_factory
 
-    def for_execution(self, execution_scope: StorageScope) -> CanonicalMemoryFacade:
+    def for_execution(
+        self,
+        execution_scope: StorageScope,
+        *,
+        event_scope: StorageScope | None = None,
+    ) -> CanonicalMemoryFacade:
         """Bind one memory facade to an exact partial execution scope.
 
         Provider-authoritative owner dimensions are merged with caller execution
@@ -129,12 +134,18 @@ class CanonicalMemoryFacadeFactory:
             Bind session Agent memory:
                 ```python
                 memory = factory.for_execution(
-                    StorageScope(session_id="session-1", agent_id="writer")
+                    StorageScope(session_id="session-1"),
+                    event_scope=StorageScope(
+                        session_id="session-1",
+                        run_id="run-1",
+                        agent_id="writer",
+                    ),
                 )
                 ```
 
         Args:
             execution_scope: Partial canonical dimensions selected by runtime scope policy.
+            event_scope: Optional full event provenance containing the bucket dimensions.
 
         Returns:
             CanonicalMemoryFacade: Bound facade over the same coherent provider bundle.
@@ -144,11 +155,17 @@ class CanonicalMemoryFacadeFactory:
             derive scope from deprecated `app_id`, `client_id`, or a legacy bucket string.
         """
         scope = merge_storage_scope(self.owner_scope, **execution_scope.as_filter())
+        resolved_event_scope = (
+            scope
+            if event_scope is None
+            else merge_storage_scope(self.owner_scope, **event_scope.as_filter())
+        )
         return CanonicalMemoryFacade(
             event_store=self._bundle.memory_events,
             state_store=self._bundle.state,
             search_backend=self._bundle.search,
             scope=scope,
+            event_scope=resolved_event_scope,
             hot_max_events=self._hot_max_events,
             hot_ttl_seconds=self._hot_ttl_seconds,
             monotonic_clock=self._monotonic_clock,
@@ -159,6 +176,7 @@ class CanonicalMemoryFacadeFactory:
         execution_scope: StorageScope,
         *,
         logical_scope_id: str,
+        provenance_scope: StorageScope | None = None,
         deprecated_app_id: str | None = None,
     ) -> CanonicalPublicMemoryFacade:
         """Bind stable public Memory behavior to one canonical execution scope.
@@ -172,6 +190,10 @@ class CanonicalMemoryFacadeFactory:
                 memory = factory.for_public_execution(
                     StorageScope(session_id="session-1"),
                     logical_scope_id="session:session-1",
+                    provenance_scope=StorageScope(
+                        session_id="session-1",
+                        run_id="run-1",
+                    ),
                 )
                 ```
 
@@ -187,6 +209,7 @@ class CanonicalMemoryFacadeFactory:
         Args:
             execution_scope: Partial canonical dimensions selected by runtime scope policy.
             logical_scope_id: Stable public memory-bucket label, never provider scope.
+            provenance_scope: Optional full execution provenance for public Event DTOs.
             deprecated_app_id: Optional explicitly deprecated response metadata.
 
         Returns:
@@ -196,9 +219,18 @@ class CanonicalMemoryFacadeFactory:
             This method performs no provider lifecycle operation and deprecated App
             metadata never affects the scope passed to provider stores.
         """
+        provenance_input = provenance_scope or execution_scope
+        resolved_provenance = merge_storage_scope(
+            self.owner_scope,
+            **provenance_input.as_filter(),
+        )
         return CanonicalPublicMemoryFacade(
-            canonical=self.for_execution(execution_scope),
+            canonical=self.for_execution(
+                execution_scope,
+                event_scope=provenance_input,
+            ),
             logical_scope_id=logical_scope_id,
+            provenance_scope=resolved_provenance,
             deprecated_app_id=deprecated_app_id,
             llm=self._llm,
             default_signal_threshold=self._default_signal_threshold,

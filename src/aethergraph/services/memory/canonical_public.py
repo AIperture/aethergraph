@@ -12,17 +12,23 @@ import math
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from aethergraph.contracts.services.memory import Event
-from aethergraph.contracts.storage.event_log import StateSnapshotConflictError
+from aethergraph.contracts.services.memory import (
+    EXTERNAL_RESOURCE_CHANGED_KIND,
+    Event,
+    ExternalResourceChangedEvent,
+)
+from aethergraph.services.memory.contracts import StateSnapshotConflictError
 from aethergraph.storage.contracts import (
     EventQuery,
     EventRecord,
+    Page,
     PageRequest,
     SearchMode,
     SortDirection,
     StateRecord,
     StorageConflictError,
     StorageIntegrityError,
+    StorageScope,
 )
 
 from .canonical_facade import CanonicalMemoryFacade
@@ -38,6 +44,7 @@ _PAGE_SIZE = 500
 _MAX_STATE_CAS_RETRIES = 8
 _STATE_SERVICE_CONTEXT = "service_context"
 _STATE_PUBLIC_METADATA = "public_metadata"
+_PROVENANCE = "provenance"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -57,6 +64,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         *,
         canonical: CanonicalMemoryFacade,
         logical_scope_id: str,
+        provenance_scope: StorageScope | None = None,
         deprecated_app_id: str | None = None,
         llm: LLMClientProtocol | None = None,
         default_signal_threshold: float = 0.0,
@@ -74,6 +82,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
                 memory = CanonicalPublicMemoryFacade(
                     canonical=canonical,
                     logical_scope_id="session:session-1",
+                    provenance_scope=execution_scope,
                 )
                 ```
 
@@ -93,6 +102,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         Args:
             canonical: Exact canonical event/state/search facade for this scope.
             logical_scope_id: Stable public memory-bucket label; never provider scope.
+            provenance_scope: Full canonical execution provenance for public DTOs.
             deprecated_app_id: Optional explicitly deprecated compatibility metadata.
             llm: Optional explicitly injected LLM client for requested distillation.
             default_signal_threshold: Finite default distillation signal threshold.
@@ -124,6 +134,8 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             raise ValueError("default_signal_threshold must be a finite number")
         self.canonical = canonical
         self.scope = canonical.scope
+        self.provenance_scope = provenance_scope or canonical.scope
+        _validate_provenance_scope(self.scope, self.provenance_scope)
         self.memory_scope_id = logical_scope_id
         self.timeline_id = logical_scope_id
         self._deprecated_app_id = deprecated_app_id
@@ -131,6 +143,116 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         self.default_signal_threshold = float(default_signal_threshold)
         self._clock = clock
         self._event_id_factory = event_id_factory
+
+    async def record_raw(
+        self,
+        *,
+        base: dict[str, Any],
+        text: str | None = None,
+        metrics: dict[str, float] | None = None,
+        state_key: str | None = None,
+        expected_state_revision: int | None = None,
+    ) -> Event:
+        """Persist one low-level public Memory event through canonical storage.
+
+        Intro:
+            Normalizes the established raw Event surface once while retaining an
+            explicitly supplied event identity and enforcing the already-bound scope.
+
+        Examples:
+            Record a Tool lifecycle event:
+                ```python
+                event = await memory.record_raw(
+                    base={"kind": "tool.call.started", "tool": "search"},
+                    text="search started",
+                )
+                ```
+
+            Commit a conditional state value:
+                ```python
+                event = await memory.record_raw(
+                    base={"kind": "state.snapshot", "data": state},
+                    state_key="agent:writer",
+                    expected_state_revision=2,
+                )
+                ```
+
+        Args:
+            base: Detached raw public Event fields.
+            text: Optional searchable authored text.
+            metrics: Optional finite numeric metrics.
+            state_key: Optional exact state key paired with an expected revision.
+            expected_state_revision: Optional exact current state revision.
+
+        Returns:
+            Event: Persisted public Event or state projection.
+
+        Notes:
+            Scope overrides must equal canonical dimensions. Deprecated App identity
+            is accepted only from facade construction as marked response metadata.
+        """
+        if (state_key is None) != (expected_state_revision is None):
+            raise ValueError("state_key and expected_state_revision must be supplied together")
+        raw = dict(base)
+        if raw.get("client_id") is not None:
+            raise ValueError("client_id is deprecated and is not canonical Memory scope")
+        if raw.get("app_id") is not None:
+            raise ValueError("app_id must be supplied only as deprecated facade metadata")
+        _assert_scope(
+            self.provenance_scope,
+            run_id=raw.get("run_id"),
+            session_id=raw.get("session_id"),
+            graph_id=raw.get("graph_id"),
+            node_id=raw.get("node_id"),
+            agent_id=raw.get("agent_id"),
+            user_id=raw.get("user_id"),
+            org_id=raw.get("org_id"),
+        )
+        if raw.get("scope_id") not in {None, self.memory_scope_id}:
+            raise ValueError("scope_id conflicts with the bound public Memory scope")
+        if state_key is not None:
+            return await self.append_state_snapshot(
+                state_key,
+                raw.get("data"),
+                tags=list(_tags(raw.get("tags"))),
+                severity=raw.get("severity", 2),
+                signal=raw.get("signal"),
+                kind=str(raw.get("kind") or "state.snapshot"),
+                stage=raw.get("stage"),
+                expected_revision=expected_state_revision,
+            )
+
+        payload: dict[str, Any] = {"data": raw.get("data")}
+        if raw.get("inputs") is not None:
+            payload["inputs"] = raw["inputs"]
+        if raw.get("outputs") is not None:
+            payload["outputs"] = raw["outputs"]
+        if self._deprecated_app_id is not None:
+            payload[_COMPATIBILITY_METADATA] = {
+                _DEPRECATED_APP_ID: {
+                    "value": self._deprecated_app_id,
+                    "deprecated": True,
+                    "scheduled_removal": "future breaking release",
+                }
+            }
+        event_id = raw.get("event_id")
+        resolved_event_id = _identity(
+            event_id if event_id is not None else self._event_id_factory()
+        )
+        receipt = await self.canonical.append_event(
+            event_id=resolved_event_id,
+            occurred_at=_utc(self._clock()),
+            kind=str(raw.get("kind") or "misc"),
+            stage=raw.get("stage"),
+            topic=_topic(topic=raw.get("topic"), tool=raw.get("tool")),
+            text=text,
+            tags=_tags(raw.get("tags")),
+            payload=payload,
+            metrics=dict(metrics or {}),
+            severity=raw.get("severity", 2),
+            signal=raw.get("signal"),
+        )
+        return _public_event(receipt.events[0], logical_scope_id=self.memory_scope_id)
 
     async def append_event(
         self,
@@ -282,6 +404,70 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             tags=list(_tags(["chat", *chat_tags])),
             severity=severity,
             signal=signal,
+        )
+
+    async def append_external_resource_change(
+        self,
+        change: ExternalResourceChangedEvent | dict[str, Any],
+    ) -> Event:
+        """Persist one authoritative external-resource outbox event idempotently.
+
+        Intro:
+            Validates the compact producer contract, exact session/logical scope,
+            and preserves its event identity in canonical Memory persistence.
+
+        Examples:
+            Append a typed change:
+                ```python
+                event = await memory.append_external_resource_change(change)
+                ```
+
+            Append a committed outbox mapping:
+                ```python
+                event = await memory.append_external_resource_change(outbox_row)
+                ```
+
+        Args:
+            change: Typed change or strict committed producer-outbox mapping.
+
+        Returns:
+            Event: Canonical public Memory event retaining the producer event ID.
+
+        Notes:
+            Duplicate event identities use provider single-assignment semantics; no
+            secondary history or fallback store is consulted.
+        """
+        normalized = (
+            change
+            if isinstance(change, ExternalResourceChangedEvent)
+            else ExternalResourceChangedEvent.from_dict(change)
+        )
+        if normalized.scope_id != self.memory_scope_id:
+            raise ValueError("external resource event scope_id does not match memory scope")
+        if normalized.session_id != (self.provenance_scope.session_id or ""):
+            raise ValueError("external resource event session_id does not match memory session")
+        payload = normalized.to_dict()
+        event_text = normalized.summary or (
+            f"external resource changed: {normalized.resource_key} revision {normalized.revision}"
+        )
+        return await self.record_raw(
+            base={
+                "event_id": normalized.event_id,
+                "kind": EXTERNAL_RESOURCE_CHANGED_KIND,
+                "session_id": normalized.session_id,
+                "scope_id": normalized.scope_id,
+                "stage": "committed_outbox",
+                "severity": 2,
+                "tags": [
+                    "external_resource",
+                    EXTERNAL_RESOURCE_CHANGED_KIND,
+                    f"external_source:{normalized.source}",
+                    f"resource_kind:{normalized.resource_kind}",
+                ],
+                "data": payload,
+                "topic": normalized.resource_key,
+            },
+            text=event_text,
         )
 
     async def get_event(self, event_id: str) -> Event | None:
@@ -653,7 +839,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         if client_id is not None:
             raise ValueError("client_id is deprecated and is not a canonical Memory filter")
         _assert_scope(
-            self.canonical,
+            self.provenance_scope,
             session_id=session_id,
             run_id=run_id,
             graph_id=graph_id,
@@ -697,6 +883,82 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             )
         events = [_public_event(record, self.memory_scope_id) for record in records]
         return events if return_event else [self.event_to_dict(event) for event in events]
+
+    async def query_event_page(
+        self,
+        *,
+        page: PageRequest,
+        kinds: Sequence[str] | None = None,
+        tags: Sequence[str] | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        topic: str | None = None,
+        order: SortDirection = SortDirection.DESCENDING,
+    ) -> Page[Event]:
+        """Read one provider-cursor page of durable public Memory events.
+
+        Intro:
+            Applies promoted canonical filters before the provider page bound and
+            projects the committed records without interpreting the opaque cursor.
+
+        Examples:
+            Read the newest durable events:
+            ```python
+            result = await memory.query_event_page(page=PageRequest(limit=20))
+            ```
+
+            Continue an ascending filtered query:
+            ```python
+            result = await memory.query_event_page(
+                page=PageRequest(limit=20, cursor=cursor),
+                kinds=["chat.turn"],
+                order=SortDirection.ASCENDING,
+            )
+            ```
+
+        Args:
+            page: Bounded provider-owned cursor request.
+            kinds: Optional exact event kinds.
+            tags: Optional tags every event must contain.
+            since: Optional inclusive timezone-aware UTC lower time bound.
+            until: Optional inclusive timezone-aware UTC upper time bound.
+            topic: Optional exact canonical topic.
+            order: Exact provider ordering direction.
+
+        Returns:
+            Page[Event]: Public events and the unchanged opaque continuation cursor.
+
+        Notes:
+            This durable administrative projection never reads hot cache, emulates
+            offsets, scans a logical scope globally, or selects a fallback backend.
+        """
+        normalized_kinds = _terms("Memory kinds", kinds)
+        normalized_tags = _tags(tags)
+        parsed_since = _utc(since) if since is not None else None
+        parsed_until = _utc(until) if until is not None else None
+        if parsed_since is not None and parsed_until is not None and parsed_since > parsed_until:
+            raise ValueError("since must not be after until")
+        if topic is not None:
+            _identity(topic)
+        result = await self.canonical.durable_query(
+            EventQuery(
+                scope=self.scope,
+                page=page,
+                kinds=normalized_kinds,
+                topic=topic,
+                tags=normalized_tags,
+                occurred_at_min=parsed_since,
+                occurred_at_max=parsed_until,
+                order=order,
+            )
+        )
+        return Page(
+            items=tuple(
+                _public_event(record, logical_scope_id=self.memory_scope_id)
+                for record in result.items
+            ),
+            next_cursor=result.next_cursor,
+        )
 
     async def recent_events(
         self,
@@ -954,6 +1216,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
                 "severity": severity,
                 "signal": signal,
                 "stage": stage,
+                _PROVENANCE: self.provenance_scope.as_filter(),
             },
             _STATE_PUBLIC_METADATA: public_meta,
         }
@@ -1005,6 +1268,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
 def _public_event(record: EventRecord, logical_scope_id: str) -> Event:
     payload = _plain(record.payload)
     compatibility = payload.pop(_COMPATIBILITY_METADATA, {})
+    provenance = record.scope
     app_id = _deprecated_app_id(compatibility)
     data = payload.pop("data", None)
     inputs = payload.pop("inputs", None)
@@ -1017,21 +1281,21 @@ def _public_event(record: EventRecord, logical_scope_id: str) -> Event:
     return Event(
         event_id=record.event_id,
         ts=record.occurred_at.isoformat(),
-        run_id=record.scope.run_id or "",
+        run_id=provenance.run_id or "",
         scope_id=logical_scope_id,
-        user_id=record.scope.user_id,
-        org_id=record.scope.org_id,
-        session_id=record.scope.session_id,
+        user_id=provenance.user_id,
+        org_id=provenance.org_id,
+        session_id=provenance.session_id,
         kind=record.kind,
         stage=record.stage,
         text=record.text,
         tags=list(record.tags),
         data=data,
         metrics=dict(record.metrics),
-        graph_id=record.scope.graph_id,
-        node_id=record.scope.node_id,
+        graph_id=provenance.graph_id,
+        node_id=provenance.node_id,
         app_id=app_id,
-        agent_id=record.scope.agent_id,
+        agent_id=provenance.agent_id,
         tool=record.topic,
         topic=record.topic,
         severity=record.severity if record.severity is not None else 2,
@@ -1049,6 +1313,7 @@ def _state_public_event(
     kind: str,
 ) -> Event:
     public_meta, service, compatibility = _state_metadata_parts(record)
+    provenance = _state_provenance(service, fallback=record.scope)
     app_id = _deprecated_app_id(compatibility)
     tags = tuple(service.get("tags") or ())
     severity = service.get("severity")
@@ -1057,11 +1322,11 @@ def _state_public_event(
     return Event(
         event_id=_state_event_id(record),
         ts=record.updated_at.isoformat(),
-        run_id=record.scope.run_id or "",
+        run_id=provenance.run_id or "",
         scope_id=logical_scope_id,
-        user_id=record.scope.user_id,
-        org_id=record.scope.org_id,
-        session_id=record.scope.session_id,
+        user_id=provenance.user_id,
+        org_id=provenance.org_id,
+        session_id=provenance.session_id,
         kind=kind,
         stage=stage if isinstance(stage, str) else None,
         text=f"state:{record.key} " + (_text(_plain(record.value)) or "null"),
@@ -1071,10 +1336,10 @@ def _state_public_event(
             "value": _plain(record.value),
             "meta": {**public_meta, "revision": record.revision},
         },
-        graph_id=record.scope.graph_id,
-        node_id=record.scope.node_id,
+        graph_id=provenance.graph_id,
+        node_id=provenance.node_id,
         app_id=app_id,
-        agent_id=record.scope.agent_id,
+        agent_id=provenance.agent_id,
         severity=severity if isinstance(severity, int) else 2,
         signal=float(signal) if isinstance(signal, int | float) else 0.0,
         version=record.schema_version,
@@ -1109,7 +1374,7 @@ def _state_metadata_parts(
     service = metadata.get(_STATE_SERVICE_CONTEXT, {})
     if not isinstance(public, dict) or not isinstance(service, dict):
         raise ValueError("Malformed canonical Memory state metadata sections")
-    if set(service) != {"tags", "severity", "signal", "stage"}:
+    if set(service) != {"tags", "severity", "signal", "stage", _PROVENANCE}:
         raise ValueError("Malformed canonical Memory state service metadata")
     tags = service.get("tags")
     if not isinstance(tags, list):
@@ -1126,6 +1391,7 @@ def _state_metadata_parts(
         not isinstance(stage, str) or not stage.strip() or stage != stage.strip()
     ):
         raise ValueError("Malformed canonical Memory state stage")
+    _state_provenance(service, fallback=record.scope)
     return public, service, metadata.get(_COMPATIBILITY_METADATA, {})
 
 
@@ -1275,10 +1541,32 @@ def _query_bound(*, limit: int, offset: int) -> None:
         raise ValueError(f"Memory query exceeds {_MAX_QUERY_EVENTS} records")
 
 
-def _assert_scope(canonical: CanonicalMemoryFacade, **dimensions: str | None) -> None:
+def _assert_scope(scope: StorageScope, **dimensions: str | None) -> None:
     for name, value in dimensions.items():
-        if value is not None and getattr(canonical.scope, name) != value:
+        if value is not None and getattr(scope, name) != value:
             raise ValueError(f"Memory query {name} conflicts with the bound canonical scope")
+
+
+def _validate_provenance_scope(bucket: StorageScope, provenance: StorageScope) -> None:
+    for name, value in bucket.as_filter().items():
+        if name == "scope_key":
+            continue
+        if getattr(provenance, name) != value:
+            raise ValueError(f"Memory provenance conflicts with bucket scope {name}")
+
+
+def _state_provenance(service: Mapping[str, Any], *, fallback: StorageScope) -> StorageScope:
+    value = service.get(_PROVENANCE)
+    return fallback if value is None else _provenance_scope(value)
+
+
+def _provenance_scope(value: object) -> StorageScope:
+    if not isinstance(value, dict):
+        raise ValueError("Malformed canonical Memory provenance")
+    try:
+        return StorageScope(**value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Malformed canonical Memory provenance") from exc
 
 
 def _record_matches(

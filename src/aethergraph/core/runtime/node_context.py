@@ -16,18 +16,17 @@ from aethergraph.core.runtime.run_types import (
     RunVisibility,
 )
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
-from aethergraph.services.agent_state import AgentStateBackend, AgentStateHandle
-from aethergraph.services.artifacts.facade import ArtifactFacade
+from aethergraph.services.agent_state import AgentStateBackend, CanonicalAgentStateHandle
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.channel.session import ChannelSession
 from aethergraph.services.continuations.continuation import (
     ContinuationDraft,
     Correlator,
     CreatedContinuation,
 )
-from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
-from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.memory.canonical_public import CanonicalPublicMemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.scope.scope import Scope
@@ -375,7 +374,7 @@ class NodeContext:
         return ChannelSession(self, channel_key)
 
     # New way: prefer memory_facade directly
-    def memory(self) -> MemoryFacade:
+    def memory(self) -> CanonicalPublicMemoryFacade:
         if not self.services.memory_facade:
             raise RuntimeError("MemoryFacade not bound")
         return self.services.memory_facade
@@ -391,7 +390,7 @@ class NodeContext:
         tags: list[str] | None = None,
         meta: dict[str, Any] | None = None,
         kind: str = "state.snapshot",
-    ) -> AgentStateHandle:
+    ) -> CanonicalAgentStateHandle:
         if not self.services.agent_state:
             raise RuntimeError("Agent state facade not bound")
         return self.services.agent_state.bind(
@@ -406,11 +405,11 @@ class NodeContext:
         )
 
     # Back-compat: old ctx.mem() now returns the bound MemoryFacade directly.
-    def mem(self) -> MemoryFacade:
+    def mem(self) -> CanonicalPublicMemoryFacade:
         return self.memory()
 
     # Artifacts / index
-    def artifacts(self) -> ArtifactFacade:
+    def artifacts(self) -> CanonicalPublicArtifactFacade:
         return self.services.artifact_store
 
     def kv(self):
@@ -645,11 +644,6 @@ class NodeContext:
         if svc is None:
             raise RuntimeError("LLM service not available")
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
-
-    def indices(self) -> ScopedIndices:
-        if not self.services.indices:
-            raise RuntimeError("ScopedIndices not available")
-        return self.services.indices
 
     # def run_manager(self):
     #     # Deprecated legacy accessor; use context.runner() instead.

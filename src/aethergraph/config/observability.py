@@ -16,6 +16,5 @@ class ObservationRetentionSettings(BaseModel):
 
 
 class ObservabilitySettings(BaseModel):
-    path: str = "events/observability.db"
     persist_logs: bool = True
     retention: ObservationRetentionSettings = ObservationRetentionSettings()

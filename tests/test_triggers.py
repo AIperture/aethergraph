@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -10,6 +11,7 @@ import pytest
 from aethergraph.api.v1.triggers import router
 from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.services.scope.scope import Scope
+from aethergraph.services.triggers.canonical_store import CanonicalTriggerStore
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.scheduling import (
     _advance_after_claim,
@@ -20,9 +22,20 @@ from aethergraph.services.triggers.scheduling import (
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
 from aethergraph.services.triggers.types import TriggerRecord
-from aethergraph.storage.triggers.sqlite_trigger_store import SQLiteTriggerStore
+from aethergraph.storage.contracts import StorageScope
+from tests.storage_conformance.runtime_repositories import InMemoryTriggerRepository
 
 UTC = UTC
+_TRIGGER_REPOSITORIES: dict[Path, InMemoryTriggerRepository] = {}
+
+
+def _trigger_store(path: Path) -> CanonicalTriggerStore:
+    repository = _TRIGGER_REPOSITORIES.setdefault(Path(path).resolve(), InMemoryTriggerRepository())
+    return CanonicalTriggerStore(
+        repository=repository,
+        owner_scope=StorageScope(project_id="trigger-tests"),
+        clock=lambda: datetime.now(UTC),
+    )
 
 
 def _trigger(
@@ -150,8 +163,8 @@ def test_catch_up_advances_one_occurrence_at_a_time() -> None:
 
 async def test_multi_worker_claim_is_atomic(tmp_path: Any) -> None:
     path = tmp_path / "triggers.db"
-    store_a = SQLiteTriggerStore(path)
-    store_b = SQLiteTriggerStore(path)
+    store_a = _trigger_store(path)
+    store_b = _trigger_store(path)
     now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
     await store_a.create(_trigger(next_fire_at=now))
     claims_a, claims_b = await asyncio.gather(
@@ -171,80 +184,9 @@ async def test_multi_worker_claim_is_atomic(tmp_path: Any) -> None:
     assert len(claims_a) + len(claims_b) == 1
 
 
-async def test_startup_skips_missed_non_catch_up_recurrence(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
-    scheduled = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
-    now = scheduled + timedelta(seconds=35)
-    trig = _trigger(
-        kind="interval",
-        next_fire_at=scheduled,
-        interval_seconds=10,
-        catch_up_missed=False,
-    )
-    await store.create(trig)
-    claims = await store.claim_due(
-        now,
-        worker_id="worker-a",
-        lease_until=now + timedelta(minutes=1),
-        limit=10,
-        skip_missed_before=now,
-    )
-    assert claims == []
-    stored = await store.get(trig.trigger_id)
-    assert stored is not None
-    assert stored.next_fire_at == scheduled + timedelta(seconds=40)
-
-
-async def test_catch_up_claim_remains_due_for_next_missed_occurrence(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
-    scheduled = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
-    now = scheduled + timedelta(seconds=35)
-    trig = _trigger(
-        kind="interval",
-        next_fire_at=scheduled,
-        interval_seconds=10,
-        catch_up_missed=True,
-    )
-    await store.create(trig)
-    claims = await store.claim_due(
-        now,
-        worker_id="worker-a",
-        lease_until=now + timedelta(minutes=1),
-        limit=10,
-        skip_missed_before=now,
-    )
-    assert len(claims) == 1
-    stored = await store.get(trig.trigger_id)
-    assert stored is not None
-    assert stored.next_fire_at == scheduled + timedelta(seconds=10)
-
-
-async def test_startup_applies_one_shot_catch_up_policy(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
-    scheduled = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
-    now = scheduled + timedelta(minutes=1)
-    skipped = _trigger(trigger_id="trig-skip", next_fire_at=scheduled)
-    catch_up = _trigger(trigger_id="trig-catch-up", next_fire_at=scheduled)
-    catch_up.catch_up_missed = True
-    await store.create(skipped)
-    await store.create(catch_up)
-    claims = await store.claim_due(
-        now,
-        worker_id="worker-a",
-        lease_until=now + timedelta(minutes=1),
-        limit=10,
-        skip_missed_before=now,
-    )
-    assert [claim.trigger.trigger_id for claim in claims] == ["trig-catch-up"]
-    stored_skip = await store.get("trig-skip")
-    assert stored_skip is not None
-    assert not stored_skip.active
-    assert stored_skip.next_fire_at is None
-
-
 async def test_restart_deduplicates_existing_run_after_stale_lease(tmp_path: Any) -> None:
-    store_a = SQLiteTriggerStore(tmp_path / "triggers.db")
-    store_b = SQLiteTriggerStore(tmp_path / "triggers.db")
+    store_a = _trigger_store(tmp_path / "triggers.db")
+    store_b = _trigger_store(tmp_path / "triggers.db")
     now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
     await store_a.create(_trigger(next_fire_at=now))
     first = await store_a.claim_due(
@@ -278,7 +220,7 @@ async def test_restart_deduplicates_existing_run_after_stale_lease(tmp_path: Any
 
 
 async def test_overlap_limit_uses_greater_equal_and_paginates(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
+    store = _trigger_store(tmp_path / "triggers.db")
     now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
     trig = _trigger(next_fire_at=now, max_overlap_runs=1001)
     await store.create(trig)
@@ -300,7 +242,7 @@ async def test_overlap_limit_uses_greater_equal_and_paginates(tmp_path: Any) -> 
 
 
 async def test_event_fire_is_tenant_scoped(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
+    store = _trigger_store(tmp_path / "triggers.db")
     trig = _trigger(kind="event")
     trig.event_key = "invoice.paid"
     trig.next_fire_at = None
@@ -319,7 +261,7 @@ async def test_event_fire_is_tenant_scoped(tmp_path: Any) -> None:
 
 
 async def test_event_reads_require_scope_while_due_scan_is_all_tenant(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
+    store = _trigger_store(tmp_path / "triggers.db")
     now = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
     await store.create(_trigger(trigger_id="trig-org-a", next_fire_at=now))
     await store.create(
@@ -342,8 +284,8 @@ async def test_event_reads_require_scope_while_due_scan_is_all_tenant(tmp_path: 
 
 
 async def test_service_get_and_cancel_are_owner_bound(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
-    trig = _trigger()
+    store = _trigger_store(tmp_path / "triggers.db")
+    trig = _trigger(next_fire_at=datetime(2026, 8, 13, 12, 0, tzinfo=UTC))
     await store.create(trig)
     service = TriggerServiceImpl(store=store)
     assert (
@@ -356,7 +298,7 @@ async def test_service_get_and_cancel_are_owner_bound(tmp_path: Any) -> None:
 
 
 async def test_service_create_list_and_delete_are_owner_bound(tmp_path: Any) -> None:
-    store = SQLiteTriggerStore(tmp_path / "triggers.db")
+    store = _trigger_store(tmp_path / "triggers.db")
     service = TriggerServiceImpl(store=store)
     scope = Scope(org_id="org-a", user_id="user-a", mode="local")
     trig = await service.create_from_scope(

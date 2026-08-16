@@ -454,7 +454,6 @@ class RunManager:
             _seed_outputs_from_snapshot,
         )
         from aethergraph.core.runtime.runtime_env import RuntimeEnv
-        from aethergraph.services.container.default_container import build_default_container
 
         identity = self._identity_for_record(record)
         self._resolve_target_identity = identity
@@ -468,10 +467,7 @@ class RunManager:
             return None, snap.rev
 
         inputs = dict((record.meta or {}).get("original_inputs") or {})
-        try:
-            container = current_services()
-        except Exception:
-            container = build_default_container()
+        container = current_services()
         env = RuntimeEnv(
             run_id=record.run_id,
             graph_id=record.graph_id,

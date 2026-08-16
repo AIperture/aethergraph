@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 import sys
 from typing import Any, TextIO
-from uuid import uuid4
 
 from aethergraph.contracts.services.runtime_output import (
     RuntimeOutputFrame,
     RuntimeOutputSink,
 )
-from aethergraph.server.security.redaction import sanitize_text
 
 _capture_state: ContextVar[_CaptureState | None] = ContextVar(
     "aethergraph_runtime_output_capture",
@@ -85,133 +81,6 @@ class _RuntimeOutputBounds:
         bounds.rows += 1
         bounds.size_bytes += size
         return frame
-
-
-@dataclass
-class _Barrier:
-    future: asyncio.Future[None]
-
-
-class EventLogRuntimeOutputSink:
-    """Asynchronously persist bounded runtime output frames to the event log."""
-
-    def __init__(
-        self,
-        *,
-        event_log: Any,
-        logger: Any = None,
-        tags: tuple[str, ...] = (),
-        max_line_bytes: int = 16 * 1024,
-        max_run_bytes: int = 256 * 1024,
-        max_rows_per_run: int = 1_000,
-    ):
-        self.event_log = event_log
-        self.logger = logger
-        self.tags = tuple(tags)
-        self._bounds = _RuntimeOutputBounds(
-            max_line_bytes=max_line_bytes,
-            max_run_bytes=max_run_bytes,
-            max_rows_per_run=max_rows_per_run,
-        )
-        self._queue: asyncio.Queue[RuntimeOutputFrame | _Barrier] | None = None
-        self._worker_task: asyncio.Task[None] | None = None
-
-    def _ensure_worker(self) -> asyncio.Queue[RuntimeOutputFrame | _Barrier]:
-        if self._queue is None:
-            self._queue = asyncio.Queue()
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._run_worker())
-        return self._queue
-
-    def emit(self, frame: RuntimeOutputFrame) -> None:
-        bounded = self._bounds.bounded(frame)
-        if bounded is not None:
-            self._ensure_worker().put_nowait(bounded)
-
-    async def _run_worker(self) -> None:
-        token = _capture_state.set(None)
-        try:
-            assert self._queue is not None
-            while True:
-                item = await self._queue.get()
-                try:
-                    if isinstance(item, _Barrier):
-                        if not item.future.done():
-                            item.future.set_result(None)
-                        continue
-                    await self.event_log.append(self._event_row(item))
-                except Exception as exc:
-                    if isinstance(item, _Barrier):
-                        if not item.future.done():
-                            item.future.set_result(None)
-                    else:
-                        self._report_persistence_failure(exc)
-                finally:
-                    self._queue.task_done()
-        finally:
-            _capture_state.reset(token)
-
-    def _report_persistence_failure(self, exc: Exception) -> None:
-        if self.logger is None:
-            return
-        warning = getattr(self.logger, "warning", None)
-        if warning is not None:
-            warning("Runtime output persistence failed: %s", exc, exc_info=True)
-
-    def _event_row(self, frame: RuntimeOutputFrame) -> dict[str, Any]:
-        scope_id = frame.session_id or frame.run_id
-        return {
-            "id": str(uuid4()),
-            "ts": datetime.now(UTC).timestamp(),
-            "scope_id": scope_id,
-            "kind": "runtime_console",
-            "session_id": frame.session_id,
-            "run_id": frame.run_id,
-            "graph_id": frame.graph_id,
-            "node_id": frame.node_id,
-            "tool": frame.tool_name,
-            "tags": ["runtime-console", *self.tags],
-            "payload": {
-                "type": "runtime.console.output",
-                "schema_version": "ag.runtime-console-output/v1",
-                "execution_id": frame.execution_id,
-                "stream": frame.stream,
-                "text": sanitize_text(frame.text),
-                "sequence": frame.sequence,
-                "partial": frame.partial,
-                "truncated": frame.truncated,
-                "meta": {
-                    "source": frame.source,
-                    "run_id": frame.run_id,
-                    "session_id": frame.session_id,
-                    "graph_id": frame.graph_id,
-                    "node_id": frame.node_id,
-                    "tool_name": frame.tool_name,
-                    "eof": frame.eof,
-                },
-            },
-        }
-
-    async def _flush(self) -> None:
-        if self._queue is None or self._worker_task is None:
-            return
-        future = asyncio.get_running_loop().create_future()
-        self._queue.put_nowait(_Barrier(future=future))
-        await future
-
-    async def flush_execution(self, execution_id: str) -> None:
-        await self._flush()
-
-    async def flush_run(self, run_id: str) -> None:
-        await self._flush()
-
-    async def close(self) -> None:
-        await self._flush()
-        if self._worker_task is not None:
-            self._worker_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await self._worker_task
-            self._worker_task = None
 
 
 @dataclass
@@ -381,7 +250,7 @@ async def capture_runtime_output(
 @dataclass
 class RuntimeOutputCaptureHost:
     container: Any
-    sink: EventLogRuntimeOutputSink
+    sink: RuntimeOutputSink
     streams: RuntimeStreamCaptureHandle
 
     async def flush_run(self, run_id: str) -> None:
@@ -390,7 +259,6 @@ class RuntimeOutputCaptureHost:
     async def close(self) -> None:
         if getattr(self.container, "runtime_output_sink", None) is self.sink:
             self.container.runtime_output_sink = None
-        await self.sink.close()
         self.streams.close()
 
 
@@ -400,14 +268,7 @@ def enable_runtime_output_capture(
     tags: tuple[str, ...] = (),
 ) -> RuntimeOutputCaptureHost:
     """Opt one host into Python stdout/stderr capture for active tools."""
-    logger = getattr(container, "logger", None)
-    if logger is not None and hasattr(logger, "for_service"):
-        logger = logger.for_service(ns="runtime_output")
-    sink = EventLogRuntimeOutputSink(
-        event_log=container.eventlog,
-        logger=logger,
-        tags=tags,
-    )
+    sink = container.storage_services.runtime_output.with_tags(tags)
     container.runtime_output_sink = sink
     return RuntimeOutputCaptureHost(
         container=container,

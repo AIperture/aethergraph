@@ -44,22 +44,38 @@ from aethergraph.services.continuations.continuation import (
 )
 from aethergraph.services.continuations.stores.fs_store import FSContinuationStore
 from aethergraph.services.integration import (
-    EventLogInboundEventStore,
-    EventLogSemanticEventStore,
     IntegrationIngressCoordinator,
     InteractionResolver,
     ManifestRouteResolver,
     SemanticEventEmitter,
-    SQLiteExternalSessionBindingStore,
-    SQLiteIngressIdempotencyStore,
     VerifiedIntegrationContext,
+    bind_canonical_integration_persistence,
 )
-from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
+from aethergraph.storage.contracts import (
+    StorageBundle,
+    StorageOpenMode,
+    StorageOpenRequest,
+    StorageProviderSelection,
+    StorageScope,
+)
+from aethergraph.storage.providers.local_sqlite import LocalStorageProvider
 from tests._integration_fixtures import contract_compatibility
 
 _NOW = datetime(2026, 8, 3, tzinfo=UTC)
 _DIGEST = "d" * 64
 _ALL_EVENTS = tuple(SemanticEventKind)
+_SECRET_REF = "secret://tests/vertical-integration"
+_SECRET = b"vertical-integration-secret-32bytes"
+
+
+class _Clock:
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+class _Secrets:
+    async def resolve(self, reference: str) -> str | bytes:
+        raise AssertionError(f"provider must not resolve {reference!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +255,8 @@ class _Harness:
     continuations: FSContinuationStore
     dispatcher: _RootDispatcher
     resumes: _ResumeRouter
-    event_log: SqliteEventLog
+    bundle: StorageBundle
+    event_log: Any
     coordinator: IntegrationIngressCoordinator
 
     @classmethod
@@ -252,20 +269,45 @@ class _Harness:
     ) -> _Harness:
         manifest = _manifest()
         continuations = FSContinuationStore(root / "continuations", secret=b"vertical-secret")
-        event_log = SqliteEventLog(str(root / "events.db"))
+        provider = LocalStorageProvider(
+            continuation_token_secret_ref=_SECRET_REF,
+            continuation_token_secret=_SECRET,
+        )
+        owner_scope = StorageScope(project_id="vertical-integration-tests")
+        bundle = provider.open(
+            StorageOpenRequest(
+                workspace_id="vertical-integration-tests",
+                workspace_root=root.resolve(),
+                owner_scope=owner_scope,
+                selection=StorageProviderSelection(
+                    provider="local.sqlite",
+                    config={"continuation_token_secret_ref": _SECRET_REF},
+                ),
+                mode=StorageOpenMode.READ_WRITE,
+                expected_format_version=1,
+                clock=_Clock(),
+                secrets=_Secrets(),
+            )
+        )
+        persistence = bind_canonical_integration_persistence(
+            bundle=bundle,
+            owner_scope=owner_scope,
+            clock=_Clock().now,
+        )
+        event_log = persistence.semantic_events
         dispatcher = dispatcher or _RootDispatcher()
         resumes = resumes or _ResumeRouter()
         coordinator = IntegrationIngressCoordinator(
             manifest=manifest,
             route_resolver=ManifestRouteResolver(manifest),
-            idempotency_store=SQLiteIngressIdempotencyStore(root / "operations.db"),
-            binding_store=SQLiteExternalSessionBindingStore(root / "operations.db"),
+            idempotency_store=persistence.idempotency,
+            binding_store=persistence.bindings,
             resource_ingress=_ResourceIngress(),
             interaction_resolver=InteractionResolver(continuations),
-            inbound_events=EventLogInboundEventStore(event_log),
+            inbound_events=persistence.inbound_events,
             semantic_emitter=SemanticEventEmitter(
                 deployment_id=manifest.deployment_id,
-                store=EventLogSemanticEventStore(event_log),
+                store=event_log,
                 semantic_event_protocol_version=manifest.semantic_event_protocol_version,
             ),
             resume_router=resumes,
@@ -277,12 +319,13 @@ class _Harness:
             continuations=continuations,
             dispatcher=dispatcher,
             resumes=resumes,
+            bundle=bundle,
             event_log=event_log,
             coordinator=coordinator,
         )
 
     async def restart(self) -> _Harness:
-        await self.event_log.close()
+        await self.bundle.close()
         return self.open(
             self.root,
             dispatcher=self.dispatcher,
@@ -370,7 +413,7 @@ async def test_each_transport_shares_root_session_duplicate_attachment_and_resta
         )
         assert replay == history[2:]
     finally:
-        await harness.event_log.close()
+        await harness.bundle.close()
 
 
 @pytest.mark.asyncio
@@ -464,7 +507,7 @@ async def test_each_transport_resumes_choice_and_free_text_without_cross_deliver
         assert other.session_id != root.session_id
         assert harness.dispatcher.calls[-1]["binding"].ag_session_id == other.session_id
     finally:
-        await harness.event_log.close()
+        await harness.bundle.close()
 
 
 @pytest.mark.asyncio
@@ -500,7 +543,7 @@ async def test_each_transport_keeps_concurrent_sessions_and_capabilities_exact(
         assert route.required_capabilities.attachments is True
         assert route.required_capabilities.cancellation is case.cancellation
     finally:
-        await harness.event_log.close()
+        await harness.bundle.close()
 
 
 @pytest.mark.asyncio
@@ -675,4 +718,4 @@ async def test_shared_fixture_semantics_cover_streaming_activity_interactions_an
             case.route_id for case in _CASES
         }
     finally:
-        await harness.event_log.close()
+        await harness.bundle.close()

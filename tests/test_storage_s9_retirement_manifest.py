@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-from collections import Counter
 import json
 from pathlib import Path
 
@@ -16,59 +15,52 @@ def _manifest() -> dict[str, object]:
     return json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
 
 
-def _legacy_symbols(manifest: dict[str, object]) -> set[str]:
-    return {str(item["symbol"]) for item in manifest["legacy_call_sites"]}
-
-
-def _source_call_sites(symbols: set[str]) -> Counter[tuple[str, str]]:
-    calls: Counter[tuple[str, str]] = Counter()
+def _source_identifiers() -> set[str]:
+    identifiers: set[str] = set()
     for path in _SOURCE_ROOT.rglob("*.py"):
-        relative = path.relative_to(_ROOT).as_posix()
-        if relative.startswith("src/aethergraph/storage/"):
-            continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if isinstance(node.func, ast.Name):
-                name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                name = node.func.attr
-            else:
-                continue
-            if name in symbols:
-                calls[(relative, name)] += 1
-    return calls
+            if isinstance(node, ast.Name):
+                identifiers.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                identifiers.add(node.attr)
+            elif isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                identifiers.add(node.name)
+    return identifiers
 
 
-def test_s9_manifest_freezes_every_remaining_legacy_service_call_site() -> None:
+def test_s9_manifest_records_and_removes_every_legacy_service_call_site() -> None:
     manifest = _manifest()
-    expected = Counter(
-        {
-            (str(item["path"]), str(item["symbol"])): int(item["count"])
-            for item in manifest["legacy_call_sites"]
-        }
-    )
+    identifiers = _source_identifiers()
 
-    assert manifest["schema_version"] == 1
-    assert manifest["status"] == "frozen_pre_s9"
-    assert _source_call_sites(_legacy_symbols(manifest)) == expected
+    assert manifest["schema_version"] == 2
+    assert manifest["status"] == "completed_s9_clean_cut"
+    assert manifest["retired_call_sites"]
+    for item in manifest["retired_call_sites"]:
+        assert str(item["symbol"]) not in identifiers, item
 
 
-def test_s9_manifest_freezes_legacy_settings_factories_and_physical_paths() -> None:
+def test_s9_manifest_proves_legacy_settings_factories_and_paths_are_absent() -> None:
     manifest = _manifest()
 
     assert set(manifest["legacy_app_settings_fields"]) == {"cont", "search", "storage"}
-    assert set(manifest["legacy_app_settings_fields"]) <= set(AppSettings.model_fields)
+    assert set(manifest["legacy_app_settings_fields"]).isdisjoint(AppSettings.model_fields)
     for relative in (
         *manifest["legacy_settings_modules"],
         *manifest["legacy_factory_modules"],
         *manifest["whole_module_retirements"],
     ):
-        assert (_ROOT / str(relative)).is_file(), relative
+        assert not (_ROOT / str(relative)).exists(), relative
     for item in manifest["legacy_physical_paths"]:
-        source = (_ROOT / str(item["path"])).read_text(encoding="utf-8")
-        assert str(item["literal"]) in source, item
+        path = _ROOT / str(item["path"])
+        if path.exists():
+            assert str(item["literal"]) not in path.read_text(encoding="utf-8"), item
+    for item in manifest["partial_symbol_retirements"]:
+        path = _ROOT / str(item["path"])
+        if path.exists():
+            source = path.read_text(encoding="utf-8")
+            for symbol in item["symbols"]:
+                assert str(symbol) not in source, (path, symbol)
 
 
 def test_s9_manifest_preserves_project_inputs_and_retires_only_runtime_history() -> None:

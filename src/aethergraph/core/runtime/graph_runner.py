@@ -63,7 +63,7 @@ async def _attach_persistence(graph, env, spec, snapshot_every=1) -> Persistence
     obs = PersistenceObserver(
         store=store,
         scope=scope_for_runtime_env(env),
-        artifact_store=env.container.artifacts,
+        artifact_store=None,
         spec_hash=hash_spec(spec),
         snapshot_every=snapshot_every,
     )

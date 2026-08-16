@@ -1,4 +1,4 @@
-"""Inactive canonical auth grant and invite persistence for the S9 cut."""
+"""Canonical auth grant and invite persistence over provider storage."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ class CanonicalAuthStore:
             clock: Timezone-aware UTC clock used for domain expiry checks.
 
         Returns:
-            None: The inactive-until-S9 auth projection is ready.
+            None: The provider-backed auth projection is ready.
 
         Notes:
             The bundle owns repository lifecycle. This service has no opener,

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from aethergraph.api.v1.deps import get_identity
-from aethergraph.services.auth.authn import AuthenticationRejected, AuthnService, DemoGrant
+from aethergraph.services.auth.authn import AuthenticationRejected, DemoGrant
 from aethergraph.services.auth.canonical_authn import CanonicalAuthnService
 from aethergraph.services.auth.canonical_store import CanonicalAuthStore
 from aethergraph.storage.contracts import StorageOpenMode, StorageScope
@@ -216,7 +216,7 @@ def test_canonical_authn_has_provider_neutral_structure_and_strict_docstrings() 
         assert doc.index("Returns:") < doc.index("Notes:")
         assert doc.count("```python") >= 2
 
-    for member in (AuthnService.resolve, get_identity):
+    for member in (get_identity,):
         doc = getdoc(member) or ""
         assert doc.index("Intro:") < doc.index("Examples:")
         assert doc.index("Examples:") < doc.index("Args:")

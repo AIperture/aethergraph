@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -12,7 +13,6 @@ from aethergraph.observability.legacy_cleanup import (
     scan_legacy_observability,
 )
 from aethergraph.server.server_state import workspace_lock
-from aethergraph.storage.eventlog.sqlite_event_sync import SQLiteEventLogSync
 
 
 def _legacy_trace_event(event_id: str = "legacy-trace") -> dict:
@@ -45,27 +45,32 @@ def _seed_workspace(workspace: Path) -> None:
     llm_dir.mkdir(parents=True)
     (llm_dir / "llm_calls.jsonl").write_text('{"legacy":true}\n', encoding="utf-8")
 
-    log = SQLiteEventLogSync(str(workspace / "events" / "events.db"))
-    log.append(_legacy_trace_event())
-    log.append(
-        {
-            "id": "custom-trace",
-            "ts": 2.0,
-            "scope_id": "custom",
-            "kind": "trace",
-            "payload": {"schema_version": 2, "purpose": "user-defined"},
-        }
-    )
-    log.append(
-        {
-            "id": "canonical",
-            "ts": 3.0,
-            "scope_id": "run-1",
-            "kind": "agent_engine.decision",
-            "payload": {"selected_action": "tool"},
-        }
-    )
-    log.close()
+    event_db = workspace / "events" / "events.db"
+    with sqlite3.connect(event_db) as connection:
+        connection.execute(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, kind TEXT, payload TEXT NOT NULL)"
+        )
+        rows = [
+            _legacy_trace_event(),
+            {
+                "id": "custom-trace",
+                "ts": 2.0,
+                "scope_id": "custom",
+                "kind": "trace",
+                "payload": {"schema_version": 2, "purpose": "user-defined"},
+            },
+            {
+                "id": "canonical",
+                "ts": 3.0,
+                "scope_id": "run-1",
+                "kind": "agent_engine.decision",
+                "payload": {"selected_action": "tool"},
+            },
+        ]
+        connection.executemany(
+            "INSERT INTO events (ts, kind, payload) VALUES (?, ?, ?)",
+            [(float(row["ts"]), str(row["kind"]), json.dumps(row)) for row in rows],
+        )
 
 
 def test_scan_reports_only_fixed_legacy_files_and_exact_generic_trace_shape(
@@ -121,9 +126,8 @@ def test_dry_run_is_read_only_and_apply_archives_exact_candidates(tmp_path: Path
     assert json.loads(archived_rows)["event_row_id"] > 0
     assert (archive / "legacy_observability_cleanup_manifest.json").is_file()
 
-    log = SQLiteEventLogSync(str(workspace / "events" / "events.db"), read_only=True)
-    remaining = log.query(limit=None)
-    log.close()
+    with sqlite3.connect(workspace / "events" / "events.db") as connection:
+        remaining = [json.loads(row[0]) for row in connection.execute("SELECT payload FROM events")]
     assert {row["id"] for row in remaining} == {"custom-trace", "canonical"}
 
 

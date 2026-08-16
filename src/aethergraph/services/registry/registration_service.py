@@ -10,13 +10,12 @@ import types
 from types import SimpleNamespace
 from typing import Any, Protocol
 
-from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
-from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
 from aethergraph.core.graph.graphify_validation import (
     ValidationResult,
     validate_graph_source,
 )
 from aethergraph.core.runtime.runtime_services import use_services
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.registry.unified_registry import TenantIdentity, UnifiedRegistry
 from aethergraph.services.scope.tenant import normalize_registry_tenant
 
@@ -112,13 +111,11 @@ class RegistrationService:
         *,
         registry: UnifiedRegistry,
         manifest_store: _RegistrationManifestPersistence | None = None,
-        artifact_store: AsyncArtifactStore | None = None,
-        artifact_index: AsyncArtifactIndex | None = None,
+        artifacts: CanonicalPublicArtifactFacade | None = None,
     ) -> None:
         self.registry = registry
         self.manifest_store = manifest_store
-        self.artifact_store = artifact_store
-        self.artifact_index = artifact_index
+        self.artifacts = artifacts
 
     def validate_graphify_source(
         self,
@@ -174,8 +171,10 @@ class RegistrationService:
 
         derived_filename: str | None = Path(uri).name if uri else None
         try:
-            if artifact_id and self.artifact_index is not None:
-                art = await self.artifact_index.get(artifact_id)
+            if self.artifacts is None:
+                raise RuntimeError("Artifacts are not configured for registration service")
+            if artifact_id:
+                art = await self.artifacts.get_by_id(artifact_id)
                 if art is not None:
                     labels = art.labels or {}
                     derived_filename = (
@@ -184,8 +183,9 @@ class RegistrationService:
                         or derived_filename
                         or (Path(art.uri).name if art.uri else None)
                     )
-            source_uri = await self._resolve_artifact_uri(artifact_id=artifact_id, uri=uri)
-            source = await self.artifact_store.load_text(source_uri)
+                source = await self.artifacts.load_text_by_id(artifact_id)
+            else:
+                source = await self.artifacts.load_text(str(uri))
         except Exception as e:
             if strict:
                 raise
@@ -207,27 +207,6 @@ class RegistrationService:
             persist=persist,
             strict=strict,
         )
-
-    async def _resolve_artifact_uri(
-        self,
-        *,
-        artifact_id: str | None,
-        uri: str | None,
-    ) -> str:
-        if uri:
-            if self.artifact_store is None:
-                raise RuntimeError("Artifact store is not configured for registration service")
-            return uri
-        if not artifact_id:
-            raise ValueError("artifact_id or uri is required")
-        if self.artifact_store is None or self.artifact_index is None:
-            raise RuntimeError(
-                "Artifact store/index are not configured for artifact-based registration"
-            )
-        art = await self.artifact_index.get(artifact_id)
-        if art is None or not art.uri:
-            raise FileNotFoundError(f"Artifact {artifact_id} not found or missing uri")
-        return art.uri
 
     async def register_by_folder(
         self,

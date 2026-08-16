@@ -10,9 +10,10 @@ from aethergraph.core.runtime.run_types import RunOrigin, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.storage.contracts.scope import StorageScope
-from aethergraph.storage.runs.inmen_store import InMemoryRunStore
-from aethergraph.storage.runs.result_store import InMemoryRunResultStore
-from aethergraph.storage.runs.sqlite_run_store import SQLiteRunStore
+from tests._run_store_fakes import RunResultStoreFake, RunStoreFake
+
+InMemoryRunStore = RunStoreFake
+InMemoryRunResultStore = RunResultStoreFake
 
 
 class Identity:
@@ -772,7 +773,7 @@ async def test_success_status_is_durable_before_result_save(
     dummy_meter,
     tmp_path,
 ):
-    store = SQLiteRunStore(str(tmp_path / "runs.db"))
+    store = RunStoreFake()
 
     class OrderingResultStore(InMemoryRunResultStore):
         observed_status = None

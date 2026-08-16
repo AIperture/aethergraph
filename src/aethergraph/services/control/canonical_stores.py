@@ -1,4 +1,4 @@
-"""Inactive canonical run, result, and session projections for the S9 cut."""
+"""Canonical run, result, and session projections over provider storage."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class CanonicalRunStore(RunStore):
             clock: Timezone-aware UTC default occurrence clock.
 
         Returns:
-            None: The inactive-until-S9 projection is ready.
+            None: The provider-backed projection is ready.
 
         Notes:
             Construction performs no I/O and the bundle retains lifecycle ownership.
@@ -216,7 +216,7 @@ class CanonicalRunStore(RunStore):
         record = await self._repository.get(
             _operation_scope(self._owner_scope, run_id=run_id), run_id
         )
-        return _run_to_service(record) if record is not None else None
+        return project_canonical_run_record(record) if record is not None else None
 
     async def list(
         self,
@@ -266,7 +266,7 @@ class CanonicalRunStore(RunStore):
             page=PageRequest(limit=window),
         )
         page = await self._repository.query(query)
-        return [_run_to_service(item) for item in page.items[offset : offset + limit]]
+        return [project_canonical_run_record(item) for item in page.items[offset : offset + limit]]
 
     async def record_artifact(
         self,
@@ -346,7 +346,7 @@ class CanonicalRunResultStore(RunResultStore):
             owner_scope: Trusted provider ownership scope.
 
         Returns:
-            None: The inactive-until-S9 projection is ready.
+            None: The provider-backed projection is ready.
 
         Notes:
             Result/run atomicity remains provider-owned; this object has no close.
@@ -490,7 +490,7 @@ class CanonicalSessionStore(SessionStore):
             clock: Timezone-aware UTC transition clock.
 
         Returns:
-            None: The inactive-until-S9 projection is ready.
+            None: The provider-backed projection is ready.
 
         Notes:
             Construction performs no I/O and the bundle owns repository lifecycle.
@@ -931,7 +931,34 @@ def _run_to_canonical(
     )
 
 
-def _run_to_service(record: CanonicalRunRecord) -> RunRecord:
+def project_canonical_run_record(record: CanonicalRunRecord) -> RunRecord:
+    """Project one canonical provider run into the stable runtime record.
+
+    Intro:
+        Decodes provider-neutral metadata and explicit compatibility metadata without
+        exposing the repository record or inferring deprecated App identity.
+
+    Examples:
+        Project a queried run:
+            ```python
+            public = project_canonical_run_record(record)
+            ```
+
+        Read the stable status value:
+            ```python
+            assert project_canonical_run_record(record).status.value == "running"
+            ```
+
+    Args:
+        record: Canonical provider run authorized by its repository query.
+
+    Returns:
+        RunRecord: Detached stable runtime projection of the canonical record.
+
+    Notes:
+        `app_id` is decoded only from explicitly deprecated optional compatibility
+        metadata and never from provider scope, tags, or public metadata.
+    """
     public, service, compatibility = _metadata_parts(record.metadata, "run")
     return RunRecord(
         run_id=record.run_id,

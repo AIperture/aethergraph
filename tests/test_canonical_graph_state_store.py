@@ -20,7 +20,6 @@ from aethergraph.storage.contracts import (
     StorageProviderSelection,
     StorageScope,
 )
-from aethergraph.storage.graph_state_store.state_store import GraphStateStoreImpl
 from aethergraph.storage.providers.local_sqlite import LocalStorageProvider
 
 _SECRET_REF = "secret://tests/graph-state"
@@ -118,7 +117,6 @@ def test_graph_state_public_docstrings_follow_required_format() -> None:
     for owner in (
         GraphStateStore,
         CanonicalGraphStateStore,
-        GraphStateStoreImpl,
         JsonGraphStateStore,
     ):
         for name in methods:

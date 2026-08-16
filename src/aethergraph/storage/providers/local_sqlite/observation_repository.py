@@ -679,6 +679,7 @@ class LocalObservationRepository:
             ("provider", query.providers),
             ("model", query.models),
             ("call_type", query.call_types),
+            ("prompt_manifest_id", query.prompt_manifest_ids),
         ):
             if selected:
                 clauses.append(f"l.{column} IN ({','.join('?' for _ in selected)})")
@@ -2500,6 +2501,7 @@ def _llm_query_fingerprint(query: LLMCallQuery) -> str:
         "providers": list(query.providers),
         "models": list(query.models),
         "call_types": list(query.call_types),
+        "prompt_manifest_ids": list(query.prompt_manifest_ids),
         "statuses": [status.value for status in query.statuses],
         "occurred_at_or_after": _optional_iso(query.occurred_at_or_after),
         "occurred_at_or_before": _optional_iso(query.occurred_at_or_before),

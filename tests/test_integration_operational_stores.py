@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
@@ -9,7 +8,6 @@ from aethergraph.contracts.integration import (
     ExternalIdentity,
     HostManifest,
     IngressEnvelope,
-    IngressReceipt,
     IntegrationCapabilities,
     IntegrationKind,
     IntegrationMatchPolicy,
@@ -19,12 +17,8 @@ from aethergraph.contracts.integration import (
     SemanticEventKind,
 )
 from aethergraph.services.integration import (
-    IngressIdempotencyError,
     IntegrationRouteError,
     ManifestRouteResolver,
-    SessionBindingError,
-    SQLiteExternalSessionBindingStore,
-    SQLiteIngressIdempotencyStore,
     VerifiedIntegrationContext,
 )
 from tests._integration_fixtures import contract_compatibility
@@ -160,133 +154,3 @@ def test_manifest_route_resolver_rejects_ambiguity_and_disabled_route() -> None:
     with pytest.raises(IntegrationRouteError) as exc_info:
         disabled.resolve(verified=_verified(), envelope=_envelope())
     assert exc_info.value.code == "integration.route_disabled"
-
-
-@pytest.mark.asyncio
-async def test_sqlite_session_binding_creation_is_atomic_and_build_pinned(tmp_path) -> None:
-    store = SQLiteExternalSessionBindingStore(tmp_path / "integration.db")
-    route = _route()
-
-    async def create(index: int):
-        return await store.get_or_create(
-            route=route,
-            external_identity=_identity(user_id=f"user-{index}"),
-            build_id="build-1",
-            binding_id=f"binding-{index}",
-            ag_session_id=f"session-{index}",
-            now=_NOW + timedelta(seconds=index),
-        )
-
-    results = await asyncio.gather(*(create(index) for index in range(8)))
-
-    assert sum(result.created for result in results) == 1
-    assert len({result.binding.binding_id for result in results}) == 1
-    assert len({result.binding.ag_session_id for result in results}) == 1
-    restored = SQLiteExternalSessionBindingStore(tmp_path / "integration.db")
-    binding = await restored.get(route=route, external_identity=_identity(user_id="another-user"))
-    assert binding is not None
-    assert binding.binding_id == results[0].binding.binding_id
-
-    with pytest.raises(SessionBindingError) as exc_info:
-        await store.get_or_create(
-            route=route,
-            external_identity=_identity(),
-            build_id="build-2",
-            binding_id="replacement-binding",
-            ag_session_id="replacement-session",
-            now=_NOW + timedelta(days=1),
-        )
-    assert exc_info.value.code == "integration.binding_build_mismatch"
-
-
-@pytest.mark.asyncio
-async def test_sqlite_session_binding_requires_policy_thread_identity(tmp_path) -> None:
-    store = SQLiteExternalSessionBindingStore(tmp_path / "integration.db")
-
-    with pytest.raises(SessionBindingError) as exc_info:
-        await store.get_or_create(
-            route=_route(),
-            external_identity=_identity(thread_id=None),
-            build_id="build-1",
-            binding_id="binding-1",
-            ag_session_id="session-1",
-            now=_NOW,
-        )
-    assert exc_info.value.code == "integration.binding_thread_required"
-
-
-@pytest.mark.asyncio
-async def test_sqlite_idempotency_claims_once_and_replays_terminal_receipt(tmp_path) -> None:
-    store = SQLiteIngressIdempotencyStore(tmp_path / "integration.db")
-    envelope = _envelope()
-
-    claims = await asyncio.gather(
-        *(store.claim(deployment_id="deployment-1", envelope=envelope) for _ in range(8))
-    )
-
-    assert sum(claim.acquired for claim in claims) == 1
-    assert sum(claim.pending for claim in claims) == 7
-
-    receipt = IngressReceipt(
-        accepted=True,
-        duplicate=False,
-        action="root_turn_started",
-        deployment_id="deployment-1",
-        route_id="route-slack",
-        session_id="session-1",
-        turn_id="turn-1",
-        event_cursor=1,
-    )
-    await store.complete(
-        deployment_id="deployment-1",
-        envelope=envelope,
-        receipt=receipt,
-    )
-
-    restored = SQLiteIngressIdempotencyStore(tmp_path / "integration.db")
-    redelivered = envelope.model_copy(update={"received_at": _NOW + timedelta(minutes=1)})
-    duplicate = await restored.claim(deployment_id="deployment-1", envelope=redelivered)
-    assert duplicate.acquired is False
-    assert duplicate.pending is False
-    assert duplicate.receipt == receipt.model_copy(update={"duplicate": True})
-
-
-@pytest.mark.asyncio
-async def test_sqlite_idempotency_rejects_key_reuse_and_second_completion(tmp_path) -> None:
-    store = SQLiteIngressIdempotencyStore(tmp_path / "integration.db")
-    envelope = _envelope()
-    await store.claim(deployment_id="deployment-1", envelope=envelope)
-
-    with pytest.raises(IngressIdempotencyError) as exc_info:
-        await store.claim(
-            deployment_id="deployment-1",
-            envelope=_envelope(text="Different content"),
-        )
-    assert exc_info.value.code == "integration.idempotency_conflict"
-
-    with pytest.raises(IngressIdempotencyError) as exc_info:
-        await store.claim(
-            deployment_id="deployment-1",
-            envelope=_envelope(idempotency_key="another-key"),
-        )
-    assert exc_info.value.code == "integration.idempotency_conflict"
-
-    receipt = IngressReceipt(
-        accepted=False,
-        duplicate=False,
-        action="rejected",
-        deployment_id="deployment-1",
-        rejection_code="integration.route_not_found",
-    )
-    await store.complete(
-        deployment_id="deployment-1",
-        envelope=envelope,
-        receipt=receipt,
-    )
-    with pytest.raises(IngressIdempotencyError) as exc_info:
-        await store.complete(
-            deployment_id="deployment-1",
-            envelope=envelope,
-            receipt=receipt,
-        )
-    assert exc_info.value.code == "integration.idempotency_already_completed"

@@ -101,6 +101,9 @@ def open_local_workspace_manifest(request: StorageOpenRequest) -> LocalWorkspace
     Notes:
         The manifest stores only a SHA-256 configuration fingerprint. Raw options,
         secret references, and resolved credentials are never persisted in it.
+        Writable reopen therefore verifies the supplied configuration fingerprint;
+        read-only historical reopen validates exact provider, format, workspace, and
+        owner identity without pretending to reconstruct unavailable raw options.
     """
     if request.selection.provider != LOCAL_PROVIDER_NAME:
         raise StorageFormatError(
@@ -286,7 +289,10 @@ def _validate_request(
         raise StorageFormatError("Local workspace_id does not match the open request")
     if manifest.owner_scope != request.owner_scope:
         raise StorageFormatError("Local workspace owner scope does not match the open request")
-    if manifest.config_fingerprint != _config_fingerprint(request.selection.config):
+    if (
+        request.mode is StorageOpenMode.READ_WRITE
+        and manifest.config_fingerprint != _config_fingerprint(request.selection.config)
+    ):
         raise StorageFormatError("Local workspace configuration fingerprint does not match")
 
 

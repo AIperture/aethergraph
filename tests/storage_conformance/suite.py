@@ -136,7 +136,12 @@ async def check_event_store_conformance(store: EventStore) -> None:
     assert len({first.cursor, *(row.cursor for row in batch)}) == 3
     assert await store.get(scope, "event-1") == first
     assert await store.get(other_scope, "event-1") is None
+    owner_scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
+    assert await store.get(owner_scope, "event-1") == first
     assert await store.append_many(()) == ()
+
+    owner_page = await store.query(EventQuery(scope=owner_scope, page=PageRequest(limit=10)))
+    assert [row.event_id for row in owner_page.items] == ["event-3", "event-2", "event-1"]
 
     page_one = await store.query(EventQuery(scope=scope, page=PageRequest(limit=2)))
     assert [row.event_id for row in page_one.items] == ["event-3", "event-2"]

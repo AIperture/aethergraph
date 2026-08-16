@@ -67,7 +67,7 @@ def test_manifest_initializes_only_empty_workspace_without_persisting_config(
     assert read_local_workspace_manifest(root) == manifest
 
 
-def test_manifest_reopen_requires_exact_identity_scope_and_config(tmp_path: Path) -> None:
+def test_manifest_reopen_requires_identity_and_writable_config(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     request = _request(root)
     created = open_local_workspace_manifest(request)
@@ -93,6 +93,16 @@ def test_manifest_reopen_requires_exact_identity_scope_and_config(tmp_path: Path
                 ),
             )
         )
+
+    historical = replace(
+        request,
+        mode=StorageOpenMode.READ_ONLY,
+        selection=StorageProviderSelection(
+            provider="local.sqlite",
+            config={"durability": "full"},
+        ),
+    )
+    assert open_local_workspace_manifest(historical) == created
 
 
 def test_unmanifested_read_only_or_nonempty_workspace_fails_without_mutation(

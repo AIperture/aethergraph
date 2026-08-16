@@ -26,8 +26,6 @@ from aethergraph.services.continuations.continuation import ContinuationDraft, C
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.integration import (
     BindingResolution,
-    EventLogInboundEventStore,
-    EventLogSemanticEventStore,
     IntegrationIngressCoordinator,
     InteractionResolutionError,
     InteractionResolver,
@@ -36,12 +34,14 @@ from aethergraph.services.integration import (
     ResourceIngressError,
     ResourceIngressPolicy,
     SemanticEventEmitter,
-    SQLiteIngressIdempotencyStore,
     VerifiedAttachment,
     VerifiedIntegrationContext,
     install_integration_ingress,
 )
-from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
+from tests._canonical_storage_fakes import (
+    make_integration_persistence,
+    make_semantic_event_store,
+)
 from tests._integration_fixtures import contract_compatibility
 
 _NOW = datetime(2026, 8, 3, tzinfo=UTC)
@@ -215,17 +215,18 @@ def _coordinator(
     resume_router,
 ) -> IntegrationIngressCoordinator:
     manifest = _manifest(route)
+    persistence = make_integration_persistence()
     return IntegrationIngressCoordinator(
         manifest=manifest,
         route_resolver=ManifestRouteResolver(manifest),
-        idempotency_store=SQLiteIngressIdempotencyStore(tmp_path / "integration.db"),
+        idempotency_store=persistence.idempotency,
         binding_store=_BindingStore(),
         resource_ingress=ResourceIngress(container=SimpleNamespace()),
         interaction_resolver=InteractionResolver(continuation_store),
-        inbound_events=EventLogInboundEventStore(event_log),
+        inbound_events=persistence.inbound_events,
         semantic_emitter=SemanticEventEmitter(
             deployment_id=manifest.deployment_id,
-            store=EventLogSemanticEventStore(event_log),
+            store=event_log,
             semantic_event_protocol_version=manifest.semantic_event_protocol_version,
         ),
         resume_router=resume_router,
@@ -242,13 +243,14 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
         def register_adapter(self, prefix, adapter) -> None:
             self.adapters[prefix] = adapter
 
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    persistence = make_integration_persistence()
+    event_log = persistence.semantic_events
     container = SimpleNamespace(
         root=str(tmp_path),
         integration_ingress=None,
         host_manifest=None,
         cont_store=InMemoryContinuationStore(secret=b"test-secret"),
-        eventlog=event_log,
+        storage_services=SimpleNamespace(integration=persistence),
         resume_router=_ResumeRouter(),
         run_manager=SimpleNamespace(),
         channels=_Channels(),
@@ -263,7 +265,7 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
     assert container.semantic_events is not None
     assert container.semantic_turn_monitor is not None
     assert "endpoint" in container.channels.adapters
-    assert (tmp_path / "integration" / "operations.db").is_file()
+    assert not (tmp_path / "integration").exists()
     with pytest.raises(RuntimeError, match="already installed"):
         install_integration_ingress(container=container, manifest=manifest)
     await event_log.close()
@@ -278,13 +280,14 @@ async def test_host_installer_enables_canonical_semantic_projector(tmp_path) -> 
         def register_adapter(self, prefix, adapter) -> None:
             self.adapters[prefix] = adapter
 
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    persistence = make_integration_persistence()
+    event_log = persistence.semantic_events
     container = SimpleNamespace(
         root=str(tmp_path),
         integration_ingress=None,
         host_manifest=None,
         cont_store=InMemoryContinuationStore(secret=b"test-secret"),
-        eventlog=event_log,
+        storage_services=SimpleNamespace(integration=persistence),
         resume_router=_ResumeRouter(),
         run_manager=SimpleNamespace(),
         channels=_Channels(),
@@ -298,14 +301,14 @@ async def test_host_installer_enables_canonical_semantic_projector(tmp_path) -> 
     )
     assert container.integration_ingress is coordinator
     assert container.host_manifest is manifest
-    assert (tmp_path / "integration" / "operations.db").is_file()
+    assert not (tmp_path / "integration").exists()
     await event_log.close()
 
 
 @pytest.mark.asyncio
 async def test_coordinator_starts_one_root_turn_and_replays_receipt(tmp_path) -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _RootDispatcher()
     resume = _ResumeRouter()
     coordinator = _coordinator(
@@ -351,7 +354,7 @@ async def test_coordinator_completes_idempotency_after_unexpected_dispatch_failu
     tmp_path,
 ) -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _FailingRootDispatcher()
     coordinator = _coordinator(
         tmp_path=tmp_path,
@@ -392,7 +395,7 @@ async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None
         session_id="session-1",
         interaction_id="interaction-public-1",
     )
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _RootDispatcher()
     resume = _ResumeRouter()
     coordinator = _coordinator(
@@ -489,7 +492,7 @@ async def test_interaction_resolver_rejects_exact_identity_from_other_session() 
 
 @pytest.mark.asyncio
 async def test_coordinator_persists_disabled_route_rejection(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _RootDispatcher()
     coordinator = _coordinator(
         tmp_path=tmp_path,

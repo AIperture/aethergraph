@@ -1,4 +1,4 @@
-"""Inactive canonical Host-integration persistence binding for the S9 cut."""
+"""Canonical Host-integration persistence binding over provider storage."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from datetime import datetime
 from aethergraph.storage.contracts import StorageBundle, StorageScope
 
 from .canonical_events import CanonicalInboundEventStore, CanonicalSemanticEventStore
-from .events import InboundEventStore, SemanticEventStore
+from .event_contracts import InboundEventStore, SemanticEventStore
 from .idempotency import CanonicalIngressIdempotencyStore, IngressIdempotencyStore
 from .session_bindings import (
     CanonicalExternalSessionBindingStore,

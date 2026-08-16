@@ -915,6 +915,10 @@ async def test_observation_schema_has_no_legacy_identity_and_promoted_query_inde
             "EXPLAIN QUERY PLAN SELECT * FROM local_llm_calls WHERE capture_mode = ?",
             ("full",),
         ),
+        "manifest_correlation": await database.fetch_all(
+            "EXPLAIN QUERY PLAN SELECT * FROM local_llm_calls WHERE prompt_manifest_id = ?",
+            ("manifest-1",),
+        ),
         "management": await database.fetch_all(
             "EXPLAIN QUERY PLAN SELECT * FROM local_observation_scope_management "
             "WHERE trace_id = ? AND pinned = 1",
@@ -960,6 +964,7 @@ async def test_observation_schema_has_no_legacy_identity_and_promoted_query_inde
     assert "ix_local_observations_producer_time" in details["producer"]
     assert "ix_local_observations_name_time" in details["name"]
     assert "ix_local_llm_calls_capture" in details["capture"]
+    assert "ix_local_llm_calls_manifest" in details["manifest_correlation"]
     assert "ix_local_observation_management_trace" in details["management"]
     assert "ix_local_observations_project_trace_time" in details["usage"]
     assert "ix_local_observation_management_visibility" in details["management_visibility"]

@@ -1,4 +1,4 @@
-"""Inactive canonical metering persistence for the S9 cut."""
+"""Canonical metering persistence over provider storage."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class CanonicalMeteringStore:
             clock: Timezone-aware UTC default event clock.
 
         Returns:
-            None: The inactive-until-S9 projection is ready.
+            None: The provider-backed projection is ready.
 
         Notes:
             The bundle owns lifecycle; no fallback, opener, or close path exists.

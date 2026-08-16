@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-import sqlite3
 from typing import Any
 
 import pytest
@@ -12,6 +11,7 @@ from aethergraph.core.runtime.continuation_timer import ContinuationTimerService
 from aethergraph.observability import OperationObserver
 from aethergraph.observability.models import ObservationRecord
 from aethergraph.services.container.default_container import SERVICE_KEYS, DefaultContainer
+from aethergraph.services.continuations.canonical_store import CanonicalContinuationLeaseStore
 from aethergraph.services.continuations.continuation import (
     Continuation,
     ContinuationDraft,
@@ -24,9 +24,20 @@ from aethergraph.services.resume.multi_scheduler_resume_bus import (
 )
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
-from aethergraph.storage.continuation_store.timer_leases import (
-    SQLiteContinuationTimerLeaseStore,
-)
+from aethergraph.storage.contracts import StorageScope
+from tests.storage_conformance.runtime_repositories import InMemoryContinuationLeaseRepository
+
+_LEASE_REPOSITORIES: dict[Path, InMemoryContinuationLeaseRepository] = {}
+
+
+def _lease_store(root: Path) -> CanonicalContinuationLeaseStore:
+    repository = _LEASE_REPOSITORIES.setdefault(
+        root.resolve(), InMemoryContinuationLeaseRepository()
+    )
+    return CanonicalContinuationLeaseStore(
+        repository=repository,
+        owner_scope=StorageScope(project_id="continuation-timer-tests"),
+    )
 
 
 class _Clock:
@@ -130,7 +141,7 @@ def _timer(
 ) -> ContinuationTimerService:
     return ContinuationTimerService(
         continuation_store=store,
-        lease_store=SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db"),
+        lease_store=_lease_store(tmp_path),
         resume_router=router,  # type: ignore[arg-type]
         clock=clock,  # type: ignore[arg-type]
         worker_id=worker_id,
@@ -189,7 +200,7 @@ async def test_timer_delivers_through_canonical_resume_router(tmp_path: Path) ->
     resume_router = ResumeRouter(store=store, runner=resume_bus)
     timer = ContinuationTimerService(
         continuation_store=store,
-        lease_store=SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db"),
+        lease_store=_lease_store(tmp_path),
         resume_router=resume_router,
         clock=clock,  # type: ignore[arg-type]
         worker_id="worker-a",
@@ -267,7 +278,7 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
     continuation = await _save_due(store, now=now)
     router = _Router(store)
     sink = _Sink()
-    lease_store = SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db")
+    lease_store = _lease_store(tmp_path)
     fire_id = _fire_id(
         continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
@@ -398,46 +409,6 @@ async def test_timer_start_and_shutdown_are_idempotent(tmp_path: Path) -> None:
     await timer.stop()
     await timer.stop()
     assert timer._task is None
-
-
-@pytest.mark.asyncio
-async def test_timer_lease_schema_upgrade_preserves_terminal_receipts(tmp_path: Path) -> None:
-    path = tmp_path / "timer-leases.db"
-    now = datetime(2026, 8, 13, tzinfo=UTC)
-    with sqlite3.connect(path) as connection:
-        connection.execute("""
-            CREATE TABLE continuation_timer_leases_v2 (
-                fire_id TEXT PRIMARY KEY,
-                continuation_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                scheduled_for REAL NOT NULL,
-                worker_id TEXT,
-                status TEXT NOT NULL,
-                lease_until REAL,
-                attempts INTEGER NOT NULL,
-                next_attempt_at REAL,
-                last_error TEXT,
-                updated_at REAL NOT NULL
-            )
-            """)
-        connection.execute(
-            """
-            INSERT INTO continuation_timer_leases_v2 (
-                fire_id, continuation_id, run_id, node_id, scheduled_for,
-                worker_id, status, lease_until, attempts, next_attempt_at,
-                last_error, updated_at
-            ) VALUES (?, ?, ?, ?, ?, NULL, 'delivered', NULL, 2, NULL, NULL, ?)
-            """,
-            ("fire-old", "cont-old", "run-old", "node-old", now.timestamp(), now.timestamp()),
-        )
-
-    store = SQLiteContinuationTimerLeaseStore(path)
-    receipt = await store.get("run-old", "node-old", "fire-old")
-
-    assert receipt is not None
-    assert receipt.revision == 1
-    assert receipt.finished_at == now
 
 
 def test_legacy_wakeup_boundary_is_deleted() -> None:

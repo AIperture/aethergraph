@@ -4,15 +4,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from aethergraph.observability.logger import StdLoggerService
-from aethergraph.services.agent_state import AgentStateFacade
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.clock.clock import SystemClock
-from aethergraph.services.continuations.stores.fs_store import FSContinuationStore
-from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.image_service import ImageGenerationService
 from aethergraph.services.llm.service import LLMService
-from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
@@ -23,7 +19,7 @@ from aethergraph.services.waits.wait_registry import WaitRegistry
 @dataclass
 class NodeServices:
     channels: ChannelBus
-    continuation_store: FSContinuationStore
+    continuation_store: Any
     artifact_store: Any  # e.g., ArtifactFacadeAsync
     wait_registry: WaitRegistry | None = None
     clock: SystemClock | None = None
@@ -32,13 +28,12 @@ class NodeServices:
     )
     kv: Any | None = None
     memory: Any | None = None  # MemoryFactory (for cross-session needs)
-    memory_facade: MemoryFacade | None = None  # bound memory for this node
-    agent_state: AgentStateFacade | None = None  # experimental bound agent state facade
+    memory_facade: Any | None = None  # bound public memory for this node
+    agent_state: Any | None = None  # bound canonical agent-state facade
     viz: VizFacade | None = None  # VizFacade
     llm: LLMService | None = None  # LLMService
     embedding: EmbeddingService | None = None  # EmbeddingService
     image_model: ImageGenerationService | None = None  # ImageGenerationService
     runner: RunFacade | None = None  # RunFacade for child run orchestration
-    indices: ScopedIndices | None = None  # ScopedIndices for this node
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
     registry: RegistryFacade | None = None  # Scope-bound runtime registry facade

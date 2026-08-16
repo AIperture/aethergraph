@@ -4,7 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from aethergraph.core.runtime.runtime_services import register_llm_client, use_services
+from aethergraph.core.runtime import runtime_services
+from aethergraph.core.runtime.runtime_services import (
+    current_services,
+    install_services,
+    register_llm_client,
+    uninstall_services,
+    use_services,
+)
 
 
 class _ProfileService:
@@ -15,6 +22,28 @@ class _ProfileService:
     def configure_profile(self, **kwargs):
         self.calls.append(kwargs)
         return self.result
+
+
+def test_uninstall_services_clears_only_the_exact_installed_container(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = object()
+    replacement = object()
+    monkeypatch.setattr(runtime_services, "_services_global", None)
+    token = runtime_services._current.set(None)
+    try:
+        install_services(first)
+        assert current_services() is first
+
+        install_services(replacement)
+        uninstall_services(first)
+        assert current_services() is replacement
+
+        uninstall_services(replacement)
+        with pytest.raises(RuntimeError, match="No services installed"):
+            current_services()
+    finally:
+        runtime_services._current.reset(token)
 
 
 def test_register_llm_client_keeps_chat_and_embedding_configuration_separate() -> None:

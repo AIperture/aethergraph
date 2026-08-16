@@ -5,8 +5,9 @@ from dataclasses import dataclass
 import inspect
 from typing import Any
 
+from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.services.viz import VizEvent, VizEventSink, VizMode
-from aethergraph.services.artifacts.facade import Artifact, ArtifactFacade
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.scope.scope import Scope
 
 
@@ -38,7 +39,7 @@ class VizFacade:
 
     viz_service: VizEventSink
     scope: Scope | None = None
-    artifacts: ArtifactFacade | None = None
+    artifacts: CanonicalPublicArtifactFacade | None = None
 
     # ------- internal helpers -------
     def _scope_dims(self) -> dict[str, Any]:

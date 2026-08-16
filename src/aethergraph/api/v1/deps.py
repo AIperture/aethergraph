@@ -6,8 +6,9 @@ from fastapi import Depends, Header, HTTPException, Request, status  # type: ign
 from pydantic import BaseModel, Field  # type: ignore
 
 from aethergraph.core.runtime.runtime_services import current_services
-from aethergraph.services.auth.authn import AuthenticationRejected, AuthnService, DemoGrant
+from aethergraph.services.auth.authn import AuthenticationRejected, DemoGrant
 from aethergraph.services.auth.authz import AuthZService
+from aethergraph.services.auth.canonical_authn import CanonicalAuthnService
 from aethergraph.services.scope.tenant import registry_tenant_from_identity
 
 
@@ -52,7 +53,7 @@ def _get_deploy_mode() -> str:
     return "local"
 
 
-def get_authn() -> AuthnService:
+def get_authn() -> CanonicalAuthnService:
     container = current_services()
     return container.authn  # type: ignore[return-value]
 
@@ -129,7 +130,7 @@ async def get_identity(
     client_id = x_client_id or request.query_params.get("client_id")
     authn = get_authn()
     try:
-        resolved = authn.resolve(
+        resolved = await authn.resolve(
             deploy_mode=deploy_mode,
             session_id=request.cookies.get(authn.cookie_name),
             client_id=client_id,
@@ -215,8 +216,8 @@ def artifact_belongs_to_identity(identity: RequestIdentity, artifact: Any) -> bo
     if identity.mode == "local":
         return True
     labels = getattr(artifact, "labels", None) or {}
-    art_user = labels.get("user_id")
-    art_org = labels.get("org_id")
+    art_user = getattr(artifact, "user_id", None) or labels.get("user_id")
+    art_org = getattr(artifact, "org_id", None) or labels.get("org_id")
     if identity.user_id and art_user and art_user != identity.user_id:
         return False
     if identity.org_id and art_org and art_org != identity.org_id:

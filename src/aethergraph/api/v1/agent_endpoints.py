@@ -23,6 +23,7 @@ from aethergraph.contracts.integration import (
 from aethergraph.core.runtime.run_types import SessionKind
 from aethergraph.services.host.endpoint_credentials import ENDPOINT_COOKIE_NAME
 from aethergraph.services.integration import VerifiedAttachment, VerifiedIntegrationContext
+from aethergraph.storage.contracts import StorageScope
 
 from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
 
@@ -701,7 +702,10 @@ async def endpoint_artifact(
     """
     container = _host(request)
     route = _route(container, endpoint_id)
-    artifact = await container.artifact_index.get(artifact_id)
+    artifacts = container.artifact_factory.for_public_execution(
+        StorageScope(org_id=identity.org_id, user_id=identity.user_id)
+    )
+    artifact = await artifacts.get_by_id(artifact_id)
     labels = artifact.labels if artifact is not None else {}
     if (
         artifact is None
@@ -709,7 +713,7 @@ async def endpoint_artifact(
         or labels.get("route_id") != route.route_id
     ):
         raise HTTPException(status_code=404, detail="Artifact not found.")
-    data = await container.artifacts.load_artifact_bytes(artifact.uri)
+    data = await artifacts.load_bytes_by_id(artifact_id)
     return Response(
         content=data,
         media_type=artifact.mime or "application/octet-stream",

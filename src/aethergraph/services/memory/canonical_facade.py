@@ -54,6 +54,7 @@ class CanonicalMemoryFacade:
         state_store: StateStore,
         search_backend: SearchBackend,
         scope: StorageScope,
+        event_scope: StorageScope | None = None,
         hot_max_events: int = 500,
         hot_ttl_seconds: float = 900.0,
         monotonic_clock: Callable[[], float] = monotonic,
@@ -91,12 +92,13 @@ class CanonicalMemoryFacade:
             state_store: Canonical transactional memory-state repository.
             search_backend: Canonical exact-mode searchable projection.
             scope: Exact immutable memory ownership/execution scope.
+            event_scope: Optional full event provenance containing every bucket dimension.
             hot_max_events: Positive maximum records retained in process.
             hot_ttl_seconds: Positive insertion-age lifetime for hot records.
             monotonic_clock: Monotonic time source used only for cache expiry.
 
         Returns:
-            None: The inactive-until-S9 facade is ready without I/O.
+            None: The provider-backed facade is ready without I/O.
 
         Notes:
             Durable events remain authoritative; hot cache and search are projections.
@@ -115,6 +117,10 @@ class CanonicalMemoryFacade:
         self._state = state_store
         self._search = search_backend
         self.scope = scope
+        self.event_scope = event_scope or scope
+        for name, value in scope.as_filter().items():
+            if name != "scope_key" and getattr(self.event_scope, name) != value:
+                raise ValueError(f"Memory event scope conflicts with bucket scope {name}")
         self._hot_max_events = hot_max_events
         self._hot_ttl_seconds = float(hot_ttl_seconds)
         self._monotonic = monotonic_clock
@@ -187,7 +193,7 @@ class CanonicalMemoryFacade:
                 EventDraft(
                     event_id=event_id,
                     occurred_at=occurred_at,
-                    scope=self.scope,
+                    scope=self.event_scope,
                     kind=kind,
                     stage=stage,
                     topic=topic,
@@ -231,8 +237,8 @@ class CanonicalMemoryFacade:
         if not isinstance(events, tuple):
             raise TypeError("events must be an immutable tuple")
         for event in events:
-            if event.scope != self.scope:
-                raise ValueError("Memory event scope must exactly match the bound facade scope")
+            if event.scope != self.event_scope:
+                raise ValueError("Memory event scope must exactly match the bound event provenance")
         if not events:
             return MemoryCommitReceipt(events=(), event_cursor=None, indexed_cursor=None)
         committed = await self._events.append_many(events)
@@ -246,7 +252,7 @@ class CanonicalMemoryFacade:
                 self._hot.append((inserted_at, event))
                 cached_ids.add(event.event_id)
         indexed_cursor = await self._search.upsert_many(
-            tuple(_search_document(event) for event in committed)
+            tuple(_search_document(event, scope=self.scope) for event in committed)
         )
         return MemoryCommitReceipt(
             events=committed,
@@ -641,7 +647,7 @@ class CanonicalMemoryFacade:
             self._hot.popleft()
 
 
-def _search_document(event: EventRecord) -> SearchDocument:
+def _search_document(event: EventRecord, *, scope: StorageScope) -> SearchDocument:
     metadata: dict[str, Any] = {
         "event_cursor": event.cursor,
         "kind": event.kind,
@@ -655,7 +661,7 @@ def _search_document(event: EventRecord) -> SearchDocument:
         corpus=_MEMORY_CORPUS,
         item_id=event.event_id,
         text=event.text or "",
-        scope=event.scope,
+        scope=scope,
         occurred_at=event.occurred_at,
         tags=event.tags,
         metadata=metadata,

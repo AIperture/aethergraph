@@ -1,4 +1,4 @@
-"""Inactive canonical continuation and timer-lease projections for the S9 cut."""
+"""Canonical continuation and timer-lease projections over provider storage."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ class CanonicalContinuationStore:
             owner_scope: Trusted provider ownership scope.
 
         Returns:
-            None: The inactive-until-S9 projection is ready.
+            None: The provider-backed projection is ready.
 
         Notes:
             The bundle owns lifecycle; this projection has no fallback or close path.
@@ -470,7 +470,7 @@ class CanonicalContinuationLeaseStore:
             owner_scope: Trusted provider ownership scope.
 
         Returns:
-            None: The inactive-until-S9 lease projection is ready.
+            None: The provider-backed lease projection is ready.
 
         Notes:
             Lease state is never persisted beside the selected canonical repository.

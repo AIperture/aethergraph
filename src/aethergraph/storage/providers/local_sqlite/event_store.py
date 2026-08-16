@@ -27,7 +27,7 @@ from ...contracts import (
 )
 from .database import LocalSQLiteDatabase
 
-_EVENT_COMPONENT_VERSION = 1
+_EVENT_COMPONENT_VERSION = 2
 _MAX_APPEND_BATCH = 1_000
 _STREAM_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SCOPE_FIELDS = tuple(item.name for item in fields(StorageScope))
@@ -67,6 +67,12 @@ _EVENT_INDEXES = (
     "CREATE INDEX ix_local_events_kind ON local_events(stream, kind, cursor)",
     "CREATE INDEX ix_local_events_topic ON local_events(stream, topic, cursor)",
     "CREATE INDEX ix_local_events_occurred ON local_events(stream, occurred_at, cursor)",
+    "CREATE INDEX ix_local_events_session ON local_events("
+    "stream, project_id, org_id, user_id, session_id, cursor)",
+    "CREATE INDEX ix_local_events_run ON local_events("
+    "stream, project_id, org_id, user_id, run_id, cursor)",
+    "CREATE INDEX ix_local_events_agent ON local_events("
+    "stream, project_id, org_id, user_id, session_id, agent_id, cursor)",
     "CREATE INDEX ix_local_event_tags_tag ON local_event_tags(tag, event_cursor)",
 )
 
@@ -157,10 +163,10 @@ class LocalEventStore:
         return await self._database.transaction(commit)
 
     async def get(self, scope: StorageScope, event_id: str) -> EventRecord | None:
-        """Read one exact event ID within one exact canonical scope.
+        """Read one event ID constrained by populated canonical scope dimensions.
 
-        Every populated and absent scope dimension participates in the lookup, so an
-        event owned by another scope is never returned.
+        Every populated scope dimension participates in the lookup. Omitted execution
+        dimensions remain wildcards under the caller's required owner boundary.
 
         Examples:
             Read a committed event:
@@ -174,14 +180,15 @@ class LocalEventStore:
                 ```
 
         Args:
-            scope: Exact canonical owner/execution scope.
+            scope: Canonical owner and optional execution constraints.
             event_id: Stable event identifier, never a provider cursor alias.
 
         Returns:
             EventRecord | None: Matching scoped event or `None`.
 
         Notes:
-            This operation performs no cross-stream or cross-scope scan.
+            Event identity is stream-unique; populated owner constraints are still
+            checked before hydration.
         """
         where, parameters = _scope_predicate(scope)
         rows = await self._database.fetch_all(
@@ -333,10 +340,13 @@ class LocalEventStore:
         return _record(row)
 
 
-def _scope_predicate(scope: StorageScope) -> tuple[str, tuple[str | None, ...]]:
+def _scope_predicate(scope: StorageScope) -> tuple[str, tuple[str, ...]]:
+    populated = scope.as_filter()
+    if not populated:
+        return "1 = 1", ()
     return (
-        " AND ".join(f"{name} IS ?" for name in _SCOPE_FIELDS),
-        tuple(getattr(scope, name) for name in _SCOPE_FIELDS),
+        " AND ".join(f"{name} = ?" for name in populated),
+        tuple(populated.values()),
     )
 
 

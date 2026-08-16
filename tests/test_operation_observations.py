@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -9,9 +8,7 @@ import pytest
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.core.runtime.runtime_services import use_services
 from aethergraph.observability import (
-    ObservabilityFacade,
     OperationObserver,
-    SQLiteObservationStore,
     resolve_operation_observer,
     summarize_payload,
 )
@@ -79,11 +76,18 @@ async def test_operation_observer_persists_bounded_terminal_record() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_operation_observer_uses_canonical_redacted_store(tmp_path: Path) -> None:
-    store = SQLiteObservationStore(tmp_path / "observability.db")
-    facade = ObservabilityFacade(store)
+async def test_runtime_operation_observer_resolves_canonical_write_sink() -> None:
+    class Sink:
+        def __init__(self) -> None:
+            self.records: list[ObservationRecord] = []
 
-    with use_services(SimpleNamespace(observability=facade)):
+        async def append_observation(self, record: ObservationRecord) -> str:
+            self.records.append(record)
+            return record.observation_id
+
+    sink = Sink()
+
+    with use_services(SimpleNamespace(observation_sink=sink)):
         span = await resolve_operation_observer().start_span(
             service="artifacts",
             operation="save",
@@ -91,13 +95,10 @@ async def test_runtime_operation_observer_uses_canonical_redacted_store(tmp_path
         )
         await span.fail(RuntimeError("write failed"))
 
-    rows = await store.list_observations()
-    assert len(rows) == 1
-    assert rows[0]["category"] == "service_operation"
-    assert rows[0]["status"] == "error"
-    assert rows[0]["attributes"]["request"]["preview"]["image"] == (
-        "[redacted data URL: image/png]"
-    )
+    assert len(sink.records) == 1
+    assert sink.records[0].category == "service_operation"
+    assert sink.records[0].status == "error"
+    assert sink.records[0].attributes["request"]["preview"]["image"].startswith("data:image/png")
 
 
 @pytest.mark.asyncio

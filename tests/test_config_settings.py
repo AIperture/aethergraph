@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 import pytest
 
 from aethergraph.api.v1.schemas.settings import SlackPayload, SlackView
@@ -19,14 +19,12 @@ from aethergraph.config.llm_env import (
     encode_llm_profiles_env,
 )
 from aethergraph.config.loader import load_settings
-from aethergraph.config.search import SearchBackendSettings
 from aethergraph.services.channel import factory as channel_factory
 from aethergraph.services.llm.profiles import (
     ChatCapabilityOverrides,
     EmbeddingCapabilityOverrides,
     ImageGenerationCapabilityOverrides,
 )
-from aethergraph.storage.search_factory import build_search_backend
 
 
 def test_explicit_settings_file_does_not_use_discovered_files(
@@ -192,19 +190,6 @@ def test_provider_settings_expose_only_supported_transport_configuration() -> No
         "enabled",
         "bot_token",
     }
-
-
-@pytest.mark.parametrize("backend", ["none", "sqlite_lexical"])
-def test_search_settings_reject_null_and_unimplemented_backends(backend: str) -> None:
-    with pytest.raises(ValidationError):
-        SearchBackendSettings(backend=backend)  # type: ignore[arg-type]
-
-
-def test_active_search_factory_requires_embedding_capability(tmp_path: Path) -> None:
-    settings = AppSettings(workspace=str(tmp_path))
-
-    with pytest.raises(RuntimeError, match="requires an embedding client"):
-        build_search_backend(settings, embedder=None)
 
 
 def test_slack_delivery_adapter_does_not_require_webhook_credentials(

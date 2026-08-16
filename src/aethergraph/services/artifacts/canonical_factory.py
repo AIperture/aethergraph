@@ -59,7 +59,7 @@ class CanonicalArtifactFacadeFactory:
             occurrence_id_factory: Occurrence identity source for writes without one.
 
         Returns:
-            None: The inactive-until-S9 facade factory is ready without provider I/O.
+            None: The provider-backed facade factory is ready without provider I/O.
 
         Notes:
             Deprecated App/client metadata is not accepted as owner input and cannot

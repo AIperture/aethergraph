@@ -1,4 +1,4 @@
-"""Inactive canonical registry-manifest persistence for the S9 cut."""
+"""Canonical registry-manifest persistence over provider storage."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class CanonicalRegistrationManifestStore:
             clock: Timezone-aware UTC timestamp source.
 
         Returns:
-            None: The inactive-until-S9 service projection is ready.
+            None: The provider-backed service projection is ready.
 
         Notes:
             The service owns neither repository lifecycle nor provider selection.

@@ -10,10 +10,11 @@ import pytest
 from aethergraph.api.v1 import session as session_api
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.integration import SemanticEventKind
-from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
+from aethergraph.core.runtime.run_types import SessionKind
+from tests._canonical_storage_fakes import make_session_store
 
 
-class FakeEventLog:
+class FakeSemanticEventStore:
     def __init__(self, rows: list[Any] | None = None):
         self.rows = list(rows or [])
 
@@ -42,10 +43,9 @@ class FakeLLMService:
 
 
 class FakeContainer:
-    def __init__(self, *, session_store, eventlog, llm=None):
+    def __init__(self, *, session_store, semantic_events, llm=None):
         self.session_store = session_store
-        self.eventlog = eventlog
-        self.semantic_events = eventlog
+        self.semantic_events = semantic_events
         self.host_manifest = SimpleNamespace(deployment_id="deployment-1")
         self.llm = llm
 
@@ -101,10 +101,10 @@ def _chat_row(
 
 
 def test_infer_session_title_generates_and_persists(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = InMemorySessionStore()
+    store = make_session_store()
     created = __import__("asyncio").run(
         store.create(
-            kind="chat",
+            kind=SessionKind.chat,
             title=None,
             external_ref=None,
             user_id="user-1",
@@ -132,7 +132,7 @@ def test_infer_session_title_generates_and_persists(monkeypatch: pytest.MonkeyPa
     ]
     container = FakeContainer(
         session_store=store,
-        eventlog=FakeEventLog(rows),
+        semantic_events=FakeSemanticEventStore(rows),
         llm=FakeLLMService('"Slack Onboarding Bot Plan"'),
     )
     app = _build_app(container, identity=_identity(), monkeypatch=monkeypatch)
@@ -156,10 +156,10 @@ def test_infer_session_title_generates_and_persists(monkeypatch: pytest.MonkeyPa
 
 
 def test_infer_session_title_skips_when_not_enough_context(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = InMemorySessionStore()
+    store = make_session_store()
     created = __import__("asyncio").run(
         store.create(
-            kind="chat",
+            kind=SessionKind.chat,
             title=None,
             external_ref=None,
             user_id="user-1",
@@ -179,7 +179,7 @@ def test_infer_session_title_skips_when_not_enough_context(monkeypatch: pytest.M
     ]
     container = FakeContainer(
         session_store=store,
-        eventlog=FakeEventLog(rows),
+        semantic_events=FakeSemanticEventStore(rows),
         llm=FakeLLMService("unused"),
     )
     app = _build_app(container, identity=_identity(), monkeypatch=monkeypatch)
@@ -192,10 +192,10 @@ def test_infer_session_title_skips_when_not_enough_context(monkeypatch: pytest.M
 
 
 def test_infer_session_title_normalizes_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = InMemorySessionStore()
+    store = make_session_store()
     created = __import__("asyncio").run(
         store.create(
-            kind="chat",
+            kind=SessionKind.chat,
             title=None,
             external_ref=None,
             user_id="user-1",
@@ -223,7 +223,7 @@ def test_infer_session_title_normalizes_output(monkeypatch: pytest.MonkeyPatch) 
     ]
     container = FakeContainer(
         session_store=store,
-        eventlog=FakeEventLog(rows),
+        semantic_events=FakeSemanticEventStore(rows),
         llm=FakeLLMService('Title:\n"Solar Inverter Anomaly Review"'),
     )
     app = _build_app(container, identity=_identity(), monkeypatch=monkeypatch)
@@ -237,10 +237,10 @@ def test_infer_session_title_normalizes_output(monkeypatch: pytest.MonkeyPatch) 
 def test_manual_rename_marks_title_source_and_allows_explicit_ai_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = InMemorySessionStore()
+    store = make_session_store()
     created = __import__("asyncio").run(
         store.create(
-            kind="chat",
+            kind=SessionKind.chat,
             title=None,
             external_ref=None,
             user_id="user-1",
@@ -268,7 +268,7 @@ def test_manual_rename_marks_title_source_and_allows_explicit_ai_refresh(
     ]
     container = FakeContainer(
         session_store=store,
-        eventlog=FakeEventLog(rows),
+        semantic_events=FakeSemanticEventStore(rows),
         llm=FakeLLMService("Launch Email Draft"),
     )
     app = _build_app(container, identity=_identity(), monkeypatch=monkeypatch)
@@ -294,10 +294,10 @@ def test_manual_rename_marks_title_source_and_allows_explicit_ai_refresh(
 
 
 def test_infer_session_title_enforces_session_access(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = InMemorySessionStore()
+    store = make_session_store()
     created = __import__("asyncio").run(
         store.create(
-            kind="chat",
+            kind=SessionKind.chat,
             title=None,
             external_ref=None,
             user_id="owner-1",
@@ -325,7 +325,7 @@ def test_infer_session_title_enforces_session_access(monkeypatch: pytest.MonkeyP
     ]
     container = FakeContainer(
         session_store=store,
-        eventlog=FakeEventLog(rows),
+        semantic_events=FakeSemanticEventStore(rows),
         llm=FakeLLMService("Migration Rollout Plan"),
     )
     app = _build_app(

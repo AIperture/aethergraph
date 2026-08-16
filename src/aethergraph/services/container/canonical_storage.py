@@ -1,4 +1,4 @@
-"""Inactive canonical runtime-service composition over one storage bundle."""
+"""Canonical runtime-service composition over one storage bundle."""
 
 from __future__ import annotations
 
@@ -182,6 +182,9 @@ def bind_canonical_storage_services(
     observation_policy: ObservationPolicy,
     llm: LLMClientProtocol | None = None,
     runtime_output_tags: tuple[str, ...] = (),
+    memory_hot_max_events: int = 500,
+    memory_hot_ttl_seconds: float = 900.0,
+    memory_signal_threshold: float = 0.0,
 ) -> CanonicalStorageServices:
     """Bind the complete inactive storage-service graph to one coherent bundle.
 
@@ -220,9 +223,12 @@ def bind_canonical_storage_services(
         observation_policy: Exact capture, redaction, and retention policy.
         llm: Optional LLM client used only for explicit Memory distillation.
         runtime_output_tags: Immutable provider-neutral output classification tags.
+        memory_hot_max_events: Positive per-facade in-memory event bound.
+        memory_hot_ttl_seconds: Positive in-memory event insertion lifetime.
+        memory_signal_threshold: Finite default explicit distillation threshold.
 
     Returns:
-        CanonicalStorageServices: Inactive service graph over exact bundle fields.
+        CanonicalStorageServices: Provider-backed service graph over exact bundle fields.
 
     Notes:
         The binder performs no selection, open, health check, I/O, fallback, global
@@ -291,6 +297,9 @@ def bind_canonical_storage_services(
         memory_factory=CanonicalMemoryFacadeFactory(
             bundle=bundle,
             owner_scope=owner_scope,
+            hot_max_events=memory_hot_max_events,
+            hot_ttl_seconds=memory_hot_ttl_seconds,
+            default_signal_threshold=memory_signal_threshold,
             llm=llm,
             clock=clock,
         ),

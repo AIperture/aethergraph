@@ -1,4 +1,4 @@
-"""Inactive canonical general key-value facade for the S9 cut."""
+"""Canonical general key-value facade over provider storage."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class CanonicalKeyValueFacade:
             clock: Timezone-aware UTC source used to translate relative TTLs.
 
         Returns:
-            None: The inactive-until-S9 facade is ready.
+            None: The provider-backed facade is ready.
 
         Notes:
             The bundle owns lifecycle. Keys cannot select another namespace, scope,

@@ -123,9 +123,17 @@ class StdLoggerService(LoggerService):
     • context helpers (with_context / for_*_ctx)
     """
 
-    def __init__(self, base: logging.Logger, *, cfg: LoggingConfig):
+    def __init__(
+        self,
+        base: logging.Logger,
+        *,
+        cfg: LoggingConfig,
+        handlers: tuple[logging.Handler, ...] = (),
+    ):
         self._base = base
         self._cfg = cfg
+        self._handlers = handlers
+        self._closed = False
 
     # --- LoggerService interface ---
 
@@ -195,6 +203,46 @@ class StdLoggerService(LoggerService):
         base = self.for_run()
         return self.with_context(base, LogContext(run_id=run_id, graph_id=graph_id))
 
+    def close(self) -> None:
+        """Detach and close only the handlers owned by this logger service.
+
+        Intro:
+            Removes persistent observation and file handlers before their provider
+            resources close, while leaving handlers installed by another container.
+
+        Examples:
+            Close during container shutdown:
+            ```python
+            logger_service.close()
+            ```
+
+            Close idempotently after failed startup cleanup:
+            ```python
+            logger_service.close()
+            logger_service.close()
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            None: Owned handlers and queue listeners are stopped and detached.
+
+        Notes:
+            A stale service never removes replacement handlers installed by a newer
+            container because ownership is tracked by handler identity.
+        """
+        if self._closed:
+            return
+        for handler in self._handlers:
+            if handler in self._base.handlers:
+                self._base.removeHandler(handler)
+            listener = getattr(handler, "_aethergraph_listener", None)
+            if listener is not None:
+                listener.stop()
+            handler.close()
+        self._closed = True
+
     # --- builder ---
 
     @staticmethod
@@ -205,6 +253,10 @@ class StdLoggerService(LoggerService):
         # Reset handlers if rebuilding (idempotent server restarts)
         for h in list(root.handlers):
             root.removeHandler(h)
+            listener = getattr(h, "_aethergraph_listener", None)
+            if listener is not None:
+                listener.stop()
+            h.close()
 
         # Root should usually be DEBUG or `cfg.level`, but since we
         # now tune at handler level, it's safe to set it low:
@@ -254,6 +306,7 @@ class StdLoggerService(LoggerService):
             listener = logging.handlers.QueueListener(q, fh, respect_handler_level=True)
             listener.daemon = True
             listener.start()
+            qh._aethergraph_listener = listener  # type: ignore[attr-defined]
         elif cfg.file_level is not None:
             fh = logging.handlers.RotatingFileHandler(
                 file_path,
@@ -283,4 +336,4 @@ class StdLoggerService(LoggerService):
             lg.setLevel(ext_level)
             lg.propagate = True
 
-        return StdLoggerService(root, cfg=cfg)
+        return StdLoggerService(root, cfg=cfg, handlers=tuple(root.handlers))

@@ -6,9 +6,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from aethergraph.config.config import AppSettings
+from aethergraph.storage.contracts import (
+    StorageProviderSelection,
+    StorageScope,
+    StorageSecretResolver,
+)
+from aethergraph.storage.provider_registry import StorageProviderFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +35,22 @@ class RuntimeOpenRequest:
     settings: AppSettings
     channel_adapters: Mapping[str, Any] = field(default_factory=dict)
     extensions: Mapping[str, Any] = field(default_factory=dict)
+    workspace_id: str | None = None
+    owner_scope: StorageScope | None = None
+    storage_selection: StorageProviderSelection | None = None
+    storage_providers: Mapping[str, StorageProviderFactory] = field(default_factory=dict)
+    storage_secrets: StorageSecretResolver | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "channel_adapters", MappingProxyType(dict(self.channel_adapters)))
+        object.__setattr__(self, "extensions", MappingProxyType(dict(self.extensions)))
+        object.__setattr__(
+            self, "storage_providers", MappingProxyType(dict(self.storage_providers))
+        )
+        if self.workspace_id is not None and (
+            not self.workspace_id.strip() or self.workspace_id != self.workspace_id.strip()
+        ):
+            raise ValueError("workspace_id must be exact and non-empty when supplied")
 
 
 @dataclass(frozen=True, slots=True)

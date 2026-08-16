@@ -6,7 +6,7 @@ import importlib
 from pathlib import Path
 from typing import get_type_hints
 
-from aethergraph.config.storage import StorageSettings
+from aethergraph.config.config import AppSettings
 from aethergraph.storage.contracts import StorageOpenRequest
 
 CONTRACT_ROOT = Path(__file__).parents[1] / "src" / "aethergraph" / "storage" / "contracts"
@@ -98,36 +98,26 @@ def test_superseded_copied_sqlite_vector_implementations_are_absent() -> None:
 
     assert not (vector_root / "sqlite_index copy.py").exists()
     assert not (vector_root / "sqlite_index_vanila.py").exists()
+    assert not any(vector_root.glob("*.py"))
 
 
 def test_independent_rag_vector_configuration_and_factory_are_absent() -> None:
     vector_root = STORAGE_ROOT / "vector_index"
     factory = STORAGE_ROOT / "factory.py"
-    function_names = {
-        node.name
-        for node in ast.walk(ast.parse(factory.read_text(encoding="utf-8")))
-        if isinstance(node, ast.FunctionDef)
-    }
-    search_tree = ast.parse(
-        (STORAGE_ROOT.parent / "config" / "search.py").read_text(encoding="utf-8")
-    )
-    imports_storage_config = any(
-        isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "storage"
-        for node in ast.walk(search_tree)
-    )
 
-    assert "vector_index" not in StorageSettings.model_fields
-    assert "build_vector_index" not in function_names
+    assert "storage" not in AppSettings.model_fields
+    assert "search" not in AppSettings.model_fields
+    assert not factory.exists()
     assert not (vector_root / "chroma_index.py").exists()
-    assert not imports_storage_config
+    assert not (STORAGE_ROOT.parent / "config" / "search.py").exists()
 
 
 def test_silent_null_search_backend_is_absent() -> None:
     search_root = STORAGE_ROOT / "search_backend"
-    factory_source = (STORAGE_ROOT / "search_factory.py").read_text(encoding="utf-8")
 
     assert not (search_root / "null_backend.py").exists()
-    assert "NullSearchBackend" not in factory_source
+    assert not any(search_root.glob("*.py"))
+    assert not (STORAGE_ROOT / "search_factory.py").exists()
 
 
 def test_memory_contract_has_no_duplicate_vector_or_embedding_protocol() -> None:

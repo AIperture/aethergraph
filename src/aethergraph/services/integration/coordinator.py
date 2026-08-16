@@ -18,7 +18,7 @@ from aethergraph.contracts.integration import (
 from .context import VerifiedIntegrationContext
 from .delivery import SemanticEventEmitter
 from .dispatch import RootTurnDispatcher
-from .events import InboundEventStore
+from .event_contracts import InboundEventStore
 from .idempotency import IngressIdempotencyStore
 from .interactions import (
     InteractionResolutionError,

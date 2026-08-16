@@ -31,7 +31,7 @@ from aethergraph.storage.contracts import (
     StorageScope,
 )
 
-from .events import (
+from .event_contracts import (
     PersistedInboundEvent,
     PersistedSemanticEvent,
     SemanticEventStoreError,
@@ -78,7 +78,7 @@ class CanonicalInboundEventStore:
             owner_scope: Exact trusted Host ownership scope.
 
         Returns:
-            None: The inactive-until-S9 service projection is ready without I/O.
+            None: The provider-backed service projection is ready without I/O.
 
         Notes:
             Deprecated App/client metadata is not accepted as scope or identity.
@@ -214,7 +214,7 @@ class CanonicalSemanticEventStore:
             max_history_events: Positive ceiling for calls without an explicit limit.
 
         Returns:
-            None: The inactive-until-S9 service projection is ready without I/O.
+            None: The provider-backed service projection is ready without I/O.
 
         Notes:
             Legacy semantic v1 events and catch-all kind fallback are not supported.
@@ -447,8 +447,8 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
                 "producer": record.producer,
                 "timestamp": record.occurred_at,
                 "kind": SemanticEventKind(record.kind.value),
-                "payload": dict(payload),
-                "extensions": dict(extensions),
+                "payload": _thaw_json(payload),
+                "extensions": _thaw_json(extensions),
             }
         )
     except (TypeError, ValueError) as exc:
@@ -457,3 +457,11 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
             message="Canonical semantic event cannot be projected to active v2.",
         ) from exc
     return PersistedSemanticEvent(cursor=record.delivery_cursor, event=event)
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_json(item) for item in value]
+    return value

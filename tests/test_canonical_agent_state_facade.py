@@ -9,7 +9,6 @@ import pytest
 
 from aethergraph.services.agent_state import (
     AgentStateConflictError,
-    AgentStateHandle,
     CanonicalAgentStateFacade,
     CanonicalAgentStateHandle,
     project_agent_state_scope,
@@ -200,7 +199,7 @@ async def test_canonical_agent_state_local_backend_never_writes_provider(tmp_pat
         await bundle.close()
 
 
-def test_agent_state_public_docstrings_and_legacy_probe_removal_are_locked() -> None:
+def test_agent_state_public_docstrings_and_probe_removal_are_locked() -> None:
     for name in ("load", "commit", "update", "history"):
         docstring = inspect.getdoc(getattr(CanonicalAgentStateHandle, name)) or ""
         assert docstring.index("Examples:") < docstring.index("Args:")
@@ -210,12 +209,12 @@ def test_agent_state_public_docstrings_and_legacy_probe_removal_are_locked() -> 
     bind_docstring = inspect.getdoc(CanonicalAgentStateFacade.bind) or ""
     assert bind_docstring.count("```python") >= 2
 
-    legacy_source = inspect.getsource(AgentStateHandle)
+    canonical_source = inspect.getsource(CanonicalAgentStateHandle)
     for method_name in (
         "get_latest_state_record",
         "append_state_snapshot",
         "append_external_resource_change",
         "list_state_history",
     ):
-        assert f'getattr(self.memory, "{method_name}"' not in legacy_source
-    assert "_call_memory_method" not in legacy_source
+        assert method_name not in canonical_source
+    assert "_call_memory_method" not in canonical_source

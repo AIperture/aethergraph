@@ -132,7 +132,7 @@ class _FakeArtifactStore:
         self.root = root
         self.saved: dict[str, Any] | None = None
 
-    async def plan_staging_path(self, planned_ext: str = "") -> str:
+    async def stage_path(self, planned_ext: str = "") -> str:
         path = self.root / f"stage{planned_ext}"
         path.parent.mkdir(parents=True, exist_ok=True)
         return str(path)
@@ -155,30 +155,15 @@ class _FakeArtifactStore:
         )
 
 
-class _FakeArtifactIndex:
-    def __init__(self) -> None:
-        self.upserts: list[Artifact] = []
-        self.occurrences: list[Artifact] = []
-
-    async def upsert(self, artifact: Artifact) -> None:
-        self.upserts.append(artifact)
-
-    async def record_occurrence(self, artifact: Artifact) -> None:
-        self.occurrences.append(artifact)
-
-    async def get(self, artifact_id: str) -> Artifact | None:
-        for artifact in self.upserts:
-            if artifact.artifact_id == artifact_id:
-                return artifact
-        return None
-
-
 class _FakeContainer:
     def __init__(self, root: Path) -> None:
         self.artifacts = _FakeArtifactStore(root)
-        self.artifact_index = _FakeArtifactIndex()
+        self.artifact_factory = self
         self.scope_factory = ScopeFactory()
-        self.scoped_indices = None
+
+    def for_public_execution(self, scope, **kwargs):
+        del scope, kwargs
+        return self.artifacts
 
 
 @pytest.mark.asyncio
@@ -205,5 +190,4 @@ async def test_resource_stager_uses_facade_and_preserves_channel_scope(tmp_path:
     assert resource.labels["channel_key"] == "slack:team/T:chan/C"
     assert "run_id" not in resource.labels
     assert container.artifacts.saved is not None
-    assert container.artifacts.saved["run_id"] == ""
-    assert len(container.artifact_index.upserts) == 1
+    assert "run_id" not in container.artifacts.saved

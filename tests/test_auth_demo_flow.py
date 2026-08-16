@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -13,9 +14,7 @@ from aethergraph.api.v1 import (
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.config.config import AppSettings
 from aethergraph.server.app_factory import create_app
-from aethergraph.services.auth.authn import AuthenticationRejected, AuthnService, DemoGrant
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
-from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
 
 
 @pytest.fixture()
@@ -32,16 +31,21 @@ def auth_client(tmp_path) -> TestClient:
 
 def _create_invite_and_redeem(client: TestClient, *, grant_id: str = "grant-1") -> dict:
     """Create an invite code on the server and redeem it, returning the auth/me body."""
-    authn = client.app.state.container.authn
-    grant = DemoGrant(
-        grant_id=grant_id,
-        org_id="org-demo",
-        allowed_apps=["allowed-app"],
-        allowed_agents=["allowed-agent"],
-        client_label="Demo Client",
+    created = client.post(
+        "/api/v1/auth/invite/create",
+        json={
+            "grant_id": grant_id,
+            "org_id": "org-demo",
+            "allowed_apps": ["allowed-app"],
+            "allowed_agents": ["allowed-agent"],
+            "client_label": "Demo Client",
+        },
     )
-    invite = authn.create_invite_code(grant)
-    resp = client.post("/api/v1/auth/invite/redeem", json={"code": invite.code})
+    assert created.status_code == 200
+    resp = client.post(
+        "/api/v1/auth/invite/redeem",
+        json={"code": created.json()["code"]},
+    )
     assert resp.status_code == 200
     return resp.json()
 
@@ -61,12 +65,16 @@ def test_invite_redeem_sets_guest_session_cookie_and_auth_me(auth_client: TestCl
 
 
 def test_same_grant_creates_distinct_guest_users(auth_client: TestClient) -> None:
-    authn = auth_client.app.state.container.authn
-    grant = DemoGrant(grant_id="grant-shared", org_id="org-demo")
-    sess_a = authn.create_demo_session(grant=grant)
-    sess_b = authn.create_demo_session(grant=grant)
-    assert sess_a.user_id != sess_b.user_id
-    assert sess_a.org_id == sess_b.org_id == "org-demo"
+    created = auth_client.post(
+        "/api/v1/auth/invite/create",
+        json={"grant_id": "grant-shared", "org_id": "org-demo", "max_uses": 2},
+    )
+    assert created.status_code == 200
+    code = created.json()["code"]
+    first = auth_client.post("/api/v1/auth/invite/redeem", json={"code": code}).json()
+    second = auth_client.post("/api/v1/auth/invite/redeem", json={"code": code}).json()
+    assert first["user_id"] != second["user_id"]
+    assert first["org_id"] == second["org_id"] == "org-demo"
 
 
 def test_revoked_demo_session_fails_closed_without_public_demo_fallback(
@@ -74,7 +82,7 @@ def test_revoked_demo_session_fails_closed_without_public_demo_fallback(
 ) -> None:
     _create_invite_and_redeem(auth_client)
     authn = auth_client.app.state.container.authn
-    authn.revoke_grant("grant-1")
+    asyncio.run(authn.revoke_grant("grant-1"))
 
     response = auth_client.get(
         "/api/v1/whoami",
@@ -83,25 +91,6 @@ def test_revoked_demo_session_fails_closed_without_public_demo_fallback(
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Demo session grant is no longer valid"
-
-
-def test_missing_demo_session_grant_is_deleted_and_rejected() -> None:
-    authn = AuthnService(secret="test-secret")
-    grant = DemoGrant(grant_id="grant-1", org_id="org-1")
-    session = authn.create_demo_session(grant=grant)
-    authn.delete_grant(grant.grant_id)
-
-    with pytest.raises(AuthenticationRejected, match="no longer valid"):
-        authn.resolve(
-            deploy_mode="demo",
-            session_id=session.session_id,
-            client_id="browser-1",
-            x_user_id=None,
-            x_org_id=None,
-            x_mode="demo",
-        )
-
-    assert authn.get_session(session.session_id) is None
 
 
 def test_cloud_proxy_headers_resolve_identity(auth_client: TestClient) -> None:
@@ -193,17 +182,21 @@ def test_artifact_content_enforces_identity(monkeypatch) -> None:
         labels={"user_id": "owner-a", "org_id": "org-a"},
     )
 
-    class FakeIndex:
-        async def get(self, artifact_id: str):
+    class FakeFacade:
+        async def get_by_id(self, artifact_id: str):
             return artifact if artifact_id == "art-1" else None
 
-    class FakeStore:
-        async def load_artifact_bytes(self, uri: str):
+        async def load_bytes_by_id(self, artifact_id: str):
             return b"hello"
 
+    class FakeFactory:
+        def for_public_execution(self, scope):
+            assert scope.user_id == "owner-b"
+            assert scope.org_id == "org-a"
+            return FakeFacade()
+
     class FakeContainer:
-        artifact_index = FakeIndex()
-        artifacts = FakeStore()
+        artifact_factory = FakeFactory()
         run_manager = object()
 
     monkeypatch.setattr("aethergraph.api.v1.artifacts.current_services", lambda: FakeContainer())
@@ -219,93 +212,6 @@ def test_artifact_content_enforces_identity(monkeypatch) -> None:
     client = TestClient(app)
     resp = client.get("/api/v1/artifacts/art-1/content")
     assert resp.status_code == 404
-
-
-# ---- Persistence tests ---------------------------------------------------
-
-
-def test_invite_code_survives_service_restart(tmp_path) -> None:
-    """Invite codes persisted to SQLite survive AuthnService restart."""
-    db_path = str(tmp_path / "auth_kv.db")
-    grant_store = SQLiteKVSync(db_path, prefix="grant:")
-    invite_store = SQLiteKVSync(db_path, prefix="invite:")
-
-    authn1 = AuthnService(
-        secret="test-secret",
-        grant_store=grant_store,
-        invite_store=invite_store,
-    )
-    grant = DemoGrant(grant_id="persist-grant", org_id="org-persist")
-    invite = authn1.create_invite_code(grant, code="DEMO-PERSIST-TEST")
-    assert invite.code == "DEMO-PERSIST-TEST"
-
-    # Simulate server restart: new AuthnService, same stores
-    grant_store2 = SQLiteKVSync(db_path, prefix="grant:")
-    invite_store2 = SQLiteKVSync(db_path, prefix="invite:")
-    authn2 = AuthnService(
-        secret="test-secret",
-        grant_store=grant_store2,
-        invite_store=invite_store2,
-    )
-    authn2.load_persisted()
-
-    # Redeem the persisted invite code on the new instance
-    sess = authn2.redeem_invite_code("DEMO-PERSIST-TEST")
-    assert sess.org_id == "org-persist"
-    assert sess.user_id.startswith("demo_guest:persist-grant:")
-
-
-def test_invite_use_count_persists(tmp_path) -> None:
-    """Incremented use count is persisted to the store."""
-    db_path = str(tmp_path / "auth_kv.db")
-    grant_store = SQLiteKVSync(db_path, prefix="grant:")
-    invite_store = SQLiteKVSync(db_path, prefix="invite:")
-
-    authn = AuthnService(
-        secret="test-secret",
-        grant_store=grant_store,
-        invite_store=invite_store,
-    )
-    grant = DemoGrant(grant_id="uses-grant", org_id="org-uses")
-    authn.create_invite_code(grant, max_uses=3, code="DEMO-USES")
-
-    authn.redeem_invite_code("DEMO-USES")
-    authn.redeem_invite_code("DEMO-USES")
-
-    # Restart and verify uses count
-    grant_store2 = SQLiteKVSync(db_path, prefix="grant:")
-    invite_store2 = SQLiteKVSync(db_path, prefix="invite:")
-    authn2 = AuthnService(
-        secret="test-secret",
-        grant_store=grant_store2,
-        invite_store=invite_store2,
-    )
-    authn2.load_persisted()
-
-    # Should allow one more (uses=2, max=3)
-    authn2.redeem_invite_code("DEMO-USES")
-
-    # Should reject (uses=3, max=3)
-    with pytest.raises(ValueError, match="usage limit"):
-        authn2.redeem_invite_code("DEMO-USES")
-
-
-def test_custom_invite_code_collision_rejected(tmp_path) -> None:
-    """Creating a duplicate custom code raises ValueError."""
-    db_path = str(tmp_path / "auth_kv.db")
-    grant_store = SQLiteKVSync(db_path, prefix="grant:")
-    invite_store = SQLiteKVSync(db_path, prefix="invite:")
-
-    authn = AuthnService(
-        secret="test-secret",
-        grant_store=grant_store,
-        invite_store=invite_store,
-    )
-    grant = DemoGrant(grant_id="dup-grant", org_id="org-dup")
-    authn.create_invite_code(grant, code="DEMO-UNIQUE")
-
-    with pytest.raises(ValueError, match="already exists"):
-        authn.create_invite_code(grant, code="DEMO-UNIQUE")
 
 
 def test_admin_api_key_blocks_unauthorized(tmp_path) -> None:

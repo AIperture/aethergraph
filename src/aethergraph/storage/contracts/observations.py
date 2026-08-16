@@ -569,6 +569,7 @@ class LLMCallQuery:
     providers: tuple[str, ...] = ()
     models: tuple[str, ...] = ()
     call_types: tuple[str, ...] = ()
+    prompt_manifest_ids: tuple[str, ...] = ()
     statuses: tuple[ObservationStatus, ...] = ()
     occurred_at_or_after: datetime | None = None
     occurred_at_or_before: datetime | None = None
@@ -579,6 +580,7 @@ class LLMCallQuery:
             ("providers", self.providers),
             ("models", self.models),
             ("call_types", self.call_types),
+            ("prompt_manifest_ids", self.prompt_manifest_ids),
             ("statuses", self.statuses),
         ):
             if not isinstance(values, tuple):
@@ -589,6 +591,7 @@ class LLMCallQuery:
             ("providers", self.providers),
             ("models", self.models),
             ("call_types", self.call_types),
+            ("prompt_manifest_ids", self.prompt_manifest_ids),
         ):
             if any(not isinstance(value, str) or not value.strip() for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
@@ -1141,8 +1144,8 @@ class ObservationRepository(Protocol):
     async def query_llm_calls(self, query: LLMCallQuery) -> Page[LLMCallRecord]:
         """Query bounded metadata-only LLM records using promoted indexes.
 
-        Scope, trace, provider, model, call type, status, and time filters execute in
-        the provider before stable cursor pagination.
+        Scope, trace, provider, model, call type, prompt-manifest identity, status,
+        and time filters execute in the provider before stable cursor pagination.
 
         Examples:
             List failed calls:
@@ -1163,7 +1166,8 @@ class ObservationRepository(Protocol):
 
         Notes:
             Attempts are loaded without per-row correlated queries; retained prompt
-            and response content is excluded.
+            and response content is excluded. Manifest identity is an indexed
+            correlation filter, not a direct fragment-hydration API.
         """
         ...
 

@@ -1,49 +1,26 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import pytest
 
-from aethergraph.contracts.services.runtime_output import RuntimeOutputFrame
 from aethergraph.observability import (
     LLMObservationRecord,
     ObservationPolicy,
     ObservationRecord,
-    SQLiteObservationStore,
     emit_agent_event,
 )
 from aethergraph.observability.prompt_store import PromptStore
-from aethergraph.observability.runtime_output import EventLogRuntimeOutputSink
 
 _DATA_URL = "data:image/png;base64,c2Vuc2l0aXZlLWJ5dGVz"
 _MARKER = "[redacted data URL: image/png]"
 
 
-class _EventLog:
+class _ObservationSink:
     def __init__(self) -> None:
-        self.rows: list[dict[str, Any]] = []
+        self.rows: list[ObservationRecord] = []
 
-    async def append(self, row: dict[str, Any]) -> None:
+    async def append_observation(self, row: ObservationRecord) -> str:
         self.rows.append(row)
-
-
-@pytest.mark.asyncio
-async def test_observation_persistence_applies_canonical_redaction(tmp_path: Path) -> None:
-    store = SQLiteObservationStore(tmp_path / "observability.db")
-    observation_id = await store.append_observation(
-        ObservationRecord(
-            category="tool",
-            name="result",
-            summary=f"result {_DATA_URL}",
-            attributes={"image": _DATA_URL, "binary": b"payload"},
-        )
-    )
-
-    persisted = await store.get_observation(observation_id)
-    assert persisted["summary"] == f"result {_MARKER}"
-    assert persisted["attributes"]["image"] == _MARKER
-    assert persisted["attributes"]["binary"]["binary_bytes"] == 7
+        return row.observation_id
 
 
 def test_prompt_persistence_applies_canonical_redaction() -> None:
@@ -76,40 +53,17 @@ def test_prompt_persistence_applies_canonical_redaction() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_event_persistence_applies_canonical_redaction() -> None:
-    event_log = _EventLog()
+    sink = _ObservationSink()
     await emit_agent_event(
         event_type="tool.completed",
         summary=f"completed {_DATA_URL}",
         payload={"image": _DATA_URL, "binary": b"payload"},
         tags=[_DATA_URL],
-        event_log=event_log,
+        observation_sink=sink,
     )
 
-    envelope = event_log.rows[0]["payload"]
-    assert envelope["summary"] == f"completed {_MARKER}"
-    assert envelope["payload"]["image"] == _MARKER
-    assert envelope["payload"]["binary"]["binary_bytes"] == 7
-    assert envelope["tags"] == [_MARKER]
-
-
-@pytest.mark.asyncio
-async def test_runtime_output_persistence_applies_canonical_redaction() -> None:
-    event_log = _EventLog()
-    sink = EventLogRuntimeOutputSink(event_log=event_log)
-    sink.emit(
-        RuntimeOutputFrame(
-            execution_id="execution-1",
-            run_id="run-1",
-            session_id="session-1",
-            graph_id="graph-1",
-            node_id="node-1",
-            tool_name="tool-1",
-            stream="stdout",
-            sequence=1,
-            text=f"output {_DATA_URL}",
-        )
-    )
-    await sink.flush_execution("execution-1")
-    await sink.close()
-
-    assert event_log.rows[0]["payload"]["text"] == f"output {_MARKER}"
+    record = sink.rows[0]
+    assert record.summary == f"completed {_MARKER}"
+    assert record.attributes["payload"]["image"] == _MARKER
+    assert record.attributes["payload"]["binary"]["binary_bytes"] == 7
+    assert record.attributes["tags"] == [_MARKER]

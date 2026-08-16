@@ -6,8 +6,28 @@ from typing import Any
 import pytest
 
 from aethergraph import NodeContext, graph_fn, graphify, tool
+from aethergraph.config.config import AppSettings
+import aethergraph.core.runtime.graph_runner as graph_runner
 from aethergraph.core.runtime.graph_runner import run_async
+from aethergraph.core.runtime.runtime_services import install_services, uninstall_services
 from aethergraph.core.tools.waitable import DualStageTool
+from aethergraph.services.container.default_container import build_default_container
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    container = build_default_container(
+        root=str(tmp_path),
+        cfg=AppSettings(workspace=str(tmp_path)),
+    )
+    asyncio.run(container.start_storage())
+    install_services(container)
+    monkeypatch.setattr(graph_runner, "_get_container", lambda: container)
+    yield
+    try:
+        asyncio.run(container.close_storage())
+    finally:
+        uninstall_services(container)
 
 
 @tool(outputs=["graph_id"])

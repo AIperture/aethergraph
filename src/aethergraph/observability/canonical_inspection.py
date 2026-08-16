@@ -1,4 +1,4 @@
-"""Inactive bounded Inspect projection over canonical observation storage."""
+"""Bounded Inspect projection over canonical observation storage."""
 
 from __future__ import annotations
 
@@ -23,10 +23,13 @@ from aethergraph.storage.contracts import (
 
 from .canonical_service import CanonicalObservationService
 from .contracts import (
+    AgentEventEnvelope,
+    AgentEventListResponse,
     InspectLinks,
     InspectLogError,
     InspectLogListResponse,
     InspectLogRecord,
+    InspectPayloadSchema,
     InspectProducer,
     InspectScope,
     LLMCallAttempt,
@@ -89,7 +92,7 @@ class CanonicalInspectionReader:
             run_status_resolver: Optional bounded batch resolver for visible run IDs.
 
         Returns:
-            None: The inactive-until-S9 reader is ready.
+            None: The provider-backed reader is ready.
 
         Notes:
             The reader neither owns nor closes the service or its storage bundle.
@@ -565,6 +568,85 @@ class CanonicalInspectionReader:
             )
         return InspectLogListResponse(items=items, next_cursor=page.next_cursor)
 
+    async def list_agent_events(
+        self,
+        *,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        run_id: str | None = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        graph_id: str | None = None,
+        node_id: str | None = None,
+        event_type: str | None = None,
+        cursor: str | None = None,
+        limit: int = 100,
+    ) -> AgentEventListResponse:
+        """List one provider-cursor page of canonical Agent events.
+
+        Exact canonical scope, event type, and time predicates run inside the
+        observation repository before bounded presentation.
+
+        Examples:
+            List one run:
+                ```python
+                page = await reader.list_agent_events(run_id="run-1")
+                ```
+
+            Continue one event type:
+                ```python
+                page = await reader.list_agent_events(
+                    event_type="planning.started",
+                    cursor=previous.next_cursor,
+                )
+                ```
+
+        Args:
+            since: Optional inclusive occurrence lower bound.
+            until: Optional inclusive occurrence upper bound.
+            run_id: Optional exact canonical run scope.
+            session_id: Optional exact canonical session scope.
+            agent_id: Optional exact canonical Agent scope.
+            app_id: Deprecated optional compatibility-metadata filter.
+            graph_id: Optional exact canonical graph scope.
+            node_id: Optional exact canonical node scope.
+            event_type: Optional exact event type.
+            cursor: Optional provider-authored continuation cursor.
+            limit: Maximum records in the provider page.
+
+        Returns:
+            AgentEventListResponse: Presented page with provider continuation cursor.
+
+        Notes:
+            Deprecated App identity never becomes provider scope or an indexed query.
+        """
+        scope = self._scope(
+            run_id=run_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            graph_id=graph_id,
+            node_id=node_id,
+        )
+        if scope is None:
+            return AgentEventListResponse(items=[], next_cursor=None)
+        page = await self.service.repository.query(
+            ObservationQuery(
+                scope=scope,
+                page=PageRequest(limit=limit, cursor=cursor),
+                categories=("agent_event",),
+                names=(event_type,) if event_type is not None else (),
+                occurred_at_or_after=since,
+                occurred_at_or_before=until,
+            )
+        )
+        items = [
+            _agent_event(record)
+            for record in page.items
+            if app_id is None or _deprecated_app_id(record) == app_id
+        ]
+        return AgentEventListResponse(items=items, next_cursor=page.next_cursor)
+
     def _scope(self, **dimensions: str | None) -> StorageScope | None:
         values = {name: value for name, value in dimensions.items() if value is not None}
         if self.identity.mode in {"cloud", "demo"}:
@@ -586,8 +668,18 @@ class CanonicalInspectionReader:
 
 def _attributes(record: CanonicalObservationRecord) -> dict[str, Any]:
     return {
-        key: value for key, value in record.attributes.items() if key != _COMPATIBILITY_METADATA
+        key: _thaw_json(value)
+        for key, value in record.attributes.items()
+        if key != _COMPATIBILITY_METADATA
     }
+
+
+def _thaw_json(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_thaw_json(item) for item in value]
+    return value
 
 
 def _deprecated_app_id(record: CanonicalObservationRecord) -> str | None:
@@ -656,8 +748,8 @@ def _llm(
     *,
     detail: LLMCallDetail | None = None,
 ) -> LLMCallRecord:
-    options = dict(record.request_options)
-    attempts = [
+    options = _thaw_json(record.request_options)
+    all_attempts = [
         LLMCallAttempt(
             attempt_number=attempt.attempt_number,
             elapsed_ms=attempt.elapsed_ms,
@@ -668,12 +760,13 @@ def _llm(
             request_id=attempt.request_id,
             provider_delay_ms=attempt.provider_delay_ms,
             scheduled_delay_ms=attempt.scheduled_delay_ms,
-            rate_limits=list(attempt.rate_limits),
+            rate_limits=[_thaw_json(limit) for limit in attempt.rate_limits],
         )
         for attempt in record.attempts
     ]
-    captured_request = detail.captured_request if detail is not None else None
-    captured_response = detail.captured_response if detail is not None else None
+    attempts = all_attempts if detail is not None else []
+    captured_request = _thaw_json(detail.captured_request) if detail is not None else None
+    captured_response = _thaw_json(detail.captured_response) if detail is not None else None
     messages = captured_request.get("messages") if isinstance(captured_request, Mapping) else None
     raw_text = captured_response.get("text") if isinstance(captured_response, Mapping) else None
     status = record.observation.status.value
@@ -695,23 +788,23 @@ def _llm(
         profile_name=record.profile_name,
         call_name=record.call_name,
         latency_ms=record.latency_ms,
-        usage=dict(record.usage),
+        usage=_thaw_json(record.usage),
         reasoning_effort=options.get("reasoning_effort"),
         output_format=options.get("output_format"),
         request_args=dict(options.get("request_args") or {}),
         provider_request_args=dict(options.get("provider_request_args") or {}),
         compatibility_notes=[str(item) for item in options.get("compatibility_notes") or ()],
-        messages_preview=record.request_preview,
-        trace_payload_preview=record.trace_payload_preview,
-        raw_text_preview=record.response_preview,
+        messages_preview=_thaw_json(record.request_preview),
+        trace_payload_preview=_thaw_json(record.trace_payload_preview),
+        raw_text_preview=_thaw_json(record.response_preview),
         messages=messages,
-        trace_payload=detail.trace_payload if detail is not None else None,
+        trace_payload=_thaw_json(detail.trace_payload) if detail is not None else None,
         raw_text=raw_text,
         error_type=record.error_type,
         error_message=record.error_message,
-        attempt_count=len(attempts),
-        retry_count=max(0, len(attempts) - 1),
-        total_retry_wait_ms=sum(attempt.scheduled_delay_ms or 0 for attempt in attempts),
+        attempt_count=len(all_attempts),
+        retry_count=max(0, len(all_attempts) - 1),
+        total_retry_wait_ms=sum(attempt.scheduled_delay_ms or 0 for attempt in all_attempts),
         attempts=attempts,
     )
 
@@ -743,6 +836,54 @@ def _log(
         extra=dict(payload.get("extra") or {}),
         run_status=run_status,
         trace_status=trace_status,
+    )
+
+
+def _agent_event(record: CanonicalObservationRecord) -> AgentEventEnvelope:
+    attributes = _attributes(record)
+    producer_value = attributes.get("producer")
+    producer = producer_value if isinstance(producer_value, Mapping) else {}
+    schema_value = attributes.get("payload_schema")
+    schema = schema_value if isinstance(schema_value, Mapping) else {}
+    links_value = attributes.get("links")
+    links = links_value if isinstance(links_value, Mapping) else {}
+    payload_value = attributes.get("payload")
+    payload = dict(payload_value) if isinstance(payload_value, Mapping) else {}
+    tags_value = attributes.get("tags")
+    tags = [str(value) for value in tags_value] if isinstance(tags_value, (list, tuple)) else []
+    event_type = str(attributes.get("event_type") or record.name)
+    return AgentEventEnvelope(
+        id=record.observation_id,
+        ts=record.occurred_at.timestamp(),
+        summary=record.summary,
+        severity=record.severity.value,
+        status=str(attributes.get("status") or record.status.value),
+        producer=InspectProducer(
+            family=str(producer.get("family") or "agent"),
+            name=str(producer.get("name") or record.producer or "unknown"),
+            version=(str(producer["version"]) if producer.get("version") is not None else None),
+        ),
+        scope=_scope(record),
+        tags=tags,
+        links=InspectLinks(
+            parent_event_id=(
+                str(links["parent_event_id"])
+                if links.get("parent_event_id") is not None
+                else record.parent_observation_id
+            ),
+            caused_by_event_id=(
+                str(links["caused_by_event_id"])
+                if links.get("caused_by_event_id") is not None
+                else record.caused_by_observation_id
+            ),
+        ),
+        payload=payload,
+        event_id=record.observation_id,
+        event_type=event_type,
+        payload_schema=InspectPayloadSchema(
+            name=str(schema["name"]) if schema.get("name") is not None else event_type,
+            version=int(schema["version"]) if schema.get("version") is not None else None,
+        ),
     )
 
 

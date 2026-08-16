@@ -8,8 +8,9 @@ from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from aethergraph.contracts.services.artifacts import Artifact
-from aethergraph.services.artifacts.facade import ArtifactFacade
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.scope.scope import Scope
+from aethergraph.storage.contracts import StorageScope
 
 RESOURCE_KINDS = {
     "artifact",
@@ -486,8 +487,8 @@ class ResourceEnricher:
 
     async def enrich(self, resources: ResourceSet | list[InputResource]) -> ResourceSet:
         resource_set = resources if isinstance(resources, ResourceSet) else ResourceSet(resources)
-        artifact_index = getattr(self.container, "artifact_index", None)
-        get_artifact = getattr(artifact_index, "get", None) if artifact_index is not None else None
+        artifacts = getattr(self.container, "artifact_service", None)
+        get_artifact = getattr(artifacts, "get_by_id", None) if artifacts is not None else None
 
         for resource in resource_set.resources:
             if resource.kind != "artifact" or not resource.artifact_id:
@@ -581,24 +582,24 @@ class ResourceStager:
         )
         return _hydrate_public_artifact(resource, artifact)
 
-    def _facade(self, scope: ArtifactIngressScope) -> ArtifactFacade:
-        art_store = self.container.artifacts
-        art_index = getattr(self.container, "artifact_index", None)
-        if art_index is None:
-            raise RuntimeError("ResourceStager requires container.artifact_index")
-
+    def _facade(self, scope: ArtifactIngressScope) -> CanonicalPublicArtifactFacade:
         scope_obj = self._scope(scope)
-        facade_run_id = scope.run_id or ""
-        return ArtifactFacade(
-            run_id=facade_run_id,
-            graph_id=scope.graph_id,
-            node_id=scope.node_id,
+        storage_scope = StorageScope(
+            org_id=scope_obj.org_id,
+            user_id=scope_obj.user_id,
+            session_id=scope_obj.session_id,
+            run_id=scope_obj.run_id,
+            graph_id=scope_obj.graph_id,
+            node_id=scope_obj.node_id,
+            agent_id=scope_obj.agent_id,
+            scope_key=(
+                None if scope_obj.session_id or scope_obj.run_id else scope_obj.memory_scope_id()
+            ),
+        )
+        return self.container.artifact_factory.for_public_execution(
+            storage_scope,
             tool_name=scope.tool_name,
             tool_version=scope.tool_version,
-            art_store=art_store,
-            art_index=art_index,
-            scoped_indices=getattr(self.container, "scoped_indices", None),
-            scope=scope_obj,
         )
 
     def _scope(self, scope: ArtifactIngressScope) -> Scope:

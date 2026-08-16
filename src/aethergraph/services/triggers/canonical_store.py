@@ -1,4 +1,4 @@
-"""Inactive canonical trigger-store projection for the S9 cut."""
+"""Canonical trigger-store projection over provider storage."""
 
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ class CanonicalTriggerStore:
             clock: Timezone-aware UTC transition timestamp source.
 
         Returns:
-            None: The inactive-until-S9 projection is ready.
+            None: The provider-backed projection is ready.
 
         Notes:
             The bundle owns repository lifecycle; this projection has no close method.

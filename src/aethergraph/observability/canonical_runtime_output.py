@@ -1,4 +1,4 @@
-"""Inactive runtime-output projection onto one canonical provider sink."""
+"""Runtime-output projection onto one canonical provider sink."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ class CanonicalRuntimeOutputSink:
             max_rows_per_run: Positive persisted-frame ceiling for one run.
 
         Returns:
-            None: The inactive-until-S9 projection is ready without I/O.
+            None: The provider-backed projection is ready without I/O.
 
         Notes:
             Bundle lifecycle owns sink closure; this service never closes a store.
@@ -82,11 +82,52 @@ class CanonicalRuntimeOutputSink:
         _validate_tags(tags)
         self._sink = sink
         self._owner_scope = owner_scope
+        self._classification_tags = tags
+        self._max_line_bytes = max_line_bytes
+        self._max_run_bytes = max_run_bytes
+        self._max_rows_per_run = max_rows_per_run
         self._tags = ("runtime-console", *tags)
         self._bounds = _RuntimeOutputBounds(
             max_line_bytes=max_line_bytes,
             max_run_bytes=max_run_bytes,
             max_rows_per_run=max_rows_per_run,
+        )
+
+    def with_tags(self, tags: tuple[str, ...]) -> CanonicalRuntimeOutputSink:
+        """Bind an independent capture projection with additional exact tags.
+
+        Intro:
+            Reuses the same provider-owned sink and trusted owner while allocating
+            independent per-run bounds for one capture host.
+
+        Examples:
+            Bind a Studio test capture:
+                ```python
+                capture = output.with_tags(("studio-test",))
+                ```
+
+            Preserve existing deployment classification:
+                ```python
+                capture = classified.with_tags(("worker-1",))
+                ```
+
+        Args:
+            tags: Additional immutable provider-neutral classification tags.
+
+        Returns:
+            CanonicalRuntimeOutputSink: New projection over the same selected sink.
+
+        Notes:
+            The projection does not open, close, or select storage. Duplicate and
+            deprecated identity tags fail before construction.
+        """
+        return CanonicalRuntimeOutputSink(
+            sink=self._sink,
+            owner_scope=self._owner_scope,
+            tags=(*self._classification_tags, *tags),
+            max_line_bytes=self._max_line_bytes,
+            max_run_bytes=self._max_run_bytes,
+            max_rows_per_run=self._max_rows_per_run,
         )
 
     def emit(self, frame: RuntimeOutputFrame) -> None:
@@ -284,7 +325,7 @@ def bind_canonical_runtime_output(
         CanonicalRuntimeOutputSink: Focused bounded projection over `bundle.runtime_output`.
 
     Notes:
-        The active EventLog capture installer remains unchanged until the S9 atomic cut.
+        The active capture installer binds only this canonical provider projection.
     """
     return CanonicalRuntimeOutputSink(
         sink=bundle.runtime_output,

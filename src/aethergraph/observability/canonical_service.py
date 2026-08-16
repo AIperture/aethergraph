@@ -1,4 +1,4 @@
-"""Inactive canonical observation service projection for the S9 cut."""
+"""Canonical observation service projection over provider storage."""
 
 from __future__ import annotations
 
@@ -162,7 +162,7 @@ class ProviderObservationService:
             policy: AG capture, redaction, preview, and retention policy.
 
         Returns:
-            None: The inactive-until-S9 service is ready for use.
+            None: The provider-backed service is ready for use.
 
         Notes:
             The owning `StorageBundle` retains repository lifecycle responsibility.

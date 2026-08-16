@@ -28,7 +28,7 @@ from aethergraph.contracts.integration import (
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
 from aethergraph.core.runtime.run_types import RunStatus
 
-from .events import PersistedSemanticEvent, SemanticEventStore
+from .event_contracts import PersistedSemanticEvent, SemanticEventStore
 
 
 class SemanticDeliveryError(RuntimeError):

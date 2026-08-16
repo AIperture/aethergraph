@@ -52,7 +52,7 @@ class ArtifactMetricOrder(StrEnum):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EventQuery:
-    """Bounded event query over exact canonical scope and promoted dimensions."""
+    """Bounded event query over populated canonical scope constraints."""
 
     scope: StorageScope
     page: PageRequest = PageRequest()
@@ -267,7 +267,7 @@ class EventStore(Protocol):
         scope: StorageScope,
         event_id: str,
     ) -> EventRecord | None:
-        """Read one exact event within canonical scope.
+        """Read one event within populated canonical scope constraints.
 
         The lookup is scope constrained and never searches another tenant or project
         when the requested identity is absent.
@@ -284,7 +284,7 @@ class EventStore(Protocol):
                 ```
 
         Args:
-            scope: Canonical owner/execution scope constraining the lookup.
+            scope: Required canonical owner and optional execution constraints.
             event_id: Exact stable event identifier.
 
         Returns:
@@ -313,7 +313,7 @@ class EventStore(Protocol):
                 ```
 
         Args:
-            query: Exact filters, order, scope, and opaque page request.
+            query: Promoted filters, order, scope constraints, and opaque page request.
 
         Returns:
             Page[EventRecord]: Matching records and optional continuation cursor.

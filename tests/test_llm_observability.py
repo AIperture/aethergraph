@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -10,11 +9,10 @@ from aethergraph.config.config import AppSettings, LLMUsageQuotaSettings
 from aethergraph.core.runtime.runtime_metering import current_meter_context
 from aethergraph.observability import (
     LLMObservationRecord,
-    ObservabilityFacade,
     ObservationPolicy,
-    SQLiteObservationStore,
 )
-from aethergraph.server.security.redaction import canonical_json
+from aethergraph.observability.canonical_inspection import CanonicalInspectionReader
+from aethergraph.observability.canonical_service import ProviderObservationService
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
@@ -25,12 +23,17 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRateLimitSnapshot,
     ProviderResponseMetadata,
     ProviderRetrySettings,
-    ProviderTransportAttempt,
 )
 from aethergraph.services.llm.types import (
     LLMContextWindowExceededError,
     LLMRunQuotaExceededError,
     LLMRunQuotaWouldExceedError,
+)
+from aethergraph.storage.contracts import StorageOpenMode, StorageScope
+from aethergraph.storage.providers.local_sqlite import (
+    LocalDatabaseRole,
+    LocalObservationRepository,
+    LocalSQLiteDatabase,
 )
 
 
@@ -80,190 +83,20 @@ async def test_console_sink_compact_view_renders_prompt_and_output(capsys) -> No
 
 
 @pytest.mark.asyncio
-async def test_manifest_reconstructs_exact_provider_request_and_deduplicates_fragments(
+async def test_llm_client_records_success_and_provider_error_canonically(
     tmp_path: Path,
 ) -> None:
-    store = SQLiteObservationStore(
-        tmp_path / "observability.db",
+    database = LocalSQLiteDatabase.open(
+        workspace_root=tmp_path,
+        role=LocalDatabaseRole.CONTROL,
+        mode=StorageOpenMode.READ_WRITE,
+    )
+    sink = ProviderObservationService(
+        repository=LocalObservationRepository(database=database),
+        owner_scope=StorageScope(project_id="project-1"),
         policy=ObservationPolicy(capture_mode="manifest"),
     )
-    first = _record(run_id="run-1")
-    first.attempts = (
-        ProviderTransportAttempt(
-            attempt_number=1,
-            elapsed_s=0.01,
-            outcome="success",
-            retryable=False,
-        ),
-    )
-    second = _record(run_id="run-2")
-
-    await store.append_llm_call(first)
-    first_stats = await store.get_storage_stats()
-    await store.append_llm_call(second)
-    second_stats = await store.get_storage_stats()
-    detail = await store.get_llm_call(first.llm_call_id)
-
-    assert detail is not None
-    manifest = detail["prompt_manifest"]
-    request = manifest["provider_request"]
-    assert (
-        sha256(canonical_json(request).encode()).hexdigest() == manifest["assembled_request_hash"]
-    )
-    assert request["messages"] == [{"content": "hello", "role": "user"}]
-    assert second_stats.fragments == first_stats.fragments
-
-
-@pytest.mark.asyncio
-async def test_full_capture_stores_one_prompt_body_without_duplicate_preview(
-    tmp_path: Path,
-) -> None:
-    store = SQLiteObservationStore(
-        tmp_path / "observability.db",
-        policy=ObservationPolicy(capture_mode="full"),
-    )
-    record = _record(prompt="unique-secret-prompt")
-
-    await store.append_llm_call(record)
-    detail = await store.get_llm_call(record.llm_call_id)
-
-    assert detail is not None
-    assert detail["messages"] == [{"content": "unique-secret-prompt", "role": "user"}]
-    assert "preview" not in detail["messages_preview"]
-    with store._connect() as conn:
-        bodies = [row[0] for row in conn.execute("SELECT body FROM content_fragments")]
-    assert sum(body.count("unique-secret-prompt") for body in bodies) == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["off", "metadata"])
-async def test_non_payload_capture_modes_store_no_content_fragments(
-    tmp_path: Path, mode: str
-) -> None:
-    store = SQLiteObservationStore(
-        tmp_path / f"{mode}.db",
-        policy=ObservationPolicy(capture_mode=mode),  # type: ignore[arg-type]
-    )
-    record = _record(prompt="secret prompt", output="secret answer")
-
-    await store.append_llm_call(record)
-    stats = await store.get_storage_stats()
-    detail = await store.get_llm_call(record.llm_call_id)
-
-    assert stats.fragments == 0
-    assert detail is not None
-    assert detail["messages"] is None
-    assert detail["raw_text"] is None
-    if mode == "off":
-        assert detail["messages_preview"] is None
-        assert stats.manifests == 0
-    else:
-        assert detail["messages_preview"]["count"] == 1
-        assert stats.manifests == 1
-
-
-@pytest.mark.asyncio
-async def test_deletion_retains_shared_fragments_until_final_reference(tmp_path: Path) -> None:
-    store = SQLiteObservationStore(
-        tmp_path / "observability.db",
-        policy=ObservationPolicy(capture_mode="manifest"),
-    )
-    first = _record(run_id="run-1")
-    second = _record(run_id="run-2")
-    await store.append_llm_call(first)
-    await store.append_llm_call(second)
-    before = await store.get_storage_stats()
-
-    preview = await store.delete_run_observations("run-1", dry_run=True)
-    deleted_first = await store.delete_run_observations("run-1")
-    middle = await store.get_storage_stats()
-    deleted_second = await store.delete_run_observations("run-2")
-    after = await store.get_storage_stats()
-
-    assert preview.shared_fragment_bytes_retained > 0
-    assert deleted_first.deleted_observations == 1
-    with store._connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM llm_call_attempts").fetchone()[0] == 0
-    assert middle.fragments == before.fragments
-    assert deleted_second.deleted_fragments == before.fragments
-    assert after.fragments == 0
-
-
-@pytest.mark.asyncio
-async def test_read_only_store_hydrates_attempts_after_schema_creation(tmp_path: Path) -> None:
-    path = tmp_path / "observability.db"
-    writable = SQLiteObservationStore(
-        path,
-        policy=ObservationPolicy(capture_mode="metadata"),
-    )
-    record = _record(run_id="run-read-only")
-    record.attempts = (
-        ProviderTransportAttempt(
-            attempt_number=1,
-            elapsed_s=0.02,
-            outcome="success",
-            retryable=False,
-            request_id="req-read-only",
-        ),
-    )
-    await writable.append_llm_call(record)
-
-    read_only = SQLiteObservationStore(path, read_only=True)
-    detail = await read_only.get_llm_call(record.llm_call_id)
-
-    assert detail is not None
-    assert detail["attempt_count"] == 1
-    assert detail["attempts"][0]["request_id"] == "req-read-only"
-
-
-@pytest.mark.asyncio
-async def test_read_only_store_projects_empty_attempts_for_older_schema(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "observability.db"
-    writable = SQLiteObservationStore(
-        path,
-        policy=ObservationPolicy(capture_mode="metadata"),
-    )
-    record = _record(run_id="run-before-attempt-schema")
-    await writable.append_llm_call(record)
-    with writable._connect() as conn:
-        conn.execute("DROP TABLE llm_call_attempts")
-
-    read_only = SQLiteObservationStore(path, read_only=True)
-    listed = await read_only.query_llm_calls(run_id=record.scope.run_id)
-    detail = await read_only.get_llm_call(record.llm_call_id)
-
-    assert listed[0]["attempt_count"] == 0
-    assert listed[0]["retry_count"] == 0
-    assert listed[0]["total_retry_wait_ms"] == 0
-    assert detail is not None
-    assert detail["attempts"] == []
-
-
-@pytest.mark.asyncio
-async def test_concurrent_writes_and_historical_reads_are_safe(tmp_path: Path) -> None:
-    store = SQLiteObservationStore(
-        tmp_path / "observability.db",
-        policy=ObservationPolicy(capture_mode="manifest"),
-    )
-    records = [_record(run_id=f"run-{index}") for index in range(20)]
-
-    await asyncio.gather(
-        *(store.append_llm_call(record) for record in records),
-        *(store.query_llm_calls(limit=None) for _ in range(5)),
-    )
-
-    assert len(await store.query_llm_calls(limit=None)) == 20
-
-
-@pytest.mark.asyncio
-async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path: Path) -> None:
-    store = SQLiteObservationStore(
-        tmp_path / "observability.db",
-        policy=ObservationPolicy(capture_mode="manifest"),
-    )
-    sink = ObservabilityFacade(store)
+    reader = CanonicalInspectionReader(sink)
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
@@ -322,36 +155,24 @@ async def test_llm_client_records_success_and_provider_error_in_sqlite(tmp_path:
     with pytest.raises(RuntimeError, match="boom"):
         await client.chat([{"role": "user", "content": "hello"}])
 
-    rows = await store.query_llm_calls(limit=None)
-    assert len(rows) == 2
-    assert {row["error_type"] for row in rows} == {None, "RuntimeError"}
-    assert len({row["llm_call_id"] for row in rows}) == 2
-    recovered = next(row for row in rows if row["error_type"] is None)
-    assert recovered["attempt_count"] == 2
-    assert recovered["retry_count"] == 1
-    assert recovered["total_retry_wait_ms"] == 598
-    detail = await store.get_llm_call(recovered["llm_call_id"])
-    assert detail is not None
-    assert detail["attempts"][0]["error_code"] == "provider_rate_limited"
-    assert detail["attempts"][0]["rate_limits"] == [
-        {
-            "resource": "tokens",
-            "limit": 200000,
-            "remaining": 34571,
-            "reset_after_s": 0.598,
-        }
-    ]
-    assert detail["attempts"][1]["request_id"] == "req-success"
-    inspect_page = await sink.list_inspect_llm_calls(run_id="run-success")
-    assert inspect_page.items[0].attempt_count == 2
-    assert inspect_page.items[0].retry_count == 1
-    assert inspect_page.items[0].attempts == []
-    inspect_detail = await sink.get_inspect_llm_call(recovered["llm_call_id"])
+    inspect_page = await reader.list_llm_calls()
+    assert len(inspect_page.items) == 2
+    assert {row.error_type for row in inspect_page.items} == {None, "RuntimeError"}
+    assert len({row.call_id for row in inspect_page.items}) == 2
+    recovered = next(row for row in inspect_page.items if row.error_type is None)
+    assert recovered.attempt_count == 2
+    assert recovered.retry_count == 1
+    assert recovered.attempts == []
+    inspect_detail = await reader.get_llm_call(recovered.call_id)
     assert len(inspect_detail.attempts) == 2
+    assert inspect_detail.total_retry_wait_ms == 598
+    assert inspect_detail.attempts[0].error_code == "provider_rate_limited"
     assert inspect_detail.attempts[0].rate_limits[0].resource == "tokens"
+    assert inspect_detail.attempts[1].request_id == "req-success"
     correlation = current_llm_call_correlation()
     assert correlation is not None
-    assert correlation.llm_call_id in {row["llm_call_id"] for row in rows}
+    assert correlation.llm_call_id in {row.call_id for row in inspect_page.items}
+    await database.close()
 
 
 @pytest.mark.asyncio
@@ -379,7 +200,7 @@ async def test_observation_sink_failure_cannot_change_a_successful_llm_result() 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["off", "metadata", "manifest", "full"])
-async def test_metering_is_independent_of_capture_mode(tmp_path: Path, mode: str) -> None:
+async def test_metering_is_independent_of_capture_mode(mode: str) -> None:
     class FakeMetering:
         def __init__(self) -> None:
             self.records = []
@@ -388,15 +209,16 @@ async def test_metering_is_independent_of_capture_mode(tmp_path: Path, mode: str
             self.records.append(record)
 
     metering = FakeMetering()
-    store = SQLiteObservationStore(
-        tmp_path / f"{mode}.db",
-        policy=ObservationPolicy(capture_mode=mode),  # type: ignore[arg-type]
-    )
+
+    class CaptureSink:
+        async def emit(self, record, *, capture_mode: str) -> None:
+            assert capture_mode == mode
+
     client = GenericLLMClient(
         provider="openai",
         model="gpt-test",
         metering=metering,
-        observation_sink=ObservabilityFacade(store),
+        observation_sink=CaptureSink(),
         observation_capture_mode=mode,  # type: ignore[arg-type]
     )
 
@@ -448,11 +270,33 @@ async def test_default_container_uses_sqlite_without_legacy_observability_sinks(
     client._chat_dispatch = fake_chat_dispatch  # type: ignore[method-assign]
     await client.chat([{"role": "user", "content": "from container"}])
 
-    assert (tmp_path / "events" / "observability.db").is_file()
+    assert (tmp_path / "local" / "events.sqlite3").is_file()
     assert not list(tmp_path.rglob("llm_calls.jsonl"))
     assert not hasattr(container, "tracer")
-    rows = await container.observability.list_llm_calls(limit=None)
-    assert rows[0]["capture_mode"] == "manifest"
+    page = await container.storage_services.inspection().list_llm_calls()
+    assert page.items[0].provider == "openai"
+    assert isinstance(container.observability, CanonicalInspectionReader)
+    assert await container.metering.get_overview() == {
+        "llm_calls": 1,
+        "llm_prompt_tokens": 9,
+        "llm_completion_tokens": 1,
+        "llm_cache_read_tokens": 0,
+        "llm_cache_write_tokens": 0,
+        "llm_uncached_input_tokens": 9,
+        "embedding_calls": 0,
+        "embedding_texts": 0,
+        "embedding_tokens": 0,
+        "image_generation_calls": 0,
+        "images_generated": 0,
+        "image_generation_tokens": 0,
+        "runs": 0,
+        "runs_succeeded": 0,
+        "runs_failed": 0,
+        "artifacts": 0,
+        "artifact_bytes": 0,
+        "events": 0,
+    }
+    await container.close_storage()
 
 
 def test_llm_observability_defaults_to_manifest_capture() -> None:

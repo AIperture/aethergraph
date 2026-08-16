@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
-from aethergraph.contracts.services.artifacts import AsyncArtifactStore
 from aethergraph.contracts.services.state_stores import GraphStateStore, StateEvent
 from aethergraph.core.graph.task_node import NodeStatus
 from aethergraph.services.state_stores.scope import require_graph_run_scope
@@ -18,7 +18,7 @@ class PersistenceObserver:
         *,
         store: GraphStateStore,
         scope: StorageScope,
-        artifact_store: AsyncArtifactStore,
+        artifact_store: Any | None,
         spec_hash: str,
         snapshot_every: int = 50,
         min_interval_s: float = 5.0,

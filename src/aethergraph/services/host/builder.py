@@ -192,7 +192,7 @@ def build_host(
     _validate_runtime_identity(manifest, runtime_identity)
     _validate_release_compatibility(manifest, runtime_identity)
     inspection = validate_compiled_build(manifest)
-    workspace_path = _prepare_workspace(Path(workspace), manifest)
+    workspace_path = _prepare_workspace(Path(workspace))
 
     registry = UnifiedRegistry(allow_overwrite=False)
     set_current_registry(registry)
@@ -206,6 +206,7 @@ def build_host(
             _provider_prefix(connection.integration_kind): connection.delivery_adapter
             for connection in provider_connections
         },
+        workspace_id=_host_storage_workspace_id(manifest),
     )
     install_services(container)
     entrypoint = _load_entrypoint(
@@ -419,27 +420,15 @@ def _installed_dependency(name: str) -> ReleaseDependency:
     )
 
 
-def _prepare_workspace(path: Path, manifest: HostManifest) -> Path:
+def _prepare_workspace(path: Path) -> Path:
     workspace = path.expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
-    marker_path = workspace / "host-workspace.json"
-    marker = {
-        "deployment_id": manifest.deployment_id,
-        "workspace_identity": manifest.workspace_identity,
-    }
-    if marker_path.exists():
-        try:
-            existing = json.loads(marker_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise HostManifestError("Deployment workspace marker is invalid.") from exc
-        if existing != marker:
-            raise HostManifestError("Deployment workspace belongs to another Host identity.")
-    else:
-        marker_path.write_text(
-            json.dumps(marker, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-        )
     return workspace
+
+
+def _host_storage_workspace_id(manifest: HostManifest) -> str:
+    identity = f"{manifest.deployment_id}\0{manifest.workspace_identity}".encode()
+    return "host-workspace-" + sha256(identity).hexdigest()[:32]
 
 
 def _load_entrypoint(

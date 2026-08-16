@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aethergraph.observability.metering import EventLogMeteringService
+from aethergraph.observability.metering import CanonicalMeteringService
 from aethergraph.services.canonical_metering import (
     CanonicalMeteringStore,
     bind_canonical_metering_store,
@@ -128,7 +128,7 @@ async def test_metering_store_requires_explicit_bound_and_service_supplies_it(
             return []
 
     capture = _CaptureStore()
-    service = EventLogMeteringService(capture)
+    service = CanonicalMeteringService(capture)
     await service._query(
         window="24h",
         kinds=["meter.llm"],
