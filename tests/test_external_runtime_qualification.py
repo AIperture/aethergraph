@@ -13,30 +13,11 @@ from storage_conformance.external_provider import (
 )
 
 from aethergraph.config.storage_provider import StorageProviderSettings
-from aethergraph.observability.canonical_inspection import CanonicalInspectionReader
-from aethergraph.observability.canonical_runtime_output import bind_canonical_runtime_output
-from aethergraph.observability.canonical_service import bind_canonical_observation_service
 from aethergraph.observability.policy import ObservationPolicy
-from aethergraph.services.agent_state.canonical_facade import CanonicalAgentStateFacade
-from aethergraph.services.artifacts.canonical_factory import CanonicalArtifactFacadeFactory
-from aethergraph.services.auth.canonical_store import bind_canonical_auth_store
-from aethergraph.services.canonical_kv import bind_canonical_key_value_facade
-from aethergraph.services.canonical_metering import bind_canonical_metering_store
-from aethergraph.services.continuations.canonical_store import (
-    bind_canonical_continuation_lease_store,
-    bind_canonical_continuation_store,
+from aethergraph.services.container.canonical_storage import (
+    CanonicalStorageServices,
+    bind_canonical_storage_services,
 )
-from aethergraph.services.control.canonical_stores import bind_canonical_control_stores
-from aethergraph.services.integration.canonical_factory import (
-    bind_canonical_integration_persistence,
-)
-from aethergraph.services.memory.canonical_factory import CanonicalMemoryFacadeFactory
-from aethergraph.services.registry.canonical_manifest_store import (
-    bind_canonical_registration_manifest_store,
-)
-from aethergraph.services.state_stores.canonical_store import CanonicalGraphStateStore
-from aethergraph.services.triggers.canonical_store import bind_canonical_trigger_store
-from aethergraph.services.viz.canonical_service import build_canonical_viz_service
 from aethergraph.storage.builtin_local import build_builtin_local_storage_registry
 from aethergraph.storage.contracts import (
     ContinuationDraft,
@@ -132,10 +113,11 @@ def _local_request(root: Path) -> StorageOpenRequest:
 
 
 def _bind_all_runtime_services(bundle: StorageBundle) -> tuple[object, ...]:
-    observations = bind_canonical_observation_service(
+    services = bind_canonical_storage_services(
         bundle=bundle,
         owner_scope=OWNER,
-        policy=ObservationPolicy(capture_mode="off"),
+        clock=_Clock().now,
+        observation_policy=ObservationPolicy(capture_mode="off"),
     )
     execution_scope = StorageScope(
         tenant_id="tenant-1",
@@ -146,35 +128,23 @@ def _bind_all_runtime_services(bundle: StorageBundle) -> tuple[object, ...]:
         agent_id="agent-qualification",
     )
     return (
-        bind_canonical_key_value_facade(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        bind_canonical_metering_store(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        bind_canonical_control_stores(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        bind_canonical_continuation_store(bundle=bundle, owner_scope=OWNER),
-        bind_canonical_continuation_lease_store(bundle=bundle, owner_scope=OWNER),
-        bind_canonical_trigger_store(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        bind_canonical_auth_store(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        bind_canonical_registration_manifest_store(
-            bundle=bundle,
-            owner_scope=OWNER,
-            clock=_Clock().now,
-        ),
-        bind_canonical_integration_persistence(
-            bundle=bundle,
-            owner_scope=OWNER,
-            clock=_Clock().now,
-        ),
-        observations,
-        CanonicalInspectionReader(observations),
-        bind_canonical_runtime_output(bundle=bundle, owner_scope=OWNER),
-        build_canonical_viz_service(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        CanonicalMemoryFacadeFactory(bundle=bundle, owner_scope=OWNER),
-        CanonicalArtifactFacadeFactory(bundle=bundle, owner_scope=OWNER, clock=_Clock().now),
-        CanonicalAgentStateFacade(state_store=bundle.state, scope=execution_scope),
-        CanonicalGraphStateStore(
-            state_store=bundle.state,
-            event_store=bundle.events,
-            run_repository=bundle.runs,
-        ),
+        services.key_value,
+        services.metering,
+        services.control,
+        services.continuations,
+        services.continuation_leases,
+        services.triggers,
+        services.auth,
+        services.registration_manifests,
+        services.integration,
+        services.observations,
+        services.runtime_output,
+        services.viz,
+        services.memory_factory,
+        services.artifact_factory,
+        services.graph_state,
+        services.agent_state(execution_scope),
+        services.inspection(),
     )
 
 
@@ -496,3 +466,44 @@ def test_runtime_storage_composition_factory_docstring_and_exact_capabilities() 
     assert {StorageCapability.TTL, StorageCapability.LEASES} <= RUNTIME_STORAGE_CAPABILITIES
     assert StorageCapability.SEARCH_SEMANTIC not in RUNTIME_STORAGE_CAPABILITIES
     assert StorageCapability.SEARCH_HYBRID not in RUNTIME_STORAGE_CAPABILITIES
+
+
+def test_canonical_storage_service_binding_is_scoped_bundle_hidden_and_documented() -> None:
+    bundle = DeterministicExternalBundle(
+        StorageOpenMode.READ_WRITE,
+        clock=_Clock(),
+        ready=True,
+        close_failures=0,
+    )
+    services = bind_canonical_storage_services(
+        bundle=bundle,
+        owner_scope=OWNER,
+        clock=_Clock().now,
+        observation_policy=ObservationPolicy(capture_mode="off"),
+    )
+
+    assert not hasattr(services, "bundle")
+    scoped = services.agent_state(
+        StorageScope(run_id="run-1", graph_id="graph-1", node_id="node-1")
+    )
+    assert scoped.scope == StorageScope(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        run_id="run-1",
+        graph_id="graph-1",
+        node_id="node-1",
+    )
+    with pytest.raises(ValueError, match="conflicts with owner_scope project_id"):
+        services.agent_state(StorageScope(project_id="other", run_id="run-1"))
+
+    for public_api in (
+        bind_canonical_storage_services,
+        CanonicalStorageServices.agent_state,
+        CanonicalStorageServices.inspection,
+    ):
+        docstring = inspect.getdoc(public_api)
+        assert docstring is not None
+        required = ("Intro:", "Examples:", "Args:", "Returns:", "Notes:")
+        positions = tuple(docstring.index(section) for section in required)
+        assert positions == tuple(sorted(positions))
+        assert docstring.count("```python") >= 2
