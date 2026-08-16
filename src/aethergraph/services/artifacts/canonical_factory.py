@@ -9,6 +9,7 @@ from uuid import uuid4
 from aethergraph.storage.contracts import StorageBundle, StorageScope
 
 from .canonical_facade import CanonicalArtifactFacade
+from .canonical_public import CanonicalPublicArtifactFacade
 
 
 class CanonicalArtifactFacadeFactory:
@@ -149,6 +150,59 @@ class CanonicalArtifactFacadeFactory:
             The method performs no identity-label lookup and no provider fallback.
         """
         return self._facade(self.owner_scope)
+
+    def for_public_execution(
+        self,
+        execution_scope: StorageScope,
+        *,
+        tool_name: str | None = None,
+        tool_version: str | None = None,
+        deprecated_app_id: str | None = None,
+    ) -> CanonicalPublicArtifactFacade:
+        """Bind stable public Artifact behavior to one canonical execution scope.
+
+        The public projection and low-level canonical facade share the same coherent
+        bundle stores and exact owner/execution scope.
+
+        Examples:
+            Bind NodeContext Artifacts:
+                ```python
+                artifacts = factory.for_public_execution(
+                    StorageScope(run_id="run-1", node_id="node-1")
+                )
+                ```
+
+            Bind Tool provenance and deprecated App response metadata:
+                ```python
+                artifacts = factory.for_public_execution(
+                    StorageScope(run_id="run-1"),
+                    tool_name="reporter",
+                    tool_version="1.0",
+                    deprecated_app_id="app-1",
+                )
+                ```
+
+        Args:
+            execution_scope: Partial canonical execution dimensions merged with owner.
+            tool_name: Optional producing Tool name.
+            tool_version: Optional producing Tool version.
+            deprecated_app_id: Optional deprecated response-only App metadata.
+
+        Returns:
+            CanonicalPublicArtifactFacade: Stable public projection over one canonical facade.
+
+        Notes:
+            This method performs no provider lifecycle operation. Deprecated App
+            metadata never affects provider scope, search, authorization, or identity.
+        """
+        return CanonicalPublicArtifactFacade(
+            canonical=self.for_execution(
+                execution_scope,
+                tool_name=tool_name,
+                tool_version=tool_version,
+            ),
+            deprecated_app_id=deprecated_app_id,
+        )
 
     def _facade(
         self,
