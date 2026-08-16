@@ -29,7 +29,16 @@ class TriggerRecord:
     client_id: str | None = None
     mode: str | None = None  # "cloud", "demo", "local", etc.
 
-    app_id: str | None = None
+    app_id: str | None = field(
+        default=None,
+        metadata={
+            "deprecated": True,
+            "description": (
+                "Deprecated; retained for compatibility and scheduled for removal "
+                "in a future breaking release."
+            ),
+        },
+    )
     agent_id: str | None = None
     session_id: str | None = None
 
