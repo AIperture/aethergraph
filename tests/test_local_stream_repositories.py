@@ -12,6 +12,7 @@ from aethergraph.storage.contracts import (
     InboundEventDraft,
     PageRequest,
     RuntimeOutputFrame,
+    RuntimeOutputQuery,
     RuntimeOutputStream,
     SemanticEventDraft,
     SemanticEventKind,
@@ -201,20 +202,97 @@ async def test_runtime_output_capacity_selective_barriers_and_exact_retry(
     sink.emit(first)
     sink.emit(first)
     sink.emit(second)
+    pending = await sink.query(RuntimeOutputQuery(scope=RUN_SCOPE))
+    assert pending.items == ()
     with pytest.raises(StorageCapacityError, match="full"):
         sink.emit(_frame("output-3", "execution-3", 1))
 
     await sink.flush_execution("execution-1")
+    committed = await sink.query(RuntimeOutputQuery(scope=RUN_SCOPE))
+    assert tuple(item.output_id for item in committed.items) == ("output-1",)
+    assert committed.items[0].delivery_cursor == 1
     rows = await database.fetch_all("SELECT output_id FROM local_runtime_output ORDER BY cursor")
     assert [str(row[0]) for row in rows] == ["output-1"]
     sink.emit(_frame("output-3", "execution-3", 1))
     await sink.flush_run("run-1")
     rows = await database.fetch_all("SELECT output_id FROM local_runtime_output ORDER BY cursor")
     assert [str(row[0]) for row in rows] == ["output-1", "output-2", "output-3"]
+    first_page = await sink.query(RuntimeOutputQuery(scope=RUN_SCOPE, page=PageRequest(limit=2)))
+    second_page = await sink.query(
+        RuntimeOutputQuery(
+            scope=RUN_SCOPE,
+            page=PageRequest(limit=2, cursor=first_page.next_cursor),
+        )
+    )
+    assert tuple(item.output_id for item in (*first_page.items, *second_page.items)) == (
+        "output-1",
+        "output-2",
+        "output-3",
+    )
+    with pytest.raises(StorageConfigurationError, match="mismatched"):
+        await sink.query(
+            RuntimeOutputQuery(
+                scope=RUN_SCOPE,
+                after_delivery_cursor=1,
+                page=PageRequest(limit=2, cursor=first_page.next_cursor),
+            )
+        )
 
     sink.emit(first)
     await sink.flush_execution(first.execution_id)
     assert int((await database.fetch_all("SELECT COUNT(*) FROM local_runtime_output"))[0][0]) == 3
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_and_runtime_output_share_one_delivery_cursor_domain(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    semantic = LocalSemanticEventRepository(database=database)
+    output = LocalRuntimeOutputSink(database=database)
+
+    first_semantic = await semantic.append(_semantic("semantic-1", 1))
+    output.emit(_frame("output-1", "execution-1", 1))
+    await output.flush_execution("execution-1")
+    second_semantic = await semantic.append(_semantic("semantic-2", 2))
+    output.emit(_frame("output-2", "execution-2", 1))
+    await output.flush_run("run-1")
+
+    semantic_page = await semantic.query(
+        SemanticEventQuery(deployment_id="deployment-1", scope=SESSION_SCOPE)
+    )
+    output_page = await output.query(RuntimeOutputQuery(scope=RUN_SCOPE))
+    merged = sorted(
+        (*semantic_page.items, *output_page.items),
+        key=lambda item: item.delivery_cursor,
+    )
+    assert [item.delivery_cursor for item in merged] == [1, 2, 3, 4]
+    assert [item.event_id if hasattr(item, "event_id") else item.output_id for item in merged] == [
+        "semantic-1",
+        "output-1",
+        "semantic-2",
+        "output-2",
+    ]
+    assert first_semantic.delivery_cursor == 1
+    assert second_semantic.delivery_cursor == 3
+
+    after_two_semantic = await semantic.query(
+        SemanticEventQuery(
+            deployment_id="deployment-1",
+            scope=SESSION_SCOPE,
+            after_delivery_cursor=2,
+        )
+    )
+    after_two_output = await output.query(
+        RuntimeOutputQuery(scope=RUN_SCOPE, after_delivery_cursor=2)
+    )
+    resumed = sorted(
+        (*after_two_semantic.items, *after_two_output.items),
+        key=lambda item: item.delivery_cursor,
+    )
+    assert [item.delivery_cursor for item in resumed] == [3, 4]
+    assert len({item.delivery_cursor for item in merged}) == len(merged)
     await database.close()
 
 

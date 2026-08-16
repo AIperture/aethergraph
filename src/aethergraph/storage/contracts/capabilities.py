@@ -16,6 +16,7 @@ class StorageCapability(StrEnum):
     ATOMIC_COMPARE_AND_SET = "atomic_compare_and_set"
     ORDERED_APPEND = "ordered_append"
     MONOTONIC_CURSORS = "monotonic_cursors"
+    SHARED_DELIVERY_CURSOR = "shared_delivery_cursor"
     TTL = "ttl"
     LEASES = "leases"
     BLOB_STREAMING = "blob_streaming"

@@ -14,6 +14,7 @@ from aethergraph.observability import (
     bind_canonical_runtime_output,
 )
 from aethergraph.storage.contracts import (
+    RuntimeOutputQuery,
     StorageCapacityError,
     StorageOpenMode,
     StorageScope,
@@ -77,6 +78,19 @@ async def test_canonical_runtime_output_projects_exact_scope_identity_and_tags(
     assert row["node_id"] == "node-1"
     assert row["text"] == "hello"
     assert json.loads(row["tags_json"]) == ["runtime-console", "host-test"]
+    page = await sink.query(RuntimeOutputQuery(scope=StorageScope(run_id="run-1")))
+    assert len(page.items) == 1
+    assert page.items[0].scope == StorageScope(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        org_id="org-1",
+        session_id="session-1",
+        run_id="run-1",
+        graph_id="graph-1",
+        node_id="node-1",
+    )
+    with pytest.raises(ValueError, match="conflicts with owner_scope project_id"):
+        await sink.query(RuntimeOutputQuery(scope=StorageScope(project_id="other", run_id="run-1")))
     await database.close()
 
 
@@ -173,6 +187,7 @@ def test_canonical_runtime_output_public_docstrings_follow_strict_contract() -> 
         CanonicalRuntimeOutputSink.emit,
         CanonicalRuntimeOutputSink.flush_execution,
         CanonicalRuntimeOutputSink.flush_run,
+        CanonicalRuntimeOutputSink.query,
         bind_canonical_runtime_output,
     )
     for method in methods:

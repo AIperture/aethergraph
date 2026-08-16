@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from aethergraph.contracts.services.runtime_output import RuntimeOutputFrame
 from aethergraph.server.security.redaction import sanitize_text
 from aethergraph.services.canonical_storage_scope import (
@@ -9,7 +11,10 @@ from aethergraph.services.canonical_storage_scope import (
     validate_storage_owner_scope,
 )
 from aethergraph.storage.contracts import (
+    Page,
     RuntimeOutputFrame as StorageRuntimeOutputFrame,
+    RuntimeOutputQuery,
+    RuntimeOutputRecord,
     RuntimeOutputSink as StorageRuntimeOutputSink,
     RuntimeOutputStream,
     StorageBundle,
@@ -200,6 +205,44 @@ class CanonicalRuntimeOutputSink:
             Bundle shutdown, not this service, owns the final all-frame close barrier.
         """
         await self._sink.flush_run(run_id)
+
+    async def query(self, query: RuntimeOutputQuery) -> Page[RuntimeOutputRecord]:
+        """Read committed runtime output through the canonical owner boundary.
+
+        Intro:
+            Merges trusted provider ownership into the requested run scope and
+            delegates one bounded read to the selected provider repository.
+
+        Examples:
+            Read one run:
+                ```python
+                page = await output.query(
+                    RuntimeOutputQuery(scope=StorageScope(run_id="run-1"))
+                )
+                ```
+
+            Continue a merged semantic/output stream:
+                ```python
+                page = await output.query(
+                    RuntimeOutputQuery(
+                        scope=StorageScope(run_id="run-1"),
+                        after_delivery_cursor=last_cursor,
+                    )
+                )
+                ```
+
+        Args:
+            query: Exact runtime-output query with execution-level scope dimensions.
+
+        Returns:
+            Page[RuntimeOutputRecord]: Committed provider records in delivery order.
+
+        Notes:
+            Pending frames and legacy EventLog rows are not visible. Conflicting
+            trusted ownership dimensions fail before provider I/O.
+        """
+        scope = merge_storage_scope(self._owner_scope, **query.scope.as_filter())
+        return await self._sink.query(replace(query, scope=scope))
 
 
 def bind_canonical_runtime_output(

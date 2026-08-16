@@ -13,6 +13,8 @@ from aethergraph.storage.contracts import (
     InboundEventRecord,
     InboundEventRepository,
     RuntimeOutputFrame,
+    RuntimeOutputQuery,
+    RuntimeOutputRecord,
     RuntimeOutputSink,
     RuntimeOutputStream,
     SemanticEventDraft,
@@ -153,6 +155,24 @@ def test_runtime_output_frames_require_canonical_run_node_scope() -> None:
         replace(frame, sequence=0)
     with pytest.raises(TypeError, match="RuntimeOutputStream"):
         replace(frame, stream="stdout")
+
+    record = RuntimeOutputRecord(
+        **{field.name: getattr(frame, field.name) for field in fields(RuntimeOutputFrame)},
+        delivery_cursor=3,
+        cursor="runtime-output:3",
+    )
+    query = RuntimeOutputQuery(
+        scope=RUN_SCOPE,
+        after_delivery_cursor=2,
+        streams=(RuntimeOutputStream.STDOUT,),
+    )
+    assert record.delivery_cursor == 3
+    assert query.scope.run_id == "run-1"
+    assert "app_id" not in {item.name for item in fields(RuntimeOutputRecord)}
+    with pytest.raises(ValueError, match="after_delivery_cursor"):
+        replace(query, after_delivery_cursor=-1)
+    with pytest.raises(ValueError, match="run_id"):
+        replace(query, scope=SESSION_SCOPE)
 
 
 def test_stream_bundle_fields_and_protocol_docstrings_are_exact() -> None:

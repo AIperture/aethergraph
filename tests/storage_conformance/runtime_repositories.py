@@ -12,6 +12,15 @@ import aethergraph.storage.contracts as storage
 _RecordT = TypeVar("_RecordT")
 
 
+class InMemoryDeliveryCursorAllocator:
+    def __init__(self) -> None:
+        self._cursor = 0
+
+    def next(self) -> int:
+        self._cursor += 1
+        return self._cursor
+
+
 def _scope_matches(candidate: storage.StorageScope, expected: storage.StorageScope) -> bool:
     return all(getattr(candidate, name) == value for name, value in expected.as_filter().items())
 
@@ -637,28 +646,20 @@ class InMemoryInboundEventRepository:
 
 
 class InMemorySemanticEventRepository:
-    def __init__(self) -> None:
+    def __init__(self, delivery_cursors: InMemoryDeliveryCursorAllocator) -> None:
         self._records: dict[str, storage.SemanticEventRecord] = {}
-        self._cursor = 0
+        self._delivery_cursors = delivery_cursors
 
     async def append(self, event):
         current = self._records.get(event.event_id)
         if current is not None:
-            comparable = _promote(
-                event,
-                storage.SemanticEventRecord,
-                delivery_cursor=current.delivery_cursor,
-                cursor=current.cursor,
-            )
-            if current != comparable:
-                raise storage.StorageIntegrityError("external semantic event conflicts")
-            return current
-        self._cursor += 1
+            raise storage.StorageIntegrityError("external semantic event identity conflicts")
+        delivery_cursor = self._delivery_cursors.next()
         record = _promote(
             event,
             storage.SemanticEventRecord,
-            delivery_cursor=self._cursor,
-            cursor=f"external-semantic:{self._cursor}",
+            delivery_cursor=delivery_cursor,
+            cursor=f"external-semantic:{delivery_cursor}",
         )
         self._records[event.event_id] = record
         return record
@@ -680,8 +681,10 @@ class InMemorySemanticEventRepository:
 
 
 class InMemoryRuntimeOutputSink:
-    def __init__(self) -> None:
+    def __init__(self, delivery_cursors: InMemoryDeliveryCursorAllocator) -> None:
+        self._delivery_cursors = delivery_cursors
         self.frames: list[storage.RuntimeOutputFrame] = []
+        self._records: dict[str, storage.RuntimeOutputRecord] = {}
         self.flushed_executions: list[str] = []
         self.flushed_runs: list[str] = []
 
@@ -691,10 +694,78 @@ class InMemoryRuntimeOutputSink:
         self.frames.append(frame)
 
     async def flush_execution(self, execution_id):
+        self._commit(lambda frame: frame.execution_id == execution_id)
         self.flushed_executions.append(execution_id)
 
     async def flush_run(self, run_id):
+        self._commit(lambda frame: frame.scope.run_id == run_id)
         self.flushed_runs.append(run_id)
+
+    async def query(self, query):
+        rows = (
+            record
+            for record in self._records.values()
+            if _scope_matches(record.scope, query.scope)
+            and (
+                query.after_delivery_cursor is None
+                or record.delivery_cursor > query.after_delivery_cursor
+            )
+            and (not query.streams or record.stream in query.streams)
+            and (query.execution_id is None or record.execution_id == query.execution_id)
+        )
+        return _page(sorted(rows, key=lambda item: item.delivery_cursor), query.page)
+
+    def _commit(self, selected) -> None:
+        selected_frames = tuple(frame for frame in self.frames if selected(frame))
+        committed_sequences = {
+            (record.execution_id, record.sequence): record.output_id
+            for record in self._records.values()
+        }
+        staged_sequences: dict[tuple[str, int], str] = {}
+        for frame in selected_frames:
+            current = self._records.get(frame.output_id)
+            if current is not None:
+                comparable = _promote(
+                    frame,
+                    storage.RuntimeOutputRecord,
+                    delivery_cursor=current.delivery_cursor,
+                    cursor=current.cursor,
+                )
+                if current != comparable:
+                    raise storage.StorageIntegrityError(
+                        "external runtime output identity conflicts"
+                    )
+                continue
+            key = (frame.execution_id, frame.sequence)
+            conflicting_id = committed_sequences.get(key) or staged_sequences.get(key)
+            if conflicting_id is not None and conflicting_id != frame.output_id:
+                raise storage.StorageIntegrityError(
+                    "external runtime output execution sequence conflicts"
+                )
+            staged_sequences[key] = frame.output_id
+
+        remaining: list[storage.RuntimeOutputFrame] = []
+        for frame in self.frames:
+            if not selected(frame):
+                remaining.append(frame)
+                continue
+            current = self._records.get(frame.output_id)
+            if current is not None:
+                comparable = _promote(
+                    frame,
+                    storage.RuntimeOutputRecord,
+                    delivery_cursor=current.delivery_cursor,
+                    cursor=current.cursor,
+                )
+                continue
+            delivery_cursor = self._delivery_cursors.next()
+            self._records[frame.output_id] = _promote(
+                frame,
+                storage.RuntimeOutputRecord,
+                delivery_cursor=delivery_cursor,
+                cursor=f"external-runtime-output:{delivery_cursor}",
+            )
+        self.frames = remaining
 
 
 class InMemoryObservationRepository:

@@ -13,6 +13,7 @@ RUNTIME_STORAGE_CAPABILITIES = frozenset(
         StorageCapability.ATOMIC_COMPARE_AND_SET,
         StorageCapability.ORDERED_APPEND,
         StorageCapability.MONOTONIC_CURSORS,
+        StorageCapability.SHARED_DELIVERY_CURSOR,
         StorageCapability.TTL,
         StorageCapability.LEASES,
         StorageCapability.BLOB_STREAMING,

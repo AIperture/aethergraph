@@ -31,6 +31,7 @@ from aethergraph.storage.contracts import (
     RunResultRecord,
     RunStatus,
     RuntimeOutputFrame,
+    RuntimeOutputQuery,
     RuntimeOutputStream,
     SemanticEventDraft,
     SemanticEventKind,
@@ -179,7 +180,14 @@ def test_external_bundle_implements_every_typed_repository_surface() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", [StorageCapability.TTL, StorageCapability.LEASES])
+@pytest.mark.parametrize(
+    "missing",
+    [
+        StorageCapability.TTL,
+        StorageCapability.LEASES,
+        StorageCapability.SHARED_DELIVERY_CURSOR,
+    ],
+)
 async def test_runtime_admission_rejects_incomplete_external_before_health_or_publication(
     tmp_path: Path,
     missing: StorageCapability,
@@ -449,8 +457,99 @@ async def test_external_runtime_repositories_execute_representative_operations_w
     )
     bundle.runtime_output.emit(frame)
     await bundle.runtime_output.flush_execution("execution-1")
+    output_page = await bundle.runtime_output.query(RuntimeOutputQuery(scope=continuation_scope))
+    assert tuple(item.output_id for item in output_page.items) == ("output-1",)
+    assert output_page.items[0].delivery_cursor > semantic.delivery_cursor
     await bundle.runtime_output.flush_run("run-1")
 
+    await composition.close()
+    assert tuple(tmp_path.iterdir()) == ()
+
+
+@pytest.mark.asyncio
+async def test_external_semantic_and_output_interleave_in_one_cursor_domain_without_files(
+    tmp_path: Path,
+) -> None:
+    provider = DeterministicExternalProvider()
+    composition = create_runtime_storage_composition(
+        StorageProviderRegistry({EXTERNAL_PROVIDER_NAME: lambda: provider})
+    )
+    bundle = await composition.open(_external_request(tmp_path))
+    session_scope = StorageScope(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        session_id="session-1",
+    )
+    run_scope = StorageScope(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        session_id="session-1",
+        run_id="run-1",
+        graph_id="graph-1",
+        node_id="node-1",
+    )
+
+    first = await bundle.semantic_events.append(
+        SemanticEventDraft(
+            event_id="semantic-first",
+            deployment_id="deployment-1",
+            turn_id="turn-1",
+            sequence=1,
+            producer="runtime",
+            occurred_at=NOW,
+            kind=SemanticEventKind.MESSAGE_STARTED,
+            scope=session_scope,
+        )
+    )
+    bundle.runtime_output.emit(
+        RuntimeOutputFrame(
+            output_id="output-middle",
+            execution_id="execution-1",
+            scope=run_scope,
+            stream=RuntimeOutputStream.STDOUT,
+            sequence=1,
+            text="middle",
+            source="runtime",
+        )
+    )
+    assert (await bundle.runtime_output.query(RuntimeOutputQuery(scope=run_scope))).items == ()
+    await bundle.runtime_output.flush_execution("execution-1")
+    second = await bundle.semantic_events.append(
+        SemanticEventDraft(
+            event_id="semantic-last",
+            deployment_id="deployment-1",
+            turn_id="turn-1",
+            sequence=2,
+            producer="runtime",
+            occurred_at=NOW,
+            kind=SemanticEventKind.MESSAGE_COMPLETED,
+            scope=session_scope,
+        )
+    )
+
+    semantic = await bundle.semantic_events.query(
+        SemanticEventQuery(deployment_id="deployment-1", scope=session_scope)
+    )
+    output = await bundle.runtime_output.query(RuntimeOutputQuery(scope=run_scope))
+    merged = sorted((*semantic.items, *output.items), key=lambda item: item.delivery_cursor)
+    assert [item.delivery_cursor for item in merged] == [1, 2, 3]
+    assert first.delivery_cursor == 1
+    assert output.items[0].delivery_cursor == 2
+    assert second.delivery_cursor == 3
+
+    resumed_semantic = await bundle.semantic_events.query(
+        SemanticEventQuery(
+            deployment_id="deployment-1",
+            scope=session_scope,
+            after_delivery_cursor=2,
+        )
+    )
+    resumed_output = await bundle.runtime_output.query(
+        RuntimeOutputQuery(scope=run_scope, after_delivery_cursor=2)
+    )
+    assert [item.delivery_cursor for item in (*resumed_semantic.items, *resumed_output.items)] == [
+        3
+    ]
     await composition.close()
     assert tuple(tmp_path.iterdir()) == ()
 
@@ -464,6 +563,7 @@ def test_runtime_storage_composition_factory_docstring_and_exact_capabilities() 
     assert positions == tuple(sorted(positions))
     assert docstring.count("```python") >= 2
     assert {StorageCapability.TTL, StorageCapability.LEASES} <= RUNTIME_STORAGE_CAPABILITIES
+    assert StorageCapability.SHARED_DELIVERY_CURSOR in RUNTIME_STORAGE_CAPABILITIES
     assert StorageCapability.SEARCH_SEMANTIC not in RUNTIME_STORAGE_CAPABILITIES
     assert StorageCapability.SEARCH_HYBRID not in RUNTIME_STORAGE_CAPABILITIES
 

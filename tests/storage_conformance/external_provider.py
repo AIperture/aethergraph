@@ -26,6 +26,7 @@ from aethergraph.storage.contracts import (
 from storage_conformance.runtime_repositories import (
     InMemoryContinuationLeaseRepository,
     InMemoryContinuationRepository,
+    InMemoryDeliveryCursorAllocator,
     InMemoryDocumentStore,
     InMemoryExternalSessionBindingRepository,
     InMemoryInboundEventRepository,
@@ -57,6 +58,7 @@ class DeterministicExternalBundle:
         StorageCapability.ATOMIC_COMPARE_AND_SET,
         StorageCapability.ORDERED_APPEND,
         StorageCapability.MONOTONIC_CURSORS,
+        StorageCapability.SHARED_DELIVERY_CURSOR,
         StorageCapability.TTL,
         StorageCapability.LEASES,
         StorageCapability.BLOB_STREAMING,
@@ -104,8 +106,9 @@ class DeterministicExternalBundle:
         self.ingress_idempotency = InMemoryIngressIdempotencyRepository()
         self.external_session_bindings = InMemoryExternalSessionBindingRepository()
         self.inbound_events = InMemoryInboundEventRepository()
-        self.semantic_events = InMemorySemanticEventRepository()
-        self.runtime_output = InMemoryRuntimeOutputSink()
+        delivery_cursors = InMemoryDeliveryCursorAllocator()
+        self.semantic_events = InMemorySemanticEventRepository(delivery_cursors)
+        self.runtime_output = InMemoryRuntimeOutputSink(delivery_cursors)
 
     async def health(self) -> StorageHealth:
         self.health_calls += 1

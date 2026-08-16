@@ -20,6 +20,9 @@ from ...contracts import (
     InboundEventRecord,
     Page,
     RuntimeOutputFrame,
+    RuntimeOutputQuery,
+    RuntimeOutputRecord,
+    RuntimeOutputStream,
     SemanticEventDraft,
     SemanticEventKind,
     SemanticEventQuery,
@@ -33,8 +36,17 @@ from ...contracts import (
 )
 from .database import LocalDatabaseRole, LocalSQLiteDatabase
 
-_COMPONENT_VERSION = 1
+_COMPONENT_VERSION = 2
 _SCOPE_COLUMNS = tuple(item.name for item in fields(StorageScope))
+_CREATE_DELIVERY_CURSOR_ALLOCATOR = """
+CREATE TABLE local_delivery_cursor_allocator (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    current_cursor INTEGER NOT NULL CHECK (current_cursor >= 0)
+)
+"""
+_INITIALIZE_DELIVERY_CURSOR_ALLOCATOR = """
+INSERT INTO local_delivery_cursor_allocator(singleton, current_cursor) VALUES (1, 0)
+"""
 _CREATE_INBOUND = f"""
 CREATE TABLE local_inbound_events (
     cursor INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +70,7 @@ ON local_inbound_events(session_id, received_at, cursor)
 """
 _CREATE_SEMANTIC = f"""
 CREATE TABLE local_semantic_events (
-    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+    cursor INTEGER PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE,
     deployment_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
@@ -86,7 +98,7 @@ ON local_semantic_events(deployment_id, session_id, turn_id, cursor)
 """
 _CREATE_OUTPUT = f"""
 CREATE TABLE local_runtime_output (
-    cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+    cursor INTEGER PRIMARY KEY,
     output_id TEXT NOT NULL UNIQUE,
     execution_id TEXT NOT NULL,
     {", ".join(f"{name} TEXT" for name in _SCOPE_COLUMNS)},
@@ -288,13 +300,15 @@ class LocalSemanticEventRepository:
                 ),
             ).fetchone():
                 raise StorageIntegrityError("Semantic event authored sequence conflicts")
-            cursor = connection.execute(
+            cursor = _allocate_delivery_cursor(connection)
+            connection.execute(
                 f"""INSERT INTO local_semantic_events(
-                    event_id, deployment_id, turn_id, authored_sequence, producer,
+                    cursor, event_id, deployment_id, turn_id, authored_sequence, producer,
                     occurred_at, kind, {", ".join(_SCOPE_COLUMNS)}, payload_json,
                     schema_version
-                ) VALUES ({", ".join("?" for _ in range(7 + len(_SCOPE_COLUMNS) + 2))})""",
+                ) VALUES ({", ".join("?" for _ in range(8 + len(_SCOPE_COLUMNS) + 2))})""",
                 (
+                    cursor,
                     event.event_id,
                     event.deployment_id,
                     event.turn_id,
@@ -306,8 +320,8 @@ class LocalSemanticEventRepository:
                     _json(event.payload),
                     event.schema_version,
                 ),
-            ).lastrowid
-            return _semantic_from_draft(event, int(cursor))
+            )
+            return _semantic_from_draft(event, cursor)
 
         return await self._database.transaction(commit)
 
@@ -493,6 +507,62 @@ class LocalRuntimeOutputSink:
         _nonempty("run_id", run_id)
         await self._flush(lambda frame: frame.scope.run_id == run_id)
 
+    async def query(self, query: RuntimeOutputQuery) -> Page[RuntimeOutputRecord]:
+        """Read one ascending bounded page of committed runtime output.
+
+        Intro:
+            Applies run scope and optional execution/stream filters before pagination.
+            Pending frames remain invisible until a durability barrier commits.
+
+        Examples:
+            Read durable run output:
+                ```python
+                page = await sink.query(query)
+                ```
+
+            Resume merged delivery:
+                ```python
+                page = await sink.query(
+                    replace(query, after_delivery_cursor=last_cursor)
+                )
+                ```
+
+        Args:
+            query: Exact run scope, delivery boundary, filters, and page request.
+
+        Returns:
+            Page[RuntimeOutputRecord]: Committed records and continuation cursor.
+
+        Notes:
+            The cursor belongs to the same provider-wide domain as semantic events;
+            this method never reads pending memory or a legacy EventLog.
+        """
+        clauses, values = _scope_filters(query.scope)
+        if query.after_delivery_cursor is not None:
+            clauses.append("cursor > ?")
+            values.append(query.after_delivery_cursor)
+        if query.streams:
+            clauses.append(f"stream IN ({','.join('?' for _ in query.streams)})")
+            values.extend(stream.value for stream in query.streams)
+        if query.execution_id is not None:
+            clauses.append("execution_id = ?")
+            values.append(query.execution_id)
+        fingerprint = _runtime_output_fingerprint(query)
+        if query.page.cursor:
+            clauses.append("cursor > ?")
+            values.append(_decode_cursor(query.page.cursor, fingerprint))
+        rows = await self._database.fetch_all(
+            "SELECT * FROM local_runtime_output WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY cursor ASC LIMIT ?",
+            (*values, query.page.limit + 1),
+        )
+        visible = rows[: query.page.limit]
+        next_cursor = None
+        if len(rows) > query.page.limit:
+            next_cursor = _encode_cursor(fingerprint, int(visible[-1]["cursor"]))
+        return Page(items=tuple(_runtime_output(row) for row in visible), next_cursor=next_cursor)
+
     async def _flush_all(self) -> None:
         await self._flush(lambda _frame: True)
 
@@ -526,6 +596,8 @@ def _install(database: LocalSQLiteDatabase) -> None:
         name="integration_streams",
         version=_COMPONENT_VERSION,
         statements=(
+            _CREATE_DELIVERY_CURSOR_ALLOCATOR,
+            _INITIALIZE_DELIVERY_CURSOR_ALLOCATOR,
             _CREATE_INBOUND,
             _CREATE_INBOUND_SESSION_INDEX,
             _CREATE_SEMANTIC,
@@ -632,13 +704,15 @@ def _append_output(connection: sqlite3.Connection, frame: RuntimeOutputFrame) ->
     ).fetchone()
     if sequence is not None:
         raise StorageIntegrityError("Runtime output execution sequence conflicts")
+    cursor = _allocate_delivery_cursor(connection)
     connection.execute(
         f"""INSERT INTO local_runtime_output(
-            output_id, execution_id, {", ".join(_SCOPE_COLUMNS)}, stream,
+            cursor, output_id, execution_id, {", ".join(_SCOPE_COLUMNS)}, stream,
             execution_sequence, text, source, tool_name, partial, truncated, eof,
             tags_json, schema_version, content_digest
-        ) VALUES ({", ".join("?" for _ in range(2 + len(_SCOPE_COLUMNS) + 11))})""",
+        ) VALUES ({", ".join("?" for _ in range(3 + len(_SCOPE_COLUMNS) + 11))})""",
         (
+            cursor,
             frame.output_id,
             frame.execution_id,
             *_scope_values(frame.scope),
@@ -655,6 +729,46 @@ def _append_output(connection: sqlite3.Connection, frame: RuntimeOutputFrame) ->
             digest,
         ),
     )
+
+
+def _allocate_delivery_cursor(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        "SELECT current_cursor FROM local_delivery_cursor_allocator WHERE singleton = 1"
+    ).fetchone()
+    if row is None:
+        raise StorageIntegrityError("Shared delivery cursor allocator is missing")
+    cursor = int(row[0]) + 1
+    connection.execute(
+        "UPDATE local_delivery_cursor_allocator SET current_cursor = ? WHERE singleton = 1",
+        (cursor,),
+    )
+    return cursor
+
+
+def _runtime_output(row: sqlite3.Row) -> RuntimeOutputRecord:
+    try:
+        tags = _json_array(row["tags_json"])
+        if any(not isinstance(value, str) for value in tags):
+            raise TypeError("runtime-output tags must be strings")
+        return RuntimeOutputRecord(
+            output_id=str(row["output_id"]),
+            execution_id=str(row["execution_id"]),
+            scope=_scope(row),
+            stream=RuntimeOutputStream(str(row["stream"])),
+            sequence=int(row["execution_sequence"]),
+            text=str(row["text"]),
+            source=str(row["source"]),
+            delivery_cursor=int(row["cursor"]),
+            cursor=_record_cursor("runtime-output", int(row["cursor"])),
+            tool_name=row["tool_name"],
+            partial=bool(row["partial"]),
+            truncated=bool(row["truncated"]),
+            eof=bool(row["eof"]),
+            tags=tuple(tags),
+            schema_version=int(row["schema_version"]),
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise StorageIntegrityError("Persisted runtime output is malformed") from exc
 
 
 def _scope_values(scope: StorageScope) -> tuple[str | None, ...]:
@@ -721,6 +835,19 @@ def _semantic_fingerprint(query: SemanticEventQuery) -> str:
             "after_delivery_cursor": query.after_delivery_cursor,
             "kinds": tuple(kind.value for kind in query.kinds),
             "turn_id": query.turn_id,
+            "limit": query.page.limit,
+        }
+    )[:24]
+
+
+def _runtime_output_fingerprint(query: RuntimeOutputQuery) -> str:
+    return _digest(
+        {
+            "kind": "runtime-output",
+            "scope": query.scope.as_filter(),
+            "after_delivery_cursor": query.after_delivery_cursor,
+            "streams": tuple(stream.value for stream in query.streams),
+            "execution_id": query.execution_id,
             "limit": query.page.limit,
         }
     )[:24]

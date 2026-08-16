@@ -220,22 +220,79 @@ class RuntimeOutputFrame:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        _nonempty("output_id", self.output_id)
-        _nonempty("execution_id", self.execution_id)
-        self.scope.require("run_id", "node_id")
-        if not isinstance(self.stream, RuntimeOutputStream):
-            raise TypeError("stream must be a RuntimeOutputStream")
-        if isinstance(self.sequence, bool) or self.sequence < 1:
-            raise ValueError("sequence must be a positive integer")
-        if not isinstance(self.text, str):
-            raise TypeError("text must be a string")
-        _nonempty("source", self.source)
-        _optional_nonempty("tool_name", self.tool_name)
-        for name in ("partial", "truncated", "eof"):
-            if not isinstance(getattr(self, name), bool):
-                raise TypeError(f"{name} must be a boolean")
-        _strings(self.tags, name="tags")
-        _version(self.schema_version)
+        _validate_runtime_output(self)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeOutputRecord:
+    """Committed runtime output with shared delivery and opaque record cursors."""
+
+    output_id: str
+    execution_id: str
+    scope: StorageScope
+    stream: RuntimeOutputStream
+    sequence: int
+    text: str
+    source: str
+    delivery_cursor: int
+    cursor: str
+    tool_name: str | None = None
+    partial: bool = False
+    truncated: bool = False
+    eof: bool = False
+    tags: tuple[str, ...] = ()
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _validate_runtime_output(self)
+        _delivery_cursor(self.delivery_cursor)
+        _nonempty("cursor", self.cursor)
+
+
+def _validate_runtime_output(value: RuntimeOutputFrame | RuntimeOutputRecord) -> None:
+    _nonempty("output_id", value.output_id)
+    _nonempty("execution_id", value.execution_id)
+    value.scope.require("run_id", "node_id")
+    if not isinstance(value.stream, RuntimeOutputStream):
+        raise TypeError("stream must be a RuntimeOutputStream")
+    if isinstance(value.sequence, bool) or value.sequence < 1:
+        raise ValueError("sequence must be a positive integer")
+    if not isinstance(value.text, str):
+        raise TypeError("text must be a string")
+    _nonempty("source", value.source)
+    _optional_nonempty("tool_name", value.tool_name)
+    for name in ("partial", "truncated", "eof"):
+        if not isinstance(getattr(value, name), bool):
+            raise TypeError(f"{name} must be a boolean")
+    _strings(value.tags, name="tags")
+    _version(value.schema_version)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RuntimeOutputQuery:
+    """Bounded ascending runtime-output query in the shared delivery domain."""
+
+    scope: StorageScope
+    page: PageRequest = PageRequest()
+    after_delivery_cursor: int | None = None
+    streams: tuple[RuntimeOutputStream, ...] = ()
+    execution_id: str | None = None
+
+    def __post_init__(self) -> None:
+        self.scope.require("run_id")
+        if self.after_delivery_cursor is not None and (
+            isinstance(self.after_delivery_cursor, bool)
+            or not isinstance(self.after_delivery_cursor, int)
+            or self.after_delivery_cursor < 0
+        ):
+            raise ValueError("after_delivery_cursor must be a non-negative integer")
+        if not isinstance(self.streams, tuple):
+            raise TypeError("streams must be an immutable tuple")
+        if len(set(self.streams)) != len(self.streams):
+            raise ValueError("streams must not contain duplicates")
+        if any(not isinstance(value, RuntimeOutputStream) for value in self.streams):
+            raise TypeError("streams must contain RuntimeOutputStream values")
+        _optional_nonempty("execution_id", self.execution_id)
 
 
 class InboundEventRepository(Protocol):
@@ -365,7 +422,7 @@ class SemanticEventRepository(Protocol):
 
 
 class RuntimeOutputSink(Protocol):
-    """Non-blocking provider-owned sink for bounded runtime output frames."""
+    """Provider-owned admission, durability, and read repository for runtime output."""
 
     def emit(self, frame: RuntimeOutputFrame) -> None:
         """Accept one frame for ordered durable persistence.
@@ -447,5 +504,37 @@ class RuntimeOutputSink(Protocol):
 
         Notes:
             Bundle shutdown owns final sink closure after barriers complete.
+        """
+        ...
+
+    async def query(self, query: RuntimeOutputQuery) -> Page[RuntimeOutputRecord]:
+        """Read one bounded ascending page of committed runtime output.
+
+        Intro:
+            Returns only frames made durable by an execution, run, or bundle flush.
+            Delivery filtering uses the shared semantic/runtime-output domain.
+
+        Examples:
+            Read durable run output:
+                ```python
+                page = await runtime_output.query(query)
+                ```
+
+            Resume a merged reconnect stream:
+                ```python
+                page = await runtime_output.query(
+                    replace(query, after_delivery_cursor=last_cursor)
+                )
+                ```
+
+        Args:
+            query: Exact run scope, delivery boundary, filters, and page request.
+
+        Returns:
+            Page[RuntimeOutputRecord]: Committed records and continuation cursor.
+
+        Notes:
+            Pending frames are never returned. Invalid stored rows fail closed rather
+            than being skipped or read from an alternate event log.
         """
         ...
