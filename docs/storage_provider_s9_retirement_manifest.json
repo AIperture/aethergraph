@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "status": "frozen_pre_s9",
+  "frozen_at": "2026-08-16",
+  "policy": "clean_cut_no_fallback_no_history_migration",
+  "legacy_call_sites": [
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "EphemeralKV", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "EventLogMeteringStore", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "SQLiteContinuationTimerLeaseStore", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "SQLiteKVSync", "count": 2},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "SQLiteObservationStore", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "SQLiteTriggerStore", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_artifact_index", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_artifact_store", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_continuation_store", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_doc_store", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_event_log", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_graph_state_store", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_memory_hotlog", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_memory_persistence", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_run_result_store", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_run_store", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_search_backend", "count": 1},
+    {"path": "src/aethergraph/services/container/default_container.py", "symbol": "build_session_store", "count": 1},
+    {"path": "src/aethergraph/services/integration/factory.py", "symbol": "SQLiteExternalSessionBindingStore", "count": 1},
+    {"path": "src/aethergraph/services/integration/factory.py", "symbol": "SQLiteIngressIdempotencyStore", "count": 1},
+    {"path": "src/aethergraph/observability/facade.py", "symbol": "SQLiteObservationStore", "count": 1},
+    {"path": "src/aethergraph/observability/facade.py", "symbol": "SqliteEventLog", "count": 2},
+    {"path": "src/aethergraph/observability/facade.py", "symbol": "_ReadOnlySQLiteRunStore", "count": 1}
+  ],
+  "legacy_app_settings_fields": [
+    "cont",
+    "search",
+    "storage"
+  ],
+  "legacy_settings_modules": [
+    "src/aethergraph/config/search.py",
+    "src/aethergraph/config/storage.py"
+  ],
+  "legacy_factory_modules": [
+    "src/aethergraph/storage/factory.py",
+    "src/aethergraph/storage/search_factory.py"
+  ],
+  "legacy_physical_paths": [
+    {"path": "src/aethergraph/config/observability.py", "literal": "path: str = \"events/observability.db\""},
+    {"path": "src/aethergraph/services/container/default_container.py", "literal": "root_p / \"continuations\" / \"timer_leases.db\""},
+    {"path": "src/aethergraph/services/container/default_container.py", "literal": "auth_db_path = str(root_p / \"auth\" / \"auth_kv.db\")"},
+    {"path": "src/aethergraph/services/container/default_container.py", "literal": "root_p / \"triggers\" / \"triggers.db\""},
+    {"path": "src/aethergraph/services/integration/factory.py", "literal": "integration/operations.db"},
+    {"path": "src/aethergraph/observability/facade.py", "literal": "root / \"events\" / \"events.db\""},
+    {"path": "src/aethergraph/observability/facade.py", "literal": "root / \"memory_events\" / \"events.db\""},
+    {"path": "src/aethergraph/observability/facade.py", "literal": "root / \"events\" / \"observability.db\""},
+    {"path": "src/aethergraph/observability/facade.py", "literal": "root / \"runs\" / \"runs.db\""}
+  ],
+  "partial_symbol_retirements": [
+    {"path": "src/aethergraph/observability/facade.py", "symbols": ["open_observability_workspace", "_ReadOnlySQLiteRunStore"]},
+    {"path": "src/aethergraph/services/auth/authn.py", "symbols": ["load_persisted", "_persist_grant", "_persist_invite"]},
+    {"path": "src/aethergraph/services/integration/factory.py", "symbols": ["database_path"]}
+  ],
+  "whole_module_retirements": [
+    "src/aethergraph/observability/retention.py",
+    "src/aethergraph/observability/sqlite_store.py",
+    "src/aethergraph/storage/continuation_store/kvdoc_cont.py",
+    "src/aethergraph/storage/continuation_store/timer_leases.py",
+    "src/aethergraph/storage/docstore/fs_doc.py",
+    "src/aethergraph/storage/docstore/sqlite_doc.py",
+    "src/aethergraph/storage/docstore/sqlite_doc_sync.py",
+    "src/aethergraph/storage/eventlog/fs_event.py",
+    "src/aethergraph/storage/eventlog/sqlite_event.py",
+    "src/aethergraph/storage/eventlog/sqlite_event_sync.py",
+    "src/aethergraph/storage/factory.py",
+    "src/aethergraph/storage/graph_state_store/state_store.py",
+    "src/aethergraph/storage/kv/inmem_kv.py",
+    "src/aethergraph/storage/kv/layered_kv.py",
+    "src/aethergraph/storage/kv/sqlite_kv.py",
+    "src/aethergraph/storage/kv/sqlite_kv_sync.py",
+    "src/aethergraph/storage/metering/meter_event.py",
+    "src/aethergraph/storage/registry/registration_docstore.py",
+    "src/aethergraph/storage/search_factory.py",
+    "src/aethergraph/storage/triggers/sqlite_trigger_store.py"
+  ],
+  "preserved_project_inputs": [
+    "graph source",
+    "agent source",
+    "project-data",
+    "provider configuration without secrets"
+  ],
+  "retired_runtime_history": [
+    "legacy workspace databases",
+    "legacy event logs",
+    "legacy artifact blobs and indexes",
+    "legacy continuation and trigger state",
+    "legacy observation captures",
+    "legacy search indexes"
+  ]
+}
