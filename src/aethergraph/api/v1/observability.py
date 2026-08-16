@@ -33,6 +33,9 @@ from aethergraph.observability.inspection import (
 from .deps import RequestIdentity, get_identity
 
 router = APIRouter(prefix="/inspect", tags=["inspect"])
+_DEPRECATED_APP_QUERY_DESCRIPTION = (
+    "Deprecated optional App compatibility metadata; not authorization or canonical scope."
+)
 
 
 def _parse_window(value: datetime | None) -> datetime | None:
@@ -111,7 +114,11 @@ async def list_traces(
     run_id: str | None = Query(None),  # noqa: B008
     session_id: str | None = Query(None),  # noqa: B008
     agent_id: str | None = Query(None),  # noqa: B008
-    app_id: str | None = Query(None),  # noqa: B008
+    app_id: str | None = Query(  # noqa: B008
+        None,
+        deprecated=True,
+        description=_DEPRECATED_APP_QUERY_DESCRIPTION,
+    ),
     graph_id: str | None = Query(None),  # noqa: B008
     node_id: str | None = Query(None),  # noqa: B008
     trace_id: str | None = Query(None),  # noqa: B008
@@ -209,7 +216,11 @@ async def list_llm_calls(
     run_id: str | None = Query(None),  # noqa: B008
     session_id: str | None = Query(None),  # noqa: B008
     agent_id: str | None = Query(None),  # noqa: B008
-    app_id: str | None = Query(None),  # noqa: B008
+    app_id: str | None = Query(  # noqa: B008
+        None,
+        deprecated=True,
+        description=_DEPRECATED_APP_QUERY_DESCRIPTION,
+    ),
     graph_id: str | None = Query(None),  # noqa: B008
     node_id: str | None = Query(None),  # noqa: B008
     provider: str | None = Query(None),  # noqa: B008
@@ -324,7 +335,11 @@ async def list_logs(
     run_id: str | None = Query(None),  # noqa: B008
     session_id: str | None = Query(None),  # noqa: B008
     agent_id: str | None = Query(None),  # noqa: B008
-    app_id: str | None = Query(None),  # noqa: B008
+    app_id: str | None = Query(  # noqa: B008
+        None,
+        deprecated=True,
+        description=_DEPRECATED_APP_QUERY_DESCRIPTION,
+    ),
     graph_id: str | None = Query(None),  # noqa: B008
     node_id: str | None = Query(None),  # noqa: B008
     level: str | None = Query(None),  # noqa: B008
@@ -385,7 +400,11 @@ async def get_errors(
     from_: datetime | None = Query(None, alias="from"),  # noqa: B008
     to: datetime | None = Query(None),  # noqa: B008
     graph_id: str | None = Query(None),  # noqa: B008
-    app_id: str | None = Query(None),  # noqa: B008
+    app_id: str | None = Query(  # noqa: B008
+        None,
+        deprecated=True,
+        description=_DEPRECATED_APP_QUERY_DESCRIPTION,
+    ),
     agent_id: str | None = Query(None),  # noqa: B008
     run_status: str | None = Query(None),  # noqa: B008
     cursor: str | None = Query(None),  # noqa: B008
@@ -478,7 +497,11 @@ async def list_agent_events(
     run_id: str | None = Query(None),  # noqa: B008
     session_id: str | None = Query(None),  # noqa: B008
     agent_id: str | None = Query(None),  # noqa: B008
-    app_id: str | None = Query(None),  # noqa: B008
+    app_id: str | None = Query(  # noqa: B008
+        None,
+        deprecated=True,
+        description=_DEPRECATED_APP_QUERY_DESCRIPTION,
+    ),
     graph_id: str | None = Query(None),  # noqa: B008
     node_id: str | None = Query(None),  # noqa: B008
     event_type: str | None = Query(None),  # noqa: B008

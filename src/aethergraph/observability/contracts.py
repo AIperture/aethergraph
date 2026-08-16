@@ -20,7 +20,13 @@ class InspectScope(BaseModel):
     run_id: str | None = None
     session_id: str | None = None
     agent_id: str | None = None
-    app_id: str | None = None
+    app_id: str | None = Field(
+        default=None,
+        deprecated=True,
+        description=(
+            "Deprecated optional App compatibility metadata; not authorization or canonical scope."
+        ),
+    )
     graph_id: str | None = None
     node_id: str | None = None
     trace_id: str | None = None

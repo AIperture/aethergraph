@@ -9,6 +9,13 @@ from aethergraph.services.llm.provider_transport.models import ProviderTransport
 
 CaptureMode = Literal["off", "metadata", "manifest", "full"]
 ObservationStatus = Literal["ok", "error", "pending", "unknown"]
+_DEPRECATED_APP_FIELD_METADATA = {
+    "deprecated": True,
+    "compatibility_only": True,
+    "description": (
+        "Deprecated optional App compatibility metadata; not authorization or canonical scope."
+    ),
+}
 
 
 def utc_now_iso() -> str:
@@ -21,7 +28,7 @@ class ObservationScope:
     project_id: str | None = None
     org_id: str | None = None
     user_id: str | None = None
-    app_id: str | None = None
+    app_id: str | None = field(default=None, metadata=_DEPRECATED_APP_FIELD_METADATA)
     session_id: str | None = None
     run_id: str | None = None
     trace_id: str | None = None
@@ -141,7 +148,7 @@ class ObservationFilter:
     project_id: str | None = None
     org_id: str | None = None
     user_id: str | None = None
-    app_id: str | None = None
+    app_id: str | None = field(default=None, metadata=_DEPRECATED_APP_FIELD_METADATA)
     session_id: str | None = None
     run_id: str | None = None
     trace_id: str | None = None

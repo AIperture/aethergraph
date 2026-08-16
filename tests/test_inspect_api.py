@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import UTC, datetime
 import logging
 
@@ -18,7 +19,9 @@ from aethergraph.observability import (
     emit_agent_event,
     register_default_agent_event_types,
 )
+from aethergraph.observability.contracts import InspectScope
 from aethergraph.observability.logging import ObservationLogHandler
+from aethergraph.observability.models import ObservationFilter, ObservationScope
 
 
 class FakeEventLog:
@@ -623,6 +626,30 @@ def test_list_agent_events_supports_time_window(client: TestClient) -> None:
     assert resp.status_code == 200
     items = resp.json()["items"]
     assert len(items) == 0
+
+
+def test_inspect_app_id_is_explicit_deprecated_compatibility_metadata(
+    client: TestClient,
+) -> None:
+    for record_type in (ObservationScope, ObservationFilter):
+        app_field = next(item for item in fields(record_type) if item.name == "app_id")
+        assert app_field.metadata["deprecated"] is True
+        assert app_field.metadata["compatibility_only"] is True
+    assert InspectScope.model_fields["app_id"].deprecated is True
+
+    schema = client.app.openapi()
+    paths = (
+        "/api/v1/inspect/traces",
+        "/api/v1/inspect/llm-calls",
+        "/api/v1/inspect/logs",
+        "/api/v1/inspect/errors",
+        "/api/v1/inspect/agent-events",
+    )
+    for path in paths:
+        parameters = schema["paths"][path]["get"]["parameters"]
+        app_parameter = next(item for item in parameters if item["name"] == "app_id")
+        assert app_parameter["deprecated"] is True
+        assert "compatibility metadata" in app_parameter["description"]
 
 
 def test_observation_log_handler_emits_one_scoped_record() -> None:
