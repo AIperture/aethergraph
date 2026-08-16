@@ -37,7 +37,11 @@ from aethergraph.contracts.integration import (
     WarningRaisedPayload,
 )
 from aethergraph.services.channel.resources import InputResource
-from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.continuations.continuation import (
+    ContinuationDraft,
+    ContinuationStatus,
+    Correlator,
+)
 from aethergraph.services.continuations.stores.fs_store import FSContinuationStore
 from aethergraph.services.integration import (
     EventLogInboundEventStore,
@@ -224,8 +228,8 @@ class _ResumeRouter:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    async def resume(self, **kwargs) -> None:
-        self.calls.append(kwargs)
+    async def resume_continuation(self, continuation, payload) -> None:
+        self.calls.append({"continuation": continuation, "payload": payload})
 
 
 @dataclass(slots=True)
@@ -381,15 +385,21 @@ async def test_each_transport_resumes_choice_and_free_text_without_cross_deliver
             verified=_verified(case),
             envelope=_envelope(case, event_id=f"{case.name}-bind"),
         )
-        await harness.continuations.save(
-            Continuation(
+        choice_created = await harness.continuations.create(
+            ContinuationDraft(
                 run_id="run-choice",
                 node_id="node-choice",
                 kind="choice",
-                token=f"{case.name}-choice-token",
                 prompt={"title": "Ship?", "options": ["approve", "reject"]},
                 session_id=root.session_id,
                 payload={"_interaction_id": f"{case.name}-choice"},
+                correlators=(
+                    Correlator(
+                        scheme="interaction",
+                        channel="public",
+                        message=f"{case.name}-choice",
+                    ),
+                ),
             )
         )
         choice = await harness.coordinator.accept(
@@ -404,15 +414,25 @@ async def test_each_transport_resumes_choice_and_free_text_without_cross_deliver
                 ),
             ),
         )
-        await harness.continuations.mark_closed(f"{case.name}-choice-token")
-        await harness.continuations.save(
-            Continuation(
+        await harness.continuations.close(
+            choice_created.record,
+            status=ContinuationStatus.RESUMED,
+            closed_at=datetime.now(UTC),
+        )
+        text_created = await harness.continuations.create(
+            ContinuationDraft(
                 run_id="run-text",
                 node_id="node-text",
                 kind="user_input",
-                token=f"{case.name}-text-token",
                 session_id=root.session_id,
                 payload={"_interaction_id": f"{case.name}-text"},
+                correlators=(
+                    Correlator(
+                        scheme="interaction",
+                        channel="public",
+                        message=f"{case.name}-text",
+                    ),
+                ),
             )
         )
         free_text = await harness.coordinator.accept(
@@ -422,9 +442,15 @@ async def test_each_transport_resumes_choice_and_free_text_without_cross_deliver
 
         assert choice.action == free_text.action == "continuation_resumed"
         assert choice.session_id == free_text.session_id == root.session_id
-        assert harness.resumes.calls[0]["token"] == f"{case.name}-choice-token"
+        assert (
+            harness.resumes.calls[0]["continuation"].continuation_id
+            == choice_created.record.continuation_id
+        )
         assert harness.resumes.calls[0]["payload"]["choice"] == "approve"
-        assert harness.resumes.calls[1]["token"] == f"{case.name}-text-token"
+        assert (
+            harness.resumes.calls[1]["continuation"].continuation_id
+            == text_created.record.continuation_id
+        )
         assert harness.resumes.calls[1]["payload"]["text"] == "revise it"
 
         other = await harness.coordinator.accept(

@@ -9,9 +9,10 @@ import sqlite3
 @dataclass(frozen=True)
 class TimerLease:
     fire_id: str
+    continuation_id: str
     run_id: str
     node_id: str
-    token: str
+    scheduled_for: float
     worker_id: str | None
     status: str
     lease_until: float | None
@@ -38,13 +39,13 @@ class SQLiteContinuationTimerLeaseStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS continuation_timer_leases (
+            connection.execute("""
+                CREATE TABLE IF NOT EXISTS continuation_timer_leases_v2 (
                     fire_id TEXT PRIMARY KEY,
+                    continuation_id TEXT NOT NULL,
                     run_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,
-                    token TEXT NOT NULL,
+                    scheduled_for REAL NOT NULL,
                     worker_id TEXT,
                     status TEXT NOT NULL,
                     lease_until REAL,
@@ -53,22 +54,20 @@ class SQLiteContinuationTimerLeaseStore:
                     last_error TEXT,
                     updated_at REAL NOT NULL
                 )
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_continuation_timer_retry
-                ON continuation_timer_leases(status, next_attempt_at, lease_until)
-                """
-            )
+                """)
+            connection.execute("""
+                CREATE INDEX IF NOT EXISTS idx_continuation_timer_retry_v2
+                ON continuation_timer_leases_v2(status, next_attempt_at, lease_until)
+                """)
 
     @staticmethod
     def _from_row(row: sqlite3.Row, *, reclaimed: bool = False) -> TimerLease:
         return TimerLease(
             fire_id=str(row["fire_id"]),
+            continuation_id=str(row["continuation_id"]),
             run_id=str(row["run_id"]),
             node_id=str(row["node_id"]),
-            token=str(row["token"]),
+            scheduled_for=float(row["scheduled_for"]),
             worker_id=str(row["worker_id"]) if row["worker_id"] is not None else None,
             status=str(row["status"]),
             lease_until=float(row["lease_until"]) if row["lease_until"] is not None else None,
@@ -84,9 +83,10 @@ class SQLiteContinuationTimerLeaseStore:
         self,
         *,
         fire_id: str,
+        continuation_id: str,
         run_id: str,
         node_id: str,
-        token: str,
+        scheduled_for: datetime,
         worker_id: str,
         now: datetime,
         lease_until: datetime,
@@ -103,9 +103,10 @@ class SQLiteContinuationTimerLeaseStore:
             ```python
             lease = store.claim(
                 fire_id="fire-1",
+                continuation_id="cont-1",
                 run_id="run-1",
                 node_id="wait",
-                token="secret",
+                scheduled_for=scheduled_for,
                 worker_id="worker-a",
                 now=now,
                 lease_until=lease_until,
@@ -116,9 +117,10 @@ class SQLiteContinuationTimerLeaseStore:
             ```python
             if store.claim(
                 fire_id="fire-1",
+                continuation_id="cont-1",
                 run_id="run-1",
                 node_id="wait",
-                token="secret",
+                scheduled_for=scheduled_for,
                 worker_id="worker-b",
                 now=now,
                 lease_until=lease_until,
@@ -128,9 +130,10 @@ class SQLiteContinuationTimerLeaseStore:
 
         Args:
             fire_id: Stable identity for one scheduled continuation occurrence.
+            continuation_id: Stable continuation identity.
             run_id: Exact durable run identity.
             node_id: Exact waiting node identity.
-            token: Continuation token captured with the scheduled occurrence.
+            scheduled_for: Exact UTC occurrence time.
             worker_id: Timer worker attempting delivery.
             now: Injected current UTC time.
             lease_until: UTC time after which another worker may reclaim the fire.
@@ -148,35 +151,52 @@ class SQLiteContinuationTimerLeaseStore:
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT * FROM continuation_timer_leases WHERE fire_id = ?",
+                "SELECT * FROM continuation_timer_leases_v2 WHERE fire_id = ?",
                 (fire_id,),
             ).fetchone()
             if row is None:
                 connection.execute(
                     """
-                    INSERT INTO continuation_timer_leases (
-                        fire_id, run_id, node_id, token, worker_id, status,
+                    INSERT INTO continuation_timer_leases_v2 (
+                        fire_id, continuation_id, run_id, node_id, scheduled_for,
+                        worker_id, status,
                         lease_until, attempts, next_attempt_at, last_error, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, 'leased', ?, 1, NULL, NULL, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, 'leased', ?, 1, NULL, NULL, ?)
                     """,
                     (
                         fire_id,
+                        continuation_id,
                         run_id,
                         node_id,
-                        token,
+                        scheduled_for.timestamp(),
                         worker_id,
                         lease_until_ts,
                         now_ts,
                     ),
                 )
                 row = connection.execute(
-                    "SELECT * FROM continuation_timer_leases WHERE fire_id = ?",
+                    "SELECT * FROM continuation_timer_leases_v2 WHERE fire_id = ?",
                     (fire_id,),
                 ).fetchone()
                 connection.commit()
                 return self._from_row(row)
 
             status = str(row["status"])
+            identity = (
+                str(row["continuation_id"]),
+                str(row["run_id"]),
+                str(row["node_id"]),
+                float(row["scheduled_for"]),
+            )
+            requested = (
+                continuation_id,
+                run_id,
+                node_id,
+                scheduled_for.timestamp(),
+            )
+            if identity != requested:
+                connection.rollback()
+                raise ValueError("Timer fire identity conflicts with its durable receipt")
             current_lease_until = row["lease_until"]
             next_attempt_at = row["next_attempt_at"]
             if status in {"delivered", "dead_letter"}:
@@ -196,7 +216,7 @@ class SQLiteContinuationTimerLeaseStore:
             reclaimed = status == "leased" and current_lease_until is not None
             connection.execute(
                 """
-                UPDATE continuation_timer_leases
+                UPDATE continuation_timer_leases_v2
                 SET worker_id = ?, status = 'leased', lease_until = ?,
                     attempts = attempts + 1, next_attempt_at = NULL, updated_at = ?
                 WHERE fire_id = ?
@@ -204,7 +224,7 @@ class SQLiteContinuationTimerLeaseStore:
                 (worker_id, lease_until_ts, now_ts, fire_id),
             )
             row = connection.execute(
-                "SELECT * FROM continuation_timer_leases WHERE fire_id = ?",
+                "SELECT * FROM continuation_timer_leases_v2 WHERE fire_id = ?",
                 (fire_id,),
             ).fetchone()
             connection.commit()
@@ -248,7 +268,7 @@ class SQLiteContinuationTimerLeaseStore:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
-                UPDATE continuation_timer_leases
+                UPDATE continuation_timer_leases_v2
                 SET status = 'delivered', worker_id = NULL, lease_until = NULL,
                     next_attempt_at = NULL, last_error = NULL, updated_at = ?
                 WHERE fire_id = ? AND worker_id = ? AND status = 'leased'
@@ -317,7 +337,7 @@ class SQLiteContinuationTimerLeaseStore:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
-                UPDATE continuation_timer_leases
+                UPDATE continuation_timer_leases_v2
                 SET status = ?, worker_id = NULL, lease_until = NULL,
                     next_attempt_at = ?, last_error = ?, updated_at = ?
                 WHERE fire_id = ? AND worker_id = ? AND status = 'leased'
@@ -363,7 +383,7 @@ class SQLiteContinuationTimerLeaseStore:
         """
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM continuation_timer_leases WHERE fire_id = ?",
+                "SELECT * FROM continuation_timer_leases_v2 WHERE fire_id = ?",
                 (fire_id,),
             ).fetchone()
         return self._from_row(row) if row is not None else None

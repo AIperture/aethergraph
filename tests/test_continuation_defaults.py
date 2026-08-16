@@ -5,12 +5,13 @@ from datetime import UTC
 from aethergraph.services.continuations.continuation import Continuation
 
 
-def _continuation(token: str) -> Continuation:
+def _continuation(identity: str) -> Continuation:
     return Continuation(
+        continuation_id=identity,
+        revision=1,
         run_id="run-1",
         node_id="node-1",
         kind="text",
-        token=token,
     )
 
 

@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 import inspect
 import logging
 from pathlib import Path, PurePath
@@ -26,7 +27,7 @@ from aethergraph.services.channel.choices import (
     normalize_choice_reply,
     prompt_choices_from_prompt,
 )
-from aethergraph.services.continuations.continuation import Correlator
+from aethergraph.services.continuations.continuation import ContinuationStatus, Correlator
 
 
 def _artifact_filename(artifact: Artifact, fallback: str | None = None) -> str:
@@ -1419,7 +1420,7 @@ class ChannelSession:
             cont = await self.ctx.create_continuation(
                 channel=ch_key, kind=kind, payload=cont_payload, deadline_s=timeout_s
             )
-            fut = self.ctx.prepare_wait_for_resume(cont.token)
+            fut = self.ctx.prepare_wait_for_resume(cont.continuation_id)
             wait_meta = self._inject_context_meta(
                 {"channel_key": ch_key, "continuation_token": cont.token}
             )
@@ -1429,12 +1430,16 @@ class ChannelSession:
             inline = (res or {}).get("payload")
             if inline is not None:
                 try:
-                    self.ctx.services.waits.resolve(cont.token, inline)
+                    self.ctx.services.waits.resolve(cont.continuation_id, inline)
                 except Exception:
                     logger = logging.getLogger("aethergraph.services.channel.session")
                     logger.debug("Continuation token %s already resolved inline", cont.token)
                 try:
-                    await self._cont_store.delete(self._run_id, self._node_id)
+                    cont.record = await self._cont_store.close(
+                        cont.record,
+                        status=ContinuationStatus.RESUMED,
+                        closed_at=datetime.now(UTC),
+                    )
                 except Exception:
                     logger.debug("Failed to delete continuation for token %s", cont.token)
                     logger.exception("Error occurred while deleting continuation")
@@ -1444,9 +1449,11 @@ class ChannelSession:
 
             corr = (res or {}).get("correlator")
             if corr:
-                await self._cont_store.bind_correlator(token=cont.token, corr=corr)
-                await self._cont_store.bind_correlator(
-                    token=cont.token,
+                cont.record = await self._cont_store.bind_correlator(
+                    continuation=cont.record, corr=corr
+                )
+                cont.record = await self._cont_store.bind_correlator(
+                    continuation=cont.record,
                     corr=Correlator(
                         scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
                     ),
@@ -1454,13 +1461,14 @@ class ChannelSession:
             else:
                 peek = await self._bus.peek_correlator(ch_key)
                 if peek:
-                    await self._cont_store.bind_correlator(
-                        token=cont.token,
+                    cont.record = await self._cont_store.bind_correlator(
+                        continuation=cont.record,
                         corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
                     )
                 else:
-                    await self._cont_store.bind_correlator(
-                        token=cont.token, corr=Correlator(self._bus._prefix(ch_key), ch_key, "", "")
+                    cont.record = await self._cont_store.bind_correlator(
+                        continuation=cont.record,
+                        corr=Correlator(self._bus._prefix(ch_key), ch_key, "", ""),
                     )
 
             result = await fut

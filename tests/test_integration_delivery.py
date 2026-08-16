@@ -169,9 +169,10 @@ async def test_channel_bus_interaction_reaches_semantic_delivery(tmp_path) -> No
 
     await bus.notify(
         Continuation(
+            continuation_id="cont-1",
+            revision=1,
             run_id="run-1",
             node_id="node-1",
-            token="private-token",
             kind="choice",
             channel="endpoint:sessions/public-1",
             prompt={"title": "Proceed?", "choices": [{"id": "yes", "label": "Yes"}]},

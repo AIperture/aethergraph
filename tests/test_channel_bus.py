@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from aethergraph.contracts.services.channel import Button, ChannelRoutingError, OutEvent
 from aethergraph.services.channel.channel_bus import ChannelBus
-from aethergraph.services.continuations.continuation import Continuation, Correlator
+from aethergraph.services.continuations.continuation import (
+    Continuation,
+    Correlator,
+    CreatedContinuation,
+)
 
 
 class _CapturingAdapter:
@@ -73,20 +79,31 @@ async def test_notify_exposes_public_identity_and_semantic_delivery_scope() -> N
         def __init__(self) -> None:
             self.bindings: list[tuple[str, Correlator]] = []
 
-        async def bind_correlator(self, *, token: str, corr: Correlator) -> None:
-            self.bindings.append((token, corr))
+        async def bind_correlator(
+            self, *, continuation: Continuation, corr: Correlator
+        ) -> Continuation:
+            self.bindings.append((continuation.continuation_id, corr))
+            return replace(
+                continuation,
+                revision=continuation.revision + 1,
+                correlators=(*continuation.correlators, corr),
+            )
 
     adapter = _PushAdapter()
     store = _Store()
     bus = ChannelBus(adapters={"slack": adapter}, store=store)
-    continuation = Continuation(
-        run_id="run-secret",
-        node_id="node-secret",
+    continuation = CreatedContinuation(
+        record=Continuation(
+            continuation_id="cont-secret",
+            revision=1,
+            run_id="run-secret",
+            node_id="node-secret",
+            kind="choice",
+            channel="slack:team/T:chan/C",
+            prompt={"title": "Choose", "choices": [{"id": "ship", "label": "Ship"}]},
+            payload={"_interaction_id": "interaction-public-1"},
+        ),
         token="token-secret",
-        kind="choice",
-        channel="slack:team/T:chan/C",
-        prompt={"title": "Choose", "choices": [{"id": "ship", "label": "Ship"}]},
-        payload={"_interaction_id": "interaction-public-1"},
     )
 
     await bus.notify(continuation)
@@ -97,16 +114,17 @@ async def test_notify_exposes_public_identity_and_semantic_delivery_scope() -> N
     assert "resume_key" not in event_meta
     assert event_meta["run_id"] == "run-secret"
     assert event_meta["node_id"] == "node-secret"
-    assert store.bindings[0][0] == "token-secret"
+    assert store.bindings[0][0] == "cont-secret"
 
 
 @pytest.mark.asyncio
 async def test_notify_rejects_continuation_without_public_interaction_identity() -> None:
     bus = ChannelBus(adapters={"test": _CapturingAdapter()})
     continuation = Continuation(
+        continuation_id="cont-1",
+        revision=1,
         run_id="run-1",
         node_id="node-1",
-        token="token-1",
         kind="user_input",
         channel="test:conversation/one",
         prompt="Reply",

@@ -60,6 +60,7 @@ class ContinuationDraft:
     resume_schema: Mapping[str, FrozenJson] = field(default_factory=dict)
     payload: Mapping[str, FrozenJson] = field(default_factory=dict)
     poll_payload: Mapping[str, FrozenJson] = field(default_factory=dict)
+    metadata: Mapping[str, FrozenJson] = field(default_factory=dict)
     deadline: datetime | None = None
     next_wakeup_at: datetime | None = None
     channel: str | None = None
@@ -93,6 +94,7 @@ class ContinuationDraft:
             "poll_payload",
             _freeze_mapping(self.poll_payload, path="poll_payload"),
         )
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, path="metadata"))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -110,6 +112,7 @@ class ContinuationRecord:
     resume_schema: Mapping[str, FrozenJson] = field(default_factory=dict)
     payload: Mapping[str, FrozenJson] = field(default_factory=dict)
     poll_payload: Mapping[str, FrozenJson] = field(default_factory=dict)
+    metadata: Mapping[str, FrozenJson] = field(default_factory=dict)
     deadline: datetime | None = None
     next_wakeup_at: datetime | None = None
     channel: str | None = None
@@ -161,6 +164,7 @@ class ContinuationRecord:
             "poll_payload",
             _freeze_mapping(self.poll_payload, path="poll_payload"),
         )
+        object.__setattr__(self, "metadata", _freeze_mapping(self.metadata, path="metadata"))
 
 
 def _validate_continuation_identity(
@@ -228,6 +232,7 @@ class ContinuationQuery:
     channel: str | None = None
     correlator: ContinuationCorrelator | None = None
     due_at_or_before: datetime | None = None
+    open_at: datetime | None = None
 
     def __post_init__(self) -> None:
         for name, values in (("statuses", self.statuses), ("kinds", self.kinds)):
@@ -242,6 +247,8 @@ class ContinuationQuery:
         _optional_nonempty("channel", self.channel)
         if self.due_at_or_before is not None:
             _utc("due_at_or_before", self.due_at_or_before)
+        if self.open_at is not None:
+            _utc("open_at", self.open_at)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

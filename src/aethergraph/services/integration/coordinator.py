@@ -285,11 +285,9 @@ class IntegrationIngressCoordinator:
         try:
             if resolved is not None:
                 continuation = resolved.continuation
-                await self.resume_router.resume(
-                    run_id=continuation.run_id,
-                    node_id=continuation.node_id,
-                    token=continuation.token,
-                    payload=build_interaction_payload(
+                await self.resume_router.resume_continuation(
+                    continuation,
+                    build_interaction_payload(
                         resolved=resolved,
                         envelope=envelope,
                         resources=resources,

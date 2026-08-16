@@ -1,283 +1,248 @@
+"""Atomic token-safe filesystem continuation store."""
+
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
-from datetime import datetime, timezone
-import hashlib
-import hmac
+from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from datetime import datetime
 import json
-import logging
-import os
 from pathlib import Path
-import re
-import threading
-from typing import Any
+from typing import Any, TypeVar
 
-from ..continuation import Continuation, Correlator
+from ..continuation import (
+    Continuation,
+    ContinuationDraft,
+    ContinuationStatus,
+    Correlator,
+    CreatedContinuation,
+)
+from .inmem_store import InMemoryContinuationStore
+
+_T = TypeVar("_T")
 
 
-class FSContinuationStore:  # implements AsyncContinuationStore
+class FSContinuationStore(InMemoryContinuationStore):
+    """Persist the atomic runtime contract in one replace-on-commit manifest."""
+
     def __init__(self, root: str | Path, secret: bytes):
+        super().__init__(secret=secret)
         self.root = Path(root)
-        self.secret = secret
-        self._lock = threading.RLock()
+        self._manifest = self.root / "continuations.v2.json"
+        self._load()
 
-    # ---------- helpers ----------
-    def _cont_path(self, run_id: str, node_id: str) -> Path:
-        return self.root / "runs" / run_id / "nodes" / node_id / "continuation.json"
+    async def create(self, draft: ContinuationDraft) -> CreatedContinuation:
+        """Atomically create and durably commit one continuation.
 
-    def _token_idx_path(self, token: str) -> Path:
-        return self.root / "index" / "tokens" / f"{token}.json"
+        Intro:
+            Persists the in-memory atomic mutation through one manifest replacement.
 
-    def _rev_idx_path(self, token: str) -> Path:
-        return self.root / "index" / "rev" / f"{token}.json"
+        Examples:
+            Create a wait:
+            ```python
+            created = await store.create(draft)
+            ```
+            Reopen it after restart:
+            ```python
+            wait = await reopened.get(draft.run_id, draft.node_id)
+            ```
 
-    def _safe(self, s: str) -> str:
-        s = (s or "").replace("\\", "_").replace("/", "_").replace(":", "_")
-        s = re.sub(r"[^A-Za-z0-9._@-]", "_", s)
-        s = re.sub(r"_+", "_", s).strip("._ ") or "x"
-        if len(s) > 100:
-            h = hashlib.sha1(s.encode()).hexdigest()[:8]
-            s = f"{s[:92]}_{h}"
-        return s
+        Args:
+            draft: Immutable tokenless continuation content.
 
-    def _corr_dir(self, scheme: str, channel: str, thread: str, message: str) -> Path:
-        return (
-            self.root
-            / "index"
-            / "corr"
-            / self._safe(scheme)
-            / self._safe(channel)
-            / self._safe(thread)
-            / self._safe(message)
+        Returns:
+            CreatedContinuation: Revision-one record and one-time raw token.
+
+        Notes:
+            The manifest stores only a protected token digest and tokenless record.
+        """
+        return await self._mutate(lambda: super(FSContinuationStore, self).create(draft))
+
+    async def update(self, continuation: Continuation, *, expected_revision: int) -> Continuation:
+        """Compare, replace, and durably commit one revision.
+
+        Intro:
+            Couples revision validation with one atomic manifest replacement.
+
+        Examples:
+            Reschedule a timer:
+            ```python
+            stored = await store.update(changed, expected_revision=current.revision)
+            ```
+            Detect a stale write:
+            ```python
+            await store.update(changed, expected_revision=1)
+            ```
+
+        Args:
+            continuation: Complete next continuation revision.
+            expected_revision: Required current revision.
+
+        Returns:
+            Continuation: Newly committed record.
+
+        Notes:
+            Failed replacement restores the in-process snapshot before propagating.
+        """
+        return await self._mutate(
+            lambda: super(FSContinuationStore, self).update(
+                continuation, expected_revision=expected_revision
+            )
         )
 
-    def _corr_tokens_path(self, scheme: str, channel: str, thread: str, message: str) -> Path:
-        return self._corr_dir(scheme, channel, thread, message) / "tokens.json"
+    async def close(
+        self,
+        continuation: Continuation,
+        *,
+        status: ContinuationStatus,
+        closed_at: datetime,
+    ) -> Continuation:
+        """Commit one terminal continuation receipt.
 
-    def _hmac(self, *parts: str) -> str:
-        h = hmac.new(self.secret, digestmod=hashlib.sha256)
-        for p in parts:
-            h.update(p.encode("utf-8"))
-        return h.hexdigest()
+        Intro:
+            Retains terminal state through the filesystem durability boundary.
 
-    async def mint_token(self, run_id: str, node_id: str, attempts: int) -> str:
-        return self._hmac(run_id, node_id, str(attempts), os.urandom(8).hex())
+        Examples:
+            Complete a resume:
+            ```python
+            closed = await store.close(wait, status=ContinuationStatus.RESUMED, closed_at=now)
+            ```
+            Cancel a wait:
+            ```python
+            closed = await store.close(wait, status=ContinuationStatus.CANCELED, closed_at=now)
+            ```
 
-    # ---------- core ----------
-    async def save(self, cont: Continuation) -> None:
-        def _write():
-            path = self._cont_path(cont.run_id, cont.node_id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = cont.to_dict() if hasattr(cont, "to_dict") else asdict(cont)
-            for k in ("deadline", "next_wakeup_at", "created_at"):
-                v = payload.get(k)
-                if isinstance(v, datetime):
-                    payload[k] = v.astimezone(timezone.utc).isoformat()
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            tmp.replace(path)
-            self._write_token_index(cont.run_id, cont.node_id, cont.token)
+        Args:
+            continuation: Exact current waiting record.
+            status: Requested terminal status.
+            closed_at: Timezone-aware terminal time.
 
-        await asyncio.to_thread(_write)
+        Returns:
+            Continuation: Durable terminal record.
 
-    async def get(self, run_id: str, node_id: str) -> Continuation | None:
-        def _read():
-            path = self._cont_path(run_id, node_id)
-            if not path.exists():
-                return None
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            for k in ("deadline", "next_wakeup_at", "created_at"):
-                if raw.get(k):
-                    raw[k] = datetime.fromisoformat(raw[k])
-            raw["closed"] = bool(raw.get("closed", False))
-            return Continuation(**raw)
-
-        return await asyncio.to_thread(_read)
-
-    async def list_cont_by_run(self, run_id: str) -> list[Continuation]:
-        def _list():
-            out = []
-            run_path = self.root / "runs" / run_id / "nodes"
-            if not run_path.exists():
-                return out
-            for node_dir in run_path.iterdir():
-                cont_path = node_dir / "continuation.json"
-                if cont_path.exists():
-                    raw = json.loads(cont_path.read_text(encoding="utf-8"))
-                    for k in ("deadline", "next_wakeup_at", "created_at"):
-                        if raw.get(k):
-                            raw[k] = datetime.fromisoformat(raw[k])
-                    raw["closed"] = bool(raw.get("closed", False))
-                    out.append(Continuation(**raw))
-            return out
-
-        return await asyncio.to_thread(_list)
-
-    async def delete(self, run_id: str, node_id: str) -> None:
-        def _del():
-            p = self._cont_path(run_id, node_id)
-            if p.exists():
-                p.unlink()
-
-        await asyncio.to_thread(_del)
-
-    # ---------- token helpers ----------
-    def _write_token_index(self, run_id: str, node_id: str, token: str) -> None:
-        with self._lock:
-            p = self._token_idx_path(token)
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(
-                json.dumps({"run_id": run_id, "node_id": node_id}, indent=2), encoding="utf-8"
+        Notes:
+            Terminal records remain in the manifest as delivery receipts.
+        """
+        return await self._mutate(
+            lambda: super(FSContinuationStore, self).close(
+                continuation, status=status, closed_at=closed_at
             )
+        )
 
-    async def get_by_token(self, token: str) -> Continuation | None:
-        def _lookup():
-            p = self._token_idx_path(token)
-            if not p.exists():
-                return None
-            ref = json.loads(p.read_text(encoding="utf-8"))
-            return ref["run_id"], ref["node_id"]
+    async def bind_correlator(
+        self, *, continuation: Continuation, corr: Correlator
+    ) -> Continuation:
+        """Commit a record and exact correlator index together.
 
-        ref = await asyncio.to_thread(_lookup)
-        if not ref:
-            return None
-        run_id, node_id = ref
-        return await self.get(run_id, node_id)
+        Intro:
+            Persists both sides of correlation lookup in one manifest version.
 
-    async def mark_closed(self, token: str) -> None:
-        c = await self.get_by_token(token)
-        if not c:
-            return
-        if not c.closed:
-            c.closed = True
-            await self.save(c)
+        Examples:
+            Bind a message:
+            ```python
+            wait = await store.bind_correlator(continuation=wait, corr=message)
+            ```
+            Replay a binding:
+            ```python
+            same = await store.bind_correlator(continuation=wait, corr=message)
+            ```
 
-    async def verify_token(self, run_id: str, node_id: str, token: str) -> bool:
-        c = await self.get(run_id, node_id)
-        return bool(c and hmac.compare_digest(token, c.token))
+        Args:
+            continuation: Exact current continuation record.
+            corr: Exact correlator to add.
 
-    # ---------- correlators ----------
-    async def bind_correlator(self, *, token: str, corr: Correlator) -> None:
-        def _bind():
-            scheme, channel, thread, message = corr.key()
-            tokens_path = self._corr_tokens_path(scheme, channel, thread, message)
-            tokens_path.parent.mkdir(parents=True, exist_ok=True)
-            toks: list[str] = []
-            if tokens_path.exists():
-                try:
-                    toks = json.loads(tokens_path.read_text(encoding="utf-8"))
-                except Exception:
-                    toks = []
-            if token not in toks:
-                toks.append(token)
-                tokens_path.write_text(json.dumps(toks, indent=2), encoding="utf-8")
-                # reverse index
-                r = self._rev_idx_path(token)
-                r.parent.mkdir(parents=True, exist_ok=True)
-                paths = []
-                if r.exists():
-                    try:
-                        paths = json.loads(r.read_text(encoding="utf-8"))
-                    except Exception:
-                        paths = []
-                key_path = str(tokens_path.relative_to(self.root))
-                if key_path not in paths:
-                    paths.append(key_path)
-                    r.write_text(json.dumps(paths, indent=2), encoding="utf-8")
+        Returns:
+            Continuation: Current or newly revised durable record.
 
-        await asyncio.to_thread(_bind)
+        Notes:
+            Bearer tokens are not used as correlator identities.
+        """
+        return await self._mutate(
+            lambda: super(FSContinuationStore, self).bind_correlator(
+                continuation=continuation, corr=corr
+            )
+        )
 
-    async def find_by_correlator(self, *, corr: Correlator) -> Continuation | None:
-        def _read_toks():
-            scheme, channel, thread, message = corr.key()
-            p = self._corr_tokens_path(scheme, channel, thread, message)
-            if not p.exists():
-                return []
+    async def _mutate(self, operation: Callable[[], Awaitable[_T]]) -> _T:
+        with self._lock:
+            snapshot = self._snapshot()
+            result = await operation()
             try:
-                return json.loads(p.read_text(encoding="utf-8")) or []
+                await asyncio.to_thread(self._persist)
             except Exception:
-                return []
+                self._restore(snapshot)
+                raise
+            return result
 
-        toks = await asyncio.to_thread(_read_toks)
-        for tok in reversed(toks):
-            c = await self.get_by_token(tok)
-            if c and not c.closed:
-                if c.deadline and datetime.now(timezone.utc) > c.deadline.astimezone(timezone.utc):
-                    continue
-                return c
-        return None
+    def _snapshot(self) -> tuple[dict, dict, dict, dict]:
+        return (
+            dict(self._records),
+            dict(self._by_run_node),
+            dict(self._by_digest),
+            defaultdict(list, {key: list(value) for key, value in self._corr_index.items()}),
+        )
 
-    async def last_open(self, *, channel: str, kind: str) -> Continuation | None:
-        # Optional slow scan (dev only)
-        def _scan():
-            waits = []
-            runs_path = self.root / "runs"
-            if not runs_path.exists():
-                return waits
-            for run_dir in runs_path.iterdir():
-                nodes_dir = run_dir / "nodes"
-                if not nodes_dir.exists():
-                    continue
-                for node_dir in nodes_dir.iterdir():
-                    cont_path = node_dir / "continuation.json"
-                    if cont_path.exists():
-                        waits.append(json.loads(cont_path.read_text(encoding="utf-8")))
-            return waits
+    def _restore(self, snapshot: tuple[dict, dict, dict, dict]) -> None:
+        self._records, self._by_run_node, self._by_digest, self._corr_index = snapshot
 
-        waits = await asyncio.to_thread(_scan)
-        for raw in reversed(waits):
-            if raw.get("closed"):
-                continue
-            if raw.get("channel") == channel and raw.get("kind") == kind:
-                for k in ("deadline", "next_wakeup_at", "created_at"):
-                    if raw.get(k):
-                        raw[k] = datetime.fromisoformat(raw[k])
-                return Continuation(**raw)
-        return None
+    def _persist(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 2,
+            "records": {key: value.to_dict() for key, value in self._records.items()},
+            "by_run_node": [
+                {"run_id": key[0], "node_id": key[1], "continuation_id": value}
+                for key, value in self._by_run_node.items()
+            ],
+            "by_digest": self._by_digest,
+            "correlators": [
+                {
+                    "correlator": {
+                        "scheme": key[0],
+                        "channel": key[1],
+                        "thread": key[2],
+                        "message": key[3],
+                    },
+                    "continuation_ids": value,
+                }
+                for key, value in self._corr_index.items()
+            ],
+        }
+        temporary = self._manifest.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(self._manifest)
 
-    async def list_waits(self) -> list[dict[str, Any]]:
-        def _scan():
-            out = []
-            runs_path = self.root / "runs"
-            if not runs_path.exists():
-                return out
-            for run_dir in runs_path.iterdir():
-                nodes_dir = run_dir / "nodes"
-                if not nodes_dir.exists():
-                    continue
-                for node_dir in nodes_dir.iterdir():
-                    cont_path = node_dir / "continuation.json"
-                    if cont_path.exists():
-                        out.append(json.loads(cont_path.read_text(encoding="utf-8")))
-            return out
+    def _load(self) -> None:
+        if not self._manifest.exists():
+            return
+        raw = json.loads(self._manifest.read_text(encoding="utf-8"))
+        if raw.get("version") != 2:
+            raise ValueError("Unsupported continuation manifest version")
+        records = {str(key): _continuation(value) for key, value in raw.get("records", {}).items()}
+        by_run_node = {
+            (str(value["run_id"]), str(value["node_id"])): str(value["continuation_id"])
+            for value in raw.get("by_run_node", ())
+        }
+        by_digest = {str(key): str(value) for key, value in raw.get("by_digest", {}).items()}
+        correlators: dict[tuple[str, str, str, str], list[str]] = defaultdict(list)
+        for value in raw.get("correlators", ()):
+            corr = Correlator(**value["correlator"])
+            correlators[corr.key()] = [str(item) for item in value["continuation_ids"]]
+        self._records = records
+        self._by_run_node = by_run_node
+        self._by_digest = by_digest
+        self._corr_index = defaultdict(list, correlators)
 
-        return await asyncio.to_thread(_scan)
 
-    async def clear(self) -> None:
-        def _clear():
-            for sub in ("runs", "index"):
-                p = self.root / sub
-                if p.exists():
-                    for root, dirs, files in os.walk(p, topdown=False):
-                        for f in files:
-                            try:
-                                os.remove(Path(root) / f)
-                            except Exception:
-                                logger = logging.getLogger(
-                                    "aethergraph.services.continuations.stores.fs_store"
-                                )
-                                logger.warning("Failed to remove file: %s", Path(root) / f)
-                        for d in dirs:
-                            try:
-                                os.rmdir(Path(root) / d)
-                            except Exception:
-                                logger = logging.getLogger(
-                                    "aethergraph.services.continuations.stores.fs_store"
-                                )
-                                logger.warning("Failed to remove dir: %s", Path(root) / d)
-
-        await asyncio.to_thread(_clear)
-
-    async def alias_for(self, token: str) -> str | None:
-        return token[:24]
+def _continuation(raw: dict[str, Any]) -> Continuation:
+    value = dict(raw)
+    for key in ("created_at", "deadline", "next_wakeup_at", "closed_at"):
+        if value.get(key):
+            value[key] = datetime.fromisoformat(value[key])
+    value["status"] = ContinuationStatus(value["status"])
+    value["correlators"] = tuple(Correlator(**item) for item in value.pop("correlators", ()))
+    metadata = value.pop("metadata", {})
+    compatibility = metadata.get("compatibility_metadata", {})
+    app_envelope = compatibility.get("app_id") if isinstance(compatibility, dict) else None
+    value["app_id"] = app_envelope.get("value") if isinstance(app_envelope, dict) else None
+    return Continuation(**value)

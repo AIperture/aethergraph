@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 import logging
-from typing import Any
 import uuid
 
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.observability import OperationObserver, resolve_operation_observer
 from aethergraph.services.clock.clock import SystemClock
+from aethergraph.services.continuations.continuation import Continuation, ContinuationQuery
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.storage.continuation_store.timer_leases import (
     SQLiteContinuationTimerLeaseStore,
@@ -21,30 +21,13 @@ from aethergraph.storage.continuation_store.timer_leases import (
 @dataclass(frozen=True)
 class _DueContinuation:
     fire_id: str
-    run_id: str
-    node_id: str
-    token: str
+    continuation: Continuation
     scheduled_for: datetime
     timer_kind: str
 
 
-def _as_utc_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    else:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
-
-
-def _fire_id(*, run_id: str, node_id: str, token: str, scheduled_for: datetime) -> str:
-    raw = "\x00".join((run_id, node_id, token, scheduled_for.isoformat()))
+def _fire_id(*, continuation_id: str, scheduled_for: datetime) -> str:
+    raw = "\x00".join((continuation_id, scheduled_for.isoformat()))
     return f"ctf_{sha256(raw.encode('utf-8')).hexdigest()}"
 
 
@@ -185,15 +168,18 @@ class ContinuationTimerService:
             Busy, delayed, delivered, and dead-lettered fires are not counted.
         """
         now = self.clock.now().astimezone(UTC)
-        waits = await self.continuation_store.list_waits()
-        due = self._due_continuations(waits, now=now)[: self.batch_size]
+        page = await self.continuation_store.query(
+            ContinuationQuery(due_at_or_before=now, limit=self.batch_size)
+        )
+        due = [self._due_continuation(value) for value in page.items]
         processed = 0
         for candidate in due:
             lease = self.lease_store.claim(
                 fire_id=candidate.fire_id,
-                run_id=candidate.run_id,
-                node_id=candidate.node_id,
-                token=candidate.token,
+                continuation_id=candidate.continuation.continuation_id,
+                run_id=candidate.continuation.run_id,
+                node_id=candidate.continuation.node_id,
+                scheduled_for=candidate.scheduled_for,
                 worker_id=self.worker_id,
                 now=now,
                 lease_until=now + timedelta(seconds=self.lease_s),
@@ -218,41 +204,20 @@ class ContinuationTimerService:
             except TimeoutError:
                 continue
 
-    def _due_continuations(
-        self,
-        waits: list[dict[str, Any]],
-        *,
-        now: datetime,
-    ) -> list[_DueContinuation]:
-        due: list[_DueContinuation] = []
-        for raw in waits:
-            if not isinstance(raw, dict) or bool(raw.get("closed", False)):
-                continue
-            run_id = str(raw.get("run_id") or "")
-            node_id = str(raw.get("node_id") or "")
-            token = str(raw.get("token") or "")
-            scheduled_for = _as_utc_datetime(raw.get("next_wakeup_at"))
-            if not run_id or not node_id or not token or scheduled_for is None:
-                continue
-            if scheduled_for > now:
-                continue
-            timer_kind = "poll" if raw.get("poll") else "deadline"
-            due.append(
-                _DueContinuation(
-                    fire_id=_fire_id(
-                        run_id=run_id,
-                        node_id=node_id,
-                        token=token,
-                        scheduled_for=scheduled_for,
-                    ),
-                    run_id=run_id,
-                    node_id=node_id,
-                    token=token,
-                    scheduled_for=scheduled_for,
-                    timer_kind=timer_kind,
-                )
-            )
-        return sorted(due, key=lambda item: (item.scheduled_for, item.run_id, item.node_id))
+    @staticmethod
+    def _due_continuation(continuation: Continuation) -> _DueContinuation:
+        scheduled_for = continuation.next_wakeup_at
+        if scheduled_for is None:
+            raise ValueError("Due continuation is missing next_wakeup_at")
+        return _DueContinuation(
+            fire_id=_fire_id(
+                continuation_id=continuation.continuation_id,
+                scheduled_for=scheduled_for,
+            ),
+            continuation=continuation,
+            scheduled_for=scheduled_for,
+            timer_kind="poll" if continuation.poll else "deadline",
+        )
 
     async def _deliver(
         self,
@@ -267,12 +232,7 @@ class ContinuationTimerService:
             "scheduled_for": candidate.scheduled_for.isoformat(),
         }
         try:
-            await self.resume_router.resume(
-                candidate.run_id,
-                candidate.node_id,
-                candidate.token,
-                payload,
-            )
+            await self.resume_router.resume_continuation(candidate.continuation, payload)
         except Exception as exc:
             dead_letter = lease.attempts >= self.max_attempts
             retry_delay = min(
@@ -291,8 +251,8 @@ class ContinuationTimerService:
             if not changed:
                 self.logger.error(
                     "Continuation timer lost lease while recording failure for %s/%s",
-                    candidate.run_id,
-                    candidate.node_id,
+                    candidate.continuation.run_id,
+                    candidate.continuation.node_id,
                 )
             operation = "dead_letter" if dead_letter else "retry"
             await self._observe(operation, candidate=candidate, lease=lease, error=exc)
@@ -305,7 +265,8 @@ class ContinuationTimerService:
         )
         if not changed:
             raise RuntimeError(
-                f"Continuation timer lease ownership lost for {candidate.run_id}/{candidate.node_id}"
+                "Continuation timer lease ownership lost for "
+                f"{candidate.continuation.run_id}/{candidate.continuation.node_id}"
             )
         await self._observe("delivery", candidate=candidate, lease=lease)
 
@@ -323,8 +284,9 @@ class ContinuationTimerService:
             operation=operation,
             metadata={
                 "fire_id": candidate.fire_id,
-                "run_id": candidate.run_id,
-                "node_id": candidate.node_id,
+                "continuation_id": candidate.continuation.continuation_id,
+                "run_id": candidate.continuation.run_id,
+                "node_id": candidate.continuation.node_id,
                 "worker_id": self.worker_id,
                 "timer_kind": candidate.timer_kind,
                 "attempts": lease.attempts,

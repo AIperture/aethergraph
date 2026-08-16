@@ -103,9 +103,11 @@ async def _build_env(
     origin_binding = (
         raw_origin_binding
         if isinstance(raw_origin_binding, OriginBinding)
-        else OriginBinding.model_validate(raw_origin_binding)
-        if raw_origin_binding is not None
-        else None
+        else (
+            OriginBinding.model_validate(raw_origin_binding)
+            if raw_origin_binding is not None
+            else None
+        )
     )
 
     env = RuntimeEnv(
@@ -221,9 +223,17 @@ async def _resolve_graph_outputs(
                 if cont:
                     continuations.append(
                         {
+                            "continuation_id": cont.continuation_id,
                             "node_id": nid,
                             "kind": cont.kind,
-                            "token": cont.token,
+                            "interaction_id": next(
+                                (
+                                    corr.message
+                                    for corr in cont.correlators
+                                    if corr.scheme == "interaction"
+                                ),
+                                None,
+                            ),
                             "channel": cont.channel,
                             "deadline": getattr(cont.deadline, "isoformat", lambda: None)(),
                         }

@@ -22,7 +22,7 @@ from aethergraph.contracts.integration import (
     SemanticEventKind,
 )
 from aethergraph.services.channel.resources import InputResource
-from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.continuations.continuation import ContinuationDraft, Correlator
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.integration import (
     BindingResolution,
@@ -170,8 +170,39 @@ class _ResumeRouter:
     def __init__(self) -> None:
         self.calls = []
 
-    async def resume(self, **kwargs) -> None:
-        self.calls.append(kwargs)
+    async def resume_continuation(self, continuation, payload) -> None:
+        self.calls.append({"continuation": continuation, "payload": payload})
+
+
+async def _create_wait(
+    store: InMemoryContinuationStore,
+    *,
+    run_id: str,
+    node_id: str,
+    kind: str,
+    session_id: str,
+    interaction_id: str,
+    prompt=None,
+):
+    return (
+        await store.create(
+            ContinuationDraft(
+                run_id=run_id,
+                node_id=node_id,
+                kind=kind,
+                prompt=prompt,
+                session_id=session_id,
+                payload={"_interaction_id": interaction_id},
+                correlators=(
+                    Correlator(
+                        scheme="interaction",
+                        channel="public",
+                        message=interaction_id,
+                    ),
+                ),
+            )
+        )
+    ).record
 
 
 def _coordinator(
@@ -352,16 +383,15 @@ async def test_coordinator_completes_idempotency_after_unexpected_dispatch_failu
 @pytest.mark.asyncio
 async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    continuation = Continuation(
+    continuation = await _create_wait(
+        continuation_store,
         run_id="run-waiting-1",
         node_id="node-choice",
         kind="choice",
-        token="internal-secret-token",
         prompt={"title": "Proceed?", "options": ["Yes", "No"]},
         session_id="session-1",
-        payload={"_interaction_id": "interaction-public-1"},
+        interaction_id="interaction-public-1",
     )
-    await continuation_store.save(continuation)
     event_log = SqliteEventLog(str(tmp_path / "events.db"))
     root = _RootDispatcher()
     resume = _ResumeRouter()
@@ -386,7 +416,7 @@ async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None
     assert receipt.action == "continuation_resumed"
     assert receipt.turn_id == "run-waiting-1"
     assert root.calls == []
-    assert resume.calls[0]["token"] == "internal-secret-token"
+    assert resume.calls[0]["continuation"].continuation_id == continuation.continuation_id
     assert resume.calls[0]["payload"]["interaction_id"] == "interaction-public-1"
     assert resume.calls[0]["payload"]["choice"] == "Yes"
     await event_log.close()
@@ -396,15 +426,13 @@ async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None
 async def test_interaction_resolver_rejects_ambiguous_bound_session_text() -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
     for index in range(2):
-        await continuation_store.save(
-            Continuation(
-                run_id=f"run-{index}",
-                node_id=f"node-{index}",
-                kind="user_input",
-                token=f"token-{index}",
-                session_id="session-1",
-                payload={"_interaction_id": f"interaction-{index}"},
-            )
+        await _create_wait(
+            continuation_store,
+            run_id=f"run-{index}",
+            node_id=f"node-{index}",
+            kind="user_input",
+            session_id="session-1",
+            interaction_id=f"interaction-{index}",
         )
 
     with pytest.raises(InteractionResolutionError) as exc_info:
@@ -418,15 +446,13 @@ async def test_interaction_resolver_rejects_ambiguous_bound_session_text() -> No
 @pytest.mark.asyncio
 async def test_interaction_resolver_resolves_exact_public_identity() -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    await continuation_store.save(
-        Continuation(
-            run_id="run-1",
-            node_id="node-1",
-            kind="user_input",
-            token="private-token",
-            session_id="session-1",
-            payload={"_interaction_id": "interaction-public-1"},
-        )
+    continuation = await _create_wait(
+        continuation_store,
+        run_id="run-1",
+        node_id="node-1",
+        kind="user_input",
+        session_id="session-1",
+        interaction_id="interaction-public-1",
     )
 
     resolved = await InteractionResolver(continuation_store).resolve_exact(
@@ -436,21 +462,19 @@ async def test_interaction_resolver_resolves_exact_public_identity() -> None:
     )
 
     assert resolved.interaction_id == "interaction-public-1"
-    assert resolved.continuation.token == "private-token"
+    assert resolved.continuation.continuation_id == continuation.continuation_id
 
 
 @pytest.mark.asyncio
 async def test_interaction_resolver_rejects_exact_identity_from_other_session() -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    await continuation_store.save(
-        Continuation(
-            run_id="run-1",
-            node_id="node-1",
-            kind="choice",
-            token="private-token",
-            session_id="session-1",
-            payload={"_interaction_id": "interaction-public-1"},
-        )
+    await _create_wait(
+        continuation_store,
+        run_id="run-1",
+        node_id="node-1",
+        kind="choice",
+        session_id="session-1",
+        interaction_id="interaction-public-1",
     )
 
     with pytest.raises(InteractionResolutionError) as exc_info:

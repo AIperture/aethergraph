@@ -9,7 +9,11 @@ from typing import Any, Literal
 from aethergraph.contracts.integration import ExternalSessionBinding, IngressEnvelope
 from aethergraph.services.channel.choices import normalize_choice_reply
 from aethergraph.services.channel.resources import InputResource
-from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.continuations.continuation import (
+    Continuation,
+    ContinuationQuery,
+    Correlator,
+)
 
 
 class InteractionResolutionError(RuntimeError):
@@ -90,13 +94,13 @@ class InteractionResolver:
             ```
 
         Args:
-            continuation_store: Store exposing `list_waits()` and `get_by_token()`.
+            continuation_store: Store exposing the bounded continuation query contract.
 
         Returns:
             None.
 
         Notes:
-            Continuations must carry `_interaction_id` in their persisted payload.
+            Continuations bind public interaction IDs as exact indexed correlators.
         """
         self.store = continuation_store
 
@@ -133,25 +137,28 @@ class InteractionResolver:
         Notes:
             Structured root input does not resume a text/file interaction implicitly.
         """
-        waits = await self.store.list_waits()
-        open_waits = [wait for wait in waits if self._is_open(wait)]
         if envelope.choice is not None:
             return await self.resolve_exact(
                 session_id=binding.ag_session_id,
                 interaction_id=envelope.choice.interaction_id,
                 expected_kinds={"approval", "choice"},
-                waits=open_waits,
             )
 
         eligible_kinds = self._eligible_kinds(envelope)
         if not eligible_kinds:
             return None
-        eligible = [
-            wait
-            for wait in open_waits
-            if wait.get("session_id") == binding.ag_session_id
-            and wait.get("kind") in eligible_kinds
-        ]
+        eligible = list(
+            (
+                await self.store.query(
+                    ContinuationQuery(
+                        session_id=binding.ag_session_id,
+                        kinds=tuple(sorted(eligible_kinds)),
+                        open_at=datetime.now(UTC),
+                        limit=2,
+                    )
+                )
+            ).items
+        )
         if not eligible:
             return None
         if len(eligible) > 1:
@@ -159,7 +166,11 @@ class InteractionResolver:
                 code="integration.interaction_ambiguous",
                 message="More than one eligible interaction is open in the bound session.",
             )
-        return await self._load(eligible[0])
+        continuation = eligible[0]
+        return ResolvedInteraction(
+            interaction_id=self._interaction_id(continuation),
+            continuation=continuation,
+        )
 
     async def resolve_exact(
         self,
@@ -167,7 +178,6 @@ class InteractionResolver:
         session_id: str,
         interaction_id: str,
         expected_kinds: set[str],
-        waits: list[dict[str, Any]] | None = None,
     ) -> ResolvedInteraction:
         """Resolve one public interaction identity to its open continuation.
 
@@ -198,8 +208,6 @@ class InteractionResolver:
             session_id: Exact AG session that owns the interaction.
             interaction_id: Public interaction identity emitted by Channel.
             expected_kinds: Continuation kinds accepted by the response.
-            waits: Optional already-read open-wait snapshot used by `resolve`.
-
         Returns:
             ResolvedInteraction: Exact open continuation and public identity.
 
@@ -208,10 +216,22 @@ class InteractionResolver:
             wait, Channel prefix, or correlator.
         """
 
-        candidates = waits
-        if candidates is None:
-            candidates = [wait for wait in await self.store.list_waits() if self._is_open(wait)]
-        exact = [wait for wait in candidates if self._interaction_id(wait) == interaction_id]
+        correlator = Correlator(
+            scheme="interaction",
+            channel="public",
+            message=interaction_id,
+        )
+        exact = list(
+            (
+                await self.store.query(
+                    ContinuationQuery(
+                        correlator=correlator,
+                        open_at=datetime.now(UTC),
+                        limit=2,
+                    )
+                )
+            ).items
+        )
         if not exact:
             raise InteractionResolutionError(
                 code="integration.interaction_not_found",
@@ -223,44 +243,27 @@ class InteractionResolver:
                 message="The supplied interaction identity is not unique.",
             )
         wait = exact[0]
-        if wait.get("session_id") != session_id:
+        if wait.session_id != session_id:
             raise InteractionResolutionError(
                 code="integration.interaction_session_mismatch",
                 message="The interaction does not belong to the bound AG session.",
             )
-        if wait.get("kind") not in expected_kinds:
+        if wait.kind not in expected_kinds:
             raise InteractionResolutionError(
                 code="integration.interaction_kind_mismatch",
                 message="The interaction does not accept this response kind.",
             )
-        return await self._load(wait)
-
-    async def _load(self, wait: dict[str, Any]) -> ResolvedInteraction:
-        token = str(wait.get("token") or "")
-        continuation = await self.store.get_by_token(token)
-        if continuation is None or continuation.closed:
-            raise InteractionResolutionError(
-                code="integration.interaction_not_found",
-                message="The selected interaction is no longer open.",
-            )
         return ResolvedInteraction(
-            interaction_id=self._interaction_id(wait),
-            continuation=continuation,
+            interaction_id=interaction_id,
+            continuation=wait,
         )
 
     @staticmethod
-    def _interaction_id(wait: dict[str, Any]) -> str:
-        payload = wait.get("payload")
-        return str(payload.get("_interaction_id") or "") if isinstance(payload, dict) else ""
-
-    @staticmethod
-    def _is_open(wait: dict[str, Any]) -> bool:
-        if wait.get("closed"):
-            return False
-        deadline = wait.get("deadline")
-        if isinstance(deadline, str):
-            deadline = datetime.fromisoformat(deadline)
-        return not isinstance(deadline, datetime) or datetime.now(UTC) <= deadline.astimezone(UTC)
+    def _interaction_id(wait: Continuation) -> str:
+        for correlator in wait.correlators:
+            if correlator.scheme == "interaction" and correlator.channel == "public":
+                return correlator.message
+        return ""
 
     @staticmethod
     def _eligible_kinds(envelope: IngressEnvelope) -> set[str]:

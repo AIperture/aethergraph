@@ -70,6 +70,7 @@ CREATE TABLE local_continuations (
     resume_schema_json TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     poll_payload_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
     deadline TEXT,
     next_wakeup_at TEXT,
     channel TEXT,
@@ -89,6 +90,10 @@ ON local_continuations(run_id, node_id, status, next_wakeup_at, continuation_id)
 _CREATE_CONTINUATION_CHANNEL_INDEX = """
 CREATE INDEX ix_local_continuations_channel_created
 ON local_continuations(channel, created_at DESC, continuation_id DESC)
+"""
+_CREATE_CONTINUATION_SESSION_OPEN_INDEX = """
+CREATE INDEX ix_local_continuations_session_open
+ON local_continuations(session_id, status, kind, deadline, created_at DESC, continuation_id DESC)
 """
 _CREATE_CORRELATORS = """
 CREATE TABLE local_continuation_correlators (
@@ -191,6 +196,7 @@ class LocalContinuationRepository:
             resume_schema=draft.resume_schema,
             payload=draft.payload,
             poll_payload=draft.poll_payload,
+            metadata=draft.metadata,
             deadline=draft.deadline,
             next_wakeup_at=draft.next_wakeup_at,
             channel=draft.channel,
@@ -408,6 +414,9 @@ class LocalContinuationRepository:
         if due:
             clauses.extend(("c.next_wakeup_at IS NOT NULL", "c.next_wakeup_at <= ?"))
             values.append(query.due_at_or_before.isoformat())
+        if query.open_at is not None:
+            clauses.append("(c.deadline IS NULL OR c.deadline >= ?)")
+            values.append(query.open_at.isoformat())
         fingerprint = _query_fingerprint("continuations", query, without_cursor=True)
         if query.page.cursor:
             timestamp, identity = _decode_cursor(query.page.cursor, fingerprint)
@@ -702,6 +711,7 @@ def _install(database: LocalSQLiteDatabase) -> None:
             _CREATE_CONTINUATION_SCOPE_INDEX,
             _CREATE_CONTINUATION_DUE_INDEX,
             _CREATE_CONTINUATION_CHANNEL_INDEX,
+            _CREATE_CONTINUATION_SESSION_OPEN_INDEX,
             _CREATE_CORRELATORS,
             _CREATE_CORRELATOR_INDEX,
             _CREATE_LEASES,
@@ -719,9 +729,9 @@ def _insert_continuation(connection: sqlite3.Connection, record: ContinuationRec
             continuation_id, kind, tenant_id, project_id, org_id, user_id,
             session_id, run_id, graph_id, node_id, agent_id, scope_key, created_at,
             token_digest, revision, status, prompt, resume_schema_json, payload_json,
-            poll_payload_json, deadline, next_wakeup_at, channel, attempts, closed_at,
-            schema_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            poll_payload_json, metadata_json, deadline, next_wakeup_at, channel,
+            attempts, closed_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         _continuation_values(record),
     )
@@ -736,8 +746,8 @@ def _update_continuation(connection: sqlite3.Connection, record: ContinuationRec
             session_id = ?, run_id = ?, graph_id = ?, node_id = ?, agent_id = ?,
             scope_key = ?, created_at = ?, token_digest = ?, revision = ?, status = ?,
             prompt = ?, resume_schema_json = ?, payload_json = ?, poll_payload_json = ?,
-            deadline = ?, next_wakeup_at = ?, channel = ?, attempts = ?, closed_at = ?,
-            schema_version = ?
+            metadata_json = ?, deadline = ?, next_wakeup_at = ?, channel = ?, attempts = ?,
+            closed_at = ?, schema_version = ?
         WHERE continuation_id = ?
         """,
         (*values[1:], values[0]),
@@ -757,6 +767,7 @@ def _continuation_values(record: ContinuationRecord) -> tuple[object, ...]:
         _json(record.resume_schema),
         _json(record.payload),
         _json(record.poll_payload),
+        _json(record.metadata),
         _optional_iso(record.deadline),
         _optional_iso(record.next_wakeup_at),
         record.channel,
@@ -782,6 +793,7 @@ def _continuation(
             resume_schema=_json_object(row["resume_schema_json"]),
             payload=_json_object(row["payload_json"]),
             poll_payload=_json_object(row["poll_payload_json"]),
+            metadata=_json_object(row["metadata_json"]),
             deadline=_optional_time(row["deadline"]),
             next_wakeup_at=_optional_time(row["next_wakeup_at"]),
             channel=row["channel"],

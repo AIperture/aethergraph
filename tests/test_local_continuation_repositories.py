@@ -71,6 +71,7 @@ def _draft(
         resume_schema={"type": "object"},
         payload={"answer": 42},
         poll_payload={"attempt": 0},
+        metadata={"service_context": {"interaction_id": "interaction-1"}},
         deadline=created_at + timedelta(hours=1),
         next_wakeup_at=next_wakeup_at,
         channel="ui:session",
@@ -109,6 +110,7 @@ async def test_continuation_create_token_scope_and_atomic_correlators(tmp_path: 
     assert created.record.token_digest.startswith("hmac-sha256:")
     assert created.token not in created.record.token_digest
     assert await repository.get(_scope(), "cont-1") == created.record
+    assert created.record.metadata["service_context"]["interaction_id"] == "interaction-1"
     assert await repository.get(StorageScope(project_id="other"), "cont-1") is None
     assert await repository.get(StorageScope(), "cont-1") is None
     assert await repository.resolve_token(created.token) == created.record
@@ -207,6 +209,13 @@ async def test_continuation_due_and_created_queries_have_bound_cursors(tmp_path:
         )
     )
     assert due.items == tuple(records[:2])
+    open_page = await repository.query(
+        ContinuationQuery(
+            scope=_scope(),
+            open_at=NOW + timedelta(hours=2),
+        )
+    )
+    assert open_page.items == ()
     await database.close()
 
 
@@ -397,6 +406,11 @@ async def test_continuation_schema_and_query_paths_are_canonical_and_indexed(
     assert "ix_local_continuation_correlators_lookup" in correlator_plan
     assert "ix_local_continuation_leases_scope_updated" in lease_plan
     assert "SCAN local_" not in f"{due_plan} {correlator_plan} {lease_plan}"
+    indexes = {
+        str(row["name"])
+        for row in await database.fetch_all("PRAGMA index_list(local_continuations)")
+    }
+    assert "ix_local_continuations_session_open" in indexes
     await database.close()
 
 

@@ -557,12 +557,7 @@ class EmbeddedRuntime:
                 )
             )
         with self.activate():
-            await self._container.resume_router.resume(
-                run_id=continuation.run_id,
-                node_id=continuation.node_id,
-                token=continuation.token,
-                payload=payload,
-            )
+            await self._container.resume_router.resume_continuation(continuation, payload)
         return True
 
     async def query_events(

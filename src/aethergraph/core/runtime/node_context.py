@@ -19,7 +19,11 @@ from aethergraph.core.runtime.runtime_services import get_ext_context_service
 from aethergraph.services.agent_state import AgentStateBackend, AgentStateHandle
 from aethergraph.services.artifacts.facade import ArtifactFacade
 from aethergraph.services.channel.session import ChannelSession
-from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.continuations.continuation import (
+    ContinuationDraft,
+    Correlator,
+    CreatedContinuation,
+)
 from aethergraph.services.indices.scoped_indices import ScopedIndices
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
@@ -791,20 +795,62 @@ class NodeContext:
         deadline_s: int | None = None,
         poll: dict | None = None,
         attempts: int = 0,
-    ) -> Continuation:
-        """Create and store a continuation for this node in the continuation store."""
-        token = await self.services.continuation_store.mint_token(
-            self.run_id, self.node_id, attempts=attempts
-        )
+    ) -> CreatedContinuation:
+        """Atomically create a continuation for this node.
+
+        Intro:
+            Builds tokenless continuation content and delegates token minting plus
+            persistence to the configured continuation store.
+
+        Examples:
+            Create a text wait:
+            ```python
+            created = await context.create_continuation(
+                kind="user_input", payload={"prompt": "Reply"}, channel="ui:session"
+            )
+            ```
+
+            Create a timed poll:
+            ```python
+            created = await context.create_continuation(
+                kind="external", payload={}, channel=None, poll={"interval_sec": 30}
+            )
+            ```
+
+        Args:
+            kind: Runtime wait kind.
+            payload: Setup-time payload merged into resume delivery.
+            channel: Exact channel key, if the wait is user-facing.
+            deadline_s: Optional lifetime in seconds from the injected clock.
+            poll: Optional provider-neutral polling configuration.
+            attempts: Current wait-attempt count.
+
+        Returns:
+            CreatedContinuation: Tokenless record and one-time raw token.
+
+        Notes:
+            A public interaction ID is bound as an initial indexed correlator;
+            deprecated App identity remains optional compatibility metadata only.
+        """
         deadline = None
         if deadline_s:
             deadline = self._now() + timedelta(seconds=deadline_s)
 
-        continuation = Continuation(
+        session_id = getattr(self, "session_id", None)
+        interaction_id = payload.get("_interaction_id") if payload else None
+        correlators = ()
+        if isinstance(interaction_id, str) and interaction_id and isinstance(session_id, str):
+            correlators = (
+                Correlator(
+                    scheme="interaction",
+                    channel="public",
+                    message=interaction_id,
+                ),
+            )
+        draft = ContinuationDraft(
             run_id=self.run_id,
             node_id=self.node_id,
             kind=kind,
-            token=token,
             prompt=payload.get("prompt") if payload else None,
             resume_schema=payload.get("resume_schema") if payload else None,
             channel=channel,
@@ -814,13 +860,13 @@ class NodeContext:
             created_at=self._now(),
             attempts=attempts,
             payload=payload,
-            session_id=getattr(self, "session_id", None),
+            session_id=session_id,
             agent_id=getattr(self, "agent_id", None),
             app_id=getattr(self, "app_id", None),
             graph_id=getattr(self, "graph_id", None),
+            correlators=correlators,
         )
-        await self.services.continuation_store.save(continuation)
-        return continuation
+        return await self.services.continuation_store.create(draft)
 
     async def wait_for_resume(self, token: str) -> dict:
         """Wait for a continuation to be resumed, and return the payload.

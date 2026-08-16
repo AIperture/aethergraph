@@ -61,18 +61,22 @@ def _waiting_record() -> ContinuationRecord:
 
 def test_continuation_draft_and_record_are_scoped_and_deeply_immutable() -> None:
     payload = {"context": ["a"]}
+    metadata = {"compatibility_metadata": {"app_id": {"value": "legacy-app"}}}
     draft = ContinuationDraft(
         continuation_id="cont-1",
         kind="approval",
         scope=SCOPE,
         created_at=NOW,
         payload=payload,
+        metadata=metadata,
         correlators=(CORRELATOR,),
     )
     record = _waiting_record()
     payload["context"].append("b")
+    metadata["compatibility_metadata"]["app_id"]["value"] = "changed"
 
     assert draft.payload["context"] == ("a",)
+    assert draft.metadata["compatibility_metadata"]["app_id"]["value"] == "legacy-app"
     assert record.resume_schema["required"] == ("approved",)
     assert "token" not in {item.name for item in fields(ContinuationRecord)}
     assert "app_id" not in {item.name for item in fields(ContinuationRecord)}
