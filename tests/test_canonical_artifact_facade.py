@@ -23,6 +23,7 @@ from aethergraph.storage.contracts import (
     SessionRecord,
     StorageCapacityError,
     StorageIntegrityError,
+    StorageNotFoundError,
     StorageOpenMode,
     StorageOpenRequest,
     StorageProviderSelection,
@@ -101,8 +102,6 @@ def _facade(
         blobs=bundle.blobs,
         artifacts=bundle.artifacts,
         search=search or bundle.search,
-        runs=bundle.runs,
-        sessions=bundle.sessions,
         owner_scope=_owner_scope(),
         execution_scope=execution_scope or _execution_scope(),
         tool_name="reporter",
@@ -142,8 +141,13 @@ async def test_canonical_artifact_write_retry_hydration_retention_and_search(
             occurrence_id="occurrence-1",
             occurred_at=NOW,
         )
+        assert first.created is True
+        assert retried.created is False
 
-        assert retried == first
+        assert retried.record == first.record
+        assert retried.occurrence == first.occurrence
+        assert retried.retention == first.retention
+        assert retried.indexed_cursor == first.indexed_cursor
         assert first.record.blob_locator.startswith("blob:sha256:")
         assert first.record.owner_scope == _owner_scope()
         assert first.occurrence.scope == _execution_scope()
@@ -805,21 +809,72 @@ async def test_canonical_artifact_search_failure_is_visible_after_durable_record
     bundle = _open_bundle(tmp_path)
     facade = _facade(bundle, search=_FailingSearch())  # type: ignore[arg-type]
     try:
-        with pytest.raises(RuntimeError, match="index unavailable"):
-            await facade.save_text(
-                "durable before projection",
-                artifact_id="artifact-1",
-                occurrence_id="occurrence-1",
-                occurred_at=NOW,
-            )
+        failed = await facade.save_text(
+            "durable before projection",
+            artifact_id="artifact-1",
+            occurrence_id="occurrence-1",
+            occurred_at=NOW,
+        )
 
+        assert failed.created is True
+        assert failed.projection_status == "failed"
+        assert failed.projection_diagnostic == "RuntimeError: search projection failed"
         assert await bundle.artifacts.get(_owner_scope(), "artifact-1") is not None
+        intent = await facade.get_search_projection_intent("occurrence-1")
+        assert intent is not None and intent.status.value == "failed"
         page = await bundle.artifacts.list_occurrences(
             _execution_scope(),
             PageRequest(),
             "artifact-1",
         )
         assert [row.occurrence_id for row in page.items] == ["occurrence-1"]
+        await bundle.close()
+
+        bundle = _open_bundle(tmp_path)
+        reopened = _facade(bundle)
+        retried = await reopened.save_text(
+            "durable before projection",
+            artifact_id="artifact-1",
+            occurrence_id="occurrence-1",
+            occurred_at=NOW,
+        )
+        assert retried.created is False
+        assert retried.projection_status == "indexed"
+        assert retried.indexed_cursor is not None
+        restored = await reopened.get_search_projection_intent("occurrence-1")
+        assert restored is not None and restored.status.value == "indexed"
+        assert restored.attempts == 2
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_missing_run_rolls_back_artifact_authority_but_leaves_reconcilable_blob(
+    tmp_path: Path,
+) -> None:
+    bundle = _open_bundle(tmp_path)
+    execution = StorageScope(
+        **_owner_scope().as_filter(),
+        run_id="missing-run",
+        graph_id="graph-1",
+    )
+    try:
+        with pytest.raises(StorageNotFoundError, match="missing-run"):
+            await _facade(bundle, execution_scope=execution).save_text(
+                "not authoritative",
+                artifact_id="artifact-rollback",
+                occurrence_id="occurrence-rollback",
+                occurred_at=NOW,
+            )
+
+        assert await bundle.artifacts.get(_owner_scope(), "artifact-rollback") is None
+        assert (
+            await bundle.artifacts.list_occurrences(
+                execution,
+                PageRequest(),
+                "artifact-rollback",
+            )
+        ).items == ()
     finally:
         await bundle.close()
 
@@ -830,8 +885,6 @@ def test_canonical_artifact_scope_and_public_docstrings_fail_closed() -> None:
             blobs=object(),  # type: ignore[arg-type]
             artifacts=object(),  # type: ignore[arg-type]
             search=object(),  # type: ignore[arg-type]
-            runs=object(),  # type: ignore[arg-type]
-            sessions=object(),  # type: ignore[arg-type]
             owner_scope=StorageScope(project_id="project-1"),
             execution_scope=StorageScope(project_id="project-2"),
         )

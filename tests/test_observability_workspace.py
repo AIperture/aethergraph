@@ -12,8 +12,8 @@ from aethergraph.observability import (
     ObservabilityWorkspaceError,
     open_observability_workspace,
 )
+from aethergraph.services.memory.canonical_factory import CanonicalMemoryFacadeFactory
 from aethergraph.storage.contracts import (
-    EventDraft,
     LLMCallDraft,
     ObservationCaptureMode,
     ObservationDraft,
@@ -94,18 +94,21 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
             },
         )
     )
-    await bundle.memory_events.append_many(
-        (
-            EventDraft(
-                event_id="engine-1",
-                occurred_at=NOW,
-                scope=run_scope,
-                kind="agent_engine.decision",
-                text="Selected one Tool call",
-                tags=("agent_engine", "turn:t-1"),
-                payload={"turn_id": "t-1", "agent_instance_id": "agent-1"},
-            ),
-        )
+    memory = CanonicalMemoryFacadeFactory(
+        bundle=bundle,
+        owner_scope=OWNER,
+        clock=lambda: NOW,
+        event_id_factory=lambda: "engine-1",
+    ).for_public_execution(
+        run_scope,
+        logical_scope_id="run-1",
+        provenance_scope=run_scope,
+    )
+    await memory.append_event(
+        kind="agent_engine.decision",
+        data={"turn_id": "t-1", "agent_instance_id": "agent-1"},
+        text="Selected one Tool call",
+        tags=["agent_engine", "turn:t-1"],
     )
     await bundle.observations.append_many(
         (

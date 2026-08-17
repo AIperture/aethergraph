@@ -721,8 +721,22 @@ def _event_mapping(record: Any) -> dict[str, Any]:
         "kind": record.kind,
         "text": record.text or "",
         "tags": list(record.tags),
-        "data": _plain_json(record.payload),
+        "data": _engine_event_data(record.payload),
     }
+
+
+def _engine_event_data(payload: Any) -> dict[str, Any]:
+    plain = _plain_json(payload)
+    if not isinstance(plain, dict) or set(plain) != {"data"}:
+        raise ObservabilityWorkspaceError(
+            "Canonical Engine event payload must contain exactly one authored data envelope"
+        )
+    data = plain["data"]
+    if not isinstance(data, dict) or "data" in data:
+        raise ObservabilityWorkspaceError(
+            "Canonical Engine event authored data must be one flat mapping"
+        )
+    return data
 
 
 def _prompt_manifest_mapping(detail: Any) -> dict[str, Any]:

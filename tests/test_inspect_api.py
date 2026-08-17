@@ -454,3 +454,26 @@ def test_observation_log_handler_emits_one_scoped_record() -> None:
     assert row.category == "log"
     assert row.scope.run_id == "run-1"
     assert row.attributes["message"] == "structured failure"
+
+
+def test_presentation_formatter_does_not_invent_persisted_scope() -> None:
+    from aethergraph.observability.logger.formatters import SafeFormatter
+
+    record = logging.LogRecord(
+        name="aethergraph.test.inspect",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="scope-free",
+        args=(),
+        exc_info=None,
+    )
+    assert SafeFormatter("%(message)s app=%(app_id)s client=%(client_id)s").format(record) == (
+        "scope-free app=- client=-"
+    )
+
+    observation = ObservationLogHandler._to_observation(record)
+
+    assert observation.scope.app_id is None
+    assert not hasattr(record, "app_id")
+    assert not hasattr(record, "client_id")

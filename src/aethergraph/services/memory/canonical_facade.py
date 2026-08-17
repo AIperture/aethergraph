@@ -5,15 +5,16 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from aethergraph.storage.contracts import (
     EventDraft,
     EventQuery,
     EventRecord,
+    EventSearchProjectionIntent,
     EventStore,
     FrozenJson,
     Page,
@@ -21,6 +22,7 @@ from aethergraph.storage.contracts import (
     SearchBackend,
     SearchDocument,
     SearchMode,
+    SearchProjectionStatus,
     SearchQuery,
     SearchResult,
     SortDirection,
@@ -35,6 +37,10 @@ _MEMORY_STATE_NAMESPACE_PREFIX = "memory.state"
 _MAX_HOT_EVENTS = 10_000
 
 
+def _search_intent_id(event_id: str) -> str:
+    return f"memory-search:{event_id}"
+
+
 @dataclass(frozen=True, slots=True)
 class MemoryCommitReceipt:
     """Committed authoritative events and covering search-index freshness."""
@@ -42,6 +48,9 @@ class MemoryCommitReceipt:
     events: tuple[EventRecord, ...]
     event_cursor: str | None
     indexed_cursor: str | None
+    created: tuple[bool, ...] = ()
+    projection_status: Literal["not_requested", "indexed", "failed"] = "not_requested"
+    projection_diagnostic: str | None = None
 
 
 class CanonicalMemoryFacade:
@@ -241,7 +250,22 @@ class CanonicalMemoryFacade:
                 raise ValueError("Memory event scope must exactly match the bound event provenance")
         if not events:
             return MemoryCommitReceipt(events=(), event_cursor=None, indexed_cursor=None)
-        committed = await self._events.append_many(events)
+        pending_intents = tuple(
+            EventSearchProjectionIntent(
+                intent_id=_search_intent_id(event.event_id),
+                event_id=event.event_id,
+                scope=event.scope,
+                status=SearchProjectionStatus.PENDING,
+                revision=1,
+                attempts=0,
+                updated_at=event.occurred_at,
+            )
+            for event in events
+        )
+        committed, intents, created = await self._events.append_many_with_search_intents(
+            events,
+            pending_intents,
+        )
         inserted_at = self._monotonic()
         async with self._hot_lock:
             self._evict_expired(inserted_at)
@@ -251,13 +275,180 @@ class CanonicalMemoryFacade:
                     continue
                 self._hot.append((inserted_at, event))
                 cached_ids.add(event.event_id)
-        indexed_cursor = await self._search.upsert_many(
-            tuple(_search_document(event, scope=self.scope) for event in committed)
+        projection_pairs = tuple(
+            (event, intent)
+            for event, intent in zip(committed, intents, strict=True)
+            if intent.status is not SearchProjectionStatus.INDEXED
         )
+        if not projection_pairs:
+            return MemoryCommitReceipt(
+                events=committed,
+                event_cursor=committed[-1].cursor,
+                indexed_cursor=intents[-1].indexed_cursor,
+                created=created,
+                projection_status="indexed",
+            )
+        try:
+            indexed_cursor = await self._search.upsert_many(
+                tuple(
+                    _search_document(event, scope=self.scope) for event, _intent in projection_pairs
+                )
+            )
+        except Exception as exc:
+            diagnostic = f"{type(exc).__name__}: search projection failed"
+            failed = []
+            for _event, intent in projection_pairs:
+                failed.append(
+                    await self._events.compare_and_set_search_intent(
+                        replace(
+                            intent,
+                            status=SearchProjectionStatus.FAILED,
+                            revision=intent.revision + 1,
+                            attempts=intent.attempts + 1,
+                            updated_at=datetime.now(intent.updated_at.tzinfo),
+                            diagnostic=diagnostic,
+                        ),
+                        intent.revision,
+                    )
+                )
+            return MemoryCommitReceipt(
+                events=committed,
+                event_cursor=committed[-1].cursor,
+                indexed_cursor=None,
+                created=created,
+                projection_status="failed",
+                projection_diagnostic=diagnostic,
+            )
+        for _event, intent in projection_pairs:
+            await self._events.compare_and_set_search_intent(
+                replace(
+                    intent,
+                    status=SearchProjectionStatus.INDEXED,
+                    revision=intent.revision + 1,
+                    attempts=intent.attempts + 1,
+                    updated_at=datetime.now(intent.updated_at.tzinfo),
+                    indexed_cursor=indexed_cursor,
+                    diagnostic=None,
+                ),
+                intent.revision,
+            )
         return MemoryCommitReceipt(
             events=committed,
             event_cursor=committed[-1].cursor,
             indexed_cursor=indexed_cursor,
+            created=created,
+            projection_status="indexed",
+        )
+
+    async def get_search_projection_intent(
+        self,
+        event_id: str,
+    ) -> EventSearchProjectionIntent | None:
+        """Read the durable search intent for one authoritative Memory event.
+
+        Examples:
+            Inspect failed projection:
+                ```python
+                intent = await memory.get_search_projection_intent("event-1")
+                ```
+
+            Detect absence:
+                ```python
+                assert await memory.get_search_projection_intent("missing") is None
+                ```
+
+        Args:
+            event_id: Stable caller-owned event identity.
+
+        Returns:
+            EventSearchProjectionIntent | None: Durable intent or `None`.
+
+        Notes:
+            The lookup is exact and never scans or selects another provider.
+        """
+        return await self._events.get_search_intent(
+            self.event_scope,
+            _search_intent_id(event_id),
+        )
+
+    async def retry_search_projection(self, event_id: str) -> MemoryCommitReceipt:
+        """Retry one pending or failed search projection without re-appending its event.
+
+        Examples:
+            Retry failed work:
+                ```python
+                receipt = await memory.retry_search_projection("event-1")
+                ```
+
+            Retry an already indexed event:
+                ```python
+                assert (await memory.retry_search_projection("event-1")).projection_status == "indexed"
+                ```
+
+        Args:
+            event_id: Stable authoritative event identity.
+
+        Returns:
+            MemoryCommitReceipt: Same authoritative event and current projection outcome.
+
+        Notes:
+            Exact indexed retries perform no second search upsert.
+        """
+        event = await self._events.get(self.event_scope, event_id)
+        intent = await self.get_search_projection_intent(event_id)
+        if event is None or intent is None:
+            raise ValueError("Authoritative event and projection intent must both exist")
+        if intent.status is SearchProjectionStatus.INDEXED:
+            return MemoryCommitReceipt(
+                events=(event,),
+                event_cursor=event.cursor,
+                indexed_cursor=intent.indexed_cursor,
+                created=(False,),
+                projection_status="indexed",
+            )
+        try:
+            indexed_cursor = await self._search.upsert_many(
+                (_search_document(event, scope=self.scope),)
+            )
+        except Exception as exc:
+            diagnostic = f"{type(exc).__name__}: search projection failed"
+            await self._events.compare_and_set_search_intent(
+                replace(
+                    intent,
+                    status=SearchProjectionStatus.FAILED,
+                    revision=intent.revision + 1,
+                    attempts=intent.attempts + 1,
+                    updated_at=datetime.now(intent.updated_at.tzinfo),
+                    diagnostic=diagnostic,
+                ),
+                intent.revision,
+            )
+            return MemoryCommitReceipt(
+                events=(event,),
+                event_cursor=event.cursor,
+                indexed_cursor=None,
+                created=(False,),
+                projection_status="failed",
+                projection_diagnostic=diagnostic,
+            )
+        await self._events.compare_and_set_search_intent(
+            replace(
+                intent,
+                status=SearchProjectionStatus.INDEXED,
+                revision=intent.revision + 1,
+                attempts=intent.attempts + 1,
+                updated_at=datetime.now(intent.updated_at.tzinfo),
+                indexed_cursor=indexed_cursor,
+                diagnostic=None,
+            ),
+            intent.revision,
+        )
+        return MemoryCommitReceipt(
+            events=(event,),
+            event_cursor=event.cursor,
+            indexed_cursor=indexed_cursor,
+            created=(False,),
+            projection_status="indexed",
         )
 
     async def durable_query(self, query: EventQuery) -> Page[EventRecord]:

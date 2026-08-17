@@ -215,8 +215,6 @@ class CanonicalArtifactFacadeFactory:
             blobs=self._bundle.blobs,
             artifacts=self._bundle.artifacts,
             search=self._bundle.search,
-            runs=self._bundle.runs,
-            sessions=self._bundle.sessions,
             owner_scope=self.owner_scope,
             execution_scope=execution_scope,
             tool_name=tool_name,

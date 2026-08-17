@@ -148,6 +148,46 @@ class EventRecord(EventDraft):
         _nonempty("cursor", self.cursor)
 
 
+class SearchProjectionStatus(StrEnum):
+    """Durable lifecycle of one authoritative event's search projection."""
+
+    PENDING = "pending"
+    INDEXED = "indexed"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class EventSearchProjectionIntent:
+    """Provider-owned durable search intent committed with one canonical event."""
+
+    intent_id: str
+    event_id: str
+    scope: StorageScope
+    status: SearchProjectionStatus
+    revision: int
+    attempts: int
+    updated_at: datetime
+    indexed_cursor: str | None = None
+    diagnostic: str | None = None
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _nonempty("intent_id", self.intent_id)
+        _nonempty("event_id", self.event_id)
+        if not isinstance(self.status, SearchProjectionStatus):
+            raise TypeError("status must be a SearchProjectionStatus")
+        if isinstance(self.revision, bool) or self.revision < 1:
+            raise ValueError("revision must be a positive integer")
+        if isinstance(self.attempts, bool) or self.attempts < 0:
+            raise ValueError("attempts must be a non-negative integer")
+        _utc("updated_at", self.updated_at)
+        _optional_nonempty("indexed_cursor", self.indexed_cursor)
+        _optional_text("diagnostic", self.diagnostic)
+        _positive_version(self.schema_version)
+        if self.status is SearchProjectionStatus.INDEXED and self.indexed_cursor is None:
+            raise ValueError("indexed projection intent requires indexed_cursor")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StateRecord:
     """Current canonical state value at one exact optimistic revision."""
@@ -345,6 +385,45 @@ class SearchDocument:
             "metadata",
             _freeze_mapping(self.metadata, path="metadata"),
         )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ArtifactSearchProjectionIntent:
+    """Durable search work committed with one authoritative artifact occurrence."""
+
+    intent_id: str
+    artifact_id: str
+    occurrence_id: str
+    owner_scope: StorageScope
+    document: SearchDocument
+    status: SearchProjectionStatus
+    revision: int
+    attempts: int
+    updated_at: datetime
+    indexed_cursor: str | None = None
+    diagnostic: str | None = None
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        _nonempty("intent_id", self.intent_id)
+        _nonempty("artifact_id", self.artifact_id)
+        _nonempty("occurrence_id", self.occurrence_id)
+        if self.document.item_id != self.artifact_id:
+            raise ValueError("artifact projection document must identify the artifact")
+        if self.document.scope != self.owner_scope:
+            raise ValueError("artifact projection document must use the owner scope")
+        if not isinstance(self.status, SearchProjectionStatus):
+            raise TypeError("status must be a SearchProjectionStatus")
+        if isinstance(self.revision, bool) or self.revision < 1:
+            raise ValueError("revision must be a positive integer")
+        if isinstance(self.attempts, bool) or self.attempts < 0:
+            raise ValueError("attempts must be a non-negative integer")
+        _utc("updated_at", self.updated_at)
+        _optional_nonempty("indexed_cursor", self.indexed_cursor)
+        _optional_text("diagnostic", self.diagnostic)
+        _positive_version(self.schema_version)
+        if self.status is SearchProjectionStatus.INDEXED and self.indexed_cursor is None:
+            raise ValueError("indexed artifact projection requires indexed_cursor")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

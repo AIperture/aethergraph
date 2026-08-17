@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 import hashlib
 
@@ -15,6 +16,7 @@ from aethergraph.storage.contracts import (
     ArtifactRelationKind,
     ArtifactRepository,
     ArtifactRetentionRecord,
+    ArtifactSearchProjectionIntent,
     BlobRange,
     BlobStore,
     EventDraft,
@@ -31,6 +33,7 @@ from aethergraph.storage.contracts import (
     SearchBackend,
     SearchDocument,
     SearchMode,
+    SearchProjectionStatus,
     SearchQuery,
     StateHistoryQuery,
     StateStore,
@@ -337,6 +340,76 @@ async def check_artifact_repository_conformance(
         provider_version=target_blob.provider_version,
         labels={"tags": ("final", "report"), "scope_id": "scope-1"},
     )
+
+    committed_blob = await blobs.put(scope, content(b"atomic-production"))
+    committed = ArtifactRecord(
+        artifact_id="artifact-committed",
+        content_hash=committed_blob.content_hash,
+        hash_algorithm=committed_blob.hash_algorithm,
+        size_bytes=committed_blob.size_bytes,
+        media_type="text/plain",
+        kind="atomic",
+        blob_locator=committed_blob.blob_locator,
+        owner_scope=scope,
+        created_at=NOW,
+        provider_version=committed_blob.provider_version,
+    )
+    committed_occurrence = ArtifactOccurrence(
+        occurrence_id="occurrence-committed",
+        artifact_id=committed.artifact_id,
+        scope=scope,
+        action=ArtifactAction.PRODUCED,
+        occurred_at=NOW,
+    )
+    committed_retention = ArtifactRetentionRecord(
+        artifact_id=committed.artifact_id,
+        scope=scope,
+        pinned=True,
+        revision=1,
+        updated_at=NOW,
+    )
+    committed_document = SearchDocument(
+        corpus="artifact",
+        item_id=committed.artifact_id,
+        text="atomic production",
+        scope=scope,
+        occurred_at=NOW,
+        metadata={"occurrence_id": committed_occurrence.occurrence_id},
+    )
+    committed_intent = ArtifactSearchProjectionIntent(
+        intent_id="artifact-search:occurrence-committed",
+        artifact_id=committed.artifact_id,
+        occurrence_id=committed_occurrence.occurrence_id,
+        owner_scope=scope,
+        document=committed_document,
+        status=SearchProjectionStatus.PENDING,
+        revision=1,
+        attempts=0,
+        updated_at=NOW,
+    )
+    first_commit = await repository.commit_production(
+        committed,
+        committed_occurrence,
+        committed_retention,
+        committed_intent,
+    )
+    retry_commit = await repository.commit_production(
+        committed,
+        committed_occurrence,
+        committed_retention,
+        committed_intent,
+    )
+    assert first_commit[:-1] == retry_commit[:-1]
+    assert first_commit[-1] is True and retry_commit[-1] is False
+    assert await repository.get_search_intent(scope, committed_intent.intent_id) == committed_intent
+    failed_intent = replace(
+        committed_intent,
+        status=SearchProjectionStatus.FAILED,
+        revision=2,
+        attempts=1,
+        diagnostic="RuntimeError: search projection failed",
+    )
+    assert await repository.compare_and_set_search_intent(failed_intent, 1) == failed_intent
 
     assert await repository.put(source) == source
     assert await repository.put(source) == source

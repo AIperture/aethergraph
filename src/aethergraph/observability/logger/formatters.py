@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 import json
 import logging
 import sys
@@ -16,6 +17,7 @@ class SafeFormatter(logging.Formatter):
     """
 
     def format(self, record: logging.LogRecord) -> str:
+        presentation_record = copy(record)
         # Provide default values for our known keys so %()s doesn't KeyError
         for k in (
             "run_id",
@@ -30,15 +32,15 @@ class SafeFormatter(logging.Formatter):
             "org_id",
             "client_id",
         ):
-            if not hasattr(record, k):
-                setattr(record, k, "-")
+            if not hasattr(presentation_record, k):
+                setattr(presentation_record, k, "-")
 
         # Collapse noisy sentinel for graph inputs
-        if getattr(record, "node_id", None) == GRAPH_INPUTS_NODE_ID:
-            record.node_id = "-"
+        if getattr(presentation_record, "node_id", None) == GRAPH_INPUTS_NODE_ID:
+            presentation_record.node_id = "-"
 
         # First do the normal formatting
-        s = super().format(record)
+        s = super().format(presentation_record)
 
         # Then strip any "field=-" tokens for missing context,
         # assuming your patterns use "run=%(run_id)s", "node=%(node_id)s", etc.
@@ -48,7 +50,7 @@ class SafeFormatter(logging.Formatter):
             ("graph", "graph_id"),
             ("agent", "agent_id"),
         ):
-            val = getattr(record, attr, None)
+            val = getattr(presentation_record, attr, None)
             if not val or val == "-":
                 token = f" {prefix}=-"
                 s = s.replace(token, "")

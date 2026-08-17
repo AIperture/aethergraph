@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Literal
 
 ModelOperation = Literal["chat", "embeddings", "image_generation"]
+_RUNTIME_OBSERVABILITY_CAPABILITIES = ("llm_observation_manifest",)
 
 
 @dataclass(frozen=True)
@@ -111,78 +112,124 @@ _ENDPOINTS = (
         "openai_responses",
         "responses",
         ("chat",),
-        ("image_input", "streaming", "native_tools", "native_tool_search", "structured_output"),
+        (
+            "image_input",
+            "streaming",
+            "native_tools",
+            "native_tool_search",
+            "structured_output",
+            *_RUNTIME_OBSERVABILITY_CAPABILITIES,
+        ),
     ),
     EndpointAdapterDescriptor(
         "openai_chat_completions",
         "chat.completions",
         ("chat",),
-        ("image_input", "streaming", "native_tools", "structured_output"),
+        (
+            "image_input",
+            "streaming",
+            "native_tools",
+            "structured_output",
+            *_RUNTIME_OBSERVABILITY_CAPABILITIES,
+        ),
     ),
     EndpointAdapterDescriptor(
         "azure_responses",
         "responses",
         ("chat",),
-        ("image_input", "native_tools", "native_tool_search", "structured_output"),
+        (
+            "image_input",
+            "native_tools",
+            "native_tool_search",
+            "structured_output",
+            *_RUNTIME_OBSERVABILITY_CAPABILITIES,
+        ),
     ),
     EndpointAdapterDescriptor(
         "azure_chat_completions",
         "chat.completions",
         ("chat",),
-        ("image_input", "streaming", "native_tools", "structured_output"),
+        (
+            "image_input",
+            "streaming",
+            "native_tools",
+            "structured_output",
+            *_RUNTIME_OBSERVABILITY_CAPABILITIES,
+        ),
     ),
     EndpointAdapterDescriptor(
         "anthropic_messages",
         "messages",
         ("chat",),
-        ("image_input", "streaming", "native_tools", "native_tool_search", "structured_output"),
+        (
+            "image_input",
+            "streaming",
+            "native_tools",
+            "native_tool_search",
+            "structured_output",
+            *_RUNTIME_OBSERVABILITY_CAPABILITIES,
+        ),
     ),
     EndpointAdapterDescriptor(
         "gemini_generate_content",
         "generateContent",
         ("chat",),
-        ("image_input", "streaming", "native_tools", "structured_output"),
+        (
+            "image_input",
+            "streaming",
+            "native_tools",
+            "structured_output",
+            *_RUNTIME_OBSERVABILITY_CAPABILITIES,
+        ),
     ),
     EndpointAdapterDescriptor(
         "openai_embeddings",
         "openai.embeddings",
         ("embeddings",),
-        ("text_embeddings", "dimensions"),
+        ("text_embeddings", "dimensions", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
         "azure_embeddings",
         "azure.embeddings",
         ("embeddings",),
-        ("text_embeddings", "dimensions"),
+        ("text_embeddings", "dimensions", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
         "gemini_embeddings",
         "google.embeddings",
         ("embeddings",),
-        ("text_embeddings", "dimensions"),
+        ("text_embeddings", "dimensions", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
-        "dummy_embeddings", "dummy.embeddings", ("embeddings",), ("text_embeddings",)
+        "dummy_embeddings",
+        "dummy.embeddings",
+        ("embeddings",),
+        ("text_embeddings", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
         "openai_images",
         "openai.images",
         ("image_generation",),
-        ("text_to_image", "multiple_outputs"),
+        ("text_to_image", "multiple_outputs", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
         "azure_images",
         "azure.images",
         ("image_generation",),
-        ("text_to_image", "multiple_outputs"),
+        ("text_to_image", "multiple_outputs", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
     EndpointAdapterDescriptor(
         "gemini_image_generation",
         "google.image_generation",
         ("image_generation",),
-        ("text_to_image", "image_editing"),
+        ("text_to_image", "image_editing", *_RUNTIME_OBSERVABILITY_CAPABILITIES),
     ),
-    EndpointAdapterDescriptor("dummy_chat", "dummy.chat", ("chat",)),
+    EndpointAdapterDescriptor(
+        "dummy_chat",
+        "dummy.chat",
+        ("chat",),
+        _RUNTIME_OBSERVABILITY_CAPABILITIES,
+    ),
 )
 
 _PROVIDERS = (

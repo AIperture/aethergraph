@@ -1,6 +1,11 @@
 from .canonical_facade import CanonicalMemoryFacade, MemoryCommitReceipt
 from .canonical_factory import CanonicalMemoryFacadeFactory
-from .canonical_public import CanonicalPublicMemoryFacade, PublicMemorySearchHit
+from .canonical_public import (
+    CanonicalPublicMemoryFacade,
+    MemoryProjectionError,
+    PublicMemoryCommitReceipt,
+    PublicMemorySearchHit,
+)
 from .contracts import StateSnapshotConflictError
 
 __all__ = [
@@ -8,6 +13,8 @@ __all__ = [
     "CanonicalMemoryFacadeFactory",
     "CanonicalPublicMemoryFacade",
     "MemoryCommitReceipt",
+    "MemoryProjectionError",
+    "PublicMemoryCommitReceipt",
     "PublicMemorySearchHit",
     "StateSnapshotConflictError",
 ]

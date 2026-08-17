@@ -14,6 +14,7 @@ from aethergraph.storage.contracts import (
     EventQuery,
     PageRequest,
     SearchMode,
+    SearchProjectionStatus,
     SortDirection,
     StorageCapabilityError,
     StorageConflictError,
@@ -219,14 +220,58 @@ async def test_canonical_memory_search_failure_is_visible_after_authoritative_co
         scope=_scope(),
     )
     try:
-        with pytest.raises(RuntimeError, match="index unavailable"):
-            await memory.append_many((_draft("event-1", 1, "durable"),))
+        receipt = await memory.append_many((_draft("event-1", 1, "durable"),))
 
+        assert receipt.projection_status == "failed"
+        assert receipt.projection_diagnostic == "RuntimeError: search projection failed"
         durable = await bundle.memory_events.get(_scope(), "event-1")
         assert durable is not None
         assert [event.event_id for event in await memory.recent_hot()] == ["event-1"]
     finally:
         await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_projection_intent_survives_reopen_and_retries_exact_event(
+    tmp_path: Path,
+) -> None:
+    first_bundle = _open_bundle(tmp_path)
+    first = CanonicalMemoryFacade(
+        event_store=first_bundle.memory_events,
+        state_store=first_bundle.state,
+        search_backend=_FailingSearch(),  # type: ignore[arg-type]
+        scope=_scope(),
+    )
+    draft = _draft("event-retry", 1, "durable retry")
+    failed = await first.append_many((draft,))
+    intent = await first.get_search_projection_intent("event-retry")
+    assert failed.projection_status == "failed"
+    assert failed.created == (True,)
+    assert intent is not None
+    assert intent.status is SearchProjectionStatus.FAILED
+    assert intent.attempts == 1
+    await first_bundle.close()
+
+    second_bundle = _open_bundle(tmp_path)
+    second = CanonicalMemoryFacade(
+        event_store=second_bundle.memory_events,
+        state_store=second_bundle.state,
+        search_backend=second_bundle.search,
+        scope=_scope(),
+    )
+    try:
+        retried = await second.append_many((draft,))
+        restored = await second.get_search_projection_intent("event-retry")
+        durable = await second.durable_query(EventQuery(scope=_scope()))
+
+        assert retried.projection_status == "indexed"
+        assert retried.created == (False,)
+        assert restored is not None
+        assert restored.status is SearchProjectionStatus.INDEXED
+        assert restored.attempts == 2
+        assert [event.event_id for event in durable.items] == ["event-retry"]
+    finally:
+        await second_bundle.close()
 
 
 @pytest.mark.asyncio

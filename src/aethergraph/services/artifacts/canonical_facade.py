@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 from uuid import uuid4
 
 from aethergraph.contracts.services.artifacts import Artifact
@@ -27,16 +27,16 @@ from aethergraph.storage.contracts import (
     ArtifactRelationKind,
     ArtifactRepository,
     ArtifactRetentionRecord,
+    ArtifactSearchProjectionIntent,
     BlobStore,
     Page,
     PageRequest,
-    RunRepository,
     SearchBackend,
     SearchDocument,
     SearchMode,
+    SearchProjectionStatus,
     SearchQuery,
     SearchResult,
-    SessionRepository,
     StorageCapacityError,
     StorageIntegrityError,
     StorageNotFoundError,
@@ -63,12 +63,15 @@ _DEPRECATED_IDENTITY_LABELS = frozenset({"app_id", "application_id", "client_id"
 
 @dataclass(frozen=True, slots=True)
 class ArtifactCommitReceipt:
-    """One coherent canonical artifact write result and its projection cursor."""
+    """One coherent authoritative artifact result and search projection outcome."""
 
     record: ArtifactRecord
     occurrence: ArtifactOccurrence
     retention: ArtifactRetentionRecord | None
-    indexed_cursor: str
+    indexed_cursor: str | None
+    created: bool = False
+    projection_status: Literal["indexed", "failed"] = "indexed"
+    projection_diagnostic: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,8 +279,6 @@ class CanonicalArtifactFacade:
         blobs: BlobStore,
         artifacts: ArtifactRepository,
         search: SearchBackend,
-        runs: RunRepository,
-        sessions: SessionRepository,
         owner_scope: StorageScope,
         execution_scope: StorageScope,
         tool_name: str | None = None,
@@ -298,8 +299,6 @@ class CanonicalArtifactFacade:
                     blobs=bundle.blobs,
                     artifacts=bundle.artifacts,
                     search=bundle.search,
-                    runs=bundle.runs,
-                    sessions=bundle.sessions,
                     owner_scope=owner_scope,
                     execution_scope=run_scope,
                 )
@@ -311,8 +310,6 @@ class CanonicalArtifactFacade:
                     blobs=blobs,
                     artifacts=metadata,
                     search=search,
-                    runs=runs,
-                    sessions=sessions,
                     owner_scope=owner,
                     execution_scope=execution,
                     tool_name="reporter",
@@ -324,8 +321,6 @@ class CanonicalArtifactFacade:
             blobs: Canonical immutable streaming content store.
             artifacts: Canonical metadata, occurrence, lineage, and retention repository.
             search: Canonical exact-mode search projection.
-            runs: Canonical run repository for idempotent occurrence counters.
-            sessions: Canonical session repository for idempotent occurrence counters.
             owner_scope: Stable canonical artifact-content owner scope.
             execution_scope: Exact canonical occurrence scope.
             tool_name: Optional producing Tool name.
@@ -349,8 +344,6 @@ class CanonicalArtifactFacade:
         self._blobs = blobs
         self._artifacts = artifacts
         self._search = search
-        self._runs = runs
-        self._sessions = sessions
         self.owner_scope = owner_scope
         self.execution_scope = execution_scope
         self.tool_name = tool_name
@@ -618,7 +611,6 @@ class CanonicalArtifactFacade:
             labels=resolved_occurrence_labels,
             metrics=dict(metrics or {}),
         )
-        _search_document(record, occurrence, search_text=search_text)
         blob = await self._blobs.put(self.owner_scope, chunks)
         record = replace(
             record,
@@ -628,32 +620,92 @@ class CanonicalArtifactFacade:
             blob_locator=blob.blob_locator,
             provider_version=blob.provider_version,
         )
-        record = await self._artifacts.put(record)
-        occurrence = await self._artifacts.record_occurrence(occurrence)
-        retention = await self.pin(record.artifact_id, True) if pinned else None
-        indexed_cursor = await self._search.upsert(
-            _search_document(record, occurrence, search_text=search_text)
+        document = _search_document(record, occurrence, search_text=search_text)
+        pending_intent = ArtifactSearchProjectionIntent(
+            intent_id=f"artifact-search:{occurrence.occurrence_id}",
+            artifact_id=record.artifact_id,
+            occurrence_id=occurrence.occurrence_id,
+            owner_scope=record.owner_scope,
+            document=document,
+            status=SearchProjectionStatus.PENDING,
+            revision=1,
+            attempts=0,
+            updated_at=occurrence.occurred_at,
         )
-        if self.execution_scope.run_id is not None:
-            await self._runs.record_artifact(
-                self.execution_scope,
-                self.execution_scope.run_id,
-                record.artifact_id,
-                occurrence.occurrence_id,
-                occurrence.occurred_at,
+        initial_retention = (
+            ArtifactRetentionRecord(
+                artifact_id=record.artifact_id,
+                scope=self.owner_scope,
+                pinned=True,
+                revision=1,
+                updated_at=now,
             )
-        if self.execution_scope.session_id is not None:
-            await self._sessions.record_artifact(
-                self.execution_scope,
-                self.execution_scope.session_id,
-                occurrence.occurrence_id,
-                occurrence.occurred_at,
+            if pinned
+            else None
+        )
+        (
+            record,
+            occurrence,
+            retention,
+            search_intent,
+            created,
+        ) = await self._artifacts.commit_production(
+            record,
+            occurrence,
+            initial_retention,
+            pending_intent,
+        )
+        if search_intent.status is SearchProjectionStatus.INDEXED:
+            return ArtifactCommitReceipt(
+                record=record,
+                occurrence=occurrence,
+                retention=retention,
+                indexed_cursor=search_intent.indexed_cursor,
+                created=created,
             )
+        try:
+            indexed_cursor = await self._search.upsert(search_intent.document)
+        except Exception as exc:
+            diagnostic = f"{type(exc).__name__}: search projection failed"
+            await self._artifacts.compare_and_set_search_intent(
+                replace(
+                    search_intent,
+                    status=SearchProjectionStatus.FAILED,
+                    revision=search_intent.revision + 1,
+                    attempts=search_intent.attempts + 1,
+                    updated_at=self._now(),
+                    indexed_cursor=None,
+                    diagnostic=diagnostic,
+                ),
+                search_intent.revision,
+            )
+            return ArtifactCommitReceipt(
+                record=record,
+                occurrence=occurrence,
+                retention=retention,
+                indexed_cursor=None,
+                created=created,
+                projection_status="failed",
+                projection_diagnostic=diagnostic,
+            )
+        await self._artifacts.compare_and_set_search_intent(
+            replace(
+                search_intent,
+                status=SearchProjectionStatus.INDEXED,
+                revision=search_intent.revision + 1,
+                attempts=search_intent.attempts + 1,
+                updated_at=self._now(),
+                indexed_cursor=indexed_cursor,
+                diagnostic=None,
+            ),
+            search_intent.revision,
+        )
         return ArtifactCommitReceipt(
             record=record,
             occurrence=occurrence,
             retention=retention,
             indexed_cursor=indexed_cursor,
+            created=created,
         )
 
     async def save_file(
@@ -1382,6 +1434,38 @@ class CanonicalArtifactFacade:
                 updated_at=self._now(),
             ),
             expected_revision,
+        )
+
+    async def get_search_projection_intent(
+        self,
+        occurrence_id: str,
+    ) -> ArtifactSearchProjectionIntent | None:
+        """Read durable search work for one authoritative artifact occurrence.
+
+        Examples:
+            Inspect a failed projection:
+                ```python
+                intent = await facade.get_search_projection_intent("occurrence-1")
+                ```
+
+            Detect an unknown occurrence:
+                ```python
+                assert await facade.get_search_projection_intent("missing") is None
+                ```
+
+        Args:
+            occurrence_id: Exact stable artifact occurrence identity.
+
+        Returns:
+            ArtifactSearchProjectionIntent | None: Current projection work or absence.
+
+        Notes:
+            The lookup uses canonical owner scope and never queries the search index.
+        """
+
+        return await self._artifacts.get_search_intent(
+            self.owner_scope,
+            f"artifact-search:{occurrence_id}",
         )
 
     async def get_retention(self, artifact_id: str) -> ArtifactRetentionRecord | None:

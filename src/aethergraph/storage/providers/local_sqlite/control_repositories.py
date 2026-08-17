@@ -404,39 +404,14 @@ class LocalRunRepository:
         _utc(occurred_at)
 
         def commit(connection: sqlite3.Connection) -> RunRecord:
-            row = connection.execute(
-                "SELECT * FROM local_runs WHERE run_id = ?", (run_id,)
-            ).fetchone()
-            if row is None:
-                raise StorageNotFoundError(run_id)
-            current = _run(row)
-            if not _scope_authorizes(current.scope, scope):
-                raise StorageNotFoundError(run_id)
-            receipt = connection.execute(
-                """
-                SELECT artifact_id, occurred_at FROM local_run_artifact_occurrences
-                WHERE run_id = ? AND occurrence_id = ?
-                """,
-                (run_id, occurrence_id),
-            ).fetchone()
-            if receipt is not None:
-                if (
-                    str(receipt["artifact_id"]) != artifact_id
-                    or str(receipt["occurred_at"]) != occurred_at.isoformat()
-                ):
-                    raise StorageIntegrityError("Run artifact occurrence identity conflicts")
-                return current
-            connection.execute(
-                """
-                INSERT INTO local_run_artifact_occurrences(
-                    run_id, occurrence_id, artifact_id, occurred_at
-                ) VALUES (?, ?, ?, ?)
-                """,
-                (run_id, occurrence_id, artifact_id, occurred_at.isoformat()),
+            return _record_run_artifact_in_transaction(
+                connection,
+                scope=scope,
+                run_id=run_id,
+                artifact_id=artifact_id,
+                occurrence_id=occurrence_id,
+                occurred_at=occurred_at,
             )
-            updated = _run_with_artifact(current, artifact_id, occurred_at)
-            _update_run(connection, updated)
-            return updated
 
         return await self._database.transaction(commit)
 
@@ -971,36 +946,13 @@ class LocalSessionRepository:
         _utc(occurred_at)
 
         def commit(connection: sqlite3.Connection) -> SessionRecord:
-            row = connection.execute(
-                "SELECT * FROM local_sessions WHERE session_id = ?", (session_id,)
-            ).fetchone()
-            if row is None:
-                raise StorageNotFoundError(session_id)
-            current = _session(row)
-            if not _scope_authorizes(current.scope, scope):
-                raise StorageNotFoundError(session_id)
-            receipt = connection.execute(
-                """
-                SELECT occurred_at FROM local_session_artifact_occurrences
-                WHERE session_id = ? AND occurrence_id = ?
-                """,
-                (session_id, occurrence_id),
-            ).fetchone()
-            if receipt is not None:
-                if str(receipt[0]) != occurred_at.isoformat():
-                    raise StorageIntegrityError("Session artifact occurrence identity conflicts")
-                return current
-            connection.execute(
-                """
-                INSERT INTO local_session_artifact_occurrences(
-                    session_id, occurrence_id, occurred_at
-                ) VALUES (?, ?, ?)
-                """,
-                (session_id, occurrence_id, occurred_at.isoformat()),
+            return _record_session_artifact_in_transaction(
+                connection,
+                scope=scope,
+                session_id=session_id,
+                occurrence_id=occurrence_id,
+                occurred_at=occurred_at,
             )
-            updated = _session_with_artifact(current, occurred_at)
-            _update_session(connection, updated)
-            return updated
 
         return await self._database.transaction(commit)
 
@@ -1031,6 +983,88 @@ def _install(database: LocalSQLiteDatabase) -> None:
             _CREATE_SESSION_ARTIFACT_OCCURRENCES,
         ),
     )
+
+
+def _record_run_artifact_in_transaction(
+    connection: sqlite3.Connection,
+    *,
+    scope: StorageScope,
+    run_id: str,
+    artifact_id: str,
+    occurrence_id: str,
+    occurred_at: datetime,
+) -> RunRecord:
+    row = connection.execute("SELECT * FROM local_runs WHERE run_id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise StorageNotFoundError(run_id)
+    current = _run(row)
+    if not _scope_authorizes(current.scope, scope):
+        raise StorageNotFoundError(run_id)
+    receipt = connection.execute(
+        """
+        SELECT artifact_id, occurred_at FROM local_run_artifact_occurrences
+        WHERE run_id = ? AND occurrence_id = ?
+        """,
+        (run_id, occurrence_id),
+    ).fetchone()
+    if receipt is not None:
+        if (
+            str(receipt["artifact_id"]) != artifact_id
+            or str(receipt["occurred_at"]) != occurred_at.isoformat()
+        ):
+            raise StorageIntegrityError("Run artifact occurrence identity conflicts")
+        return current
+    connection.execute(
+        """
+        INSERT INTO local_run_artifact_occurrences(
+            run_id, occurrence_id, artifact_id, occurred_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (run_id, occurrence_id, artifact_id, occurred_at.isoformat()),
+    )
+    updated = _run_with_artifact(current, artifact_id, occurred_at)
+    _update_run(connection, updated)
+    return updated
+
+
+def _record_session_artifact_in_transaction(
+    connection: sqlite3.Connection,
+    *,
+    scope: StorageScope,
+    session_id: str,
+    occurrence_id: str,
+    occurred_at: datetime,
+) -> SessionRecord:
+    row = connection.execute(
+        "SELECT * FROM local_sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        raise StorageNotFoundError(session_id)
+    current = _session(row)
+    if not _scope_authorizes(current.scope, scope):
+        raise StorageNotFoundError(session_id)
+    receipt = connection.execute(
+        """
+        SELECT occurred_at FROM local_session_artifact_occurrences
+        WHERE session_id = ? AND occurrence_id = ?
+        """,
+        (session_id, occurrence_id),
+    ).fetchone()
+    if receipt is not None:
+        if str(receipt[0]) != occurred_at.isoformat():
+            raise StorageIntegrityError("Session artifact occurrence identity conflicts")
+        return current
+    connection.execute(
+        """
+        INSERT INTO local_session_artifact_occurrences(
+            session_id, occurrence_id, occurred_at
+        ) VALUES (?, ?, ?)
+        """,
+        (session_id, occurrence_id, occurred_at.isoformat()),
+    )
+    updated = _session_with_artifact(current, occurred_at)
+    _update_session(connection, updated)
+    return updated
 
 
 def _insert_run(connection: sqlite3.Connection, record: RunRecord) -> None:

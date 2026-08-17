@@ -25,6 +25,7 @@ from aethergraph.storage.contracts import (
     ArtifactRelation,
     ArtifactRepository,
     ArtifactRetentionRecord,
+    ArtifactSearchProjectionIntent,
     BlobHead,
     BlobRange,
     BlobStore,
@@ -32,6 +33,7 @@ from aethergraph.storage.contracts import (
     EventDraft,
     EventQuery,
     EventRecord,
+    EventSearchProjectionIntent,
     EventStore,
     FrozenJson,
     Page,
@@ -60,10 +62,16 @@ def _scope_key(scope: StorageScope) -> tuple[tuple[str, str], ...]:
 class _EventStore:
     def __init__(self) -> None:
         self.rows: list[EventRecord] = []
+        self.search_intents: dict[str, EventSearchProjectionIntent] = {}
 
     async def append(self, event: EventDraft) -> EventRecord:
         existing = next((row for row in self.rows if row.event_id == event.event_id), None)
         if existing is not None:
+            if any(
+                getattr(existing, name) != getattr(event, name)
+                for name in EventDraft.__dataclass_fields__
+            ):
+                raise StorageIntegrityError("event identity conflicts")
             return existing
         row = EventRecord(
             **{name: getattr(event, name) for name in event.__dataclass_fields__},
@@ -74,6 +82,50 @@ class _EventStore:
 
     async def append_many(self, events: tuple[EventDraft, ...]) -> tuple[EventRecord, ...]:
         return tuple([await self.append(event) for event in events])
+
+    async def append_many_with_search_intents(self, events, intents):
+        if len(events) != len(intents):
+            raise ValueError("events and intents must have matching lengths")
+        for event, intent in zip(events, intents, strict=True):
+            if event.event_id != intent.event_id or event.scope != intent.scope:
+                raise ValueError("event and intent must match")
+            current = self.search_intents.get(intent.intent_id)
+            if current is not None and (
+                current.event_id != intent.event_id or current.scope != intent.scope
+            ):
+                raise StorageIntegrityError("search intent identity conflicts")
+            existing = next(
+                (row for row in self.rows if row.event_id == event.event_id),
+                None,
+            )
+            if existing is not None and any(
+                getattr(existing, name) != getattr(event, name)
+                for name in EventDraft.__dataclass_fields__
+            ):
+                raise StorageIntegrityError("event identity conflicts")
+        created = tuple(
+            not any(row.event_id == event.event_id for row in self.rows) for event in events
+        )
+        records = await self.append_many(events)
+        stored = []
+        for intent in intents:
+            current = self.search_intents.get(intent.intent_id)
+            if current is None:
+                self.search_intents[intent.intent_id] = intent
+                current = intent
+            stored.append(current)
+        return records, tuple(stored), created
+
+    async def get_search_intent(self, scope, intent_id):
+        intent = self.search_intents.get(intent_id)
+        return intent if intent is not None and intent.scope == scope else None
+
+    async def compare_and_set_search_intent(self, intent, expected_revision):
+        current = self.search_intents.get(intent.intent_id)
+        if current is None or current.revision != expected_revision:
+            raise StorageConflictError("search intent revision is stale")
+        self.search_intents[intent.intent_id] = intent
+        return intent
 
     async def get(self, scope: StorageScope, event_id: str) -> EventRecord | None:
         return next(
@@ -278,6 +330,44 @@ class _ArtifactRepository:
         self.retention: dict[tuple, ArtifactRetentionRecord] = {}
         self.occurrences: list[ArtifactOccurrence] = []
         self.relations: list[ArtifactRelation] = []
+        self.search_intents: dict[str, ArtifactSearchProjectionIntent] = {}
+
+    async def commit_production(self, record, occurrence, retention, search_intent):
+        created = not any(row.occurrence_id == occurrence.occurrence_id for row in self.occurrences)
+        stored_record = await self.put(record)
+        stored_occurrence = await self.record_occurrence(occurrence)
+        stored_retention = None
+        if retention is not None:
+            current = await self.get_retention(record.owner_scope, record.artifact_id)
+            stored_retention = current or await self.compare_and_set_retention(retention, 0)
+        current_intent = self.search_intents.get(search_intent.intent_id)
+        if current_intent is None:
+            self.search_intents[search_intent.intent_id] = search_intent
+            current_intent = search_intent
+        elif (
+            current_intent.artifact_id != search_intent.artifact_id
+            or current_intent.occurrence_id != search_intent.occurrence_id
+            or current_intent.document != search_intent.document
+        ):
+            raise StorageIntegrityError("artifact search intent conflicts")
+        return (
+            stored_record,
+            stored_occurrence,
+            stored_retention,
+            current_intent,
+            created,
+        )
+
+    async def get_search_intent(self, scope, intent_id):
+        intent = self.search_intents.get(intent_id)
+        return intent if intent is not None and intent.owner_scope == scope else None
+
+    async def compare_and_set_search_intent(self, intent, expected_revision):
+        current = self.search_intents.get(intent.intent_id)
+        if current is None or current.revision != expected_revision:
+            raise StorageConflictError("artifact search intent revision conflict")
+        self.search_intents[intent.intent_id] = intent
+        return intent
 
     async def put(self, record: ArtifactRecord) -> ArtifactRecord:
         blob = await self.blobs.head(record.owner_scope, record.blob_locator)

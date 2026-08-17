@@ -20,8 +20,11 @@ from ...contracts import (
     ArtifactRelation,
     ArtifactRelationKind,
     ArtifactRetentionRecord,
+    ArtifactSearchProjectionIntent,
     Page,
     PageRequest,
+    SearchDocument,
+    SearchProjectionStatus,
     StorageConfigurationError,
     StorageConflictError,
     StorageIntegrityError,
@@ -29,6 +32,10 @@ from ...contracts import (
     StorageOpenMode,
     StorageReadOnlyError,
     StorageScope,
+)
+from .control_repositories import (
+    _record_run_artifact_in_transaction,
+    _record_session_artifact_in_transaction,
 )
 from .database import LocalSQLiteDatabase
 
@@ -172,6 +179,27 @@ _CREATE_RELATION_TARGET_INDEX = """
 CREATE INDEX ix_local_relations_target
 ON local_artifact_relations(scope_identity, target_artifact_id, sequence)
 """
+_CREATE_ARTIFACT_SEARCH_INTENTS = """
+CREATE TABLE local_artifact_search_intents (
+    intent_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL REFERENCES local_artifacts(artifact_id),
+    occurrence_id TEXT NOT NULL UNIQUE
+        REFERENCES local_artifact_occurrences(occurrence_id),
+    owner_scope_identity TEXT NOT NULL,
+    document_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    attempts INTEGER NOT NULL CHECK (attempts >= 0),
+    updated_at TEXT NOT NULL,
+    indexed_cursor TEXT,
+    diagnostic TEXT,
+    schema_version INTEGER NOT NULL
+)
+"""
+_CREATE_ARTIFACT_SEARCH_INTENT_SCOPE_INDEX = """
+CREATE INDEX ix_local_artifact_search_intents_scope
+ON local_artifact_search_intents(owner_scope_identity, status, updated_at, intent_id)
+"""
 
 
 class LocalArtifactRepository:
@@ -205,6 +233,228 @@ class LocalArtifactRepository:
                 _CREATE_RELATION_TARGET_INDEX,
             ),
         )
+        database.install_component(
+            name="artifact_search_projections",
+            version=1,
+            statements=(
+                _CREATE_ARTIFACT_SEARCH_INTENTS,
+                _CREATE_ARTIFACT_SEARCH_INTENT_SCOPE_INDEX,
+            ),
+        )
+
+    async def commit_production(
+        self,
+        record: ArtifactRecord,
+        occurrence: ArtifactOccurrence,
+        retention: ArtifactRetentionRecord | None,
+        search_intent: ArtifactSearchProjectionIntent,
+    ) -> tuple[
+        ArtifactRecord,
+        ArtifactOccurrence,
+        ArtifactRetentionRecord | None,
+        ArtifactSearchProjectionIntent,
+        bool,
+    ]:
+        """Commit artifact authority, accounting, and search intent atomically.
+
+        Examples:
+            Commit one production boundary:
+                ```python
+                receipt = await repository.commit_production(
+                    record, occurrence, retention, search_intent
+                )
+                ```
+
+            Retry an exact production boundary:
+                ```python
+                *_, created = await repository.commit_production(
+                    record, occurrence, retention, search_intent
+                )
+                assert created is False
+                ```
+
+        Args:
+            record: Immutable artifact metadata for an already committed scoped blob.
+            occurrence: Stable production occurrence and execution scope.
+            retention: Optional exact initial pinned retention record.
+            search_intent: Pending exact search projection for this occurrence.
+
+        Returns:
+            tuple: Stored records, durable intent, and occurrence creation flag.
+
+        Notes:
+            Search indexing runs after this control-database transaction. Exact retry
+            returns existing rows without advancing retention or accounting twice.
+        """
+
+        self._require_writable()
+        if occurrence.artifact_id != record.artifact_id:
+            raise ValueError("artifact occurrence must reference committed metadata")
+        if (
+            search_intent.artifact_id != record.artifact_id
+            or search_intent.occurrence_id != occurrence.occurrence_id
+            or search_intent.owner_scope != record.owner_scope
+        ):
+            raise ValueError("artifact search intent must match production authority")
+        if retention is not None and (
+            retention.artifact_id != record.artifact_id
+            or retention.scope != record.owner_scope
+            or retention.revision != 1
+            or not retention.pinned
+        ):
+            raise ValueError("initial artifact retention must be pinned revision one")
+
+        def commit(connection: sqlite3.Connection):
+            created = (
+                connection.execute(
+                    "SELECT 1 FROM local_artifact_occurrences WHERE occurrence_id = ?",
+                    (occurrence.occurrence_id,),
+                ).fetchone()
+                is None
+            )
+            stored_record = _put_artifact(connection, record)
+            stored_occurrence = _record_artifact_occurrence(connection, occurrence)
+            stored_retention = (
+                _put_initial_retention(connection, retention) if retention is not None else None
+            )
+            if occurrence.scope.run_id is not None:
+                _record_run_artifact_in_transaction(
+                    connection,
+                    scope=occurrence.scope,
+                    run_id=occurrence.scope.run_id,
+                    artifact_id=record.artifact_id,
+                    occurrence_id=occurrence.occurrence_id,
+                    occurred_at=occurrence.occurred_at,
+                )
+            if occurrence.scope.session_id is not None:
+                _record_session_artifact_in_transaction(
+                    connection,
+                    scope=occurrence.scope,
+                    session_id=occurrence.scope.session_id,
+                    occurrence_id=occurrence.occurrence_id,
+                    occurred_at=occurrence.occurred_at,
+                )
+            stored_intent = _put_artifact_search_intent(connection, search_intent)
+            return (
+                stored_record,
+                stored_occurrence,
+                stored_retention,
+                stored_intent,
+                created,
+            )
+
+        return await self._database.transaction(commit)
+
+    async def get_search_intent(
+        self,
+        scope: StorageScope,
+        intent_id: str,
+    ) -> ArtifactSearchProjectionIntent | None:
+        """Read one exact owner-authorized artifact search intent.
+
+        Examples:
+            Inspect a projection:
+                ```python
+                intent = await repository.get_search_intent(scope, intent_id)
+                ```
+
+            Detect unknown work:
+                ```python
+                assert await repository.get_search_intent(scope, "missing") is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            intent_id: Stable projection identity.
+
+        Returns:
+            ArtifactSearchProjectionIntent | None: Matching intent or absence.
+
+        Notes:
+            Search content remains provider-neutral serialized contract data.
+        """
+
+        rows = await self._database.fetch_all(
+            """
+            SELECT * FROM local_artifact_search_intents
+            WHERE intent_id = ? AND owner_scope_identity = ?
+            """,
+            (intent_id, _scope_identity(scope)),
+        )
+        return _artifact_search_intent(rows[0]) if rows else None
+
+    async def compare_and_set_search_intent(
+        self,
+        intent: ArtifactSearchProjectionIntent,
+        expected_revision: int,
+    ) -> ArtifactSearchProjectionIntent:
+        """Advance one artifact search intent through exact revision CAS.
+
+        Examples:
+            Mark indexed work:
+                ```python
+                stored = await repository.compare_and_set_search_intent(indexed, 1)
+                ```
+
+            Record failed retry work:
+                ```python
+                stored = await repository.compare_and_set_search_intent(failed, current.revision)
+                ```
+
+        Args:
+            intent: Complete next projection state.
+            expected_revision: Exact current revision.
+
+        Returns:
+            ArtifactSearchProjectionIntent: Newly stored state.
+
+        Notes:
+            Artifact authority and accounting are never modified by this CAS.
+        """
+
+        self._require_writable()
+        if intent.revision != expected_revision + 1:
+            raise StorageConflictError("Artifact search intent revision is not next")
+
+        def commit(connection: sqlite3.Connection):
+            row = connection.execute(
+                "SELECT * FROM local_artifact_search_intents WHERE intent_id = ?",
+                (intent.intent_id,),
+            ).fetchone()
+            if row is None:
+                raise StorageNotFoundError(intent.intent_id)
+            current = _artifact_search_intent(row)
+            if current.revision != expected_revision:
+                raise StorageConflictError("Artifact search intent revision is stale")
+            if (
+                current.artifact_id != intent.artifact_id
+                or current.occurrence_id != intent.occurrence_id
+                or current.owner_scope != intent.owner_scope
+                or current.document != intent.document
+            ):
+                raise StorageIntegrityError("Artifact search intent identity conflicts")
+            connection.execute(
+                """
+                UPDATE local_artifact_search_intents SET
+                    status = ?, revision = ?, attempts = ?, updated_at = ?,
+                    indexed_cursor = ?, diagnostic = ?, schema_version = ?
+                WHERE intent_id = ? AND revision = ?
+                """,
+                (
+                    intent.status.value,
+                    intent.revision,
+                    intent.attempts,
+                    intent.updated_at.isoformat(),
+                    intent.indexed_cursor,
+                    intent.diagnostic,
+                    intent.schema_version,
+                    intent.intent_id,
+                    expected_revision,
+                ),
+            )
+            return intent
+
+        return await self._database.transaction(commit)
 
     async def put(self, record: ArtifactRecord) -> ArtifactRecord:
         """Idempotently commit immutable artifact content metadata.
@@ -236,73 +486,7 @@ class LocalArtifactRepository:
         self._require_writable()
 
         def commit(connection: sqlite3.Connection) -> ArtifactRecord:
-            owner_identity = _scope_identity(record.owner_scope)
-            blob = connection.execute(
-                """
-                SELECT content_hash, hash_algorithm, size_bytes, provider_version
-                FROM local_blobs WHERE scope_key = ? AND blob_locator = ?
-                """,
-                (owner_identity, record.blob_locator),
-            ).fetchone()
-            if blob is None:
-                raise StorageNotFoundError(record.blob_locator)
-            expected_blob = (
-                record.content_hash,
-                record.hash_algorithm,
-                record.size_bytes,
-                record.provider_version,
-            )
-            if tuple(blob) != expected_blob:
-                raise StorageIntegrityError("Artifact metadata conflicts with scoped blob")
-            existing = connection.execute(
-                "SELECT * FROM local_artifacts WHERE artifact_id = ?",
-                (record.artifact_id,),
-            ).fetchone()
-            if existing is not None:
-                stored = _artifact(existing)
-                if stored != record:
-                    raise StorageIntegrityError(
-                        f"Artifact identity {record.artifact_id!r} has conflicting metadata"
-                    )
-                return stored
-            connection.execute(
-                """
-                INSERT INTO local_artifacts(
-                    artifact_id, owner_scope_identity, content_hash, hash_algorithm,
-                    size_bytes, media_type, kind, blob_locator, created_at,
-                    preview_locator, original_filename, provider_version, labels_json,
-                    schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.artifact_id,
-                    owner_identity,
-                    record.content_hash,
-                    record.hash_algorithm,
-                    record.size_bytes,
-                    record.media_type,
-                    record.kind,
-                    record.blob_locator,
-                    record.created_at.isoformat(),
-                    record.preview_locator,
-                    record.original_filename,
-                    record.provider_version,
-                    _json(record.labels),
-                    record.schema_version,
-                ),
-            )
-            connection.executemany(
-                """
-                INSERT INTO local_artifact_labels(artifact_id, label_key, value_json)
-                VALUES (?, ?, ?)
-                """,
-                ((record.artifact_id, key, _json(value)) for key, value in record.labels.items()),
-            )
-            connection.executemany(
-                "INSERT INTO local_artifact_tags(artifact_id, tag) VALUES (?, ?)",
-                ((record.artifact_id, tag) for tag in _artifact_tags(record.labels)),
-            )
-            return record
+            return _put_artifact(connection, record)
 
         return await self._database.transaction(commit)
 
@@ -609,56 +793,7 @@ class LocalArtifactRepository:
         self._require_writable()
 
         def commit(connection: sqlite3.Connection) -> ArtifactOccurrence:
-            existing = connection.execute(
-                "SELECT * FROM local_artifact_occurrences WHERE occurrence_id = ?",
-                (occurrence.occurrence_id,),
-            ).fetchone()
-            if existing is not None:
-                stored = _occurrence(existing)
-                if stored != occurrence:
-                    raise StorageIntegrityError(
-                        f"Occurrence identity {occurrence.occurrence_id!r} conflicts"
-                    )
-                return stored
-            artifact = connection.execute(
-                "SELECT owner_scope_identity FROM local_artifacts WHERE artifact_id = ?",
-                (occurrence.artifact_id,),
-            ).fetchone()
-            if artifact is None or not _scope_authorizes(
-                _scope(str(artifact[0])), occurrence.scope
-            ):
-                raise StorageNotFoundError(occurrence.artifact_id)
-            connection.execute(
-                f"INSERT INTO local_artifact_occurrences("
-                f"occurrence_id, artifact_id, scope_identity, {', '.join(_SCOPE_FIELDS)}, "
-                "action, occurred_at, tool_name, tool_version, labels_json, metrics_json, "
-                f"schema_version) VALUES ({', '.join('?' for _ in range(20))})",
-                (
-                    occurrence.occurrence_id,
-                    occurrence.artifact_id,
-                    _scope_identity(occurrence.scope),
-                    *(getattr(occurrence.scope, name) for name in _SCOPE_FIELDS),
-                    occurrence.action.value,
-                    occurrence.occurred_at.isoformat(),
-                    occurrence.tool_name,
-                    occurrence.tool_version,
-                    _json(occurrence.labels),
-                    _json(occurrence.metrics),
-                    occurrence.schema_version,
-                ),
-            )
-            connection.executemany(
-                """
-                INSERT INTO local_artifact_occurrence_metrics(
-                    occurrence_id, metric_key, metric_value
-                ) VALUES (?, ?, ?)
-                """,
-                (
-                    (occurrence.occurrence_id, key, value)
-                    for key, value in sorted(occurrence.metrics.items())
-                ),
-            )
-            return occurrence
+            return _record_artifact_occurrence(connection, occurrence)
 
         return await self._database.transaction(commit)
 
@@ -1055,6 +1190,209 @@ def _batch_occurrence_ids(occurrence_ids: Sequence[str]) -> tuple[str, ...]:
     return requested
 
 
+def _put_artifact(
+    connection: sqlite3.Connection,
+    record: ArtifactRecord,
+) -> ArtifactRecord:
+    owner_identity = _scope_identity(record.owner_scope)
+    blob = connection.execute(
+        """
+        SELECT content_hash, hash_algorithm, size_bytes, provider_version
+        FROM local_blobs WHERE scope_key = ? AND blob_locator = ?
+        """,
+        (owner_identity, record.blob_locator),
+    ).fetchone()
+    if blob is None:
+        raise StorageNotFoundError(record.blob_locator)
+    expected_blob = (
+        record.content_hash,
+        record.hash_algorithm,
+        record.size_bytes,
+        record.provider_version,
+    )
+    if tuple(blob) != expected_blob:
+        raise StorageIntegrityError("Artifact metadata conflicts with scoped blob")
+    existing = connection.execute(
+        "SELECT * FROM local_artifacts WHERE artifact_id = ?",
+        (record.artifact_id,),
+    ).fetchone()
+    if existing is not None:
+        stored = _artifact(existing)
+        if stored != record:
+            raise StorageIntegrityError(
+                f"Artifact identity {record.artifact_id!r} has conflicting metadata"
+            )
+        return stored
+    connection.execute(
+        """
+        INSERT INTO local_artifacts(
+            artifact_id, owner_scope_identity, content_hash, hash_algorithm,
+            size_bytes, media_type, kind, blob_locator, created_at,
+            preview_locator, original_filename, provider_version, labels_json,
+            schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.artifact_id,
+            owner_identity,
+            record.content_hash,
+            record.hash_algorithm,
+            record.size_bytes,
+            record.media_type,
+            record.kind,
+            record.blob_locator,
+            record.created_at.isoformat(),
+            record.preview_locator,
+            record.original_filename,
+            record.provider_version,
+            _json(record.labels),
+            record.schema_version,
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO local_artifact_labels(artifact_id, label_key, value_json)
+        VALUES (?, ?, ?)
+        """,
+        ((record.artifact_id, key, _json(value)) for key, value in record.labels.items()),
+    )
+    connection.executemany(
+        "INSERT INTO local_artifact_tags(artifact_id, tag) VALUES (?, ?)",
+        ((record.artifact_id, tag) for tag in _artifact_tags(record.labels)),
+    )
+    return record
+
+
+def _record_artifact_occurrence(
+    connection: sqlite3.Connection,
+    occurrence: ArtifactOccurrence,
+) -> ArtifactOccurrence:
+    existing = connection.execute(
+        "SELECT * FROM local_artifact_occurrences WHERE occurrence_id = ?",
+        (occurrence.occurrence_id,),
+    ).fetchone()
+    if existing is not None:
+        stored = _occurrence(existing)
+        if stored != occurrence:
+            raise StorageIntegrityError(
+                f"Occurrence identity {occurrence.occurrence_id!r} conflicts"
+            )
+        return stored
+    artifact = connection.execute(
+        "SELECT owner_scope_identity FROM local_artifacts WHERE artifact_id = ?",
+        (occurrence.artifact_id,),
+    ).fetchone()
+    if artifact is None or not _scope_authorizes(_scope(str(artifact[0])), occurrence.scope):
+        raise StorageNotFoundError(occurrence.artifact_id)
+    connection.execute(
+        f"INSERT INTO local_artifact_occurrences("
+        f"occurrence_id, artifact_id, scope_identity, {', '.join(_SCOPE_FIELDS)}, "
+        "action, occurred_at, tool_name, tool_version, labels_json, metrics_json, "
+        f"schema_version) VALUES ({', '.join('?' for _ in range(20))})",
+        (
+            occurrence.occurrence_id,
+            occurrence.artifact_id,
+            _scope_identity(occurrence.scope),
+            *(getattr(occurrence.scope, name) for name in _SCOPE_FIELDS),
+            occurrence.action.value,
+            occurrence.occurred_at.isoformat(),
+            occurrence.tool_name,
+            occurrence.tool_version,
+            _json(occurrence.labels),
+            _json(occurrence.metrics),
+            occurrence.schema_version,
+        ),
+    )
+    connection.executemany(
+        """
+        INSERT INTO local_artifact_occurrence_metrics(
+            occurrence_id, metric_key, metric_value
+        ) VALUES (?, ?, ?)
+        """,
+        (
+            (occurrence.occurrence_id, key, value)
+            for key, value in sorted(occurrence.metrics.items())
+        ),
+    )
+    return occurrence
+
+
+def _put_initial_retention(
+    connection: sqlite3.Connection,
+    retention: ArtifactRetentionRecord,
+) -> ArtifactRetentionRecord:
+    existing = connection.execute(
+        "SELECT * FROM local_artifact_retention WHERE artifact_id = ?",
+        (retention.artifact_id,),
+    ).fetchone()
+    if existing is not None:
+        current = _retention(existing)
+        if current.scope != retention.scope:
+            raise StorageIntegrityError("Artifact retention owner scope conflicts")
+        return current
+    connection.execute(
+        """
+        INSERT INTO local_artifact_retention(
+            artifact_id, owner_scope_identity, pinned, revision,
+            updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            retention.artifact_id,
+            _scope_identity(retention.scope),
+            int(retention.pinned),
+            retention.revision,
+            retention.updated_at.isoformat(),
+            retention.schema_version,
+        ),
+    )
+    return retention
+
+
+def _put_artifact_search_intent(
+    connection: sqlite3.Connection,
+    intent: ArtifactSearchProjectionIntent,
+) -> ArtifactSearchProjectionIntent:
+    existing = connection.execute(
+        "SELECT * FROM local_artifact_search_intents WHERE intent_id = ?",
+        (intent.intent_id,),
+    ).fetchone()
+    if existing is not None:
+        current = _artifact_search_intent(existing)
+        if (
+            current.artifact_id != intent.artifact_id
+            or current.occurrence_id != intent.occurrence_id
+            or current.owner_scope != intent.owner_scope
+            or current.document != intent.document
+        ):
+            raise StorageIntegrityError("Artifact search intent identity conflicts")
+        return current
+    connection.execute(
+        """
+        INSERT INTO local_artifact_search_intents(
+            intent_id, artifact_id, occurrence_id, owner_scope_identity,
+            document_json, status, revision, attempts, updated_at,
+            indexed_cursor, diagnostic, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            intent.intent_id,
+            intent.artifact_id,
+            intent.occurrence_id,
+            _scope_identity(intent.owner_scope),
+            _search_document_json(intent.document),
+            intent.status.value,
+            intent.revision,
+            intent.attempts,
+            intent.updated_at.isoformat(),
+            intent.indexed_cursor,
+            intent.diagnostic,
+            intent.schema_version,
+        ),
+    )
+    return intent
+
+
 def _artifact(row: sqlite3.Row) -> ArtifactRecord:
     try:
         return ArtifactRecord(
@@ -1110,6 +1448,52 @@ def _occurrence(row: sqlite3.Row) -> ArtifactOccurrence:
         )
     except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise StorageIntegrityError("Persisted local occurrence row is malformed") from exc
+
+
+def _search_document_json(document: SearchDocument) -> str:
+    return _json(
+        {
+            "corpus": document.corpus,
+            "item_id": document.item_id,
+            "text": document.text,
+            "scope": document.scope.as_filter(),
+            "occurred_at": document.occurred_at.isoformat(),
+            "tags": document.tags,
+            "metadata": document.metadata,
+            "schema_version": document.schema_version,
+        }
+    )
+
+
+def _artifact_search_intent(row: sqlite3.Row) -> ArtifactSearchProjectionIntent:
+    try:
+        raw_document = json.loads(row["document_json"])
+        document = SearchDocument(
+            corpus=str(raw_document["corpus"]),
+            item_id=str(raw_document["item_id"]),
+            text=str(raw_document["text"]),
+            scope=StorageScope(**raw_document["scope"]),
+            occurred_at=datetime.fromisoformat(str(raw_document["occurred_at"])),
+            tags=tuple(raw_document["tags"]),
+            metadata=raw_document["metadata"],
+            schema_version=int(raw_document["schema_version"]),
+        )
+        return ArtifactSearchProjectionIntent(
+            intent_id=str(row["intent_id"]),
+            artifact_id=str(row["artifact_id"]),
+            occurrence_id=str(row["occurrence_id"]),
+            owner_scope=_scope(str(row["owner_scope_identity"])),
+            document=document,
+            status=SearchProjectionStatus(str(row["status"])),
+            revision=int(row["revision"]),
+            attempts=int(row["attempts"]),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            indexed_cursor=row["indexed_cursor"],
+            diagnostic=row["diagnostic"],
+            schema_version=int(row["schema_version"]),
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise StorageIntegrityError("Persisted artifact search intent is malformed") from exc
 
 
 def _relation(row: sqlite3.Row) -> ArtifactRelation:

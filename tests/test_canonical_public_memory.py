@@ -14,7 +14,9 @@ from aethergraph.services.agent_state import CanonicalAgentStateFacade
 from aethergraph.services.memory import (
     CanonicalMemoryFacadeFactory,
     CanonicalPublicMemoryFacade,
+    MemoryProjectionError,
 )
+from aethergraph.services.memory.canonical_facade import CanonicalMemoryFacade
 from aethergraph.services.memory.canonical_prompt import CanonicalPromptMemoryMixin
 from aethergraph.storage.contracts import (
     EventQuery,
@@ -66,6 +68,11 @@ class _LLM:
         return self.response, {"input_tokens": 10, "output_tokens": 5}
 
 
+class _FailingSearch:
+    async def upsert_many(self, documents):
+        raise RuntimeError("provider unavailable with secret-value")
+
+
 @dataclass
 class _DemoState:
     count: int = 0
@@ -94,6 +101,46 @@ def _open_bundle(root: Path, clock: _Clock):
             secrets=_Secrets(),
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_public_commit_receipt_preserves_authority_and_sanitizes_projection_failure(
+    tmp_path: Path,
+) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    scope = StorageScope(tenant_id="tenant-1", project_id="project-1", run_id="run-1")
+    memory = CanonicalPublicMemoryFacade(
+        canonical=CanonicalMemoryFacade(
+            event_store=bundle.memory_events,
+            state_store=bundle.state,
+            search_backend=_FailingSearch(),  # type: ignore[arg-type]
+            scope=scope,
+        ),
+        logical_scope_id="run:run-1",
+        clock=clock.now,
+    )
+    try:
+        receipt = await memory.append_event_commit(
+            event_id="engine-output-1",
+            kind="agent_engine.assistant_output",
+            data={"output_id": "output-1"},
+        )
+
+        assert receipt.authoritative is True
+        assert receipt.created is True
+        assert receipt.event.event_id == "engine-output-1"
+        assert receipt.projection_status == "failed"
+        assert receipt.projection_diagnostic == "RuntimeError: search projection failed"
+        assert "secret-value" not in receipt.projection_diagnostic
+        with pytest.raises(MemoryProjectionError):
+            await memory.append_event(
+                event_id="engine-output-2",
+                kind="agent_engine.assistant_output",
+                data={"output_id": "output-2"},
+            )
+    finally:
+        await bundle.close()
 
 
 @pytest.mark.asyncio

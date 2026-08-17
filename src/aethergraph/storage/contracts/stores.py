@@ -15,11 +15,13 @@ from .records import (
     ArtifactRecord,
     ArtifactRelation,
     ArtifactRetentionRecord,
+    ArtifactSearchProjectionIntent,
     BlobHead,
     BlobRange,
     BlobWriteResult,
     EventDraft,
     EventRecord,
+    EventSearchProjectionIntent,
     FrozenJson,
     SearchDocument,
     SearchQuery,
@@ -230,6 +232,106 @@ class EventStore(Protocol):
         Notes:
             Search projection behavior is explicit provider configuration and never a
             fallback from the authoritative event write.
+        """
+        ...
+
+    async def append_many_with_search_intents(
+        self,
+        events: tuple[EventDraft, ...],
+        intents: tuple[EventSearchProjectionIntent, ...],
+    ) -> tuple[
+        tuple[EventRecord, ...],
+        tuple[EventSearchProjectionIntent, ...],
+        tuple[bool, ...],
+    ]:
+        """Commit canonical events and their search intents in one transaction.
+
+        Examples:
+            Commit one event and intent:
+                ```python
+                events, intents, created = await store.append_many_with_search_intents(
+                    (event,), (intent,)
+                )
+                ```
+
+            Retry the same atomic batch:
+                ```python
+                assert await store.append_many_with_search_intents((event,), (intent,)) == (
+                    events,
+                    intents,
+                )
+                ```
+
+        Args:
+            events: Immutable bounded canonical events in caller order.
+            intents: One initial pending intent per event in matching order.
+
+        Returns:
+            tuple[tuple[EventRecord, ...], tuple[EventSearchProjectionIntent, ...], tuple[bool, ...]]:
+                Authoritative events, durable intents, and per-event creation flags.
+
+        Notes:
+            Any identity conflict rolls back the complete event-and-intent batch.
+        """
+        ...
+
+    async def get_search_intent(
+        self,
+        scope: StorageScope,
+        intent_id: str,
+    ) -> EventSearchProjectionIntent | None:
+        """Read one durable search intent within exact canonical scope.
+
+        Examples:
+            Read pending work:
+                ```python
+                intent = await store.get_search_intent(scope, "memory-search:event-1")
+                ```
+
+            Detect absence:
+                ```python
+                assert await store.get_search_intent(scope, "missing") is None
+                ```
+
+        Args:
+            scope: Exact canonical event scope.
+            intent_id: Stable projection-intent identity.
+
+        Returns:
+            EventSearchProjectionIntent | None: Matching durable intent or `None`.
+
+        Notes:
+            The method never derives intent identity from a provider cursor.
+        """
+        ...
+
+    async def compare_and_set_search_intent(
+        self,
+        intent: EventSearchProjectionIntent,
+        expected_revision: int,
+    ) -> EventSearchProjectionIntent:
+        """Advance one durable search intent with optimistic concurrency.
+
+        Examples:
+            Record failed projection:
+                ```python
+                failed = await store.compare_and_set_search_intent(intent, 1)
+                ```
+
+            Record indexed projection:
+                ```python
+                indexed = await store.compare_and_set_search_intent(intent, current.revision)
+                ```
+
+        Args:
+            intent: Complete next revision of the projection intent.
+            expected_revision: Exact current revision.
+
+        Returns:
+            EventSearchProjectionIntent: Newly committed intent revision.
+
+        Notes:
+            Stale revisions fail directly; no blind overwrite or alternate store is used.
         """
         ...
 
@@ -699,6 +801,113 @@ class BlobStore(Protocol):
 
 class ArtifactRepository(Protocol):
     """Metadata, occurrence, and lineage repository for canonical artifacts."""
+
+    async def commit_production(
+        self,
+        record: ArtifactRecord,
+        occurrence: ArtifactOccurrence,
+        retention: ArtifactRetentionRecord | None,
+        search_intent: ArtifactSearchProjectionIntent,
+    ) -> tuple[
+        ArtifactRecord,
+        ArtifactOccurrence,
+        ArtifactRetentionRecord | None,
+        ArtifactSearchProjectionIntent,
+        bool,
+    ]:
+        """Atomically commit one artifact's authoritative production boundary.
+
+        Examples:
+            Commit produced content and its projection intent:
+                ```python
+                stored = await repository.commit_production(
+                    record, occurrence, retention, search_intent
+                )
+                ```
+
+            Retry the exact occurrence after restart:
+                ```python
+                *_, created = await repository.commit_production(
+                    record, occurrence, retention, search_intent
+                )
+                assert created is False
+                ```
+
+        Args:
+            record: Immutable metadata referencing an already staged provider blob.
+            occurrence: Stable authoritative production occurrence.
+            retention: Optional initial pinned retention record.
+            search_intent: Deterministic pending search projection for the occurrence.
+
+        Returns:
+            tuple: Stored metadata, occurrence, retention, intent, and creation flag.
+
+        Notes:
+            Metadata, occurrence, optional initial retention, run/session accounting,
+            and search intent share one provider transaction. Search indexing and blob
+            byte transfer remain outside this focused control-plane commit.
+        """
+        ...
+
+    async def get_search_intent(
+        self,
+        scope: StorageScope,
+        intent_id: str,
+    ) -> ArtifactSearchProjectionIntent | None:
+        """Read one owner-scoped artifact search projection intent.
+
+        Examples:
+            Inspect failed search work:
+                ```python
+                intent = await repository.get_search_intent(scope, intent_id)
+                ```
+
+            Detect missing work:
+                ```python
+                assert await repository.get_search_intent(scope, "missing") is None
+                ```
+
+        Args:
+            scope: Exact canonical artifact owner scope.
+            intent_id: Stable projection intent identity.
+
+        Returns:
+            ArtifactSearchProjectionIntent | None: Matching intent or absence.
+
+        Notes:
+            Execution scope and deprecated identity aliases are not authorization keys.
+        """
+        ...
+
+    async def compare_and_set_search_intent(
+        self,
+        intent: ArtifactSearchProjectionIntent,
+        expected_revision: int,
+    ) -> ArtifactSearchProjectionIntent:
+        """Advance one artifact search intent through exact optimistic revision.
+
+        Examples:
+            Mark an indexed projection:
+                ```python
+                stored = await repository.compare_and_set_search_intent(indexed, 1)
+                ```
+
+            Record a retry failure:
+                ```python
+                stored = await repository.compare_and_set_search_intent(failed, current.revision)
+                ```
+
+        Args:
+            intent: Complete next projection state.
+            expected_revision: Exact current revision.
+
+        Returns:
+            ArtifactSearchProjectionIntent: Newly committed intent revision.
+
+        Notes:
+            This method never writes artifact metadata, occurrences, or search data.
+        """
+        ...
 
     async def put(self, record: ArtifactRecord) -> ArtifactRecord:
         """Atomically establish one verified immutable artifact reference.

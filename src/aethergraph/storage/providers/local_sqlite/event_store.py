@@ -17,9 +17,12 @@ from ...contracts import (
     EventDraft,
     EventQuery,
     EventRecord,
+    EventSearchProjectionIntent,
     Page,
+    SearchProjectionStatus,
     SortDirection,
     StorageConfigurationError,
+    StorageConflictError,
     StorageIntegrityError,
     StorageOpenMode,
     StorageReadOnlyError,
@@ -75,6 +78,24 @@ _EVENT_INDEXES = (
     "stream, project_id, org_id, user_id, session_id, agent_id, cursor)",
     "CREATE INDEX ix_local_event_tags_tag ON local_event_tags(tag, event_cursor)",
 )
+_CREATE_EVENT_SEARCH_INTENTS = """
+CREATE TABLE local_event_search_intents (
+    stream TEXT NOT NULL,
+    intent_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    scope_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    attempts INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    indexed_cursor TEXT,
+    diagnostic TEXT,
+    schema_version INTEGER NOT NULL,
+    PRIMARY KEY (stream, intent_id),
+    UNIQUE (stream, event_id),
+    FOREIGN KEY (stream, event_id) REFERENCES local_events(stream, event_id)
+)
+"""
 
 
 class LocalEventStore:
@@ -91,6 +112,12 @@ class LocalEventStore:
             version=_EVENT_COMPONENT_VERSION,
             statements=(_CREATE_EVENTS, _CREATE_EVENT_TAGS, *_EVENT_INDEXES),
         )
+        if stream == "memory":
+            database.install_component(
+                name="memory_event_search_intents",
+                version=1,
+                statements=(_CREATE_EVENT_SEARCH_INTENTS,),
+            )
 
     async def append(self, event: EventDraft) -> EventRecord:
         """Commit one canonical event with a monotonic provider cursor.
@@ -161,6 +188,218 @@ class LocalEventStore:
             return tuple(self._append_sync(connection, event) for event in events)
 
         return await self._database.transaction(commit)
+
+    async def append_many_with_search_intents(
+        self,
+        events: tuple[EventDraft, ...],
+        intents: tuple[EventSearchProjectionIntent, ...],
+    ) -> tuple[
+        tuple[EventRecord, ...],
+        tuple[EventSearchProjectionIntent, ...],
+        tuple[bool, ...],
+    ]:
+        """Atomically commit Memory events with one durable search intent each.
+
+        Examples:
+            Commit a batch:
+                ```python
+                records, pending, created = await store.append_many_with_search_intents(
+                    events, intents
+                )
+                ```
+
+            Retry the exact batch:
+                ```python
+                retried = await store.append_many_with_search_intents(events, intents)
+                assert retried[2] == tuple(False for _event in events)
+                ```
+
+        Args:
+            events: Immutable bounded canonical events.
+            intents: Matching initial pending search intents.
+
+        Returns:
+            tuple[tuple[EventRecord, ...], tuple[EventSearchProjectionIntent, ...], tuple[bool, ...]]:
+                Authoritative records, durable intents, and creation flags.
+
+        Notes:
+            This focused operation is available only on the Memory stream.
+        """
+        if self._stream != "memory":
+            raise StorageConfigurationError("Search intents are supported only for memory events")
+        if not isinstance(events, tuple) or not isinstance(intents, tuple):
+            raise TypeError("events and intents must be immutable tuples")
+        if len(events) != len(intents):
+            raise ValueError("events and intents must have matching lengths")
+        if len(events) > _MAX_APPEND_BATCH:
+            raise StorageConfigurationError("event append batch exceeds 1000 records")
+        if any(
+            intent.event_id != event.event_id
+            or intent.scope != event.scope
+            or intent.revision != 1
+            or intent.attempts != 0
+            or str(intent.status) != "pending"
+            for event, intent in zip(events, intents, strict=True)
+        ):
+            raise ValueError("each event requires one matching initial pending intent")
+        if not events:
+            return (), (), ()
+        if self._mode is StorageOpenMode.READ_ONLY:
+            raise StorageReadOnlyError("Local memory event stream is read-only")
+
+        def commit(connection: sqlite3.Connection):
+            created = tuple(
+                connection.execute(
+                    "SELECT 1 FROM local_events WHERE stream = ? AND event_id = ?",
+                    (self._stream, event.event_id),
+                ).fetchone()
+                is None
+                for event in events
+            )
+            records = tuple(self._append_sync(connection, event) for event in events)
+            stored = tuple(self._put_intent_sync(connection, intent) for intent in intents)
+            return records, stored, created
+
+        return await self._database.transaction(commit)
+
+    async def get_search_intent(
+        self,
+        scope: StorageScope,
+        intent_id: str,
+    ) -> EventSearchProjectionIntent | None:
+        """Read one exact Memory search intent.
+
+        Examples:
+            Read pending work:
+                ```python
+                intent = await store.get_search_intent(scope, "memory-search:event-1")
+                ```
+
+            Detect absence:
+                ```python
+                assert await store.get_search_intent(scope, "missing") is None
+                ```
+
+        Args:
+            scope: Exact canonical event scope.
+            intent_id: Stable intent identity.
+
+        Returns:
+            EventSearchProjectionIntent | None: Matching intent or `None`.
+
+        Notes:
+            Scope equality is exact and never falls back to another execution bucket.
+        """
+        rows = await self._database.fetch_all(
+            "SELECT * FROM local_event_search_intents "
+            "WHERE stream = ? AND intent_id = ? AND scope_json = ?",
+            (self._stream, intent_id, _json(scope.as_filter())),
+        )
+        return _intent(rows[0]) if rows else None
+
+    async def compare_and_set_search_intent(
+        self,
+        intent: EventSearchProjectionIntent,
+        expected_revision: int,
+    ) -> EventSearchProjectionIntent:
+        """Advance one Memory search intent by one exact revision.
+
+        Examples:
+            Record failure:
+                ```python
+                stored = await store.compare_and_set_search_intent(failed, 1)
+                ```
+
+            Record success:
+                ```python
+                stored = await store.compare_and_set_search_intent(indexed, current.revision)
+                ```
+
+        Args:
+            intent: Complete next intent revision.
+            expected_revision: Exact current revision.
+
+        Returns:
+            EventSearchProjectionIntent: Committed next revision.
+
+        Notes:
+            Identity, event, and scope are immutable across revisions.
+        """
+        if intent.revision != expected_revision + 1:
+            raise ValueError("intent revision must be exactly one greater than expected")
+        if self._mode is StorageOpenMode.READ_ONLY:
+            raise StorageReadOnlyError("Local memory event stream is read-only")
+
+        def commit(connection: sqlite3.Connection):
+            row = connection.execute(
+                "SELECT * FROM local_event_search_intents WHERE stream = ? AND intent_id = ?",
+                (self._stream, intent.intent_id),
+            ).fetchone()
+            if row is None:
+                raise StorageConflictError("Search projection intent does not exist")
+            current = _intent(row)
+            if current.revision != expected_revision:
+                raise StorageConflictError("Search projection intent revision is stale")
+            if current.event_id != intent.event_id or current.scope != intent.scope:
+                raise StorageIntegrityError("Search projection intent identity changed")
+            connection.execute(
+                "UPDATE local_event_search_intents SET status = ?, revision = ?, attempts = ?, "
+                "updated_at = ?, indexed_cursor = ?, diagnostic = ?, schema_version = ? "
+                "WHERE stream = ? AND intent_id = ? AND revision = ?",
+                (
+                    str(intent.status),
+                    intent.revision,
+                    intent.attempts,
+                    intent.updated_at.isoformat(),
+                    intent.indexed_cursor,
+                    intent.diagnostic,
+                    intent.schema_version,
+                    self._stream,
+                    intent.intent_id,
+                    expected_revision,
+                ),
+            )
+            return intent
+
+        return await self._database.transaction(commit)
+
+    def _put_intent_sync(
+        self,
+        connection: sqlite3.Connection,
+        intent: EventSearchProjectionIntent,
+    ) -> EventSearchProjectionIntent:
+        existing = connection.execute(
+            "SELECT * FROM local_event_search_intents WHERE stream = ? AND intent_id = ?",
+            (self._stream, intent.intent_id),
+        ).fetchone()
+        if existing is not None:
+            stored = _intent(existing)
+            if (
+                stored.event_id != intent.event_id
+                or stored.scope != intent.scope
+                or stored.schema_version != intent.schema_version
+            ):
+                raise StorageIntegrityError("Search projection intent identity conflicts")
+            return stored
+        connection.execute(
+            "INSERT INTO local_event_search_intents("
+            "stream, intent_id, event_id, scope_json, status, revision, attempts, updated_at, "
+            "indexed_cursor, diagnostic, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                self._stream,
+                intent.intent_id,
+                intent.event_id,
+                _json(intent.scope.as_filter()),
+                str(intent.status),
+                intent.revision,
+                intent.attempts,
+                intent.updated_at.isoformat(),
+                intent.indexed_cursor,
+                intent.diagnostic,
+                intent.schema_version,
+            ),
+        )
+        return intent
 
     async def get(self, scope: StorageScope, event_id: str) -> EventRecord | None:
         """Read one event ID constrained by populated canonical scope dimensions.
@@ -370,6 +609,24 @@ def _record(row: sqlite3.Row) -> EventRecord:
         )
     except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         raise StorageIntegrityError("Persisted local event row is malformed") from exc
+
+
+def _intent(row: sqlite3.Row) -> EventSearchProjectionIntent:
+    try:
+        return EventSearchProjectionIntent(
+            intent_id=str(row["intent_id"]),
+            event_id=str(row["event_id"]),
+            scope=StorageScope(**json.loads(str(row["scope_json"]))),
+            status=SearchProjectionStatus(str(row["status"])),
+            revision=int(row["revision"]),
+            attempts=int(row["attempts"]),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+            indexed_cursor=row["indexed_cursor"],
+            diagnostic=row["diagnostic"],
+            schema_version=int(row["schema_version"]),
+        )
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+        raise StorageIntegrityError("Persisted search projection intent is malformed") from exc
 
 
 def _draft(record: EventRecord) -> EventDraft:

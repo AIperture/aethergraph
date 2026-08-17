@@ -198,8 +198,6 @@ async def _benchmark(bundle: Any, samples: int) -> dict[str, Any]:
         blobs=bundle.blobs,
         artifacts=bundle.artifacts,
         search=bundle.search,
-        runs=bundle.runs,
-        sessions=bundle.sessions,
         owner_scope=_owner_scope(),
         execution_scope=StorageScope(**_owner_scope().as_filter(), run_id="run-0"),
     )

@@ -56,6 +56,27 @@ class PublicMemorySearchHit:
     mode: SearchMode
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class PublicMemoryCommitReceipt:
+    """Public event plus authoritative and search-projection commit outcome."""
+
+    event: Event
+    authoritative: bool
+    projection_status: Literal["not_requested", "indexed", "failed"]
+    event_cursor: str | None
+    indexed_cursor: str | None
+    created: bool
+    projection_diagnostic: str | None = None
+
+
+class MemoryProjectionError(RuntimeError):
+    """Search projection failed after the public Memory event became authoritative."""
+
+    def __init__(self, receipt: PublicMemoryCommitReceipt) -> None:
+        super().__init__(receipt.projection_diagnostic or "Memory search projection failed")
+        self.receipt = receipt
+
+
 class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
     """Project stable public Memory events onto one canonical facade."""
 
@@ -222,41 +243,32 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
                 expected_revision=expected_state_revision,
             )
 
-        payload: dict[str, Any] = {"data": raw.get("data")}
-        if raw.get("inputs") is not None:
-            payload["inputs"] = raw["inputs"]
-        if raw.get("outputs") is not None:
-            payload["outputs"] = raw["outputs"]
-        if self._deprecated_app_id is not None:
-            payload[_COMPATIBILITY_METADATA] = {
-                _DEPRECATED_APP_ID: {
-                    "value": self._deprecated_app_id,
-                    "deprecated": True,
-                    "scheduled_removal": "future breaking release",
-                }
-            }
         event_id = raw.get("event_id")
         resolved_event_id = _identity(
             event_id if event_id is not None else self._event_id_factory()
         )
-        receipt = await self.canonical.append_event(
+        receipt = await self.append_event_commit(
             event_id=resolved_event_id,
-            occurred_at=_utc(self._clock()),
             kind=str(raw.get("kind") or "misc"),
+            data=raw.get("data"),
             stage=raw.get("stage"),
             topic=_topic(topic=raw.get("topic"), tool=raw.get("tool")),
             text=text,
-            tags=_tags(raw.get("tags")),
-            payload=payload,
+            tags=list(_tags(raw.get("tags"))),
+            inputs=raw.get("inputs"),
+            outputs=raw.get("outputs"),
             metrics=dict(metrics or {}),
             severity=raw.get("severity", 2),
             signal=raw.get("signal"),
         )
-        return _public_event(receipt.events[0], logical_scope_id=self.memory_scope_id)
+        if receipt.projection_status == "failed":
+            raise MemoryProjectionError(receipt)
+        return receipt.event
 
     async def append_event(
         self,
         *,
+        event_id: str | None = None,
         kind: str,
         data: Any,
         tags: list[str] | None = None,
@@ -296,6 +308,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
                 ```
 
         Args:
+            event_id: Optional stable caller-owned idempotency identity.
             kind: Exact non-empty event kind.
             data: JSON-compatible event-specific payload.
             tags: Optional unique non-empty indexed tags.
@@ -316,6 +329,83 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             Deprecated `app_id` is retained only in marked payload compatibility
             metadata and never enters canonical scope or indexes.
         """
+        receipt = await self.append_event_commit(
+            event_id=event_id,
+            kind=kind,
+            data=data,
+            tags=tags,
+            severity=severity,
+            stage=stage,
+            inputs=inputs,
+            outputs=outputs,
+            metrics=metrics,
+            signal=signal,
+            text=text,
+            topic=topic,
+            tool=tool,
+        )
+        if receipt.projection_status == "failed":
+            raise MemoryProjectionError(receipt)
+        return receipt.event
+
+    async def append_event_commit(
+        self,
+        *,
+        event_id: str | None = None,
+        kind: str,
+        data: Any,
+        tags: list[str] | None = None,
+        severity: int = 2,
+        stage: str | None = None,
+        inputs: list[Any] | None = None,
+        outputs: list[Any] | None = None,
+        metrics: dict[str, float] | None = None,
+        signal: float | None = None,
+        text: str | None = None,
+        topic: str | None = None,
+        tool: str | None = None,
+    ) -> PublicMemoryCommitReceipt:
+        """Commit one public event and return authoritative and projection outcomes.
+
+        Examples:
+            Commit with a restart-stable identity:
+                ```python
+                receipt = await memory.append_event_commit(
+                    event_id="engine-output-1",
+                    kind="agent_engine.assistant_output",
+                    data={"output_id": "output-1"},
+                )
+                ```
+
+            Inspect a degraded search projection:
+                ```python
+                receipt = await memory.append_event_commit(kind="note", data={"x": 1})
+                if receipt.projection_status == "failed":
+                    report(receipt.projection_diagnostic)
+                ```
+
+        Args:
+            event_id: Optional stable caller-owned idempotency identity.
+            kind: Exact non-empty event kind.
+            data: JSON-compatible event-specific payload.
+            tags: Optional unique non-empty indexed tags.
+            severity: Canonical severity from zero through 100.
+            stage: Optional exact execution stage.
+            inputs: Optional JSON-compatible public input values.
+            outputs: Optional JSON-compatible public output values.
+            metrics: Optional finite numeric metrics.
+            signal: Optional finite relevance signal.
+            text: Optional searchable text; compact JSON is derived when absent.
+            topic: Optional exact canonical topic.
+            tool: Deprecated topic alias; conflicts with `topic` fail directly.
+
+        Returns:
+            PublicMemoryCommitReceipt: Authoritative event and explicit search outcome.
+
+        Notes:
+            A projection failure is represented in the receipt and never changes the
+            authoritative event result or selects another backend.
+        """
         resolved_topic = _topic(topic=topic, tool=tool)
         payload: dict[str, Any] = {"data": data}
         if inputs is not None:
@@ -331,10 +421,12 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
                 }
             }
         occurred_at = _utc(self._clock())
-        event_id = _identity(self._event_id_factory())
+        resolved_event_id = _identity(
+            event_id if event_id is not None else self._event_id_factory()
+        )
         searchable_text = text if text is not None else _text(data)
         receipt = await self.canonical.append_event(
-            event_id=event_id,
+            event_id=resolved_event_id,
             occurred_at=occurred_at,
             kind=kind,
             stage=stage,
@@ -346,7 +438,15 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             severity=severity,
             signal=signal,
         )
-        return _public_event(receipt.events[0], logical_scope_id=self.memory_scope_id)
+        return PublicMemoryCommitReceipt(
+            event=_public_event(receipt.events[0], logical_scope_id=self.memory_scope_id),
+            authoritative=True,
+            projection_status=receipt.projection_status,
+            event_cursor=receipt.event_cursor,
+            indexed_cursor=receipt.indexed_cursor,
+            created=receipt.created[0],
+            projection_diagnostic=receipt.projection_diagnostic,
+        )
 
     async def append_chat_turn(
         self,
