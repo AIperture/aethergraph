@@ -12,7 +12,7 @@ from aethergraph.services.agent_state.contracts import (
     AgentStateBackend,
     AgentStateConflictError,
 )
-from aethergraph.services.scope.scope import ScopeLevel
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.storage.contracts import (
     Page,
     PageRequest,
@@ -480,6 +480,7 @@ class CanonicalAgentStateFacade:
         model: type[T] | None = None,
         default_factory: Callable[[], T] | None = None,
         level: ScopeLevel | None = None,
+        scope: Scope | None = None,
         backend: AgentStateBackend = "hybrid",
         tags: Sequence[str] | None = None,
         meta: Mapping[str, Any] | None = None,
@@ -487,8 +488,9 @@ class CanonicalAgentStateFacade:
     ) -> CanonicalAgentStateHandle[T]:
         """Bind or reuse one typed canonical Agent-state handle.
 
-        Projects the base scope to the requested logical level and caches only exact
-        equivalent handle configurations.
+        Projects either the trusted base scope or one validated legacy runtime
+        `Scope` to the requested logical level and caches only exact equivalent
+        handle configurations.
 
         Examples:
             Bind session state:
@@ -501,11 +503,20 @@ class CanonicalAgentStateFacade:
                 handle = facade.bind(key="turn", backend="memory", level="run")
                 ```
 
+            Bind state shared by every Agent in the current session:
+                ```python
+                shared = Scope(org_id="org-1", user_id="user-1", session_id="session-1")
+                handle = facade.bind(key="orchestration", level="session", scope=shared)
+                ```
+
         Args:
             key: Stable caller-owned state key.
             model: Optional model type used to hydrate stored mappings.
             default_factory: Optional callable producing missing state.
             level: Canonical logical scope projection; defaults deterministically.
+            scope: Optional existing runtime `Scope` whose populated canonical
+                identity dimensions must match the trusted base scope. Omitted
+                dimensions, including `agent_id`, remain omitted in the projection.
             backend: Exact cache policy: `hybrid`, `memory`, or `local`.
             tags: Optional commit audit tags.
             meta: Optional JSON-compatible commit audit metadata.
@@ -515,9 +526,14 @@ class CanonicalAgentStateFacade:
             CanonicalAgentStateHandle[T]: Cached exact handle configuration.
 
         Notes:
-            Deprecated App/client identity and legacy memory bucket aliases are absent.
+            Deprecated App/client identity and legacy memory bucket aliases are
+            absent. Tenant and project ownership always come from the trusted base
+            scope; an explicit scope cannot switch owners or populated identities.
         """
-        projected_scope = project_agent_state_scope(self.scope, level=level)
+        binding_scope = (
+            _validated_explicit_scope(self.scope, scope) if scope is not None else self.scope
+        )
+        projected_scope = project_agent_state_scope(binding_scope, level=level)
         cache_key = (
             projected_scope,
             key,
@@ -542,6 +558,32 @@ class CanonicalAgentStateFacade:
                 kind=kind,
             )
         return cast(CanonicalAgentStateHandle[T], self._handles[cache_key])
+
+
+def _validated_explicit_scope(base: StorageScope, requested: Scope) -> StorageScope:
+    """Convert one existing runtime `Scope` under a trusted canonical owner."""
+    if requested._memory_scope_id is not None:
+        raise ValueError("Agent-state scope does not accept a memory scope override")
+
+    dimensions = (
+        "org_id",
+        "user_id",
+        "session_id",
+        "run_id",
+        "graph_id",
+        "node_id",
+        "agent_id",
+    )
+    values: dict[str, str | None] = {
+        "tenant_id": base.tenant_id,
+        "project_id": base.project_id,
+    }
+    for name in dimensions:
+        value = getattr(requested, name)
+        if value is not None and value != getattr(base, name):
+            raise ValueError(f"Agent-state scope {name} does not match the trusted runtime scope")
+        values[name] = value
+    return StorageScope(**values)
 
 
 def project_agent_state_scope(

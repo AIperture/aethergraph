@@ -29,7 +29,7 @@ from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.canonical_public import CanonicalPublicMemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
-from aethergraph.services.scope.scope import Scope
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 
@@ -385,12 +385,55 @@ class NodeContext:
         *,
         model: type | None = None,
         default_factory: Any | None = None,
-        level: str | None = None,
+        level: ScopeLevel | None = None,
+        scope: Scope | None = None,
         backend: AgentStateBackend = "hybrid",
         tags: list[str] | None = None,
         meta: dict[str, Any] | None = None,
         kind: str = "state.snapshot",
     ) -> CanonicalAgentStateHandle:
+        """Bind typed Agent state in the canonical provider store.
+
+        The default binding uses this node's trusted runtime scope. Callers that
+        coordinate multiple Agents may pass an existing narrower `Scope`; its
+        populated identity dimensions are validated by the canonical facade.
+
+        Examples:
+            Bind ordinary Agent-scoped session state:
+                ```python
+                state = context.state("planner", model=PlannerState, level="session")
+                ```
+
+            Bind orchestration state shared across Agents in one session:
+                ```python
+                shared_scope = replace(context.scope, agent_id=None)
+                state = context.state(
+                    "session_envelope",
+                    model=dict,
+                    level="session",
+                    scope=shared_scope,
+                )
+                ```
+
+        Args:
+            key: Stable caller-owned state key.
+            model: Optional model type used to hydrate stored mappings.
+            default_factory: Optional callable producing missing state.
+            level: Logical scope projection for the state handle.
+            scope: Optional existing runtime `Scope` validated against this
+                context's trusted storage owner and identity.
+            backend: Exact cache policy: `hybrid`, `memory`, or `local`.
+            tags: Optional commit audit tags.
+            meta: Optional JSON-compatible commit audit metadata.
+            kind: Exact state family separating same-named keys.
+
+        Returns:
+            CanonicalAgentStateHandle: A handle bound to one exact state identity.
+
+        Notes:
+            Passing `scope` does not select a provider, workspace, or alternate
+            persistence path. Omitting it preserves Agent-scoped behavior.
+        """
         if not self.services.agent_state:
             raise RuntimeError("Agent state facade not bound")
         return self.services.agent_state.bind(
@@ -398,6 +441,7 @@ class NodeContext:
             model=model,
             default_factory=default_factory,
             level=level,
+            scope=scope,
             backend=backend,
             tags=tags,
             meta=meta,

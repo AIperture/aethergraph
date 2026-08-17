@@ -13,6 +13,7 @@ from aethergraph.services.agent_state import (
     CanonicalAgentStateHandle,
     project_agent_state_scope,
 )
+from aethergraph.services.scope.scope import Scope
 from aethergraph.storage.contracts import (
     StorageOpenMode,
     StorageOpenRequest,
@@ -119,6 +120,58 @@ def test_canonical_agent_state_handle_cache_normalizes_metadata_order() -> None:
     second = facade.bind(key="planner", meta={"b": 2, "a": 1})
 
     assert first is second
+
+
+def test_explicit_runtime_scope_can_omit_agent_for_shared_session_state() -> None:
+    facade = CanonicalAgentStateFacade(state_store=object(), scope=_base_scope())  # type: ignore[arg-type]
+    shared = Scope(
+        org_id="org-1",
+        user_id="user-1",
+        session_id="session-1",
+        run_id="run-1",
+        graph_id="graph-1",
+    )
+
+    handle = facade.bind(key="session-envelope", level="session", scope=shared)
+
+    assert handle.scope.as_filter() == {
+        "tenant_id": "tenant-1",
+        "project_id": "project-1",
+        "org_id": "org-1",
+        "user_id": "user-1",
+        "session_id": "session-1",
+    }
+    assert facade.bind(key="session-envelope", level="session") is not handle
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("org_id", "other-org"),
+        ("user_id", "other-user"),
+        ("session_id", "other-session"),
+        ("run_id", "other-run"),
+        ("graph_id", "other-graph"),
+        ("agent_id", "other-agent"),
+    ),
+)
+def test_explicit_runtime_scope_cannot_switch_trusted_identity(
+    field: str,
+    value: str,
+) -> None:
+    values = {
+        "org_id": "org-1",
+        "user_id": "user-1",
+        "session_id": "session-1",
+        "run_id": "run-1",
+        "graph_id": "graph-1",
+        "agent_id": "agent-1",
+    }
+    values[field] = value
+    facade = CanonicalAgentStateFacade(state_store=object(), scope=_base_scope())  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match=field):
+        facade.bind(key="session-envelope", level="session", scope=Scope(**values))
 
 
 @pytest.mark.asyncio
