@@ -1285,6 +1285,25 @@ classified before A8 rather than hidden:
 The normal Vite chunk-size warning remains non-security build advice. It is not an npm
 audit finding and is not addressed by this plan.
 
+Exact-wheel checkpoint:
+
+- AG commit `6c2d917`, wheel `aethergraph-0.1.0a17-py3-none-any.whl`, SHA-256
+  `575fae221f1a6f464a0b64566d7b853f7e9280134ae9a25479456011e675cb14`;
+- Engine commit `ae94c8b`, wheel `aethergraph_engine-0.1.0a3-py3-none-any.whl`, SHA-256
+  `fae2153f852a517416fd01cd396aecd0adecc0e04adafd66c12049c4c88b937b`;
+- Studio commit `17ca06b` installed editable only as the test harness; AG and Engine
+  imports resolved from the exact wheel `site-packages` paths and both distributions
+  contained `RECORD` metadata;
+- Python `3.13.1`; frozen-environment SHA-256
+  `369ae6fc75e25d3880318b58002cc88d5ffe23e795ccbf39e8ba939157defa39`;
+- `pip check`: no broken requirements;
+- AG exact-distribution host manifest/process gates: `6 passed`;
+- Studio exact-wheel host supervisor: `3 passed`;
+- Studio exact-wheel local deployment lifecycle: `1 passed` using a short Windows
+  qualification path; the first long worktree-local basetemp attempt failed with
+  `WinError 267`, confirming a Windows path-length test-environment issue rather than
+  a runtime fallback or product failure.
+
 ## 10. Stop conditions
 
 Stop implementation and discuss with the user if any of these occurs:
@@ -1332,14 +1351,14 @@ mark a milestone complete based only on source inspection or mocked tests.
 | Plan preparation | Complete | documentation-only working tree change | — | — | Live Studio/Engine/AG evidence recorded; no production code changed; seven existing audit tests passed. |
 | Plan review amendment | Complete | documentation-only working tree change | — | `d92a4cb` review base; implementation base advanced to `695ea64` | Added stable idempotency, minimal/reuse-first contract rules, provider-conformance distinction, complete Studio snapshot verification, granular artifact failures, UI scope, and provider-capability-aware LLM logging policy. AG LLM audit: 325 passed/2 live skipped; media 9 passed; broader audit 477 passed/2 skipped/1 environment-only failure. |
 | A0 reverification and contract decision | Complete | `092a4ee` base + working tree | `85c19c9` base + isolated worktree | `695ea64` base + isolated worktree | Worktrees and heads verified; focused EventStore composite, deterministic Engine event identity, layered Studio status, and v3 operation snapshot decisions recorded above. |
-| A1 AG authoritative Memory semantics | Complete | working tree, not committed | — | — | Event + deterministic search intent atomic locally; public discriminated receipt; sanitized degradation; exact retry and close/reopen persistence. Focused AG/provider/conformance set: 50 passed. Real external service qualification remains A8 and is not claimed. |
-| A2 existing Engine adoption | Complete | paired AG working tree | working tree, not committed | — | ReAct v3 uses only `append_event_commit`; blanket empty-receipt catches removed; stable payload-derived event IDs; receipts distinguish newly created from idempotently reused events; recorded links are separate from search status; assistant projection degradation/error/restart tests pass. Complete modified Engine regression set: 188 passed; final receipt amendment recheck: 39 passed. |
-| A3 historical Engine-event projection | Complete | working tree, not committed | reader boundary retained | — | Public Memory write → local workspace close/reopen → flat Engine data projection covered in the 20-test observability set. Malformed envelopes fail without a flat fallback. |
-| A4 Artifact alignment | Complete | working tree, not committed | — | — | One focused `ArtifactRepository.commit_production` transaction owns metadata, occurrence, initial retention, run/session accounting, and deterministic search intent. Blob staging retains the existing orphan reconciler; search degradation returns an authoritative receipt and retries the same intent after close/reopen without duplicate occurrence, retention, or counters. Focused artifact/control/API set: 50 passed; local plus deterministic-external conformance set: 26 passed. Real external service qualification remains A8. |
-| A5 deprecated identity hygiene | Complete | working tree, not committed | — | — | SafeFormatter now formats a copy; persisted absent App/client identity remains absent regardless of handler order. Included in the 20-test observability set. |
-| A6 Studio layered status | Complete | — | — | working tree, not committed | Central projector exposes overall `status` plus explicit `transport_status`; unknown/paused/simulation behavior updated; raw Engine output retained. Studio outcome/control/simulation qualification included in 28 passing backend tests; UI status/Timeline set: 13 passed; TypeScript check passed. |
-| A7 Studio operation profiles | Complete | endpoint capability registry working tree | — | working tree, not committed | Runtime snapshot v3 pins credential-free chat, embedding, and image-generation profiles plus exact resolved bindings and endpoint-owned observability evidence. Required embedding/image capabilities fail preflight; the worker recomputes the settings-source digest before materialization and enables manifest capture whenever any pinned endpoint supports it. Unsupported capture is explicit and does not select a fallback. Final AG registry set: 30 passed; Studio snapshot/worker set: 15 passed. |
-| A8 exact-wheel qualification | In progress | commit pending | commit pending | commit pending | Engine full source suite: 774 passed. AG functional source suite passed with two expected wheel-metadata release failures. Studio UI: 800 tests, build passed, npm audit 0. Exact commits, wheel hashes, isolated distribution tests, live IDs, and expected skips remain to record. |
+| A1 AG authoritative Memory semantics | Complete | `6c2d917` | — | — | Event + deterministic search intent atomic locally; public discriminated receipt; sanitized degradation; exact retry and close/reopen persistence. Focused AG/provider/conformance set: 50 passed. Real external service qualification remains A8 and is not claimed. |
+| A2 existing Engine adoption | Complete | `6c2d917` | `ae94c8b` | — | ReAct v3 uses only `append_event_commit`; blanket empty-receipt catches removed; stable payload-derived event IDs; receipts distinguish newly created from idempotently reused events; recorded links are separate from search status; assistant projection degradation/error/restart tests pass. Complete Engine suite: 774 passed. |
+| A3 historical Engine-event projection | Complete | `6c2d917` | reader boundary retained in `ae94c8b` | — | Public Memory write → local workspace close/reopen → flat Engine data projection covered in the 20-test observability set. Malformed envelopes fail without a flat fallback. |
+| A4 Artifact alignment | Complete | `6c2d917` | — | — | One focused `ArtifactRepository.commit_production` transaction owns metadata, occurrence, initial retention, run/session accounting, and deterministic search intent. Blob staging retains the existing orphan reconciler; search degradation returns an authoritative receipt and retries the same intent after close/reopen without duplicate occurrence, retention, or counters. Focused artifact/control/API set: 50 passed; local plus deterministic-external conformance set: 26 passed. Real external service qualification remains A8. |
+| A5 deprecated identity hygiene | Complete | `6c2d917` | — | — | SafeFormatter now formats a copy; persisted absent App/client identity remains absent regardless of handler order. Included in the 20-test observability set. |
+| A6 Studio layered status | Complete | — | — | `17ca06b` | Central projector exposes overall `status` plus explicit `transport_status`; unknown/paused/simulation behavior updated; raw Engine output retained. Studio outcome/control/simulation qualification included in 28 passing backend tests; UI complete suite: 800 passed; TypeScript build passed. |
+| A7 Studio operation profiles | Complete | `6c2d917` | — | `17ca06b` | Runtime snapshot v3 pins credential-free chat, embedding, and image-generation profiles plus exact resolved bindings and endpoint-owned observability evidence. Required embedding/image capabilities fail preflight; the worker recomputes the settings-source digest before materialization and enables manifest capture whenever any pinned endpoint supports it. Unsupported capture is explicit and does not select a fallback. Final AG registry set: 30 passed; Studio snapshot/worker set: 15 passed. |
+| A8 exact-wheel qualification | In progress | `6c2d917` / wheel hash recorded above | `ae94c8b` / wheel hash recorded above | `17ca06b` harness | Exact-distribution Host gates: AG 6 passed, Studio supervisor 3 passed, Studio deployment lifecycle 1 passed, pip check clean. Live/provider scenarios and real external-provider evidence remain explicitly unclaimed. |
 | A9 cleanup and merge readiness | Pending | — | — | — | User review required before merge. |
 
 ## 12. Commit and worktree discipline
