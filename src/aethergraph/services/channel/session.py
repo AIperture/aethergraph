@@ -736,7 +736,7 @@ class ChannelSession:
         stream_chars_per_second: float | None = None,
         stream_target_chunk_chars: int | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -846,7 +846,7 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -942,7 +942,7 @@ class ChannelSession:
         poll_ms: int | None = None,
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1042,7 +1042,7 @@ class ChannelSession:
         channel: str | None = None,
         artifact_labels: dict[str, Any] | None = None,
         # memory logging...
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1138,7 +1138,7 @@ class ChannelSession:
         artifact_kind: str = "file",
         artifact_labels: dict[str, Any] | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1298,7 +1298,7 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -1555,8 +1555,8 @@ class ChannelSession:
         silent: bool = False,  # kept for back-compat; same behavior as before
         channel: str | None = None,
         # memory config
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> str:
         """
@@ -1644,7 +1644,7 @@ class ChannelSession:
         *,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_reply: bool = True,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> str:
         """
@@ -1670,7 +1670,7 @@ class ChannelSession:
         Args:
             timeout_s: Maximum time in seconds to wait for a response (default: 3600).
             channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_log_reply: Whether to log the user's reply to memory (default: True).
+            memory_log_reply: Whether to log the user's reply to memory (default: False).
             memory_tags: Optional list of tags to associate with the memory log entry.
 
         Returns:
@@ -1694,8 +1694,8 @@ class ChannelSession:
         *,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> ChoiceResult:
         """Prompt for one normalized choice selection.
@@ -1825,8 +1825,8 @@ class ChannelSession:
         multiple: bool = True,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> FileInteractionResult:
         """Prompt for file upload and return a typed normalized reply.
@@ -1929,8 +1929,8 @@ class ChannelSession:
         prompt: str,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> FileInteractionResult:
         """Prompt for either text or files and return a typed normalized reply.
@@ -2125,7 +2125,7 @@ class ChannelSession:
             self,
             full_text: str | None = None,
             *,
-            memory_log: bool = True,
+            memory_log: bool = False,
             memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
             memory_tags: list[str] | None = None,
             memory_data: dict[str, Any] | None = None,
@@ -2216,7 +2216,7 @@ class ChannelSession:
         full_text: str,
         *,
         channel: str | None = None,
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
@@ -2327,7 +2327,7 @@ class ChannelSession:
         thinking_detail_tail_chars: int = 300,
         emit_thinking_phase: bool = False,
         # Memory logging
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,

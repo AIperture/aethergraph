@@ -60,9 +60,7 @@ class LLMProfile(BaseModel):
             "request estimates but leaves context admission to the provider."
         ),
     )
-    capability_overrides: ChatCapabilityOverrides = Field(
-        default_factory=ChatCapabilityOverrides
-    )
+    capability_overrides: ChatCapabilityOverrides = Field(default_factory=ChatCapabilityOverrides)
 
     # provider-specific
     azure_deployment: str | None = None
@@ -165,7 +163,7 @@ class EmbeddingProfile(BaseModel):
 
 
 class EmbeddingSettings(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     default: EmbeddingProfile = EmbeddingProfile()
     profiles: dict[str, EmbeddingProfile] = Field(default_factory=dict)
 

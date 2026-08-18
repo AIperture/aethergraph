@@ -16,6 +16,9 @@ from typing import Any, BinaryIO, Literal
 from uuid import uuid4
 
 from aethergraph.contracts.services.artifacts import Artifact
+from aethergraph.services.search_projection_diagnostics import (
+    search_projection_diagnostic,
+)
 from aethergraph.storage.contracts import (
     ArtifactAction,
     ArtifactMetricOrder,
@@ -666,7 +669,7 @@ class CanonicalArtifactFacade:
         try:
             indexed_cursor = await self._search.upsert(search_intent.document)
         except Exception as exc:
-            diagnostic = f"{type(exc).__name__}: search projection failed"
+            diagnostic = search_projection_diagnostic(exc)
             await self._artifacts.compare_and_set_search_intent(
                 replace(
                     search_intent,

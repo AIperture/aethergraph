@@ -10,6 +10,9 @@ from datetime import datetime
 from time import monotonic
 from typing import Any, Literal
 
+from aethergraph.services.search_projection_diagnostics import (
+    search_projection_diagnostic,
+)
 from aethergraph.storage.contracts import (
     EventDraft,
     EventQuery,
@@ -295,7 +298,7 @@ class CanonicalMemoryFacade:
                 )
             )
         except Exception as exc:
-            diagnostic = f"{type(exc).__name__}: search projection failed"
+            diagnostic = search_projection_diagnostic(exc)
             failed = []
             for _event, intent in projection_pairs:
                 failed.append(
@@ -411,7 +414,7 @@ class CanonicalMemoryFacade:
                 (_search_document(event, scope=self.scope),)
             )
         except Exception as exc:
-            diagnostic = f"{type(exc).__name__}: search projection failed"
+            diagnostic = search_projection_diagnostic(exc)
             await self._events.compare_and_set_search_intent(
                 replace(
                     intent,

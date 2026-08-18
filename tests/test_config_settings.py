@@ -55,6 +55,18 @@ def test_explicit_settings_file_must_exist(tmp_path: Path) -> None:
         load_settings(env_file=tmp_path / "missing.env")
 
 
+def test_embeddings_are_opt_in_and_support_explicit_environment_enablement(
+    tmp_path: Path,
+) -> None:
+    assert AppSettings().embed.enabled is False
+    target = tmp_path / "embedding-enabled.env"
+    target.write_text("AETHERGRAPH_EMBED__ENABLED=true\n", encoding="utf-8")
+
+    settings = load_settings(env_file=target)
+
+    assert settings.embed.enabled is True
+
+
 def test_replace_dotenv_removes_stale_rows(tmp_path: Path) -> None:
     target = tmp_path / ".env"
     target.write_text("STALE=value\nKEEP=old\n", encoding="utf-8")
