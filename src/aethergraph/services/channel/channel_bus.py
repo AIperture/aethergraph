@@ -94,14 +94,17 @@ class ChannelBus:
         self,
         send_result: dict | None,
         *,
-        continuation_token: str | None,
+        continuation,
     ):
-        if not self.store or not send_result or not continuation_token:
+        if not self.store or not send_result or continuation is None:
             return
         corr = send_result.get("correlator")
         if isinstance(corr, Correlator):
             try:
-                await self.store.bind_correlator(token=continuation_token, corr=corr)
+                record = getattr(continuation, "record", continuation)
+                updated = await self.store.bind_correlator(continuation=record, corr=corr)
+                if hasattr(continuation, "record"):
+                    continuation.record = updated
             except Exception as e:
                 self._warn(f"Failed to bind correlator: {e}")
 
@@ -258,7 +261,7 @@ class ChannelBus:
             res = await adapter.send(event)
             await self._bind_correlator_if_any(
                 res,
-                continuation_token=continuation.token,
+                continuation=continuation,
             )
             return res
 
@@ -274,7 +277,7 @@ class ChannelBus:
             res = await adapter.send(event)
             await self._bind_correlator_if_any(
                 res,
-                continuation_token=continuation.token,
+                continuation=continuation,
             )
             return res
 
@@ -282,7 +285,7 @@ class ChannelBus:
         res = await adapter.send(event)
         await self._bind_correlator_if_any(
             res,
-            continuation_token=continuation.token,
+            continuation=continuation,
         )
         return res
 

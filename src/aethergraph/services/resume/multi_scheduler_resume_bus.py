@@ -1,9 +1,10 @@
 import asyncio
-import hmac
+from datetime import UTC, datetime
 from logging import getLogger
 
 from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.resume import ResumeBus
+from aethergraph.services.continuations.continuation import Continuation, ContinuationStatus
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 
 log = getLogger(__name__)
@@ -27,7 +28,7 @@ class MultiSchedulerResumeBus(ResumeBus):
         self.delete_after_resume = delete_after_resume
         self.logger = logger or log
 
-    async def enqueue_resume(self, *, run_id: str, node_id: str, token: str, payload: dict) -> None:
+    async def enqueue_resume(self, *, continuation: Continuation, payload: dict) -> None:
         """Deliver one validated continuation to its active local scheduler.
 
         Intro:
@@ -37,41 +38,39 @@ class MultiSchedulerResumeBus(ResumeBus):
         Examples:
             Deliver from the scheduler's event loop:
             ```python
-            await bus.enqueue_resume(
-                run_id="run-1", node_id="approval", token=token, payload={"ok": True}
-            )
+            await bus.enqueue_resume(continuation=wait, payload={"ok": True})
             ```
 
             Handle a run that is not active in this process:
             ```python
             try:
-                await bus.enqueue_resume(
-                    run_id="run-2", node_id="input", token=token, payload={}
-                )
+                await bus.enqueue_resume(continuation=wait, payload={})
             except SchedulerUnavailableError:
                 schedule_recovery("run-2")
             ```
 
         Args:
-            run_id: Exact durable run identity.
-            node_id: Exact waiting node identity.
-            token: Secret continuation token to validate.
+            continuation: Exact tokenless continuation authorized by the caller.
             payload: Resume data delivered to the waiting node.
 
         Returns:
-            None: Dispatch and post-success continuation deletion are complete.
+            None: Dispatch and post-success terminal persistence are complete.
 
         Notes:
-            Validation, scheduler absence, dispatch failure, and deletion failure
-            are explicit errors. Before successful dispatch, the durable
+            Scheduler absence, dispatch failure, and terminal-write failure are
+            explicit errors. Before successful dispatch, the durable
             continuation remains available for retry or recovery.
         """
-        cont = await self.store.get(run_id, node_id)
-        if not cont or not hmac.compare_digest(cont.token, token):
-            self.logger.warning(
-                "[multi-resume-bus] invalid continuation/token for %s/%s", run_id, node_id
-            )
-            raise PermissionError("Invalid continuation or token")
+        current = await self.store.get_by_id(
+            continuation.run_id,
+            continuation.node_id,
+            continuation.continuation_id,
+        )
+        if current is None or current.revision != continuation.revision or current.closed:
+            raise PermissionError("Continuation is no longer waiting")
+        continuation = current
+        run_id = continuation.run_id
+        node_id = continuation.node_id
 
         sched = self.registry.get(run_id)
         if not sched:
@@ -106,10 +105,14 @@ class MultiSchedulerResumeBus(ResumeBus):
 
         if self.delete_after_resume:
             try:
-                await self.store.delete(run_id, node_id)
+                await self.store.close(
+                    continuation,
+                    status=ContinuationStatus.RESUMED,
+                    closed_at=datetime.now(UTC),
+                )
             except Exception:
                 self.logger.exception(
-                    "[multi-resume-bus] failed to delete continuation for %s/%s",
+                    "[multi-resume-bus] failed to close continuation for %s/%s",
                     run_id,
                     node_id,
                 )

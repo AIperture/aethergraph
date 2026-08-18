@@ -53,9 +53,12 @@ class MemorySummaryListResponse(BaseModel):
 
 
 class MemorySearchRequest(BaseModel):
-    query: str
-    scope_id: str | None = None
-    top_k: int = 10
+    query: str = Field(min_length=1)
+    scope_id: str | None = Field(
+        default=None,
+        description="Deprecated logical selector mapped to canonical scope dimensions",
+    )
+    top_k: int = Field(default=10, ge=1, le=1000)
 
 
 class MemorySearchHit(BaseModel):

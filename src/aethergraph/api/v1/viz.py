@@ -36,7 +36,7 @@ async def get_run_viz(
     """
     Aggregate visualization data for a run into figures/tracks for the Vis tab.
 
-    - Uses the EventLog-backed VizService.
+    - Uses the canonical provider-backed VizService.
     - Enforces demo scoping via RunManager (client_id).
     - Returns structured data (scalars, vectors, matrices, image references),
       not pre-rendered plots.

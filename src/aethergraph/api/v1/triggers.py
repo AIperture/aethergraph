@@ -69,7 +69,12 @@ class TriggerCreateRequest(BaseModel):
     )
     app_id: str | None = Field(
         default=None,
-        description="Optional app_id to associate with runs spawned by this trigger; if not set, inherits from the creating scope",
+        deprecated=True,
+        description=(
+            "Deprecated optional compatibility metadata; scheduled for removal in a "
+            "future breaking release. If set, it is forwarded to runs spawned by this "
+            "trigger but is not a storage identity."
+        ),
     )
     session_id: str | None = Field(
         default=None,
@@ -97,7 +102,14 @@ class TriggerMeta(BaseModel):
     org_id: str | None
     user_id: str | None
     client_id: str | None
-    app_id: str | None
+    app_id: str | None = Field(
+        ...,
+        deprecated=True,
+        description=(
+            "Deprecated optional compatibility metadata; not a storage identity and "
+            "scheduled for removal in a future breaking release."
+        ),
+    )
     agent_id: str | None
     session_id: str | None
     memory_level: ScopeLevel | None

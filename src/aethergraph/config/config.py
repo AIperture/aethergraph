@@ -6,8 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .llm import EmbeddingSettings, ImageGenerationSettings, LLMSettings
 from .observability import ObservabilitySettings
-from .search import SearchBackendSettings
-from .storage import StorageSettings
+from .storage_provider import StorageProviderSettings
 
 
 class RateLimitSettings(BaseSettings):
@@ -106,12 +105,6 @@ class TelegramSettings(BaseModel):
     bot_token: SecretStr | None = None
 
 
-class ContinuationStoreSettings(BaseModel):
-    kind: Literal["fs", "inmem"] = "fs"
-    secret: SecretStr | None = None
-    root: str = "./artifacts/continuations"
-
-
 class MemorySettings(BaseModel):
     hot_limit: int = 1000
     hot_ttl_s: int = 7 * 24 * 3600
@@ -190,12 +183,10 @@ class AppSettings(BaseSettings):
     observability: ObservabilitySettings = ObservabilitySettings()
     embed: EmbeddingSettings = EmbeddingSettings()
     image_generation: ImageGenerationSettings = ImageGenerationSettings()
-    cont: ContinuationStoreSettings = ContinuationStoreSettings()
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
     auth: AuthSettings = AuthSettings()
-    storage: StorageSettings = StorageSettings()
-    search: SearchBackendSettings = SearchBackendSettings()
+    storage_provider: StorageProviderSettings = StorageProviderSettings(provider="local.sqlite")
 
     # Optional path to demo-service directory (for admin routes).
     # Set via env: AETHERGRAPH_DEMO_SERVICE_DIR=/path/to/demo-service

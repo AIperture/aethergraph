@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response  # type
 from pydantic import BaseModel, Field
 
 from aethergraph.api.v1.deps import RequestIdentity, get_authn, get_identity, require_admin_key
-from aethergraph.services.auth.authn import AuthnService, DemoGrant
+from aethergraph.services.auth.authn import DemoGrant
+from aethergraph.services.auth.canonical_authn import CanonicalAuthnService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -51,12 +52,16 @@ class AuthMeResponse(BaseModel):
     capabilities: AuthCapabilities
 
 
-def _grant_for_identity(authn: AuthnService, identity: RequestIdentity) -> DemoGrant | None:
-    return authn.get_grant(identity.grant_id)
+async def _grant_for_identity(
+    authn: CanonicalAuthnService, identity: RequestIdentity
+) -> DemoGrant | None:
+    return await authn.get_grant(identity.grant_id)
 
 
-def _build_me_response(authn: AuthnService, identity: RequestIdentity) -> AuthMeResponse:
-    grant = _grant_for_identity(authn, identity)
+async def _build_me_response(
+    authn: CanonicalAuthnService, identity: RequestIdentity
+) -> AuthMeResponse:
+    grant = await _grant_for_identity(authn, identity)
     return AuthMeResponse(
         authenticated=identity.mode != "local",
         mode=identity.mode,
@@ -82,7 +87,7 @@ def _build_me_response(authn: AuthnService, identity: RequestIdentity) -> AuthMe
 )
 async def invite_create(
     body: InviteCreateRequest,
-    authn: AuthnService = Depends(get_authn),  # noqa: B008
+    authn: CanonicalAuthnService = Depends(get_authn),  # noqa: B008
 ) -> InviteCreateResponse:
     grant = DemoGrant(
         grant_id=body.grant_id,
@@ -92,7 +97,7 @@ async def invite_create(
         client_label=body.client_label,
         read_only=body.read_only,
     )
-    invite = authn.create_invite_code(
+    invite = await authn.create_invite_code(
         grant,
         max_uses=body.max_uses,
         expires_in_seconds=body.expires_in_hours * 3600,
@@ -111,14 +116,14 @@ async def invite_redeem(
     body: InviteRedeemRequest,
     request: Request,
     response: Response,
-    authn: AuthnService = Depends(get_authn),  # noqa: B008
+    authn: CanonicalAuthnService = Depends(get_authn),  # noqa: B008
 ) -> AuthMeResponse:
     client_id = request.headers.get("X-Client-ID") or request.query_params.get("client_id")
     try:
-        sess = authn.redeem_invite_code(body.code, client_id=client_id)
+        sess = await authn.redeem_invite_code(body.code, client_id=client_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    grant = authn.get_grant(sess.grant_id)
+    grant = await authn.get_grant(sess.grant_id)
     response.set_cookie(
         key=authn.cookie_name,
         value=sess.session_id,
@@ -146,22 +151,22 @@ async def invite_redeem(
         or None,
         mode="demo",
     )
-    return _build_me_response(authn, identity)
+    return await _build_me_response(authn, identity)
 
 
 @router.get("/me", response_model=AuthMeResponse)
 async def auth_me(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-    authn: AuthnService = Depends(get_authn),  # noqa: B008
+    authn: CanonicalAuthnService = Depends(get_authn),  # noqa: B008
 ) -> AuthMeResponse:
-    return _build_me_response(authn, identity)
+    return await _build_me_response(authn, identity)
 
 
 @router.post("/logout")
 async def logout(
     request: Request,
     response: Response,
-    authn: AuthnService = Depends(get_authn),  # noqa: B008
+    authn: CanonicalAuthnService = Depends(get_authn),  # noqa: B008
 ) -> dict[str, bool]:
     authn.delete_session(request.cookies.get(authn.cookie_name))
     response.delete_cookie(key=authn.cookie_name, path="/")

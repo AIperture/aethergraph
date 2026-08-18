@@ -11,7 +11,12 @@ from aethergraph.core.runtime.continuation_timer import ContinuationTimerService
 from aethergraph.observability import OperationObserver
 from aethergraph.observability.models import ObservationRecord
 from aethergraph.services.container.default_container import SERVICE_KEYS, DefaultContainer
-from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.continuations.canonical_store import CanonicalContinuationLeaseStore
+from aethergraph.services.continuations.continuation import (
+    Continuation,
+    ContinuationDraft,
+    ContinuationStatus,
+)
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.resume.multi_scheduler_resume_bus import (
     MultiSchedulerResumeBus,
@@ -19,9 +24,20 @@ from aethergraph.services.resume.multi_scheduler_resume_bus import (
 )
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
-from aethergraph.storage.continuation_store.timer_leases import (
-    SQLiteContinuationTimerLeaseStore,
-)
+from aethergraph.storage.contracts import StorageScope
+from tests.storage_conformance.runtime_repositories import InMemoryContinuationLeaseRepository
+
+_LEASE_REPOSITORIES: dict[Path, InMemoryContinuationLeaseRepository] = {}
+
+
+def _lease_store(root: Path) -> CanonicalContinuationLeaseStore:
+    repository = _LEASE_REPOSITORIES.setdefault(
+        root.resolve(), InMemoryContinuationLeaseRepository()
+    )
+    return CanonicalContinuationLeaseStore(
+        repository=repository,
+        owner_scope=StorageScope(project_id="continuation-timer-tests"),
+    )
 
 
 class _Clock:
@@ -48,21 +64,22 @@ class _Router:
         self.unavailable = unavailable
         self.calls: list[tuple[str, str, str, dict[str, Any]]] = []
 
-    async def resume(
-        self,
-        run_id: str,
-        node_id: str,
-        token: str,
-        payload: dict[str, Any],
+    async def resume_continuation(
+        self, continuation: Continuation, payload: dict[str, Any]
     ) -> None:
-        self.calls.append((run_id, node_id, token, payload))
+        self.calls.append(
+            (continuation.run_id, continuation.node_id, continuation.continuation_id, payload)
+        )
         if self.unavailable:
             raise SchedulerUnavailableError("scheduler unavailable")
         if self.failures > 0:
             self.failures -= 1
             raise RuntimeError("delivery failed")
-        assert await self.store.verify_token(run_id, node_id, token)
-        await self.store.delete(run_id, node_id)
+        await self.store.close(
+            continuation,
+            status=ContinuationStatus.RESUMED,
+            closed_at=datetime.now(UTC),
+        )
 
 
 class _Sink:
@@ -97,20 +114,19 @@ async def _save_due(
     now: datetime,
     run_id: str = "run-1",
     node_id: str = "wait-1",
-    token: str = "token-1",
     poll: dict[str, Any] | None = None,
 ) -> Continuation:
-    continuation = Continuation(
-        run_id=run_id,
-        node_id=node_id,
-        kind="external",
-        token=token,
-        deadline=now - timedelta(seconds=1),
-        poll=poll,
-        next_wakeup_at=now - timedelta(seconds=1),
+    created = await store.create(
+        ContinuationDraft(
+            run_id=run_id,
+            node_id=node_id,
+            kind="external",
+            deadline=now - timedelta(seconds=1),
+            poll=poll,
+            next_wakeup_at=now - timedelta(seconds=1),
+        )
     )
-    await store.save(continuation)
-    return continuation
+    return created.record
 
 
 def _timer(
@@ -125,7 +141,7 @@ def _timer(
 ) -> ContinuationTimerService:
     return ContinuationTimerService(
         continuation_store=store,
-        lease_store=SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db"),
+        lease_store=_lease_store(tmp_path),
         resume_router=router,  # type: ignore[arg-type]
         clock=clock,  # type: ignore[arg-type]
         worker_id=worker_id,
@@ -159,14 +175,14 @@ async def test_deadline_timer_delivers_once_and_persists_receipt(tmp_path: Path)
 
     assert len(router.calls) == 1
     assert router.calls[0][3]["timer_kind"] == "deadline"
-    assert await store.get(continuation.run_id, continuation.node_id) is None
+    assert (
+        await store.get(continuation.run_id, continuation.node_id)
+    ).status is ContinuationStatus.RESUMED
     fire_id = _fire_id(
-        run_id=continuation.run_id,
-        node_id=continuation.node_id,
-        token=continuation.token,
+        continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    receipt = timer.lease_store.get(fire_id)
+    receipt = await timer.lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None and receipt.status == "delivered"
     assert [record.name for record in sink.records] == ["claim", "delivery"]
 
@@ -184,7 +200,7 @@ async def test_timer_delivers_through_canonical_resume_router(tmp_path: Path) ->
     resume_router = ResumeRouter(store=store, runner=resume_bus)
     timer = ContinuationTimerService(
         continuation_store=store,
-        lease_store=SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db"),
+        lease_store=_lease_store(tmp_path),
         resume_router=resume_router,
         clock=clock,  # type: ignore[arg-type]
         worker_id="worker-a",
@@ -203,7 +219,9 @@ async def test_timer_delivers_through_canonical_resume_router(tmp_path: Path) ->
             },
         )
     ]
-    assert await store.get(continuation.run_id, continuation.node_id) is None
+    assert (
+        await store.get(continuation.run_id, continuation.node_id)
+    ).status is ContinuationStatus.RESUMED
 
 
 @pytest.mark.asyncio
@@ -260,18 +278,17 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
     continuation = await _save_due(store, now=now)
     router = _Router(store)
     sink = _Sink()
-    lease_store = SQLiteContinuationTimerLeaseStore(tmp_path / "timer-leases.db")
+    lease_store = _lease_store(tmp_path)
     fire_id = _fire_id(
-        run_id=continuation.run_id,
-        node_id=continuation.node_id,
-        token=continuation.token,
+        continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    first_claim = lease_store.claim(
+    first_claim = await lease_store.claim(
         fire_id=fire_id,
+        continuation_id=continuation.continuation_id,
         run_id=continuation.run_id,
         node_id=continuation.node_id,
-        token=continuation.token,
+        scheduled_for=continuation.next_wakeup_at,
         worker_id="dead-worker",
         now=now,
         lease_until=now + timedelta(seconds=5),
@@ -289,7 +306,7 @@ async def test_stale_lease_is_reclaimed_after_worker_restart(tmp_path: Path) -> 
 
     assert await restarted.run_once() == 1
 
-    receipt = lease_store.get(fire_id)
+    receipt = await lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None
     assert receipt.status == "delivered"
     assert receipt.attempts == 2
@@ -338,12 +355,10 @@ async def test_absent_scheduler_retries_without_consuming_continuation(tmp_path:
 
     assert await store.get(continuation.run_id, continuation.node_id) is not None
     fire_id = _fire_id(
-        run_id=continuation.run_id,
-        node_id=continuation.node_id,
-        token=continuation.token,
+        continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    receipt = timer.lease_store.get(fire_id)
+    receipt = await timer.lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None
     assert receipt.status == "retry"
 
@@ -368,12 +383,10 @@ async def test_retry_limit_dead_letters_and_preserves_continuation(tmp_path: Pat
     assert await timer.run_once() == 1
 
     fire_id = _fire_id(
-        run_id=continuation.run_id,
-        node_id=continuation.node_id,
-        token=continuation.token,
+        continuation_id=continuation.continuation_id,
         scheduled_for=continuation.next_wakeup_at,
     )
-    receipt = timer.lease_store.get(fire_id)
+    receipt = await timer.lease_store.get(continuation.run_id, continuation.node_id, fire_id)
     assert receipt is not None
     assert receipt.status == "dead_letter"
     assert await store.get(continuation.run_id, continuation.node_id) is not None

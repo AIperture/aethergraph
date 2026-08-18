@@ -29,7 +29,16 @@ class TriggerRecord:
     client_id: str | None = None
     mode: str | None = None  # "cloud", "demo", "local", etc.
 
-    app_id: str | None = None
+    app_id: str | None = field(
+        default=None,
+        metadata={
+            "deprecated": True,
+            "description": (
+                "Deprecated; retained for compatibility and scheduled for removal "
+                "in a future breaking release."
+            ),
+        },
+    )
     agent_id: str | None = None
     session_id: str | None = None
 
@@ -66,7 +75,32 @@ class TriggerRecord:
 
     # -------------- helpers --------------
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serializable representation for DocStore."""
+        """Return the JSON-serializable trigger service projection.
+
+        The result contains schedule, ownership, launch-context, and lifecycle fields
+        with timestamps normalized to ISO strings for public service transport.
+
+        Examples:
+            Serialize a scheduled trigger:
+                ```python
+                payload = trigger.to_dict()
+                ```
+
+            Read the stable trigger identity:
+                ```python
+                assert trigger.to_dict()["trigger_id"] == trigger.trigger_id
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, Any]: Detached JSON-compatible trigger fields.
+
+        Notes:
+            `app_id` is retained only as deprecated optional compatibility metadata;
+            canonical provider scope and authorization never depend on it.
+        """
 
         def _dt(d: datetime | None) -> str | None:
             return d.isoformat() if d is not None else None

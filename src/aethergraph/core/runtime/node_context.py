@@ -16,17 +16,20 @@ from aethergraph.core.runtime.run_types import (
     RunVisibility,
 )
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
-from aethergraph.services.agent_state import AgentStateBackend, AgentStateHandle
-from aethergraph.services.artifacts.facade import ArtifactFacade
+from aethergraph.services.agent_state import AgentStateBackend, CanonicalAgentStateHandle
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.channel.session import ChannelSession
-from aethergraph.services.continuations.continuation import Continuation
-from aethergraph.services.indices.scoped_indices import ScopedIndices
+from aethergraph.services.continuations.continuation import (
+    ContinuationDraft,
+    Correlator,
+    CreatedContinuation,
+)
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
-from aethergraph.services.memory.facade import MemoryFacade
+from aethergraph.services.memory.canonical_public import CanonicalPublicMemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
-from aethergraph.services.scope.scope import Scope
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 
@@ -371,7 +374,7 @@ class NodeContext:
         return ChannelSession(self, channel_key)
 
     # New way: prefer memory_facade directly
-    def memory(self) -> MemoryFacade:
+    def memory(self) -> CanonicalPublicMemoryFacade:
         if not self.services.memory_facade:
             raise RuntimeError("MemoryFacade not bound")
         return self.services.memory_facade
@@ -382,12 +385,55 @@ class NodeContext:
         *,
         model: type | None = None,
         default_factory: Any | None = None,
-        level: str | None = None,
+        level: ScopeLevel | None = None,
+        scope: Scope | None = None,
         backend: AgentStateBackend = "hybrid",
         tags: list[str] | None = None,
         meta: dict[str, Any] | None = None,
         kind: str = "state.snapshot",
-    ) -> AgentStateHandle:
+    ) -> CanonicalAgentStateHandle:
+        """Bind typed Agent state in the canonical provider store.
+
+        The default binding uses this node's trusted runtime scope. Callers that
+        coordinate multiple Agents may pass an existing narrower `Scope`; its
+        populated identity dimensions are validated by the canonical facade.
+
+        Examples:
+            Bind ordinary Agent-scoped session state:
+                ```python
+                state = context.state("planner", model=PlannerState, level="session")
+                ```
+
+            Bind orchestration state shared across Agents in one session:
+                ```python
+                shared_scope = replace(context.scope, agent_id=None)
+                state = context.state(
+                    "session_envelope",
+                    model=dict,
+                    level="session",
+                    scope=shared_scope,
+                )
+                ```
+
+        Args:
+            key: Stable caller-owned state key.
+            model: Optional model type used to hydrate stored mappings.
+            default_factory: Optional callable producing missing state.
+            level: Logical scope projection for the state handle.
+            scope: Optional existing runtime `Scope` validated against this
+                context's trusted storage owner and identity.
+            backend: Exact cache policy: `hybrid`, `memory`, or `local`.
+            tags: Optional commit audit tags.
+            meta: Optional JSON-compatible commit audit metadata.
+            kind: Exact state family separating same-named keys.
+
+        Returns:
+            CanonicalAgentStateHandle: A handle bound to one exact state identity.
+
+        Notes:
+            Passing `scope` does not select a provider, workspace, or alternate
+            persistence path. Omitting it preserves Agent-scoped behavior.
+        """
         if not self.services.agent_state:
             raise RuntimeError("Agent state facade not bound")
         return self.services.agent_state.bind(
@@ -395,6 +441,7 @@ class NodeContext:
             model=model,
             default_factory=default_factory,
             level=level,
+            scope=scope,
             backend=backend,
             tags=tags,
             meta=meta,
@@ -402,11 +449,11 @@ class NodeContext:
         )
 
     # Back-compat: old ctx.mem() now returns the bound MemoryFacade directly.
-    def mem(self) -> MemoryFacade:
+    def mem(self) -> CanonicalPublicMemoryFacade:
         return self.memory()
 
     # Artifacts / index
-    def artifacts(self) -> ArtifactFacade:
+    def artifacts(self) -> CanonicalPublicArtifactFacade:
         return self.services.artifact_store
 
     def kv(self):
@@ -642,11 +689,6 @@ class NodeContext:
             raise RuntimeError("LLM service not available")
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
 
-    def indices(self) -> ScopedIndices:
-        if not self.services.indices:
-            raise RuntimeError("ScopedIndices not available")
-        return self.services.indices
-
     # def run_manager(self):
     #     # Deprecated legacy accessor; use context.runner() instead.
     #     return self.runner()
@@ -791,20 +833,62 @@ class NodeContext:
         deadline_s: int | None = None,
         poll: dict | None = None,
         attempts: int = 0,
-    ) -> Continuation:
-        """Create and store a continuation for this node in the continuation store."""
-        token = await self.services.continuation_store.mint_token(
-            self.run_id, self.node_id, attempts=attempts
-        )
+    ) -> CreatedContinuation:
+        """Atomically create a continuation for this node.
+
+        Intro:
+            Builds tokenless continuation content and delegates token minting plus
+            persistence to the configured continuation store.
+
+        Examples:
+            Create a text wait:
+            ```python
+            created = await context.create_continuation(
+                kind="user_input", payload={"prompt": "Reply"}, channel="ui:session"
+            )
+            ```
+
+            Create a timed poll:
+            ```python
+            created = await context.create_continuation(
+                kind="external", payload={}, channel=None, poll={"interval_sec": 30}
+            )
+            ```
+
+        Args:
+            kind: Runtime wait kind.
+            payload: Setup-time payload merged into resume delivery.
+            channel: Exact channel key, if the wait is user-facing.
+            deadline_s: Optional lifetime in seconds from the injected clock.
+            poll: Optional provider-neutral polling configuration.
+            attempts: Current wait-attempt count.
+
+        Returns:
+            CreatedContinuation: Tokenless record and one-time raw token.
+
+        Notes:
+            A public interaction ID is bound as an initial indexed correlator;
+            deprecated App identity remains optional compatibility metadata only.
+        """
         deadline = None
         if deadline_s:
             deadline = self._now() + timedelta(seconds=deadline_s)
 
-        continuation = Continuation(
+        session_id = getattr(self, "session_id", None)
+        interaction_id = payload.get("_interaction_id") if payload else None
+        correlators = ()
+        if isinstance(interaction_id, str) and interaction_id and isinstance(session_id, str):
+            correlators = (
+                Correlator(
+                    scheme="interaction",
+                    channel="public",
+                    message=interaction_id,
+                ),
+            )
+        draft = ContinuationDraft(
             run_id=self.run_id,
             node_id=self.node_id,
             kind=kind,
-            token=token,
             prompt=payload.get("prompt") if payload else None,
             resume_schema=payload.get("resume_schema") if payload else None,
             channel=channel,
@@ -814,13 +898,13 @@ class NodeContext:
             created_at=self._now(),
             attempts=attempts,
             payload=payload,
-            session_id=getattr(self, "session_id", None),
+            session_id=session_id,
             agent_id=getattr(self, "agent_id", None),
             app_id=getattr(self, "app_id", None),
             graph_id=getattr(self, "graph_id", None),
+            correlators=correlators,
         )
-        await self.services.continuation_store.save(continuation)
-        return continuation
+        return await self.services.continuation_store.create(draft)
 
     async def wait_for_resume(self, token: str) -> dict:
         """Wait for a continuation to be resumed, and return the payload.

@@ -9,8 +9,11 @@ from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.run_types import RunOrigin, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
-from aethergraph.storage.runs.inmen_store import InMemoryRunStore
-from aethergraph.storage.runs.result_store import InMemoryRunResultStore
+from aethergraph.storage.contracts.scope import StorageScope
+from tests._run_store_fakes import RunResultStoreFake, RunStoreFake
+
+InMemoryRunStore = RunStoreFake
+InMemoryRunResultStore = RunResultStoreFake
 
 
 class Identity:
@@ -24,21 +27,25 @@ class FakeGraphStateStore:
     def __init__(self):
         self.snapshots: dict[str, GraphSnapshot] = {}
 
-    async def save_snapshot(self, snap: GraphSnapshot) -> None:
+    async def save_snapshot(self, scope: StorageScope, snap: GraphSnapshot) -> None:
         self.snapshots[snap.run_id] = snap
 
-    async def load_latest_snapshot(self, run_id: str) -> GraphSnapshot | None:
+    async def load_latest_snapshot(self, scope: StorageScope, run_id: str) -> GraphSnapshot | None:
         return self.snapshots.get(run_id)
 
-    async def append_event(self, ev) -> None:  # pragma: no cover - not needed here
+    async def append_event(
+        self, scope: StorageScope, ev
+    ) -> None:  # pragma: no cover - not needed here
         return None
 
     async def load_events_since(
-        self, run_id: str, from_rev: int
+        self, scope: StorageScope, run_id: str, from_rev: int
     ):  # pragma: no cover - not needed here
         return []
 
-    async def list_run_ids(self, graph_id: str | None = None):  # pragma: no cover - not needed here
+    async def list_run_ids(
+        self, scope: StorageScope, graph_id: str | None = None
+    ):  # pragma: no cover - not needed here
         return list(self.snapshots.keys())
 
 
@@ -761,6 +768,60 @@ async def test_wait_run_return_outputs_uses_persisted_result_for_terminal_succes
 
 
 @pytest.mark.asyncio
+async def test_success_status_is_durable_before_result_save(
+    monkeypatch,
+    dummy_meter,
+    tmp_path,
+):
+    store = RunStoreFake()
+
+    class OrderingResultStore(InMemoryRunResultStore):
+        observed_status = None
+
+        async def save(self, run_id, result) -> None:
+            durable = await store.get(run_id)
+            self.observed_status = durable.status if durable is not None else None
+            assert durable is not None
+            assert durable.status == RunStatus.succeeded
+            assert durable.finished_at is not None
+            assert "output_preview" in durable.meta
+            await super().save(run_id, result)
+
+    result_store = OrderingResultStore()
+    manager = RunManager(
+        run_store=store,
+        result_store=result_store,
+        registry=UnifiedRegistry(),
+    )
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        return {"out": 42}
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record, _, _, _ = await manager.start_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+        identity=Identity(user_id="u1", org_id="o1"),
+    )
+    waited, outputs = await manager.wait_run(record.run_id, return_outputs=True)
+    assert waited.status == RunStatus.succeeded
+    assert outputs == {"out": 42}
+    assert result_store.observed_status == RunStatus.succeeded
+
+
+@pytest.mark.asyncio
 async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_result(
     monkeypatch, dummy_meter
 ):
@@ -798,6 +859,7 @@ async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_resul
     )
     await result_store.delete(record.run_id)
     await state_store.save_snapshot(
+        StorageScope(org_id="o1", user_id="u1", run_id=record.run_id, graph_id="my-graph"),
         GraphSnapshot(
             run_id=record.run_id,
             graph_id="my-graph",
@@ -805,7 +867,7 @@ async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_resul
             created_at=0.0,
             spec_hash="demo",
             state={"graph_outputs": {"out": 99}},
-        )
+        ),
     )
 
     waited_record, outputs = await rm.wait_run(record.run_id, return_outputs=True)

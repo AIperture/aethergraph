@@ -68,14 +68,17 @@ def model_operation_dimensions(
     context = current_meter_context.get() or {}
     explicit = dict(overrides or {})
     keys = (
+        "tenant_id",
+        "project_id",
         "user_id",
         "org_id",
         "run_id",
         "graph_id",
         "session_id",
-        "app_id",
+        "app_id",  # Deprecated optional compatibility metadata; never a storage partition.
         "agent_id",
         "node_id",
+        "scope_key",
         "trace_id",
         "span_id",
     )

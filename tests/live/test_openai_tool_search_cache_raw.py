@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 import httpx
@@ -19,15 +20,14 @@ pytestmark = pytest.mark.skipif(
     os.getenv("AG_RUN_OPENAI_CACHE_SMOKE") != "1" or not os.getenv("OPENAI_API_KEY"),
     reason="set AG_RUN_OPENAI_CACHE_SMOKE=1 and OPENAI_API_KEY to run live smoke",
 )
+_LOG = logging.getLogger(__name__)
 
 
 @pytest.mark.asyncio
 async def test_raw_openai_replays_loaded_schema_branch() -> None:
     """Use raw HTTP as the provider control for the exact replay assertion."""
 
-    scenario = build_cache_scenario(
-        os.getenv("AG_OPENAI_CACHE_SMOKE_MODEL", "gpt-5.4")
-    )
+    scenario = build_cache_scenario(os.getenv("AG_OPENAI_CACHE_SMOKE_MODEL", "gpt-5.4"))
     cache_key = f"ag-cache-raw-{scenario.scenario_id}"
     headers = {
         "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
@@ -70,6 +70,14 @@ async def test_raw_openai_replays_loaded_schema_branch() -> None:
             "https://api.openai.com/v1/responses", headers=headers, json=loaded_body
         )
         replay.raise_for_status()
+
+    _LOG.info(
+        "OpenAI raw cache smoke completed model=%s initial_response_id=%s load_response_id=%s replay_response_id=%s",
+        scenario.model,
+        initial_json["id"],
+        load.json().get("id"),
+        replay.json().get("id"),
+    )
 
     assert_loaded_branch_replayed(
         load=normalize_usage(load.json().get("usage") or {}),

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime
 import importlib
-import inspect
 from pathlib import Path
 import sys
 from typing import Any
@@ -29,14 +29,14 @@ from aethergraph.services.container.default_container import (
     build_default_container,
 )
 from aethergraph.services.integration import (
-    EventLogSemanticEventStore,
     InteractionResolutionError,
     InteractionResolver,
     SemanticEventChannelAdapter,
     SemanticEventEmitter,
     install_integration_ingress,
 )
-from aethergraph.services.scope.scope import Scope
+from aethergraph.services.integration.event_contracts import SemanticEventStore
+from aethergraph.storage.contracts import PageRequest, RuntimeOutputQuery, StorageScope
 
 from .contracts import (
     RuntimeArtifactRecord,
@@ -69,6 +69,43 @@ def _public_record(record: RunRecord) -> RuntimeRunRecord:
     )
 
 
+def _runtime_output_row(record: Any) -> dict[str, Any]:
+    scope = record.scope
+    scope_id = scope.session_id or scope.run_id
+    return {
+        "id": record.output_id,
+        "_row_id": record.delivery_cursor,
+        "_cursor": record.cursor,
+        "scope_id": scope_id,
+        "kind": "runtime_console",
+        "session_id": scope.session_id,
+        "run_id": scope.run_id,
+        "graph_id": scope.graph_id,
+        "node_id": scope.node_id,
+        "tool": record.tool_name,
+        "tags": list(record.tags),
+        "payload": {
+            "type": "runtime.console.output",
+            "schema_version": "ag.runtime-console-output/v1",
+            "execution_id": record.execution_id,
+            "stream": record.stream.value,
+            "text": record.text,
+            "sequence": record.sequence,
+            "partial": record.partial,
+            "truncated": record.truncated,
+            "meta": {
+                "source": record.source,
+                "run_id": scope.run_id,
+                "session_id": scope.session_id,
+                "graph_id": scope.graph_id,
+                "node_id": scope.node_id,
+                "tool_name": record.tool_name,
+                "eof": record.eof,
+            },
+        },
+    }
+
+
 class EmbeddedRuntime:
     """Own one in-process runtime without exposing its dependency container."""
 
@@ -98,9 +135,11 @@ class EmbeddedRuntime:
         """
         self._container = container
         self._output_capture: RuntimeOutputCaptureHost | None = None
-        self._semantic_stores: dict[str, EventLogSemanticEventStore] = {}
+        self._semantic_stores: dict[str, SemanticEventStore] = {}
         self._integration: RuntimeIntegration | None = None
         self._active_run_ids: set[str] = set()
+        self._readiness_lock = asyncio.Lock()
+        self._ready = False
         self._closed = False
 
     @contextmanager
@@ -219,7 +258,7 @@ class EmbeddedRuntime:
             Semantic and runtime events share the runtime's canonical event log.
         """
         self._ensure_open()
-        store = EventLogSemanticEventStore(self._container.eventlog)
+        store = self._container.storage_services.integration.semantic_events
         self._container.channels.register_adapter(
             name,
             SemanticEventChannelAdapter(
@@ -321,6 +360,7 @@ class EmbeddedRuntime:
         Notes:
             Internal run-store records and the run manager never cross this boundary.
         """
+        await self._ensure_ready()
         manager = self._require_run_manager()
         try:
             origin = RunOrigin(request.origin)
@@ -373,6 +413,7 @@ class EmbeddedRuntime:
         Notes:
             Cancellation is best effort and physical termination remains scheduler-owned.
         """
+        await self._ensure_ready()
         with self.activate():
             record = await self._require_run_manager().cancel_run(run_id, reason=reason)
         return None if record is None else _public_record(record)
@@ -406,6 +447,7 @@ class EmbeddedRuntime:
         Notes:
             Unknown run identities retain the run manager's existing wait semantics.
         """
+        await self._ensure_ready()
         with self.activate():
             await self._require_run_manager().wait_run(
                 run_id,
@@ -440,7 +482,7 @@ class EmbeddedRuntime:
         Notes:
             Terminal reads flush pending captured output before returning.
         """
-        self._ensure_open()
+        await self._ensure_ready()
         manager = self._require_run_manager()
         record = await manager.get_record(run_id)
         if record is None:
@@ -526,7 +568,7 @@ class EmbeddedRuntime:
             Missing or mismatched interactions raise `RuntimeInteractionError`;
             continuation tokens never leave this boundary.
         """
-        self._ensure_open()
+        await self._ensure_ready()
         expected_kinds = (
             {"approval", "choice"}
             if response_kind == "choice"
@@ -557,12 +599,7 @@ class EmbeddedRuntime:
                 )
             )
         with self.activate():
-            await self._container.resume_router.resume(
-                run_id=continuation.run_id,
-                node_id=continuation.node_id,
-                token=continuation.token,
-                payload=payload,
-            )
+            await self._container.resume_router.resume_continuation(continuation, payload)
         return True
 
     async def query_events(
@@ -606,25 +643,62 @@ class EmbeddedRuntime:
         Notes:
             The Host never receives an event-log store or constructs storage paths.
         """
-        self._ensure_open()
+        await self._ensure_ready()
         if order_dir not in {"asc", "desc"}:
             raise ValueError("order_dir must be 'asc' or 'desc'.")
-        event_log = self._container.eventlog
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000
+        ):
+            raise ValueError("limit must be between 1 and 10000 when supplied")
         if engine:
-            observability = self._container.observability
-            event_log = None if observability is None else observability.engine_event_log
-            if event_log is None:
-                raise RuntimeNotReadyError("Canonical Engine event log is unavailable.")
+            ranked_engine: list[tuple[int, int, Mapping[str, Any]]] = []
+            for run_rank, run_id in enumerate(dict.fromkeys(run_ids)):
+                memory = self._container.memory_factory.for_public_execution(
+                    StorageScope(run_id=run_id),
+                    logical_scope_id=f"run:{run_id}",
+                )
+                rows = await memory.query_events(
+                    **filters,
+                    run_id=run_id,
+                    use_persistence=True,
+                    return_event=False,
+                    order_dir=order_dir,
+                    limit=limit or 10_000,
+                )
+                ranked_engine.extend((run_rank, row_rank, row) for row_rank, row in enumerate(rows))
+            result = tuple(item[2] for item in sorted(ranked_engine))
+            return result if limit is None else result[:limit]
+
+        allowed_filters = {"scope_id", "after_id", "kinds"}
+        unknown = sorted(set(filters) - allowed_filters)
+        if unknown:
+            raise ValueError("Unsupported runtime-output filters: " + ", ".join(unknown))
+        scope_id = filters.get("scope_id")
+        after_id = filters.get("after_id")
+        if after_id is not None and (
+            isinstance(after_id, bool) or not isinstance(after_id, int) or after_id < 0
+        ):
+            raise ValueError("after_id must be a non-negative shared delivery cursor")
+        kinds = filters.get("kinds")
+        if kinds is not None and (
+            not isinstance(kinds, list | tuple) or set(kinds) != {"runtime.console.output"}
+        ):
+            raise ValueError("runtime output kinds must contain only runtime.console.output")
+        page_limit = min(limit or 1_000, 1_000)
         ranked: list[tuple[int, int, int, Mapping[str, Any]]] = []
-        for run_rank, run_id in enumerate(run_ids):
-            rows = await event_log.query(
-                **filters,
-                run_id=run_id,
-                order_dir=order_dir,
-                limit=limit,
+        for run_rank, run_id in enumerate(dict.fromkeys(run_ids)):
+            page = await self._container.storage_services.runtime_output.query(
+                RuntimeOutputQuery(
+                    scope=StorageScope(run_id=run_id),
+                    after_delivery_cursor=after_id,
+                    page=PageRequest(limit=page_limit),
+                )
             )
-            for row_rank, row in enumerate(rows):
-                ranked.append((int(row["_row_id"]), run_rank, row_rank, row))
+            for row_rank, record in enumerate(page.items):
+                row = _runtime_output_row(record)
+                if scope_id is not None and row["scope_id"] != scope_id:
+                    continue
+                ranked.append((record.delivery_cursor, run_rank, row_rank, row))
         descending = order_dir == "desc"
         ranked.sort(
             key=lambda item: (
@@ -675,7 +749,7 @@ class EmbeddedRuntime:
         Notes:
             A deployment must be installed through `install_semantic_channel` first.
         """
-        self._ensure_open()
+        await self._ensure_ready()
         store = self._semantic_stores.get(deployment_id)
         if store is None:
             raise RuntimeNotReadyError(f"Semantic deployment {deployment_id!r} is not installed.")
@@ -855,7 +929,7 @@ class EmbeddedRuntime:
         Notes:
             Artifact stores and facades remain private to the runtime.
         """
-        self._ensure_open()
+        await self._ensure_ready()
         resource = await ResourceStager(
             container=self._container,
             identity=RequestIdentity(
@@ -912,8 +986,8 @@ class EmbeddedRuntime:
         Notes:
             Authorization remains the embedding Host's responsibility.
         """
-        self._ensure_open()
-        artifact = await self._container.artifact_index.get(artifact_id)
+        await self._ensure_ready()
+        artifact = await self._container.artifact_service.get_by_id(artifact_id)
         if artifact is None:
             return None
         return RuntimeArtifactRecord(
@@ -953,8 +1027,8 @@ class EmbeddedRuntime:
         Notes:
             Callers must authorize metadata before invoking this content read.
         """
-        self._ensure_open()
-        return await self._container.artifacts.load_text(uri)
+        await self._ensure_ready()
+        return await self._container.artifact_service.load_text(uri)
 
     async def append_external_resource_change(
         self,
@@ -991,21 +1065,22 @@ class EmbeddedRuntime:
         Notes:
             The event ID is checked before append; memory stores remain private.
         """
-        self._ensure_open()
-        scope = Scope(
+        await self._ensure_ready()
+        provenance_scope = StorageScope(
             org_id=identity.org_id,
             user_id=identity.user_id,
             session_id=session_id,
             graph_id="agstudio.workspace_changes",
             node_id="workspace_event_bridge",
-            memory_level="session",
         )
-        memory = self._container.memory_factory.for_session(
-            run_id=f"external:{change.event_id}",
-            graph_id="agstudio.workspace_changes",
-            node_id="workspace_event_bridge",
-            session_id=session_id,
-            scope=scope,
+        memory = self._container.memory_factory.for_public_execution(
+            StorageScope(
+                org_id=identity.org_id,
+                user_id=identity.user_id,
+                session_id=session_id,
+            ),
+            logical_scope_id=f"session:{session_id}",
+            provenance_scope=provenance_scope,
         )
         if await memory.get_event(change.event_id) is None:
             await memory.append_external_resource_change(change)
@@ -1078,21 +1153,11 @@ class EmbeddedRuntime:
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"runtime output: {exc}")
             self._output_capture = None
-        seen: set[int] = set()
-        for name in ("eventlog", "run_store", "session_store", "state_store"):
-            value = getattr(self._container, name, None)
-            if value is None or id(value) in seen:
-                continue
-            seen.add(id(value))
-            close = getattr(value, "close", None)
-            if not callable(close):
-                continue
-            try:
-                closed = close()
-                if inspect.isawaitable(closed):
-                    await closed
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f"{name}: {exc}")
+        try:
+            await self._container.close_storage()
+        except Exception as exc:  # noqa: BLE001
+            failures.append(f"storage: {exc}")
+        self._ready = False
         self._closed = True
         if failures:
             raise RuntimeError("Embedded runtime close failed: " + "; ".join(failures))
@@ -1100,6 +1165,16 @@ class EmbeddedRuntime:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("Embedded runtime is closed.")
+
+    async def _ensure_ready(self) -> None:
+        self._ensure_open()
+        if self._ready:
+            return
+        async with self._readiness_lock:
+            if self._ready:
+                return
+            await self._container.start_storage()
+            self._ready = True
 
     def _require_run_manager(self) -> Any:
         self._ensure_open()
@@ -1143,12 +1218,17 @@ def open_embedded_runtime(request: RuntimeOpenRequest) -> EmbeddedRuntime:
         root=str(request.root),
         cfg=request.settings,
         channel_adapters=dict(request.channel_adapters),
+        storage_selection=request.storage_selection,
+        storage_providers=request.storage_providers,
+        storage_secrets=request.storage_secrets,
+        workspace_id=request.workspace_id,
+        owner_scope=request.owner_scope,
     )
     container.ext_services.update(dict(request.extensions))
     required = (
         "channels",
         "cont_store",
-        "eventlog",
+        "storage_services",
         "observability",
         "resume_router",
         "run_manager",
@@ -1226,6 +1306,7 @@ class RuntimeIntegration:
         Notes:
             Idempotency, dispatch, and interaction routing remain coordinator-owned.
         """
+        await self._runtime._ensure_ready()
         with self._runtime.activate():
             return await self._coordinator.accept(
                 verified=verified,
@@ -1271,6 +1352,7 @@ class RuntimeIntegration:
         Notes:
             Route resolution never falls back to another profile.
         """
+        await self._runtime._ensure_ready()
         route = next(
             (
                 item

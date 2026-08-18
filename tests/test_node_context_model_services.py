@@ -9,6 +9,7 @@ from aethergraph.core.runtime.node_services import NodeServices
 from aethergraph.core.runtime.runtime_env import RuntimeEnv
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
+from aethergraph.services.scope.scope import Scope
 
 
 class _EmbeddingService:
@@ -88,6 +89,24 @@ def test_node_context_image_model_fails_when_service_is_not_configured() -> None
 
     with pytest.raises(RuntimeError, match="Image generation service not available"):
         context.image_model()
+
+
+def test_node_context_state_forwards_existing_scope_to_canonical_facade() -> None:
+    class _AgentStateFacade:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, object] = {}
+
+        def bind(self, **kwargs: object) -> object:
+            self.kwargs = dict(kwargs)
+            return self
+
+    facade = _AgentStateFacade()
+    context = _context(embedding=None)
+    context.services.agent_state = facade
+    shared = Scope(session_id="session")
+
+    assert context.state("session-envelope", level="session", scope=shared) is facade
+    assert facade.kwargs["scope"] is shared
 
 
 def test_runtime_env_projects_the_container_image_service() -> None:

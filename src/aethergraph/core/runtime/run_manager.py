@@ -439,7 +439,9 @@ class RunManager:
         store = self._get_state_store()
         if store is None:
             return None, None
-        snap = await store.load_latest_snapshot(record.run_id)
+        from aethergraph.services.state_stores.scope import scope_for_run_record
+
+        snap = await store.load_latest_snapshot(scope_for_run_record(record), record.run_id)
         if snap is None:
             return None, None
         graph_outputs = snap.state.get("graph_outputs")
@@ -452,7 +454,6 @@ class RunManager:
             _seed_outputs_from_snapshot,
         )
         from aethergraph.core.runtime.runtime_env import RuntimeEnv
-        from aethergraph.services.container.default_container import build_default_container
 
         identity = self._identity_for_record(record)
         self._resolve_target_identity = identity
@@ -466,10 +467,7 @@ class RunManager:
             return None, snap.rev
 
         inputs = dict((record.meta or {}).get("original_inputs") or {})
-        try:
-            container = current_services()
-        except Exception:
-            container = build_default_container()
+        container = current_services()
         env = RuntimeEnv(
             run_id=record.run_id,
             graph_id=record.graph_id,
@@ -708,6 +706,14 @@ class RunManager:
 
                 logging.getLogger("aethergraph.runtime.run_manager").exception(
                     "Error creating output preview for run_id=%s", record.run_id
+                )
+            if self._store is not None:
+                await self._store.update_status(
+                    record.run_id,
+                    record.status,
+                    finished_at=record.finished_at,
+                    error=record.error,
+                    meta_update=dict(record.meta),
                 )
             await self._persist_run_result(
                 record=record,

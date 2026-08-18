@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from aethergraph.contracts.integration import (
     SEMANTIC_EVENT_PROTOCOL_VERSION,
     HostManifest,
@@ -13,19 +11,15 @@ from aethergraph.contracts.integration import (
 from .coordinator import IntegrationIngressCoordinator
 from .delivery import SemanticEventChannelAdapter, SemanticEventEmitter, SemanticTurnMonitor
 from .dispatch import AGRootTurnDispatcher
-from .events import EventLogInboundEventStore, EventLogSemanticEventStore
-from .idempotency import SQLiteIngressIdempotencyStore
 from .interactions import InteractionResolver
 from .resources import ResourceIngress, ResourceIngressPolicy
 from .routes import ManifestRouteResolver
-from .session_bindings import SQLiteExternalSessionBindingStore
 
 
 def install_integration_ingress(
     *,
     container,
     manifest: HostManifest,
-    database_path: str | Path | None = None,
     resource_policy: ResourceIngressPolicy | None = None,
 ) -> IntegrationIngressCoordinator:
     """Install the one manifest-bound ingress coordinator on an AG Host.
@@ -34,7 +28,7 @@ def install_integration_ingress(
     from one container and one immutable deployment manifest.
 
     Examples:
-        Install using the Host workspace database:
+        Install using the selected canonical provider:
         ```python
         coordinator = install_integration_ingress(
             container=container,
@@ -42,19 +36,18 @@ def install_integration_ingress(
         )
         ```
 
-        Install with an explicit operational database:
+        Install with an explicit resource policy:
         ```python
         coordinator = install_integration_ingress(
             container=container,
             manifest=manifest,
-            database_path="host/integration/operations.db",
+            resource_policy=policy,
         )
         ```
 
     Args:
         container: Fully built AG Host service container.
         manifest: Immutable deployment manifest and sole route authority.
-        database_path: Optional explicit SQLite operational-store path.
         resource_policy: Optional shared attachment validation policy.
 
     Returns:
@@ -72,12 +65,8 @@ def install_integration_ingress(
             f"{manifest.semantic_event_protocol_version!r} is negotiated but its "
             "delivery projector is not enabled."
         )
-    path = (
-        Path(database_path)
-        if database_path is not None
-        else Path(container.root) / ("integration/operations.db")
-    )
-    semantic_events = EventLogSemanticEventStore(container.eventlog)
+    persistence = container.storage_services.integration
+    semantic_events = persistence.semantic_events
     emitter = SemanticEventEmitter(
         deployment_id=manifest.deployment_id,
         store=semantic_events,
@@ -112,11 +101,11 @@ def install_integration_ingress(
     coordinator = IntegrationIngressCoordinator(
         manifest=manifest,
         route_resolver=ManifestRouteResolver(manifest),
-        idempotency_store=SQLiteIngressIdempotencyStore(path),
-        binding_store=SQLiteExternalSessionBindingStore(path),
+        idempotency_store=persistence.idempotency,
+        binding_store=persistence.bindings,
         resource_ingress=ResourceIngress(container=container, policy=resource_policy),
         interaction_resolver=InteractionResolver(container.cont_store),
-        inbound_events=EventLogInboundEventStore(container.eventlog),
+        inbound_events=persistence.inbound_events,
         semantic_emitter=emitter,
         resume_router=container.resume_router,
         root_dispatcher=AGRootTurnDispatcher(

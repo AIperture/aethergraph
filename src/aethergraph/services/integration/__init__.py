@@ -1,5 +1,10 @@
 """Provider-neutral services for unified integration ingress."""
 
+from .canonical_events import CanonicalInboundEventStore, CanonicalSemanticEventStore
+from .canonical_factory import (
+    CanonicalIntegrationPersistence,
+    bind_canonical_integration_persistence,
+)
 from .context import VerifiedAttachment, VerifiedIntegrationContext
 from .coordinator import IngressCoordinatorError, IntegrationIngressCoordinator
 from .delivery import (
@@ -9,9 +14,8 @@ from .delivery import (
     SemanticTurnMonitor,
 )
 from .dispatch import AGRootTurnDispatcher, RootTurnDispatcher
-from .events import (
-    EventLogInboundEventStore,
-    EventLogSemanticEventStore,
+from .event_contracts import (
+    InboundEventStore,
     PersistedInboundEvent,
     PersistedSemanticEvent,
     SemanticEventStore,
@@ -19,10 +23,10 @@ from .events import (
 )
 from .factory import install_integration_ingress
 from .idempotency import (
+    CanonicalIngressIdempotencyStore,
     IngressClaim,
     IngressIdempotencyError,
     IngressIdempotencyStore,
-    SQLiteIngressIdempotencyStore,
 )
 from .interactions import (
     InteractionResolutionError,
@@ -42,21 +46,25 @@ from .resources import ResourceIngress, ResourceIngressError, ResourceIngressPol
 from .routes import IntegrationRouteError, ManifestRouteResolver
 from .session_bindings import (
     BindingResolution,
+    CanonicalExternalSessionBindingStore,
     ExternalSessionBindingStore,
     SessionBindingError,
-    SQLiteExternalSessionBindingStore,
 )
 
 __all__ = [
     "BindingResolution",
+    "CanonicalExternalSessionBindingStore",
+    "CanonicalIngressIdempotencyStore",
+    "CanonicalInboundEventStore",
+    "CanonicalIntegrationPersistence",
+    "CanonicalSemanticEventStore",
     "AGRootTurnDispatcher",
-    "EventLogInboundEventStore",
     "ExternalSessionBindingStore",
-    "EventLogSemanticEventStore",
     "IngressClaim",
     "IngressCoordinatorError",
     "IngressIdempotencyError",
     "IngressIdempotencyStore",
+    "InboundEventStore",
     "IntegrationRouteError",
     "IntegrationIngressCoordinator",
     "InteractionResolutionError",
@@ -75,8 +83,6 @@ __all__ = [
     "ResourceIngressError",
     "ResourceIngressPolicy",
     "RootTurnDispatcher",
-    "SQLiteExternalSessionBindingStore",
-    "SQLiteIngressIdempotencyStore",
     "SessionBindingError",
     "SemanticEventStore",
     "SemanticEventStoreError",
@@ -87,5 +93,6 @@ __all__ = [
     "VerifiedIntegrationContext",
     "VerifiedAttachment",
     "build_interaction_payload",
+    "bind_canonical_integration_persistence",
     "install_integration_ingress",
 ]

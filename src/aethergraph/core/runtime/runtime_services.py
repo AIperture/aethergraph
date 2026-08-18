@@ -100,6 +100,42 @@ def install_services(services: Any) -> None:
     return _current.set(services)
 
 
+def uninstall_services(services: Any) -> None:
+    """Remove one exact closed container from runtime service resolution.
+
+    Intro:
+        Clears only references that still point at the supplied container so a
+        stopped app cannot leak a closed provider bundle into later runtimes.
+
+    Examples:
+        Uninstall after app shutdown:
+            ```python
+            uninstall_services(container)
+            ```
+
+        Preserve a newer replacement:
+            ```python
+            install_services(replacement)
+            uninstall_services(previous)
+            ```
+
+    Args:
+        services: Exact container whose owned lifecycle has ended.
+
+    Returns:
+        None: Matching context-local and process-wide references are cleared.
+
+    Notes:
+        Identity comparison prevents an older host from uninstalling a newer host.
+        Deferred extension registrations are intentionally preserved.
+    """
+    global _services_global
+    if _services_global is services:
+        _services_global = None
+    if _current.get() is services:
+        _current.set(None)
+
+
 def ensure_services_installed(factory: Callable[[], Any]) -> Any:
     global _services_global, _pending_ext_services
     svc = _current.get() or _services_global

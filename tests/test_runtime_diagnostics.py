@@ -54,7 +54,7 @@ async def test_runtime_inspection_merges_latest_snapshot_and_incremental_state()
             return record if run_id == "run-1" else None
 
     class _StateStore:
-        async def load_latest_snapshot(self, run_id: str):
+        async def load_latest_snapshot(self, scope, run_id: str):
             return SimpleNamespace(
                 rev=3,
                 state={
@@ -69,7 +69,7 @@ async def test_runtime_inspection_merges_latest_snapshot_and_incremental_state()
                 },
             )
 
-        async def load_events_since(self, run_id: str, from_rev: int):
+        async def load_events_since(self, scope, run_id: str, from_rev: int):
             assert from_rev == 3
             return [
                 SimpleNamespace(
@@ -115,7 +115,7 @@ async def test_runtime_inspection_returns_node_error_diagnostics():
             return record
 
     class _StateStore:
-        async def load_latest_snapshot(self, run_id: str):
+        async def load_latest_snapshot(self, scope, run_id: str):
             return SimpleNamespace(
                 rev=1,
                 state={
@@ -135,7 +135,7 @@ async def test_runtime_inspection_returns_node_error_diagnostics():
                 },
             )
 
-        async def load_events_since(self, run_id: str, from_rev: int):
+        async def load_events_since(self, scope, run_id: str, from_rev: int):
             return []
 
     inspection = await RuntimeInspectionService(

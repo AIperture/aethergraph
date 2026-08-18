@@ -3,27 +3,25 @@ from .agent_events import (
     emit_agent_event,
     register_default_agent_event_types,
 )
-from .facade import (
-    ActiveObservabilityScopeError,
-    ObservabilityFacade,
-    open_active_observability_facade,
-    open_observability_workspace,
+from .canonical_inspection import CanonicalInspectionReader
+from .canonical_retention import ProviderRetentionJanitor, RetentionPolicy
+from .canonical_runtime_output import (
+    CanonicalRuntimeOutputSink,
+    bind_canonical_runtime_output,
+)
+from .canonical_service import (
+    CanonicalObservationService,
+    ProviderObservationService,
+    bind_canonical_observation_service,
 )
 from .inspection import (
-    InspectionPresenter,
     ObservabilityIdentity,
     ObservabilityNotFoundError,
     ObservabilityUnavailableError,
     ObservabilityWorkspaceError,
 )
-from .legacy_cleanup import (
-    LegacyObservabilityCleanupResult,
-    LegacyObservabilityReport,
-    cleanup_legacy_observability,
-    scan_legacy_observability,
-)
 from .logger import LoggingConfig, StdLoggerService
-from .metering import EventLogMeteringService
+from .metering import CanonicalMeteringService
 from .models import (
     CaptureMode,
     LLMObservationRecord,
@@ -41,17 +39,15 @@ from .operations import (
     summarize_payload,
 )
 from .policy import ObservationPolicy
-from .retention import RetentionJanitor, RetentionPolicy
-from .sqlite_store import SQLiteObservationStore
+from .workspace import ObservabilityFacade, open_observability_workspace
 
 __all__ = [
-    "ActiveObservabilityScopeError",
     "AgentEventTypeRegistry",
     "CaptureMode",
-    "InspectionPresenter",
+    "CanonicalRuntimeOutputSink",
+    "CanonicalObservationService",
+    "CanonicalInspectionReader",
     "LLMObservationRecord",
-    "LegacyObservabilityCleanupResult",
-    "LegacyObservabilityReport",
     "LoggingConfig",
     "ObservationFilter",
     "ObservationPolicy",
@@ -59,25 +55,24 @@ __all__ = [
     "ObservationScope",
     "OperationObserver",
     "OperationSpan",
-    "ObservabilityFacade",
     "ObservabilityIdentity",
+    "ObservabilityFacade",
     "ObservabilityNotFoundError",
     "ObservabilityUnavailableError",
     "ObservabilityWorkspaceError",
     "PurgeResult",
-    "RetentionJanitor",
+    "ProviderObservationService",
+    "ProviderRetentionJanitor",
     "RetentionPolicy",
-    "SQLiteObservationStore",
     "StdLoggerService",
     "StorageStats",
-    "cleanup_legacy_observability",
+    "bind_canonical_runtime_output",
+    "bind_canonical_observation_service",
     "emit_agent_event",
     "extract_metrics",
-    "open_active_observability_facade",
-    "open_observability_workspace",
     "register_default_agent_event_types",
     "resolve_operation_observer",
-    "scan_legacy_observability",
     "summarize_payload",
-    "EventLogMeteringService",
+    "open_observability_workspace",
+    "CanonicalMeteringService",
 ]

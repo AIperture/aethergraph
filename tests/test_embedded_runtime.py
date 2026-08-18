@@ -34,26 +34,59 @@ class _RunManager:
         )
 
 
-class _EventLog:
+class _RuntimeOutput:
     def __init__(self, rows_by_run):
         self.rows_by_run = rows_by_run
 
-    async def query(self, *, run_id, **kwargs):
-        del kwargs
-        return list(self.rows_by_run.get(run_id, ()))
+    async def query(self, query):
+        records = []
+        for row in self.rows_by_run.get(query.scope.run_id, ()):
+            cursor = row["_row_id"]
+            records.append(
+                SimpleNamespace(
+                    output_id=f"output-{cursor}",
+                    delivery_cursor=cursor,
+                    cursor=str(cursor),
+                    scope=SimpleNamespace(
+                        session_id=None,
+                        run_id=query.scope.run_id,
+                        graph_id=None,
+                        node_id="node-1",
+                    ),
+                    tool_name=None,
+                    tags=(),
+                    execution_id=f"execution-{cursor}",
+                    stream=SimpleNamespace(value="stdout"),
+                    text=row["kind"],
+                    sequence=cursor,
+                    partial=False,
+                    truncated=False,
+                    source="runtime",
+                    eof=False,
+                )
+            )
+        return SimpleNamespace(items=tuple(records), next_cursor=None)
 
 
 def _container(**overrides):
+    async def start_storage():
+        return None
+
+    async def close_storage():
+        return None
+
     values = {
         "channels": SimpleNamespace(),
         "cont_store": SimpleNamespace(),
         "run_manager": _RunManager(),
         "run_result_store": None,
         "state_store": SimpleNamespace(),
-        "eventlog": _EventLog({}),
+        "storage_services": SimpleNamespace(runtime_output=_RuntimeOutput({})),
         "observability": None,
         "resume_router": SimpleNamespace(),
         "ext_services": {},
+        "start_storage": start_storage,
+        "close_storage": close_storage,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -63,7 +96,8 @@ def test_open_embedded_runtime_applies_extensions_before_return(monkeypatch, tmp
     container = _container(observability=SimpleNamespace())
     observed = {}
 
-    def _build_default_container(*, root, cfg, channel_adapters):
+    def _build_default_container(*, root, cfg, channel_adapters, **storage):
+        del storage
         observed.update(root=root, cfg=cfg, channel_adapters=channel_adapters)
         return container
 
@@ -157,15 +191,17 @@ def test_runtime_exposes_immutable_profile_and_capture_values():
 async def test_query_events_merges_exact_run_membership_by_shared_cursor():
     runtime = EmbeddedRuntime(
         _container(
-            eventlog=_EventLog(
-                {
-                    "root": ({"_row_id": 3, "kind": "root"},),
-                    "child": (
-                        {"_row_id": 2, "kind": "child-start"},
-                        {"_row_id": 4, "kind": "child-end"},
-                    ),
-                }
-            )
+            storage_services=SimpleNamespace(
+                runtime_output=_RuntimeOutput(
+                    {
+                        "root": ({"_row_id": 3, "kind": "root"},),
+                        "child": (
+                            {"_row_id": 2, "kind": "child-start"},
+                            {"_row_id": 4, "kind": "child-end"},
+                        ),
+                    }
+                )
+            ),
         )
     )
 

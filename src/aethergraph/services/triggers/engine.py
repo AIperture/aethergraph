@@ -8,10 +8,12 @@ from uuid import uuid4
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.services.runs import RunStore
-from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.contracts.storage.trigger_store import TriggerStore
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunStatus, RunVisibility
+from aethergraph.observability.canonical_service import CanonicalObservationService
+from aethergraph.observability.models import ObservationRecord
 
+from .trigger_service import _trigger_observation_scope
 from .types import TriggerClaim, TriggerRecord
 
 if TYPE_CHECKING:
@@ -31,7 +33,7 @@ class TriggerEngine:
 
     store: TriggerStore
     run_manager: RunManager
-    event_log: EventLog | None = None
+    observation_sink: CanonicalObservationService | None = None
     run_store: RunStore | None = None
     logger: Any | None = None
     claim_limit: int = 100
@@ -253,16 +255,18 @@ class TriggerEngine:
         run_id: str | None,
         fire_id: str | None,
     ) -> None:
-        if self.event_log is None:
+        if self.observation_sink is None:
             return
         try:
-            await self.event_log.append(
-                {
-                    "id": f"trig-fire-{uuid4().hex[:12]}",
-                    "ts": now.timestamp(),
-                    "scope_id": trig.trigger_id,
-                    "kind": "trigger_fire",
-                    "payload": {
+            await self.observation_sink.append_observation(
+                ObservationRecord(
+                    observation_id=f"trig-fire-{uuid4().hex[:12]}",
+                    occurred_at=now.isoformat(),
+                    category="trigger_fire",
+                    name=action,
+                    summary=f"Trigger fire {action}",
+                    scope=_trigger_observation_scope(trig, run_id=run_id),
+                    attributes={
                         "action": action,
                         "trigger_id": trig.trigger_id,
                         "fire_id": fire_id,
@@ -271,7 +275,7 @@ class TriggerEngine:
                         "run_id": run_id,
                         "meta": trig.meta or {},
                     },
-                }
+                )
             )
         except Exception:
             if self.logger:

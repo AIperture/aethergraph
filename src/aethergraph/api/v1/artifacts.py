@@ -1,7 +1,6 @@
 # /artifacts
 
 import mimetypes
-import os
 from time import perf_counter
 from typing import Annotated, Any
 import unicodedata
@@ -9,9 +8,15 @@ import unicodedata
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response  # type: ignore
 from fastapi.responses import RedirectResponse  # type: ignore
 
-from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
-from aethergraph.contracts.storage.artifact_index import Artifact
+from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
+from aethergraph.storage.contracts import (
+    ArtifactMetricOrder,
+    PageRequest,
+    SearchMode,
+    StorageScope,
+)
 
 from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
 from .schemas.artifacts import (
@@ -37,25 +42,29 @@ def _latin1_safe(s: str, fallback: str = "") -> str:
 
 router = APIRouter(tags=["artifacts"])
 
+_DEPRECATED_SEARCH_IDENTITY_LABELS = frozenset({"app_id", "application_id", "client_id"})
+_PROMOTED_SEARCH_FIELDS = frozenset({"kind", "scope_id", "tags"})
+
 
 # -------- Helpers  -------- #
 
 
-def _tenant_label_filters(identity: RequestIdentity) -> dict[str, str]:
-    """
-    Convert RequestIdentity into artifact label filters.
-
-    All modes (cloud/demo/local) get org_id + user_id set, so we just use that.
-    """
+def _artifact_service(
+    identity: RequestIdentity,
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+) -> CanonicalPublicArtifactFacade:
+    container = current_services()
     org_id, user_id = identity.tenant_key
-    filters: dict[str, str] = {}
-
-    if org_id is not None:
-        filters["org_id"] = org_id
-    if user_id is not None:
-        filters["user_id"] = user_id
-
-    return filters
+    return container.artifact_factory.for_public_execution(
+        StorageScope(
+            org_id=org_id,
+            user_id=user_id,
+            run_id=run_id,
+            session_id=session_id,
+        )
+    )
 
 
 def _extract_tags(labels: dict[str, Any]) -> list[str]:
@@ -140,6 +149,109 @@ def _artifact_to_meta(a: Artifact) -> ArtifactMeta:
     return out
 
 
+async def _search_canonical_artifacts(
+    req: ArtifactSearchRequest,
+    facade: CanonicalPublicArtifactFacade,
+) -> ArtifactSearchResponse:
+    """Map the frozen Artifact search request onto exact canonical query paths."""
+    query = req.query.strip() if req.query and req.query.strip() else None
+    kind = _required_optional_text("kind", req.kind)
+    scope_id = _required_optional_text("scope_id", req.scope_id)
+    metric = _required_optional_text("metric", req.metric)
+    tags = _canonical_search_tags(req.tags)
+    labels = dict(req.labels)
+    _validate_canonical_search_labels(labels)
+    if scope_id is not None:
+        labels["scope_id"] = scope_id
+    if isinstance(req.limit, bool) or not 1 <= req.limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+
+    has_metric_order = req.mode is not None
+    if query is not None:
+        if metric is not None or has_metric_order or req.best_only:
+            raise HTTPException(
+                status_code=422,
+                detail="text search cannot be combined with metric ranking or best_only",
+            )
+        metadata = dict(labels)
+        if kind is not None:
+            metadata["kind"] = kind
+        results = await facade.search_public_artifacts(
+            query=query,
+            mode=SearchMode.LEXICAL,
+            top_k=req.limit,
+            tags=tags,
+            metadata=metadata,
+        )
+        return ArtifactSearchResponse(
+            hits=[
+                ArtifactSearchHit(artifact=_artifact_to_meta(result.artifact), score=result.score)
+                for result in results
+            ]
+        )
+
+    if (metric is None) != (req.mode is None):
+        raise HTTPException(
+            status_code=422,
+            detail="metric and mode must be supplied together",
+        )
+    if req.best_only and metric is None:
+        raise HTTPException(
+            status_code=422,
+            detail="best_only requires metric and mode",
+        )
+    metric_order = ArtifactMetricOrder(req.mode) if req.mode is not None else None
+    page = await facade.query_public_artifacts(
+        PageRequest(limit=1 if req.best_only else req.limit),
+        kind=kind,
+        tags=tags,
+        labels=labels,
+        metric=metric,
+        metric_order=metric_order,
+    )
+    return ArtifactSearchResponse(
+        hits=[
+            ArtifactSearchHit(
+                artifact=_artifact_to_meta(artifact),
+                score=float(artifact.metrics[metric]) if metric is not None else 1.0,
+            )
+            for artifact in page.items
+        ]
+    )
+
+
+def _required_optional_text(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        raise HTTPException(status_code=422, detail=f"{name} must be non-empty when supplied")
+    return normalized
+
+
+def _canonical_search_tags(values: list[str] | None) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    normalized = tuple(value.strip() for value in values)
+    if any(not value for value in normalized):
+        raise HTTPException(status_code=422, detail="tags must contain non-empty strings")
+    if len(set(normalized)) != len(normalized):
+        raise HTTPException(status_code=422, detail="tags must not contain duplicates")
+    return tuple(sorted(normalized))
+
+
+def _validate_canonical_search_labels(labels: dict[str, Any]) -> None:
+    forbidden = sorted(
+        (_DEPRECATED_SEARCH_IDENTITY_LABELS | _PROMOTED_SEARCH_FIELDS).intersection(labels)
+    )
+    if forbidden:
+        names = ", ".join(forbidden)
+        raise HTTPException(
+            status_code=422,
+            detail=f"labels contains reserved or deprecated search fields: {names}",
+        )
+
+
 # -------- API Endpoints -------- #
 @router.get("/artifacts", response_model=ArtifactListResponse)
 async def list_artifacts(
@@ -155,46 +267,32 @@ async def list_artifacts(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
     # print(f"list_artifacts called with scope_id={scope_id}, run_id={run_id}, session_id={session_id}, kind={kind}, tags={tags}, cursor={cursor}, limit={limit}, identity={identity}")
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    if index is None:
-        return ArtifactListResponse(artifacts=[], next_cursor=None)
-
-    offset = decode_cursor(cursor.strip() if cursor else None)
+    facade = _artifact_service(
+        identity,
+        run_id=run_id.strip() if run_id and run_id.strip() else None,
+        session_id=session_id.strip() if session_id and session_id.strip() else None,
+    )
     label_filters: dict[str, Any] = {}
 
-    # execution scopes
-    if run_id and run_id.strip():
-        label_filters["run_id"] = run_id.strip()
-    if session_id and session_id.strip():
-        label_filters["session_id"] = session_id.strip()
-
-    # memory scope (keep for “overview” / RAG-style scoping)
     if scope_id and scope_id.strip():
         label_filters["scope_id"] = scope_id.strip()
 
-    if tags and tags.strip():
-        label_filters["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
-
-    label_filters.update(_tenant_label_filters(identity))
+    required_tags = tuple(t.strip() for t in tags.split(",") if t.strip()) if tags else ()
 
     started_at = perf_counter()
-    artifacts = await index.search(
+    page = await facade.query_public_artifacts(
+        PageRequest(limit=limit, cursor=cursor.strip() if cursor else None),
         kind=kind.strip() if kind and kind.strip() else None,
-        labels=label_filters or None,
+        tags=required_tags,
+        labels=label_filters,
         pinned=pinned,
-        metric=None,
-        mode=None,
-        limit=limit,
-        offset=offset,
     )
-    metas = [_artifact_to_meta(a) for a in artifacts]
+    metas = [_artifact_to_meta(a) for a in page.items]
     if response is not None:
         response.headers["X-AetherGraph-Artifact-Query-Ms"] = (
             f"{(perf_counter() - started_at) * 1000:.2f}"
         )
-    next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
-    return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
+    return ArtifactListResponse(artifacts=metas, next_cursor=page.next_cursor)
 
 
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactMeta)
@@ -205,13 +303,7 @@ async def get_artifact(
     """
     Get single artifact metadata.
     """
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    rm = getattr(container, "run_manager", None)
-    if index is None or (identity.mode == "demo" and rm is None):
-        raise HTTPException(status_code=503, detail="Artifact index not configured")
-
-    artifact = await index.get(artifact_id)
+    artifact = await _artifact_service(identity).get_by_id(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
     if not artifact_belongs_to_identity(identity, artifact):
@@ -226,14 +318,8 @@ async def get_artifact_content(
     artifact_id: str,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> Response:
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    store = getattr(container, "artifacts", None)
-    rm = getattr(container, "run_manager", None)
-    if index is None or store is None or (identity.client_id and rm is None):
-        raise HTTPException(status_code=503, detail="Artifact services not configured")
-
-    artifact = await index.get(artifact_id)
+    facade = _artifact_service(identity)
+    artifact = await facade.get_by_id(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
     if not artifact_belongs_to_identity(identity, artifact):
@@ -244,15 +330,11 @@ async def get_artifact_content(
         return RedirectResponse(artifact.preview_uri)
 
     # Otherwise, stream raw bytes from the artifact store.
-    data = await store.load_artifact_bytes(artifact.uri)
+    data = await facade.load_bytes_by_id(artifact_id)
 
     # Derive a filename that's at least somewhat meaningful
     labels = artifact.labels or {}
-    filename = (
-        labels.get("filename")
-        or (os.path.basename(artifact.uri) if artifact.uri else None)
-        or artifact.artifact_id
-    )
+    filename = labels.get("filename") or artifact.artifact_id
 
     media_type = artifact.mime or "application/octet-stream"
 
@@ -278,21 +360,14 @@ async def pin_artifact(
 
     Pinned artifacts can be treated as "keep" in GC policies or highlighted in UIs.
     """
-    container = current_services()
-    rm = getattr(container, "run_manager", None)
-    index = getattr(container, "artifact_index", None)
-    if index is None:
-        raise HTTPException(status_code=503, detail="Artifact index not configured")
-
-    if identity.client_id and rm is None:
-        # Can't enforce client scoping without RunManager
-        raise HTTPException(status_code=503, detail="Run manager not configured")
-
-    artifact = await index.get(artifact_id)
+    facade = _artifact_service(identity)
+    artifact = await facade.get_by_id(artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
+    if not artifact_belongs_to_identity(identity, artifact):
+        raise HTTPException(status_code=404, detail=f"Artifact {artifact_id} not found")
 
-    await index.pin(artifact_id, pinned=pinned)
+    await facade.pin(artifact_id, pinned=pinned)
     return {"artifact_id": artifact_id, "pinned": pinned}
 
 
@@ -304,37 +379,16 @@ async def list_run_artifacts(
     response: Response = None,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    if index is None:
-        raise HTTPException(status_code=503, detail="Artifact index not configured")
-
-    offset = decode_cursor(cursor.strip() if cursor else None)
-
-    label_filters: dict[str, Any] = {"run_id": run_id}
-    label_filters.update(_tenant_label_filters(identity))
-
     started_at = perf_counter()
-    list_occurrences_for_run = getattr(index, "list_occurrences_for_run", None)
-    if callable(list_occurrences_for_run):
-        artifacts = await list_occurrences_for_run(run_id, limit=limit, offset=offset)
-        artifacts = [
-            artifact for artifact in artifacts if artifact_belongs_to_identity(identity, artifact)
-        ]
-    else:
-        artifacts = await index.search(
-            labels=label_filters,
-            limit=limit,
-            offset=offset,
-        )
-
-    metas = [_artifact_to_meta(a) for a in artifacts]
+    page = await _artifact_service(identity, run_id=run_id).query_public_artifacts(
+        PageRequest(limit=limit, cursor=cursor.strip() if cursor else None)
+    )
+    metas = [_artifact_to_meta(a) for a in page.items]
     if response is not None:
         response.headers["X-AetherGraph-Artifact-Query-Ms"] = (
             f"{(perf_counter() - started_at) * 1000:.2f}"
         )
-    next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
-    return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
+    return ArtifactListResponse(artifacts=metas, next_cursor=page.next_cursor)
 
 
 @router.get("/sessions/{session_id}/artifacts", response_model=ArtifactListResponse)
@@ -345,37 +399,16 @@ async def list_session_artifacts(
     response: Response = None,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> ArtifactListResponse:
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    if index is None:
-        raise HTTPException(status_code=503, detail="Artifact index not configured")
-
-    offset = decode_cursor(cursor.strip() if cursor else None)
-
-    label_filters: dict[str, Any] = {"session_id": session_id}
-    label_filters.update(_tenant_label_filters(identity))
-
     started_at = perf_counter()
-    list_occurrences_for_session = getattr(index, "list_occurrences_for_session", None)
-    if callable(list_occurrences_for_session):
-        artifacts = await list_occurrences_for_session(session_id, limit=limit, offset=offset)
-        artifacts = [
-            artifact for artifact in artifacts if artifact_belongs_to_identity(identity, artifact)
-        ]
-    else:
-        artifacts = await index.search(
-            labels=label_filters,
-            limit=limit,
-            offset=offset,
-        )
-
-    metas = [_artifact_to_meta(a) for a in artifacts]
+    page = await _artifact_service(identity, session_id=session_id).query_public_artifacts(
+        PageRequest(limit=limit, cursor=cursor.strip() if cursor else None)
+    )
+    metas = [_artifact_to_meta(a) for a in page.items]
     if response is not None:
         response.headers["X-AetherGraph-Artifact-Query-Ms"] = (
             f"{(perf_counter() - started_at) * 1000:.2f}"
         )
-    next_cursor = encode_cursor(offset + limit) if len(artifacts) == limit else None
-    return ArtifactListResponse(artifacts=metas, next_cursor=next_cursor)
+    return ArtifactListResponse(artifacts=metas, next_cursor=page.next_cursor)
 
 
 @router.post("/artifacts/search", response_model=ArtifactSearchResponse)
@@ -384,93 +417,6 @@ async def search_artifacts(
     identity: Annotated[RequestIdentity, Depends(get_identity)],
 ) -> ArtifactSearchResponse:
     """
-    Structured search over artifacts via the artifact index.
-
-    We interpret fields on ArtifactSearchRequest in a flexible way:
-      - kind: optional artifact kind filter
-      - scope_id: maps to labels["scope_id"]
-      - tags: optional list[str] or comma-separated string -> labels["tags"]
-      - labels: optional extra label filters
-      - metric + mode: if provided, used for ranking (and required for best-only)
-      - limit: max results
-      - best_only: if True, use index.best(...) and return a single hit
-
-    Tenant scoping is enforced via org_id/user_id/client_id/app_id from RequestIdentity.
+    Structured search over the selected canonical Artifact provider.
     """
-    container = current_services()
-    index = getattr(container, "artifact_index", None)
-    if index is None:
-        return ArtifactSearchResponse(results=[])
-
-    kind = getattr(req, "kind", None)
-    scope_id = getattr(req, "scope_id", None)
-    tags = getattr(req, "tags", None)
-    extra_labels = getattr(req, "labels", None)
-    metric = getattr(req, "metric", None)
-    mode = getattr(req, "mode", None)
-    limit = getattr(req, "limit", 50)
-    best_only = getattr(req, "best_only", False)
-
-    label_filter: dict[str, Any] = {}
-
-    if scope_id:
-        label_filter["scope_id"] = scope_id
-
-    # Handle tags, may be list or comma-separated str
-    if tags:
-        if isinstance(tags, str):
-            tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-        elif isinstance(tags, list):
-            tag_list = [str(t) for t in tags]
-        else:
-            tag_list = []
-        if tag_list:
-            label_filter["tags"] = tag_list
-
-    if extra_labels:
-        label_filter.update(extra_labels)
-
-    # 🔹 Tenant scoping
-    tenant_filters = _tenant_label_filters(identity)
-    label_filter.update(tenant_filters)
-
-    hits: list[ArtifactSearchHit] = []
-
-    if best_only and metric and mode:
-        best = await index.best(
-            kind=kind or "",
-            metric=metric,
-            mode=mode,
-            filters=label_filter or None,
-        )
-        if best is not None:
-            score = float(best.metrics.get(metric, 0.0)) if best.metrics else 0.0
-            hits.append(
-                ArtifactSearchHit(
-                    artifact=_artifact_to_meta(best),
-                    score=score,
-                )
-            )
-        return ArtifactSearchResponse(results=hits)
-
-    artifacts = await index.search(
-        kind=kind,
-        labels=label_filter or None,
-        pinned=None,
-        metric=metric,
-        mode=mode,
-        limit=limit,
-    )
-
-    for a in artifacts:
-        score = 1.0
-        if metric and a.metrics:
-            score = float(a.metrics.get(metric, 0.0))
-        hits.append(
-            ArtifactSearchHit(
-                artifact=_artifact_to_meta(a),
-                score=score,
-            )
-        )
-
-    return ArtifactSearchResponse(results=hits)
+    return await _search_canonical_artifacts(req, _artifact_service(identity))

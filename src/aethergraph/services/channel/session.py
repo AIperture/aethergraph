@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 import inspect
 import logging
 from pathlib import Path, PurePath
@@ -26,7 +27,7 @@ from aethergraph.services.channel.choices import (
     normalize_choice_reply,
     prompt_choices_from_prompt,
 )
-from aethergraph.services.continuations.continuation import Correlator
+from aethergraph.services.continuations.continuation import ContinuationStatus, Correlator
 
 
 def _artifact_filename(artifact: Artifact, fallback: str | None = None) -> str:
@@ -289,13 +290,7 @@ class ChannelSession:
             "severity": severity,
             "signal": signal,
         }
-        append_chat_turn = getattr(mem, "append_chat_turn", None)
-        if callable(append_chat_turn):
-            await append_chat_turn(role, text, **payload)
-            return
-        record_chat = getattr(mem, "record_chat", None)
-        if callable(record_chat):
-            await record_chat(role, text, **payload)
+        await mem.append_chat_turn(role, text, **payload)
 
     def _resolve_default_key(self) -> str:
         """Resolve the immutable run origin channel."""
@@ -741,7 +736,7 @@ class ChannelSession:
         stream_chars_per_second: float | None = None,
         stream_target_chunk_chars: int | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -851,7 +846,7 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -947,7 +942,7 @@ class ChannelSession:
         poll_ms: int | None = None,
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1047,7 +1042,7 @@ class ChannelSession:
         channel: str | None = None,
         artifact_labels: dict[str, Any] | None = None,
         # memory logging...
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1143,7 +1138,7 @@ class ChannelSession:
         artifact_kind: str = "file",
         artifact_labels: dict[str, Any] | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1303,7 +1298,7 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -1419,7 +1414,7 @@ class ChannelSession:
             cont = await self.ctx.create_continuation(
                 channel=ch_key, kind=kind, payload=cont_payload, deadline_s=timeout_s
             )
-            fut = self.ctx.prepare_wait_for_resume(cont.token)
+            fut = self.ctx.prepare_wait_for_resume(cont.continuation_id)
             wait_meta = self._inject_context_meta(
                 {"channel_key": ch_key, "continuation_token": cont.token}
             )
@@ -1429,12 +1424,16 @@ class ChannelSession:
             inline = (res or {}).get("payload")
             if inline is not None:
                 try:
-                    self.ctx.services.waits.resolve(cont.token, inline)
+                    self.ctx.services.waits.resolve(cont.continuation_id, inline)
                 except Exception:
                     logger = logging.getLogger("aethergraph.services.channel.session")
                     logger.debug("Continuation token %s already resolved inline", cont.token)
                 try:
-                    await self._cont_store.delete(self._run_id, self._node_id)
+                    cont.record = await self._cont_store.close(
+                        cont.record,
+                        status=ContinuationStatus.RESUMED,
+                        closed_at=datetime.now(UTC),
+                    )
                 except Exception:
                     logger.debug("Failed to delete continuation for token %s", cont.token)
                     logger.exception("Error occurred while deleting continuation")
@@ -1444,9 +1443,11 @@ class ChannelSession:
 
             corr = (res or {}).get("correlator")
             if corr:
-                await self._cont_store.bind_correlator(token=cont.token, corr=corr)
-                await self._cont_store.bind_correlator(
-                    token=cont.token,
+                cont.record = await self._cont_store.bind_correlator(
+                    continuation=cont.record, corr=corr
+                )
+                cont.record = await self._cont_store.bind_correlator(
+                    continuation=cont.record,
                     corr=Correlator(
                         scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
                     ),
@@ -1454,13 +1455,14 @@ class ChannelSession:
             else:
                 peek = await self._bus.peek_correlator(ch_key)
                 if peek:
-                    await self._cont_store.bind_correlator(
-                        token=cont.token,
+                    cont.record = await self._cont_store.bind_correlator(
+                        continuation=cont.record,
                         corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
                     )
                 else:
-                    await self._cont_store.bind_correlator(
-                        token=cont.token, corr=Correlator(self._bus._prefix(ch_key), ch_key, "", "")
+                    cont.record = await self._cont_store.bind_correlator(
+                        continuation=cont.record,
+                        corr=Correlator(self._bus._prefix(ch_key), ch_key, "", ""),
                     )
 
             result = await fut
@@ -1553,8 +1555,8 @@ class ChannelSession:
         silent: bool = False,  # kept for back-compat; same behavior as before
         channel: str | None = None,
         # memory config
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> str:
         """
@@ -1642,7 +1644,7 @@ class ChannelSession:
         *,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_reply: bool = True,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> str:
         """
@@ -1668,7 +1670,7 @@ class ChannelSession:
         Args:
             timeout_s: Maximum time in seconds to wait for a response (default: 3600).
             channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_log_reply: Whether to log the user's reply to memory (default: True).
+            memory_log_reply: Whether to log the user's reply to memory (default: False).
             memory_tags: Optional list of tags to associate with the memory log entry.
 
         Returns:
@@ -1692,8 +1694,8 @@ class ChannelSession:
         *,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> ChoiceResult:
         """Prompt for one normalized choice selection.
@@ -1823,8 +1825,8 @@ class ChannelSession:
         multiple: bool = True,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> FileInteractionResult:
         """Prompt for file upload and return a typed normalized reply.
@@ -1927,8 +1929,8 @@ class ChannelSession:
         prompt: str,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> FileInteractionResult:
         """Prompt for either text or files and return a typed normalized reply.
@@ -2123,7 +2125,7 @@ class ChannelSession:
             self,
             full_text: str | None = None,
             *,
-            memory_log: bool = True,
+            memory_log: bool = False,
             memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
             memory_tags: list[str] | None = None,
             memory_data: dict[str, Any] | None = None,
@@ -2214,7 +2216,7 @@ class ChannelSession:
         full_text: str,
         *,
         channel: str | None = None,
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
@@ -2325,7 +2327,7 @@ class ChannelSession:
         thinking_detail_tail_chars: int = 300,
         emit_thinking_phase: bool = False,
         # Memory logging
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,

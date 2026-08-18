@@ -17,6 +17,7 @@ from aethergraph.services.llm import (
     ToolPath,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
+from aethergraph.services.llm.observability import ConsoleLLMObservationSink
 
 from .openai_tool_search_cache_scenario import (
     SEARCH_SCHEMA,
@@ -35,12 +36,14 @@ pytestmark = pytest.mark.skipif(
 async def test_generic_client_replays_loaded_schema_branch() -> None:
     """Run the same exact-load replay through the provider-neutral adapter."""
 
-    scenario = build_cache_scenario(
-        os.getenv("AG_OPENAI_CACHE_SMOKE_MODEL", "gpt-5.4")
-    )
+    scenario = build_cache_scenario(os.getenv("AG_OPENAI_CACHE_SMOKE_MODEL", "gpt-5.4"))
     family = f"ag-cache-adapter-{scenario.scenario_id}"
     client = GenericLLMClient(
-        "openai", scenario.model, api_key=os.environ["OPENAI_API_KEY"]
+        "openai",
+        scenario.model,
+        api_key=os.environ["OPENAI_API_KEY"],
+        observation_sink=ConsoleLLMObservationSink(prompt_view="off"),
+        observation_capture_mode="manifest",
     )
     client.bind_tool_discovery_capabilities(
         ToolDiscoveryCapabilities(
@@ -72,9 +75,7 @@ async def test_generic_client_replays_loaded_schema_branch() -> None:
         )
         for value in scenario.tools
     )
-    discovery = ToolDiscoveryRequest(
-        "native_client", max_results=50, search_schema=SEARCH_SCHEMA
-    )
+    discovery = ToolDiscoveryRequest("native_client", max_results=50, search_schema=SEARCH_SCHEMA)
     initial_request = ToolCallRequest(
         tools=tools,
         choice="auto",

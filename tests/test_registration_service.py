@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.core.runtime.runtime_registry import set_current_registry
+from aethergraph.services.registry.canonical_manifest_store import (
+    CanonicalRegistrationManifestStore,
+)
 from aethergraph.services.registry.registration_service import RegistrationService
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
-from aethergraph.storage.docstore.fs_doc import FSDocStore
-from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
+from aethergraph.storage.contracts import StorageScope
+from tests.storage_conformance.runtime_repositories import InMemoryDocumentStore
 
 GOOD_SOURCE = """
 from aethergraph import graphify, tool
@@ -23,24 +28,41 @@ def demo_graph(x):
 """
 
 
-class _StubArtifactStore:
-    def __init__(self, text_by_uri: dict[str, str] | None = None):
+class _Clock:
+    def now(self) -> datetime:
+        return datetime.now(UTC)
+
+
+def _manifest_store() -> CanonicalRegistrationManifestStore:
+    clock = _Clock()
+    return CanonicalRegistrationManifestStore(
+        repository=InMemoryDocumentStore(clock),
+        owner_scope=StorageScope(project_id="registration-tests"),
+        clock=clock.now,
+    )
+
+
+class _StubArtifacts:
+    def __init__(
+        self,
+        text_by_uri: dict[str, str] | None = None,
+        uri_by_id: dict[str, str] | None = None,
+    ):
         self.text_by_uri = dict(text_by_uri or {})
+        self.uri_by_id = dict(uri_by_id or {})
 
     async def load_text(self, uri: str, *, encoding: str = "utf-8", errors: str = "strict") -> str:
         _ = (encoding, errors)
         return self.text_by_uri[uri]
 
-
-class _StubArtifactIndex:
-    def __init__(self, uri_by_id: dict[str, str] | None = None):
-        self.uri_by_id = dict(uri_by_id or {})
-
-    async def get(self, artifact_id: str) -> Artifact | None:
+    async def get_by_id(self, artifact_id: str) -> Artifact | None:
         uri = self.uri_by_id.get(artifact_id)
         if uri is None:
             return None
         return Artifact(artifact_id=artifact_id, uri=uri)
+
+    async def load_text_by_id(self, artifact_id: str) -> str:
+        return self.text_by_uri[self.uri_by_id[artifact_id]]
 
 
 def _make_service(
@@ -50,13 +72,12 @@ def _make_service(
     artifact_uri_by_id: dict[str, str] | None = None,
     artifact_text_by_uri: dict[str, str] | None = None,
 ) -> RegistrationService:
-    docs = FSDocStore(root=str(tmp_path / "docs"))
-    manifests = RegistrationManifestStore(doc_store=docs)
+    del tmp_path
+    manifests = _manifest_store()
     return RegistrationService(
         registry=registry,
         manifest_store=manifests,
-        artifact_store=_StubArtifactStore(artifact_text_by_uri),
-        artifact_index=_StubArtifactIndex(artifact_uri_by_id),
+        artifacts=_StubArtifacts(artifact_text_by_uri, artifact_uri_by_id),  # type: ignore[arg-type]
     )
 
 
@@ -211,16 +232,14 @@ async def test_replay_registered_sources(tmp_path):
     reg1 = UnifiedRegistry()
     set_current_registry(reg1)
 
-    docs = FSDocStore(root=str(tmp_path / "docs"))
-    manifests = RegistrationManifestStore(doc_store=docs)
+    manifests = _manifest_store()
     artifact_uri = "artifact://artifact-demo.py"
     artifact_id = "artifact-demo"
 
     writer = RegistrationService(
         registry=reg1,
         manifest_store=manifests,
-        artifact_store=_StubArtifactStore({artifact_uri: GOOD_SOURCE}),
-        artifact_index=_StubArtifactIndex({artifact_id: artifact_uri}),
+        artifacts=_StubArtifacts({artifact_uri: GOOD_SOURCE}, {artifact_id: artifact_uri}),  # type: ignore[arg-type]
     )
     create_result = await writer.register_by_artifact(
         artifact_id=artifact_id, persist=True, strict=True
@@ -232,8 +251,7 @@ async def test_replay_registered_sources(tmp_path):
     replayer = RegistrationService(
         registry=reg2,
         manifest_store=manifests,
-        artifact_store=_StubArtifactStore({artifact_uri: GOOD_SOURCE}),
-        artifact_index=_StubArtifactIndex({artifact_id: artifact_uri}),
+        artifacts=_StubArtifacts({artifact_uri: GOOD_SOURCE}, {artifact_id: artifact_uri}),  # type: ignore[arg-type]
     )
     report = await replayer.replay_registered_sources(strict=False)
     assert report.loaded == 1

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
-from aethergraph.contracts.services.viz import VizEvent, VizMode
-from aethergraph.services.artifacts.facade import Artifact, ArtifactFacade
+from aethergraph.contracts.services.artifacts import Artifact
+from aethergraph.contracts.services.viz import VizEvent, VizEventSink, VizMode
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.scope.scope import Scope
-from aethergraph.services.viz.viz_service import VizService
 
 
 @dataclass
@@ -15,7 +16,7 @@ class VizFacade:
     """
     High-level facade for visualization operations within a given Scope.
 
-    - Wraps VizService and ArtifactFacade.
+    - Wraps a Viz event sink and ArtifactFacade.
     - Knows about Scope to auto-fill provenance and tenant fields.
 
     Usage pattern in ctx.viz:
@@ -36,9 +37,9 @@ class VizFacade:
     tool_name: str
     tool_version: str
 
-    viz_service: VizService
+    viz_service: VizEventSink
     scope: Scope | None = None
-    artifacts: ArtifactFacade | None = None
+    artifacts: CanonicalPublicArtifactFacade | None = None
 
     # ------- internal helpers -------
     def _scope_dims(self) -> dict[str, Any]:
@@ -394,7 +395,9 @@ class VizFacade:
 
         # Use ArtifactFacade.writer to store the image
         async with self.artifacts.writer(kind=kind, planned_ext=".png") as w:
-            w.write(data)
+            write_result = w.write(data)
+            if inspect.isawaitable(write_result):
+                await write_result
             if labels:
                 w.add_labels(labels)
         art = self.artifacts.last_artifact

@@ -1,19 +1,18 @@
-# memory-related inspection
+"""Bounded Memory inspection over canonical provider services."""
+
+from __future__ import annotations
 
 from contextlib import suppress
 from datetime import UTC, datetime
 import json
-from typing import Annotated, Any
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query  # type: ignore
+from fastapi import APIRouter, Depends, HTTPException, Query  # type: ignore
 
-from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
-from aethergraph.contracts.services.memory import Event, MemoryTenantFilter
-from aethergraph.core.runtime.run_types import RunRecord
+from aethergraph.contracts.services.memory import Event
 from aethergraph.core.runtime.runtime_services import current_services
-from aethergraph.services.memory.facade.core import derive_timeline_id
-from aethergraph.services.memory.storage_filters import event_time
-from aethergraph.services.scope.tenant import registry_tenant_from_identity
+from aethergraph.services.memory.canonical_public import CanonicalPublicMemoryFacade
+from aethergraph.storage.contracts import PageRequest, SearchMode, SortDirection, StorageScope
 
 from .deps import RequestIdentity, get_identity
 from .schemas.memory import (
@@ -34,7 +33,8 @@ def _parse_ts(ts: str | float | int) -> datetime:
         return datetime.fromtimestamp(float(ts), tz=UTC)
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
-    return datetime.fromisoformat(ts)
+    parsed = datetime.fromisoformat(ts)
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
 
 
 def _parse_csv(value: str | None) -> list[str] | None:
@@ -44,343 +44,211 @@ def _parse_csv(value: str | None) -> list[str] | None:
     return items or None
 
 
-def _snippet_from_event(evt: Event, max_len: int = 120) -> str:
-    raw: str | None = None
-    if evt.text:
-        raw = evt.text
-    elif isinstance(evt.data, dict):
-        data_text = evt.data.get("text")
+def _snippet_from_event(event: Event, max_len: int = 120) -> str:
+    raw: str | None = event.text
+    if raw is None and isinstance(event.data, dict):
+        data_text = event.data.get("text")
         if isinstance(data_text, str) and data_text.strip():
             raw = data_text
         else:
             with suppress(Exception):
-                raw = json.dumps(evt.data, ensure_ascii=False, sort_keys=True)
-
+                raw = json.dumps(event.data, ensure_ascii=False, sort_keys=True)
     snippet = " ".join(str(raw or "").split())
-    if len(snippet) <= max_len:
-        return snippet
-    return snippet[: max_len - 1].rstrip() + "..."
+    return snippet if len(snippet) <= max_len else snippet[: max_len - 1].rstrip() + "..."
 
 
-def _tenant_filter_for_identity(identity: RequestIdentity) -> MemoryTenantFilter | None:
-    tenant: MemoryTenantFilter = {}
-    if identity.org_id:
-        tenant["org_id"] = identity.org_id
-    if identity.user_id:
-        tenant["user_id"] = identity.user_id
-    if identity.client_id:
-        tenant["client_id"] = identity.client_id
-    return tenant or None
-
-
-def _resolve_memory_config_for_run(
-    container: Any,
-    record: RunRecord,
-    identity: RequestIdentity,
-) -> tuple[str, str | None]:
-    registry = getattr(container, "registry", None)
-    tenant = registry_tenant_from_identity(identity) if identity is not None else None
-    level = "session" if record.agent_id else "run"
-    custom_scope_id: str | None = None
-    meta: dict[str, Any] = {}
-
-    if registry is not None:
-        if record.agent_id:
-            meta = (
-                registry.get_meta(
-                    nspace="agent",
-                    name=record.agent_id,
-                    version=None,
-                    tenant=tenant,
-                    include_global=True,
-                )
-                or {}
-            )
-        elif record.app_id:
-            meta = (
-                registry.get_meta(
-                    nspace="app",
-                    name=record.app_id,
-                    version=None,
-                    tenant=tenant,
-                    include_global=True,
-                )
-                or {}
-            )
-        elif record.graph_id:
-            meta = (
-                registry.get_meta(
-                    "graphfn", record.graph_id, None, tenant=tenant, include_global=True
-                )
-                or registry.get_meta(
-                    "graph", record.graph_id, None, tenant=tenant, include_global=True
-                )
-                or {}
-            )
-
-    if "memory" in meta:
-        level = meta["memory"].get("level", level)
-        custom_scope_id = meta["memory"].get("scope")
-
-    return level, custom_scope_id
-
-
-def _timeline_id_for_run(container: Any, record: RunRecord, identity: RequestIdentity) -> str:
-    scope_factory = getattr(container, "scope_factory", None)
-    if scope_factory is None:
-        return record.session_id or record.run_id
-
-    level, custom_scope_id = _resolve_memory_config_for_run(container, record, identity)
-    mem_scope = scope_factory.for_memory(
-        identity=identity,
-        run_id=record.run_id,
-        graph_id=record.graph_id,
-        session_id=record.session_id,
-        app_id=record.app_id,
-        agent_id=record.agent_id,
-        level=level,
-        custom_scope_id=custom_scope_id,
-    )
-    return derive_timeline_id(
-        memory_scope_id=mem_scope.memory_scope_id(),
-        run_id=record.run_id,
-        org_id=mem_scope.org_id,
+def _event_to_api_event(event: Event) -> MemoryEvent:
+    data = event.data if event.data is not None else ({"text": event.text} if event.text else {})
+    return MemoryEvent(
+        event_id=event.event_id,
+        scope_id=event.scope_id or event.run_id,
+        ts=event.ts,
+        session_id=event.session_id,
+        agent_id=event.agent_id,
+        run_id=event.run_id,
+        node_id=event.node_id,
+        graph_id=event.graph_id,
+        kind=event.kind,
+        stage=event.stage,
+        topic=event.topic,
+        tool=event.tool,
+        tags=event.tags or [],
+        severity=event.severity,
+        signal=event.signal,
+        created_at=_parse_ts(event.ts),
+        snippet=_snippet_from_event(event),
+        text=event.text,
+        data=data,
+        metrics=event.metrics,
+        inputs=event.inputs,
+        outputs=event.outputs,
     )
 
 
-async def _resolve_timeline_ids(
+def _event_to_summary(event: Event, summary_tag: str) -> MemorySummaryEntry:
+    payload = dict(event.data) if isinstance(event.data, dict) else {}
+    time_window = payload.pop("time_window", {})
+    created_at = _parse_ts(payload.pop("ts", event.ts))
+    time_from = _parse_ts(time_window.get("from") or time_window.get("start") or event.ts)
+    time_to = _parse_ts(time_window.get("to") or time_window.get("end") or event.ts)
+    text = str(payload.pop("summary", payload.pop("text", event.text or "")))
+    payload.pop("scope_id", None)
+    payload.pop("summary_tag", None)
+    return MemorySummaryEntry(
+        summary_id=event.event_id,
+        scope_id=event.scope_id,
+        summary_tag=summary_tag,
+        created_at=created_at,
+        time_from=time_from,
+        time_to=time_to,
+        text=text,
+        metadata=payload,
+    )
+
+
+def _scope_from_selector(
     *,
-    container: Any,
     identity: RequestIdentity,
     scope_id: str | None,
     session_id: str | None,
     run_id: str | None,
     agent_id: str | None,
-) -> list[str]:
-    resolved: list[str] = []
-    seen: set[str] = set()
-
-    def add(candidate: str | None) -> None:
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            resolved.append(candidate)
-
-    if scope_id:
-        return [scope_id]
-
-    rm = getattr(container, "run_manager", None)
-    candidate_records: list[RunRecord] = []
-
-    if run_id and rm is not None:
-        record = await rm.get_record(run_id)
-        if record is not None:
-            candidate_records.append(record)
-
-    if session_id and rm is not None:
-        records = await rm.list_records(session_id=session_id, limit=200, offset=0)
-        records.sort(key=lambda rec: rec.started_at, reverse=True)
-        if agent_id:
-            records = [rec for rec in records if rec.agent_id == agent_id]
-        if run_id:
-            records = [rec for rec in records if rec.run_id == run_id]
-        candidate_records.extend(records)
-
-    for record in candidate_records:
-        add(_timeline_id_for_run(container, record, identity))
-
-    if resolved:
-        return resolved
-
-    if session_id:
-        scope_factory = getattr(container, "scope_factory", None)
-        if scope_factory is not None:
-            fallback_scope = scope_factory.for_memory(
-                identity=identity,
-                run_id=run_id or session_id,
-                session_id=session_id,
-                agent_id=agent_id,
-                level="session",
-                custom_scope_id=None,
-            )
-            add(
-                derive_timeline_id(
-                    memory_scope_id=fallback_scope.memory_scope_id(),
-                    run_id=run_id or session_id,
-                    org_id=fallback_scope.org_id,
+) -> tuple[StorageScope, str]:
+    selected_session = session_id
+    selected_run = run_id
+    logical_scope = scope_id
+    if scope_id and session_id is None and run_id is None:
+        if scope_id.startswith("session:"):
+            selected_session = scope_id.removeprefix("session:")
+        elif scope_id.startswith("run:"):
+            selected_run = scope_id.removeprefix("run:")
+        elif scope_id.startswith("org:") and ":user:" in scope_id:
+            requested_org, requested_user = scope_id.removeprefix("org:").split(":user:", 1)
+            if identity.org_id != requested_org or identity.user_id != requested_user:
+                raise HTTPException(status_code=403, detail="Memory user scope is not authorized")
+        elif scope_id.startswith("user:"):
+            requested_user = scope_id.removeprefix("user:")
+            if identity.user_id != requested_user:
+                raise HTTPException(status_code=403, detail="Memory user scope is not authorized")
+        elif scope_id.startswith("org:") and ":user:" not in scope_id:
+            requested_org = scope_id.removeprefix("org:")
+            if identity.org_id != requested_org:
+                raise HTTPException(
+                    status_code=403, detail="Memory organization scope is not authorized"
                 )
-            )
-            return resolved
-
-    if run_id:
-        return [run_id]
-
-    return []
-
-
-def _event_to_api_event(evt: Event) -> MemoryEvent:
-    created_at = _parse_ts(evt.ts)
-    data: dict[str, Any] | None = None
-    if evt.data is not None:
-        data = evt.data
-    elif evt.text:
-        data = {"text": evt.text}
-
-    return MemoryEvent(
-        event_id=evt.event_id,
-        scope_id=evt.scope_id or evt.run_id,
-        ts=evt.ts,
-        session_id=evt.session_id,
-        agent_id=evt.agent_id,
-        run_id=evt.run_id,
-        node_id=evt.node_id,
-        graph_id=evt.graph_id,
-        kind=evt.kind,
-        stage=evt.stage,
-        topic=evt.topic,
-        tool=evt.tool,
-        tags=evt.tags or [],
-        severity=evt.severity,
-        signal=evt.signal,
-        created_at=created_at,
-        snippet=_snippet_from_event(evt),
-        text=evt.text,
-        data=data or {},
-        metrics=evt.metrics,
-        inputs=evt.inputs,
-        outputs=evt.outputs,
+        elif scope_id == "global":
+            pass
+        else:
+            # The current AG UI supplies a bare run identity as its compatibility
+            # scope selector. It is mapped only to the canonical run dimension.
+            selected_run = scope_id
+    if not any((selected_session, selected_run, identity.org_id, identity.user_id)):
+        raise HTTPException(
+            status_code=422,
+            detail="Memory inspection requires a canonical session, run, user, or organization scope",
+        )
+    if logical_scope is None:
+        if selected_session:
+            logical_scope = f"session:{selected_session}"
+        elif selected_run:
+            logical_scope = f"run:{selected_run}"
+        elif identity.org_id and identity.user_id:
+            logical_scope = f"org:{identity.org_id}:user:{identity.user_id}"
+        elif identity.user_id:
+            logical_scope = f"user:{identity.user_id}"
+        elif identity.org_id:
+            logical_scope = f"org:{identity.org_id}"
+        else:
+            logical_scope = "global"
+    return (
+        StorageScope(
+            org_id=identity.org_id,
+            user_id=identity.user_id,
+            session_id=selected_session,
+            run_id=selected_run,
+            agent_id=agent_id,
+        ),
+        logical_scope,
     )
 
 
-def _doc_to_summary_entry(doc_id: str, doc: dict[str, Any]) -> MemorySummaryEntry:
-    ts_str = doc.get("ts") or doc.get("created_at") or ""
-    created_at = _parse_ts(ts_str) if ts_str else datetime.now(UTC)
-    tw = doc.get("time_window") or {}
-    from_str = tw.get("from") or tw.get("start") or ""
-    to_str = tw.get("to") or tw.get("end") or ""
-    time_from = _parse_ts(from_str) if from_str else created_at
-    time_to = _parse_ts(to_str) if to_str else created_at
-    text = doc.get("summary") or doc.get("text") or ""
-    meta_keys = {"summary", "text", "scope_id", "run_id", "summary_tag", "ts", "time_window"}
-    metadata = {k: v for k, v in doc.items() if k not in meta_keys}
-    return MemorySummaryEntry(
-        summary_id=doc_id,
-        scope_id=doc.get("scope_id") or doc.get("run_id") or "",
-        summary_tag=doc.get("summary_tag"),
-        created_at=created_at,
-        time_from=time_from,
-        time_to=time_to,
-        text=text,
-        metadata=metadata,
-    )
-
-
-def _string_score(haystack: str, needle: str) -> float:
-    if not needle:
-        return 0.0
-    return 1.0 if needle.lower() in haystack.lower() else 0.0
-
-
-@router.get("/memory/events", response_model=MemoryEventListResponse)
-async def list_memory_events(
-    scope_id: Annotated[str | None, Query(description="Memory timeline / scope id")] = None,  # noqa: B008
-    session_id: Annotated[
-        str | None, Query(description="Session boundary for debug memory")
-    ] = None,  # noqa: B008
-    agent_id: Annotated[str | None, Query(description="Filter to a specific agent")] = None,  # noqa: B008
-    run_id: Annotated[str | None, Query(description="Filter to a specific run")] = None,  # noqa: B008
-    kinds: Annotated[
-        str | None, Query(description="Comma-separated list of kinds to filter")
-    ] = None,  # noqa: B008
-    tags: Annotated[str | None, Query(description="Comma-separated list of tags to filter")] = None,  # noqa: B008
-    after: Annotated[datetime | None, Query()] = None,  # noqa: B008
-    before: Annotated[datetime | None, Query()] = None,  # noqa: B008
-    cursor: Annotated[str | None, Query()] = None,  # noqa: B008
-    limit: Annotated[int, Query(ge=1, le=50)] = 20,  # noqa: B008
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> MemoryEventListResponse:
+def _memory_facade(
+    *,
+    identity: RequestIdentity,
+    scope_id: str | None,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    agent_id: str | None = None,
+) -> CanonicalPublicMemoryFacade:
     container = current_services()
-    mem_factory = getattr(container, "memory_factory", None)
-    if mem_factory is None:
-        return MemoryEventListResponse(events=[], next_cursor=None)
-
-    timeline_ids = await _resolve_timeline_ids(
-        container=container,
+    factory = getattr(container, "memory_factory", None)
+    if factory is None:
+        raise HTTPException(status_code=503, detail="Memory storage is not configured")
+    scope, logical_scope = _scope_from_selector(
         identity=identity,
         scope_id=scope_id,
         session_id=session_id,
         run_id=run_id,
         agent_id=agent_id,
     )
+    return factory.for_public_execution(scope, logical_scope_id=logical_scope)
 
-    tenant = _tenant_filter_for_identity(identity)
-    kinds_list = _parse_csv(kinds)
-    tags_list = _parse_csv(tags)
 
-    raw_events: list[Event] = []
-    for timeline_id in timeline_ids:
-        raw_events.extend(
-            await mem_factory.persistence.query_events(
-                timeline_id,
-                tenant=tenant,
-                since=after.isoformat() if after else None,
-                until=before.isoformat() if before else None,
-                kinds=kinds_list,
-                tags=tags_list,
-                agent_id=agent_id,
-                limit=None,
-                offset=0,
-            )
-        )
-
-    deduped: list[Event] = []
-    seen_event_ids: set[str] = set()
-    for evt in raw_events:
-        if evt.event_id in seen_event_ids:
-            continue
-        seen_event_ids.add(evt.event_id)
-        deduped.append(evt)
-
-    deduped.sort(key=lambda e: (event_time(e), e.event_id), reverse=True)
-    offset = decode_cursor(cursor)
-    page = deduped[offset : offset + limit]
-    next_cursor = encode_cursor(offset + limit) if len(deduped) > offset + limit else None
+@router.get("/memory/events", response_model=MemoryEventListResponse)
+async def list_memory_events(
+    scope_id: Annotated[str | None, Query(description="Deprecated logical scope selector")] = None,
+    session_id: Annotated[str | None, Query(description="Canonical session filter")] = None,
+    agent_id: Annotated[str | None, Query(description="Canonical Agent filter")] = None,
+    run_id: Annotated[str | None, Query(description="Canonical run filter")] = None,
+    kinds: Annotated[str | None, Query(description="Comma-separated exact event kinds")] = None,
+    tags: Annotated[str | None, Query(description="Comma-separated required tags")] = None,
+    after: Annotated[datetime | None, Query()] = None,
+    before: Annotated[datetime | None, Query()] = None,
+    cursor: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=50)] = 20,
+    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
+) -> MemoryEventListResponse:
+    memory = _memory_facade(
+        identity=identity,
+        scope_id=scope_id,
+        session_id=session_id,
+        run_id=run_id,
+        agent_id=agent_id,
+    )
+    page = await memory.query_event_page(
+        page=PageRequest(limit=limit, cursor=cursor),
+        kinds=_parse_csv(kinds),
+        tags=_parse_csv(tags),
+        since=after,
+        until=before,
+        order=SortDirection.DESCENDING,
+    )
     return MemoryEventListResponse(
-        events=[_event_to_api_event(e) for e in page],
-        next_cursor=next_cursor,
+        events=[_event_to_api_event(event) for event in page.items],
+        next_cursor=page.next_cursor,
     )
 
 
 @router.get("/memory/summaries", response_model=MemorySummaryListResponse)
 async def list_memory_summaries(
-    scope_id: Annotated[str, Query()],
+    scope_id: Annotated[str, Query(description="Deprecated logical scope selector")],
     summary_tag: Annotated[str | None, Query()] = None,
     cursor: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> MemorySummaryListResponse:
-    container = current_services()
-    mem_factory = getattr(container, "memory_factory", None)
-    if mem_factory is None:
-        return MemorySummaryListResponse(summaries=[], next_cursor=None)
-
-    offset = decode_cursor(cursor)
-    docs = await mem_factory.persistence.query_summaries(
-        scope_id=scope_id,
-        tenant=_tenant_filter_for_identity(identity),
-        summary_tag=summary_tag,
-        limit=limit,
-        offset=offset,
+    tag = summary_tag or "session"
+    memory = _memory_facade(identity=identity, scope_id=scope_id)
+    page = await memory.query_event_page(
+        page=PageRequest(limit=limit, cursor=cursor),
+        kinds=["long_term_summary"],
+        tags=["summary", tag],
+        order=SortDirection.DESCENDING,
     )
-    entries = [
-        _doc_to_summary_entry(
-            str(doc.get("summary_doc_id") or doc.get("doc_id") or f"summary-{idx}"),
-            doc,
-        )
-        for idx, doc in enumerate(docs)
-    ]
-    entries.sort(key=lambda e: e.created_at, reverse=True)
-    next_cursor = encode_cursor(offset + limit) if len(entries) == limit else None
-    return MemorySummaryListResponse(summaries=entries, next_cursor=next_cursor)
+    return MemorySummaryListResponse(
+        summaries=[_event_to_summary(event, tag) for event in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 @router.post("/memory/search", response_model=MemorySearchResponse)
@@ -388,63 +256,32 @@ async def search_memory(
     req: MemorySearchRequest,
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> MemorySearchResponse:
-    container = current_services()
-    mem_factory = getattr(container, "memory_factory", None)
-    if mem_factory is None:
-        return MemorySearchResponse(hits=[])
-
-    timeline_id = req.scope_id or ""
-    query = req.query or ""
-    top_k = getattr(req, "top_k", 10) or 10
-    tenant = _tenant_filter_for_identity(identity)
-    hits: list[MemorySearchHit] = []
-
-    if timeline_id:
-        raw_events: list[Event] = await mem_factory.hotlog.query(
-            timeline_id,
-            tenant=tenant,
-            kinds=None,
-            limit=mem_factory.hot_limit,
-        )
-        for evt in raw_events:
-            text_parts: list[str] = []
-            if evt.text:
-                text_parts.append(evt.text)
-            if evt.data:
-                with suppress(Exception):
-                    text_parts.append(str(evt.data))
-            score = _string_score(" ".join(text_parts), query)
-            if score <= 0.0:
-                continue
-            hits.append(MemorySearchHit(score=score, event=_event_to_api_event(evt), summary=None))
-
-    summaries = await mem_factory.persistence.query_summaries(
-        timeline_id=timeline_id or None,
-        tenant=tenant,
-        summary_tag=getattr(req, "summary_tag", None),
-        limit=top_k * 5,
-        offset=0,
+    memory = _memory_facade(identity=identity, scope_id=req.scope_id)
+    hits = await memory.search_events(
+        query=req.query,
+        mode=SearchMode.LEXICAL,
+        top_k=req.top_k,
     )
-    for idx, doc in enumerate(summaries):
-        text_parts: list[str] = []
-        if doc.get("summary"):
-            text_parts.append(str(doc.get("summary")))
-        if doc.get("key_facts"):
-            with suppress(Exception):
-                text_parts.append(" ".join(map(str, doc["key_facts"])))
-        score = _string_score(" ".join(text_parts), query)
-        if score <= 0.0:
-            continue
-        doc_id = str(doc.get("summary_doc_id") or doc.get("doc_id") or f"summary-{idx}")
-        hits.append(
-            MemorySearchHit(
-                score=score,
-                event=None,
-                summary=_doc_to_summary_entry(doc_id, doc),
+    projected: list[MemorySearchHit] = []
+    for hit in hits:
+        if "summary" in (hit.event.tags or []):
+            summary_tag = next(
+                (tag for tag in hit.event.tags or [] if tag != "summary"),
+                "session",
             )
-        )
-
-    hits.sort(key=lambda h: h.score, reverse=True)
-    if len(hits) > top_k:
-        hits = hits[:top_k]
-    return MemorySearchResponse(hits=hits)
+            projected.append(
+                MemorySearchHit(
+                    score=hit.score,
+                    event=None,
+                    summary=_event_to_summary(hit.event, summary_tag),
+                )
+            )
+        else:
+            projected.append(
+                MemorySearchHit(
+                    score=hit.score,
+                    event=_event_to_api_event(hit.event),
+                    summary=None,
+                )
+            )
+    return MemorySearchResponse(hits=projected)

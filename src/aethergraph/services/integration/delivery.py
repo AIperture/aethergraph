@@ -28,7 +28,7 @@ from aethergraph.contracts.integration import (
 from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
 from aethergraph.core.runtime.run_types import RunStatus
 
-from .events import EventLogSemanticEventStore, PersistedSemanticEvent
+from .event_contracts import PersistedSemanticEvent, SemanticEventStore
 
 
 class SemanticDeliveryError(RuntimeError):
@@ -42,7 +42,7 @@ class SemanticEventEmitter:
         self,
         *,
         deployment_id: str,
-        store: EventLogSemanticEventStore,
+        store: SemanticEventStore,
         semantic_event_protocol_version: SemanticEventProtocolVersion = (
             SEMANTIC_EVENT_PROTOCOL_VERSION
         ),
@@ -70,7 +70,7 @@ class SemanticEventEmitter:
 
         Args:
             deployment_id: Immutable Host deployment identity.
-            store: Canonical semantic event store over the shared EventLog.
+            store: Focused durable semantic event store.
             semantic_event_protocol_version: Exact manifest-negotiated event protocol.
 
         Returns:

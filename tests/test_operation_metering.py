@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from aethergraph.observability import EventLogMeteringService
+from aethergraph.observability import CanonicalMeteringService
 from aethergraph.services.llm.types import ImageGenerationUsage
 from aethergraph.services.llm.usage_metering import _record_image_generation_metering
 
@@ -26,7 +26,7 @@ class _Store:
 @pytest.mark.asyncio
 async def test_image_meter_event_and_stats_remain_operation_specific() -> None:
     store = _Store()
-    service = EventLogMeteringService(store)  # type: ignore[arg-type]
+    service = CanonicalMeteringService(store)  # type: ignore[arg-type]
 
     await _record_image_generation_metering(
         service,

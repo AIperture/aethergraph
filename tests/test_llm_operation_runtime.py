@@ -27,11 +27,20 @@ def test_image_trace_projection_does_not_include_prompt_content() -> None:
 def test_common_operation_dimensions_prefer_explicit_non_sensitive_values() -> None:
     dimensions = model_operation_dimensions(
         profile_name="research",
-        overrides={"run_id": "run-explicit", "user_id": "user-explicit"},
+        overrides={
+            "tenant_id": "tenant-explicit",
+            "project_id": "project-explicit",
+            "run_id": "run-explicit",
+            "user_id": "user-explicit",
+            "scope_key": "workspace-explicit",
+        },
     )
 
+    assert dimensions["tenant_id"] == "tenant-explicit"
+    assert dimensions["project_id"] == "project-explicit"
     assert dimensions["run_id"] == "run-explicit"
     assert dimensions["user_id"] == "user-explicit"
+    assert dimensions["scope_key"] == "workspace-explicit"
     assert dimensions["profile_name"] == "research"
     assert "prompt" not in dimensions
     assert "texts" not in dimensions

@@ -63,6 +63,29 @@ def test_artifact_content_url_normalizes_to_artifact_resource() -> None:
     assert payload["mimetype"] == "text/plain"
 
 
+def test_public_artifact_projects_through_one_typed_resource_path() -> None:
+    artifact = Artifact(
+        artifact_id="artifact-typed",
+        kind="report",
+        bytes=0,
+        mime="text/markdown",
+        labels={"filename": "report.md", "category": "evidence"},
+        uri="/api/v1/artifacts/artifact-typed/content",
+    )
+
+    resource = InputResourceNormalizer().from_artifact(artifact, source="agent")
+
+    assert resource.artifact_id == "artifact-typed"
+    assert resource.name == "report.md"
+    assert resource.mime == "text/markdown"
+    assert resource.size == 0
+    assert resource.uri == artifact.uri
+    assert resource.url == artifact.uri
+    assert resource.labels == artifact.labels
+    with pytest.raises(TypeError, match="public Artifact DTO"):
+        InputResourceNormalizer().from_artifact(object())  # type: ignore[arg-type]
+
+
 def test_text_normalizer_extracts_artifact_refs_before_paths() -> None:
     resources = InputResourceNormalizer().from_text(
         "use /api/v1/artifacts/art-2/content and artifact://art-3.py",
@@ -109,7 +132,7 @@ class _FakeArtifactStore:
         self.root = root
         self.saved: dict[str, Any] | None = None
 
-    async def plan_staging_path(self, planned_ext: str = "") -> str:
+    async def stage_path(self, planned_ext: str = "") -> str:
         path = self.root / f"stage{planned_ext}"
         path.parent.mkdir(parents=True, exist_ok=True)
         return str(path)
@@ -132,30 +155,15 @@ class _FakeArtifactStore:
         )
 
 
-class _FakeArtifactIndex:
-    def __init__(self) -> None:
-        self.upserts: list[Artifact] = []
-        self.occurrences: list[Artifact] = []
-
-    async def upsert(self, artifact: Artifact) -> None:
-        self.upserts.append(artifact)
-
-    async def record_occurrence(self, artifact: Artifact) -> None:
-        self.occurrences.append(artifact)
-
-    async def get(self, artifact_id: str) -> Artifact | None:
-        for artifact in self.upserts:
-            if artifact.artifact_id == artifact_id:
-                return artifact
-        return None
-
-
 class _FakeContainer:
     def __init__(self, root: Path) -> None:
         self.artifacts = _FakeArtifactStore(root)
-        self.artifact_index = _FakeArtifactIndex()
+        self.artifact_factory = self
         self.scope_factory = ScopeFactory()
-        self.scoped_indices = None
+
+    def for_public_execution(self, scope, **kwargs):
+        del scope, kwargs
+        return self.artifacts
 
 
 @pytest.mark.asyncio
@@ -182,5 +190,4 @@ async def test_resource_stager_uses_facade_and_preserves_channel_scope(tmp_path:
     assert resource.labels["channel_key"] == "slack:team/T:chan/C"
     assert "run_id" not in resource.labels
     assert container.artifacts.saved is not None
-    assert container.artifacts.saved["run_id"] == ""
-    assert len(container.artifact_index.upserts) == 1
+    assert "run_id" not in container.artifacts.saved

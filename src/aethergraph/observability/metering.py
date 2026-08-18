@@ -4,11 +4,12 @@ from typing import Any
 from aethergraph.contracts.services.metering import MeteringService, MeteringStore
 from aethergraph.services.scope.scope import Scope
 
+_MAX_METERING_QUERY = 10_000
 
-class EventLogMeteringService(MeteringService):
+
+class CanonicalMeteringService(MeteringService):
     """
-    MeteringService implementation backed by a MeteringStore (which itself
-    is backed by an EventLog).
+    MeteringService implementation backed by the canonical metering store.
 
     Behavior notes:
         - All events are tagged with "meter" for easy filtering
@@ -106,7 +107,7 @@ class EventLogMeteringService(MeteringService):
             since=cutoff,
             until=None,
             kinds=kinds,
-            limit=None,
+            limit=_MAX_METERING_QUERY,
             user_id=store_user,
             org_id=store_org,
         )
@@ -287,7 +288,7 @@ class EventLogMeteringService(MeteringService):
                 ```
 
         Args:
-            self: Event-log-backed metering service.
+            self: Canonical provider-backed metering service.
             scope: Optional canonical execution scope.
             user_id: Optional explicit user identity.
             org_id: Optional explicit organization identity.
@@ -635,7 +636,7 @@ class EventLogMeteringService(MeteringService):
                 ```
 
         Args:
-            self: Event-log-backed metering service.
+            self: Canonical provider-backed metering service.
             user_id: Optional user filter.
             org_id: Optional organization filter.
             window: Relative query window such as `24h` or `7d`.

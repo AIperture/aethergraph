@@ -400,7 +400,7 @@ def resolve_operation_observer(explicit: OperationObserver | None = None) -> Ope
     try:
         from aethergraph.core.runtime.runtime_services import current_services
 
-        sink = getattr(current_services(), "observability", None)
+        sink = getattr(current_services(), "observation_sink", None)
         if sink is not None:
             return OperationObserver(sink)
     except Exception:

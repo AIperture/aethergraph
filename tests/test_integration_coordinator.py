@@ -22,12 +22,10 @@ from aethergraph.contracts.integration import (
     SemanticEventKind,
 )
 from aethergraph.services.channel.resources import InputResource
-from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.services.continuations.continuation import ContinuationDraft, Correlator
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.integration import (
     BindingResolution,
-    EventLogInboundEventStore,
-    EventLogSemanticEventStore,
     IntegrationIngressCoordinator,
     InteractionResolutionError,
     InteractionResolver,
@@ -36,12 +34,14 @@ from aethergraph.services.integration import (
     ResourceIngressError,
     ResourceIngressPolicy,
     SemanticEventEmitter,
-    SQLiteIngressIdempotencyStore,
     VerifiedAttachment,
     VerifiedIntegrationContext,
     install_integration_ingress,
 )
-from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
+from tests._canonical_storage_fakes import (
+    make_integration_persistence,
+    make_semantic_event_store,
+)
 from tests._integration_fixtures import contract_compatibility
 
 _NOW = datetime(2026, 8, 3, tzinfo=UTC)
@@ -170,8 +170,39 @@ class _ResumeRouter:
     def __init__(self) -> None:
         self.calls = []
 
-    async def resume(self, **kwargs) -> None:
-        self.calls.append(kwargs)
+    async def resume_continuation(self, continuation, payload) -> None:
+        self.calls.append({"continuation": continuation, "payload": payload})
+
+
+async def _create_wait(
+    store: InMemoryContinuationStore,
+    *,
+    run_id: str,
+    node_id: str,
+    kind: str,
+    session_id: str,
+    interaction_id: str,
+    prompt=None,
+):
+    return (
+        await store.create(
+            ContinuationDraft(
+                run_id=run_id,
+                node_id=node_id,
+                kind=kind,
+                prompt=prompt,
+                session_id=session_id,
+                payload={"_interaction_id": interaction_id},
+                correlators=(
+                    Correlator(
+                        scheme="interaction",
+                        channel="public",
+                        message=interaction_id,
+                    ),
+                ),
+            )
+        )
+    ).record
 
 
 def _coordinator(
@@ -184,17 +215,18 @@ def _coordinator(
     resume_router,
 ) -> IntegrationIngressCoordinator:
     manifest = _manifest(route)
+    persistence = make_integration_persistence()
     return IntegrationIngressCoordinator(
         manifest=manifest,
         route_resolver=ManifestRouteResolver(manifest),
-        idempotency_store=SQLiteIngressIdempotencyStore(tmp_path / "integration.db"),
+        idempotency_store=persistence.idempotency,
         binding_store=_BindingStore(),
         resource_ingress=ResourceIngress(container=SimpleNamespace()),
         interaction_resolver=InteractionResolver(continuation_store),
-        inbound_events=EventLogInboundEventStore(event_log),
+        inbound_events=persistence.inbound_events,
         semantic_emitter=SemanticEventEmitter(
             deployment_id=manifest.deployment_id,
-            store=EventLogSemanticEventStore(event_log),
+            store=event_log,
             semantic_event_protocol_version=manifest.semantic_event_protocol_version,
         ),
         resume_router=resume_router,
@@ -211,13 +243,14 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
         def register_adapter(self, prefix, adapter) -> None:
             self.adapters[prefix] = adapter
 
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    persistence = make_integration_persistence()
+    event_log = persistence.semantic_events
     container = SimpleNamespace(
         root=str(tmp_path),
         integration_ingress=None,
         host_manifest=None,
         cont_store=InMemoryContinuationStore(secret=b"test-secret"),
-        eventlog=event_log,
+        storage_services=SimpleNamespace(integration=persistence),
         resume_router=_ResumeRouter(),
         run_manager=SimpleNamespace(),
         channels=_Channels(),
@@ -232,7 +265,7 @@ async def test_host_installer_binds_one_manifest_coordinator(tmp_path) -> None:
     assert container.semantic_events is not None
     assert container.semantic_turn_monitor is not None
     assert "endpoint" in container.channels.adapters
-    assert (tmp_path / "integration" / "operations.db").is_file()
+    assert not (tmp_path / "integration").exists()
     with pytest.raises(RuntimeError, match="already installed"):
         install_integration_ingress(container=container, manifest=manifest)
     await event_log.close()
@@ -247,13 +280,14 @@ async def test_host_installer_enables_canonical_semantic_projector(tmp_path) -> 
         def register_adapter(self, prefix, adapter) -> None:
             self.adapters[prefix] = adapter
 
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    persistence = make_integration_persistence()
+    event_log = persistence.semantic_events
     container = SimpleNamespace(
         root=str(tmp_path),
         integration_ingress=None,
         host_manifest=None,
         cont_store=InMemoryContinuationStore(secret=b"test-secret"),
-        eventlog=event_log,
+        storage_services=SimpleNamespace(integration=persistence),
         resume_router=_ResumeRouter(),
         run_manager=SimpleNamespace(),
         channels=_Channels(),
@@ -267,14 +301,14 @@ async def test_host_installer_enables_canonical_semantic_projector(tmp_path) -> 
     )
     assert container.integration_ingress is coordinator
     assert container.host_manifest is manifest
-    assert (tmp_path / "integration" / "operations.db").is_file()
+    assert not (tmp_path / "integration").exists()
     await event_log.close()
 
 
 @pytest.mark.asyncio
 async def test_coordinator_starts_one_root_turn_and_replays_receipt(tmp_path) -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _RootDispatcher()
     resume = _ResumeRouter()
     coordinator = _coordinator(
@@ -320,7 +354,7 @@ async def test_coordinator_completes_idempotency_after_unexpected_dispatch_failu
     tmp_path,
 ) -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _FailingRootDispatcher()
     coordinator = _coordinator(
         tmp_path=tmp_path,
@@ -352,17 +386,16 @@ async def test_coordinator_completes_idempotency_after_unexpected_dispatch_failu
 @pytest.mark.asyncio
 async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    continuation = Continuation(
+    continuation = await _create_wait(
+        continuation_store,
         run_id="run-waiting-1",
         node_id="node-choice",
         kind="choice",
-        token="internal-secret-token",
         prompt={"title": "Proceed?", "options": ["Yes", "No"]},
         session_id="session-1",
-        payload={"_interaction_id": "interaction-public-1"},
+        interaction_id="interaction-public-1",
     )
-    await continuation_store.save(continuation)
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _RootDispatcher()
     resume = _ResumeRouter()
     coordinator = _coordinator(
@@ -386,7 +419,7 @@ async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None
     assert receipt.action == "continuation_resumed"
     assert receipt.turn_id == "run-waiting-1"
     assert root.calls == []
-    assert resume.calls[0]["token"] == "internal-secret-token"
+    assert resume.calls[0]["continuation"].continuation_id == continuation.continuation_id
     assert resume.calls[0]["payload"]["interaction_id"] == "interaction-public-1"
     assert resume.calls[0]["payload"]["choice"] == "Yes"
     await event_log.close()
@@ -396,15 +429,13 @@ async def test_coordinator_resumes_exact_public_interaction_id(tmp_path) -> None
 async def test_interaction_resolver_rejects_ambiguous_bound_session_text() -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
     for index in range(2):
-        await continuation_store.save(
-            Continuation(
-                run_id=f"run-{index}",
-                node_id=f"node-{index}",
-                kind="user_input",
-                token=f"token-{index}",
-                session_id="session-1",
-                payload={"_interaction_id": f"interaction-{index}"},
-            )
+        await _create_wait(
+            continuation_store,
+            run_id=f"run-{index}",
+            node_id=f"node-{index}",
+            kind="user_input",
+            session_id="session-1",
+            interaction_id=f"interaction-{index}",
         )
 
     with pytest.raises(InteractionResolutionError) as exc_info:
@@ -418,15 +449,13 @@ async def test_interaction_resolver_rejects_ambiguous_bound_session_text() -> No
 @pytest.mark.asyncio
 async def test_interaction_resolver_resolves_exact_public_identity() -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    await continuation_store.save(
-        Continuation(
-            run_id="run-1",
-            node_id="node-1",
-            kind="user_input",
-            token="private-token",
-            session_id="session-1",
-            payload={"_interaction_id": "interaction-public-1"},
-        )
+    continuation = await _create_wait(
+        continuation_store,
+        run_id="run-1",
+        node_id="node-1",
+        kind="user_input",
+        session_id="session-1",
+        interaction_id="interaction-public-1",
     )
 
     resolved = await InteractionResolver(continuation_store).resolve_exact(
@@ -436,21 +465,19 @@ async def test_interaction_resolver_resolves_exact_public_identity() -> None:
     )
 
     assert resolved.interaction_id == "interaction-public-1"
-    assert resolved.continuation.token == "private-token"
+    assert resolved.continuation.continuation_id == continuation.continuation_id
 
 
 @pytest.mark.asyncio
 async def test_interaction_resolver_rejects_exact_identity_from_other_session() -> None:
     continuation_store = InMemoryContinuationStore(secret=b"test-secret")
-    await continuation_store.save(
-        Continuation(
-            run_id="run-1",
-            node_id="node-1",
-            kind="choice",
-            token="private-token",
-            session_id="session-1",
-            payload={"_interaction_id": "interaction-public-1"},
-        )
+    await _create_wait(
+        continuation_store,
+        run_id="run-1",
+        node_id="node-1",
+        kind="choice",
+        session_id="session-1",
+        interaction_id="interaction-public-1",
     )
 
     with pytest.raises(InteractionResolutionError) as exc_info:
@@ -465,7 +492,7 @@ async def test_interaction_resolver_rejects_exact_identity_from_other_session() 
 
 @pytest.mark.asyncio
 async def test_coordinator_persists_disabled_route_rejection(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     root = _RootDispatcher()
     coordinator = _coordinator(
         tmp_path=tmp_path,

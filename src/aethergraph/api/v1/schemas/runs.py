@@ -37,7 +37,7 @@ class RunSummary(BaseModel):
     entrypoint: bool | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
     error_info: RunErrorInfo | None = None
-    app_id: str | None = Field(default=None, alias="appId")
+    app_id: str | None = Field(default=None, alias="appId", deprecated=True)
     app_name: str | None = Field(default=None, alias="appName")
     agent_id: str | None = Field(default=None, alias="agentId")
     origin: RunOrigin | None = None
@@ -61,7 +61,7 @@ class RunCreateRequest(BaseModel):
     visibility: RunVisibility | None = None
     importance: RunImportance | None = None
     agent_id: str | None = Field(default=None, alias="agentId")
-    app_id: str | None = Field(default=None, alias="appId")
+    app_id: str | None = Field(default=None, alias="appId", deprecated=True)
     app_name: str | None = Field(default=None, alias="appName")
 
 

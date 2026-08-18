@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from logging import getLogger
 from typing import Any
 from uuid import uuid4
 
 from aethergraph.contracts.services.trigger import TriggerKind, TriggerService
-from aethergraph.contracts.storage.event_log import EventLog
 from aethergraph.contracts.storage.trigger_store import TriggerStore
+from aethergraph.observability.canonical_service import CanonicalObservationService
+from aethergraph.observability.models import ObservationRecord, ObservationScope
 from aethergraph.services.scope.scope import Scope
 
 from .scheduling import _initial_fire_at, _validate_trigger_config
@@ -20,7 +20,7 @@ class TriggerServiceImpl(TriggerService):
     """Create and mutate triggers through tenant-bound service operations."""
 
     store: TriggerStore
-    event_log: EventLog | None = None
+    observation_sink: CanonicalObservationService | None = None
     logger: Any | None = None
 
     async def create_from_scope(
@@ -156,26 +156,41 @@ class TriggerServiceImpl(TriggerService):
         return trig
 
     async def _log_trigger_event(self, trig: TriggerRecord, action: str) -> None:
-        if not self.event_log:
+        if self.observation_sink is None:
             return
         try:
-            await self.event_log.append(
-                {
-                    "id": f"trig-evt-{uuid4().hex[:8]}",
-                    "ts": datetime.now(UTC).timestamp(),
-                    "scope_id": trig.trigger_id,
-                    "kind": "trigger",
-                    "payload": {
+            await self.observation_sink.append_observation(
+                ObservationRecord(
+                    observation_id=f"trig-evt-{uuid4().hex[:8]}",
+                    category="trigger",
+                    name=action,
+                    summary=f"Trigger {action}",
+                    scope=_trigger_observation_scope(trig),
+                    attributes={
                         "action": action,
                         "trigger_id": trig.trigger_id,
                         "kind": trig.kind,
                         "graph_id": trig.graph_id,
                         "meta": trig.meta or {},
                     },
-                }
+                )
             )
         except Exception:
             if self.logger:
                 self.logger.exception("Failed to log trigger event for %s", trig.trigger_id)
-            else:
-                getLogger(__name__).exception("Failed to log trigger event for %s", trig.trigger_id)
+
+
+def _trigger_observation_scope(
+    trig: TriggerRecord,
+    *,
+    run_id: str | None = None,
+) -> ObservationScope:
+    return ObservationScope(
+        org_id=trig.org_id,
+        user_id=trig.user_id,
+        app_id=trig.app_id,
+        session_id=trig.session_id,
+        run_id=run_id,
+        agent_id=trig.agent_id,
+        graph_id=trig.graph_id,
+    )

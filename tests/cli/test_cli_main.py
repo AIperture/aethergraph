@@ -6,7 +6,7 @@ import pytest
 
 from aethergraph import __main__ as package_main
 from aethergraph.cli import main as cli_main
-from aethergraph.cli.commands import observability, register, run, serve
+from aethergraph.cli.commands import register, run, serve
 
 
 def test_build_parser_exposes_current_top_level_commands() -> None:
@@ -14,7 +14,8 @@ def test_build_parser_exposes_current_top_level_commands() -> None:
     subparsers_action = next(
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
-    assert {"serve", "run", "register", "observability"} <= set(subparsers_action.choices)
+    assert {"serve", "host", "run", "register"} <= set(subparsers_action.choices)
+    assert "observability" not in subparsers_action.choices
 
 
 @pytest.mark.parametrize(
@@ -23,7 +24,6 @@ def test_build_parser_exposes_current_top_level_commands() -> None:
         (["serve"], serve.handle),
         (["run", "my_graph"], run.handle),
         (["register"], register.handle),
-        (["observability", "legacy"], observability.handle_legacy),
     ],
 )
 def test_subcommands_bind_handlers(argv: list[str], expected_handler) -> None:

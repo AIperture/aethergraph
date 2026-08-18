@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import fields
 import json
 from typing import Any
 
@@ -10,10 +11,12 @@ from aethergraph.services.llm import (
     PromptCacheRequest,
     ToolCallRequest,
     ToolDefinition,
+    prompt_cache,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.prompt_cache import prepare_prompt_cache
 from aethergraph.services.llm.types import LLMUnsupportedFeatureError
+from aethergraph.storage.contracts import StorageScope
 
 
 class _FakeResponse:
@@ -53,6 +56,14 @@ def test_prompt_cache_request_rejects_ambiguous_boundaries() -> None:
         PromptCacheRequest((0, 0), "agent.v1")
 
 
+def test_prompt_cache_partition_uses_only_stable_canonical_scope() -> None:
+    canonical_fields = {item.name for item in fields(StorageScope)}
+
+    assert set(prompt_cache._CACHE_SCOPE_KEYS) <= canonical_fields
+    assert "app_id" not in prompt_cache._CACHE_SCOPE_KEYS
+    assert {"run_id", "session_id", "node_id"}.isdisjoint(prompt_cache._CACHE_SCOPE_KEYS)
+
+
 def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
     messages = [
         {"role": "system", "content": "header"},
@@ -65,18 +76,48 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
         messages,
         provider="openai",
         model="gpt-5.6",
-        scope_dimensions={"org_id": "local", "span_id": "ignored-1"},
+        scope_dimensions={
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "org_id": "local",
+            "graph_id": "graph-1",
+            "agent_id": "agent-1",
+            "app_id": "deprecated-app-1",
+            "span_id": "ignored-1",
+        },
     )
     second = prepare_prompt_cache(
         request,
         messages,
         provider="openai",
         model="gpt-5.6",
-        scope_dimensions={"org_id": "local", "span_id": "ignored-2"},
+        scope_dimensions={
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "org_id": "local",
+            "graph_id": "graph-1",
+            "agent_id": "agent-1",
+            "app_id": "deprecated-app-2",
+            "span_id": "ignored-2",
+        },
+    )
+    other_graph = prepare_prompt_cache(
+        request,
+        messages,
+        provider="openai",
+        model="gpt-5.6",
+        scope_dimensions={
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "org_id": "local",
+            "graph_id": "graph-2",
+            "agent_id": "agent-1",
+        },
     )
 
     assert messages[0]["content"] == "header"
     assert first.provider_request_fields == second.provider_request_fields
+    assert first.provider_request_fields != other_graph.provider_request_fields
     assert len(first.provider_request_fields["prompt_cache_key"]) == 64
     assert first.observation == second.observation
     assert first.observation == {

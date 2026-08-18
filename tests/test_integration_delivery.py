@@ -20,13 +20,12 @@ from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.continuations.continuation import Continuation
 from aethergraph.services.integration import (
-    EventLogSemanticEventStore,
     SemanticDeliveryError,
     SemanticEventChannelAdapter,
     SemanticEventEmitter,
     SemanticTurnMonitor,
 )
-from aethergraph.storage.eventlog.sqlite_event import SqliteEventLog
+from tests._canonical_storage_fakes import make_semantic_event_store
 
 
 def _meta() -> dict[str, str]:
@@ -39,8 +38,8 @@ def _meta() -> dict[str, str]:
 
 @pytest.mark.asyncio
 async def test_semantic_adapter_persists_ordered_message_and_interaction(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
@@ -86,11 +85,11 @@ async def test_semantic_adapter_persists_ordered_message_and_interaction(tmp_pat
 
 @pytest.mark.asyncio
 async def test_semantic_adapter_rejects_missing_turn_identity(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(
             deployment_id="deployment-1",
-            store=EventLogSemanticEventStore(event_log),
+            store=event_log,
         )
     )
 
@@ -108,11 +107,11 @@ async def test_semantic_adapter_rejects_missing_turn_identity(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_semantic_adapter_rejects_unsupported_channel_event(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
+    event_log = make_semantic_event_store()
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(
             deployment_id="deployment-1",
-            store=EventLogSemanticEventStore(event_log),
+            store=event_log,
         )
     )
 
@@ -129,8 +128,8 @@ async def test_semantic_adapter_rejects_unsupported_channel_event(tmp_path) -> N
 
 @pytest.mark.asyncio
 async def test_semantic_adapter_persists_named_structured_output(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
@@ -160,8 +159,8 @@ async def test_semantic_adapter_persists_named_structured_output(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_channel_bus_interaction_reaches_semantic_delivery(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
@@ -169,9 +168,10 @@ async def test_channel_bus_interaction_reaches_semantic_delivery(tmp_path) -> No
 
     await bus.notify(
         Continuation(
+            continuation_id="cont-1",
+            revision=1,
             run_id="run-1",
             node_id="node-1",
-            token="private-token",
             kind="choice",
             channel="endpoint:sessions/public-1",
             prompt={"title": "Proceed?", "choices": [{"id": "yes", "label": "Yes"}]},
@@ -193,8 +193,8 @@ async def test_channel_bus_interaction_reaches_semantic_delivery(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_semantic_adapter_preserves_authored_buttons(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
@@ -241,8 +241,8 @@ async def test_semantic_adapter_preserves_authored_buttons(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_semantic_adapter_projects_remote_file_as_structured_output(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
@@ -279,8 +279,8 @@ async def test_semantic_adapter_projects_remote_file_as_structured_output(tmp_pa
 async def test_semantic_adapter_preserves_structured_output_upsert_identity(
     tmp_path,
 ) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
@@ -310,8 +310,8 @@ async def test_semantic_adapter_preserves_structured_output_upsert_identity(
 async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
     tmp_path,
 ) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
@@ -349,8 +349,8 @@ async def test_semantic_adapter_projects_tool_activity_with_upsert_identity(
 async def test_tool_failure_preserves_structured_error_in_one_activity_path(
     tmp_path,
 ) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(
             deployment_id="deployment-1",
@@ -401,8 +401,8 @@ async def test_tool_failure_preserves_structured_error_in_one_activity_path(
 
 @pytest.mark.asyncio
 async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     emitter = SemanticEventEmitter(deployment_id="deployment-1", store=store)
     await emitter.emit(
         OutEvent(
@@ -457,8 +457,8 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
 async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
     tmp_path,
 ) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     emitter = SemanticEventEmitter(
         deployment_id="deployment-1",
         store=store,
@@ -522,8 +522,8 @@ async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
 async def test_turn_monitor_does_not_invent_outcome_for_infrastructure_failure(
     tmp_path,
 ) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
 
     class _RunManager:
         async def wait_run(self, run_id, *, return_outputs=False):
@@ -557,8 +557,8 @@ async def test_turn_monitor_does_not_invent_outcome_for_infrastructure_failure(
 
 @pytest.mark.asyncio
 async def test_semantic_adapter_preserves_rich_message_as_named_output(tmp_path) -> None:
-    event_log = SqliteEventLog(str(tmp_path / "events.db"))
-    store = EventLogSemanticEventStore(event_log)
+    event_log = make_semantic_event_store()
+    store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )

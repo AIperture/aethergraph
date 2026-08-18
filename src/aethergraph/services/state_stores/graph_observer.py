@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
-from aethergraph.contracts.services.artifacts import AsyncArtifactStore
 from aethergraph.contracts.services.state_stores import GraphStateStore, StateEvent
 from aethergraph.core.graph.task_node import NodeStatus
+from aethergraph.services.state_stores.scope import require_graph_run_scope
 from aethergraph.services.state_stores.serialize import _jsonish_outputs_with_refs
 from aethergraph.services.state_stores.utils import snapshot_from_graph
+from aethergraph.storage.contracts.scope import StorageScope
 
 
 class PersistenceObserver:
@@ -15,12 +17,55 @@ class PersistenceObserver:
         self,
         *,
         store: GraphStateStore,
-        artifact_store: AsyncArtifactStore,
+        scope: StorageScope,
+        artifact_store: Any | None,
         spec_hash: str,
         snapshot_every: int = 50,
         min_interval_s: float = 5.0,
     ):
+        """Attach canonical scope and persistence policy to graph callbacks.
+
+        Retains one exact graph-run scope for every event and snapshot emitted by the
+        observer and performs no provider selection.
+
+        Examples:
+            Persist every event interval:
+                ```python
+                observer = PersistenceObserver(
+                    store=store,
+                    scope=scope,
+                    artifact_store=artifacts,
+                    spec_hash=spec_hash,
+                    snapshot_every=1,
+                )
+                ```
+
+            Use the default snapshot cadence:
+                ```python
+                observer = PersistenceObserver(
+                    store=store,
+                    scope=scope,
+                    artifact_store=artifacts,
+                    spec_hash=spec_hash,
+                )
+                ```
+
+        Args:
+            store: Graph-state service receiving normalized persistence calls.
+            scope: Exact canonical owner and graph-run identity.
+            artifact_store: Artifact service used while serializing graph snapshots.
+            spec_hash: Stable digest of the active graph specification.
+            snapshot_every: Positive event interval between snapshot attempts.
+            min_interval_s: Minimum elapsed seconds between snapshot writes.
+
+        Returns:
+            None: The observer is ready for graph registration.
+
+        Notes:
+            The observer never infers scope from `app_id` or writes a fallback store.
+        """
         self.store = store
+        self.scope = scope
         self.artifact_store = artifact_store
         self.spec_hash = spec_hash
         self.snapshot_every = snapshot_every
@@ -43,7 +88,8 @@ class PersistenceObserver:
                 else str(runtime_node.state.status),
             },
         )
-        await self.store.append_event(ev)
+        require_graph_run_scope(self.scope, run_id=ev.run_id, graph_id=ev.graph_id)
+        await self.store.append_event(self.scope, ev)
         await self._maybe_snapshot(g)
 
     async def on_node_output_change(self, runtime_node):
@@ -73,7 +119,8 @@ class PersistenceObserver:
                 "outputs": safe_outputs or {},  # ✅ JSON-safe
             },
         )
-        await self.store.append_event(ev)
+        require_graph_run_scope(self.scope, run_id=ev.run_id, graph_id=ev.graph_id)
+        await self.store.append_event(self.scope, ev)
         await self._maybe_snapshot(g)
 
     async def on_inputs_bound(self, graph):
@@ -96,7 +143,8 @@ class PersistenceObserver:
             kind="INPUTS_BOUND",
             payload={"inputs": safe_inputs or {}},  # JSON-safe
         )
-        await self.store.append_event(ev)
+        require_graph_run_scope(self.scope, run_id=ev.run_id, graph_id=ev.graph_id)
+        await self.store.append_event(self.scope, ev)
         await self._maybe_snapshot(graph)
 
     async def on_patch_applied(self, graph, patch):
@@ -108,7 +156,8 @@ class PersistenceObserver:
             kind="PATCH",
             payload={"patch": patch.__dict__},
         )
-        await self.store.append_event(ev)
+        require_graph_run_scope(self.scope, run_id=ev.run_id, graph_id=ev.graph_id)
+        await self.store.append_event(self.scope, ev)
         await self._maybe_snapshot(graph)
 
     async def _maybe_snapshot(self, graph):
@@ -128,5 +177,6 @@ class PersistenceObserver:
                 allow_externalize=False,  # keep snapshots JSON-only (opaque refs)
                 include_wait_spec=True,
             )
-            await self.store.save_snapshot(snap)
+            require_graph_run_scope(self.scope, run_id=snap.run_id, graph_id=snap.graph_id)
+            await self.store.save_snapshot(self.scope, snap)
             self._last_snap_ts = now

@@ -55,6 +55,18 @@ def test_explicit_settings_file_must_exist(tmp_path: Path) -> None:
         load_settings(env_file=tmp_path / "missing.env")
 
 
+def test_embeddings_are_opt_in_and_support_explicit_environment_enablement(
+    tmp_path: Path,
+) -> None:
+    assert AppSettings().embed.enabled is False
+    target = tmp_path / "embedding-enabled.env"
+    target.write_text("AETHERGRAPH_EMBED__ENABLED=true\n", encoding="utf-8")
+
+    settings = load_settings(env_file=target)
+
+    assert settings.embed.enabled is True
+
+
 def test_replace_dotenv_removes_stale_rows(tmp_path: Path) -> None:
     target = tmp_path / ".env"
     target.write_text("STALE=value\nKEEP=old\n", encoding="utf-8")
@@ -93,9 +105,7 @@ def test_operation_profile_environment_writers_round_trip_independently(
             "default": LLMProfile(
                 provider="openai",
                 model="gpt-test",
-                capability_overrides=ChatCapabilityOverrides(
-                    structured_output="supported"
-                ),
+                capability_overrides=ChatCapabilityOverrides(structured_output="supported"),
             )
         }
     )
@@ -110,9 +120,7 @@ def test_operation_profile_environment_writers_round_trip_independently(
                     provider="google",
                     model="gemini-embedding-001",
                     endpoint_id="gemini_embeddings",
-                    capability_overrides=EmbeddingCapabilityOverrides(
-                        dimensions="unsupported"
-                    ),
+                    capability_overrides=EmbeddingCapabilityOverrides(dimensions="unsupported"),
                 ),
             }
         )

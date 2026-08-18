@@ -20,7 +20,7 @@ from aethergraph.contracts.integration import (
 )
 from aethergraph.services.host.endpoint_credentials import EndpointCredentialRegistry
 from aethergraph.services.integration import BindingResolution, ManifestRouteResolver
-from aethergraph.storage.sessions.inmem_store import InMemorySessionStore
+from tests._canonical_storage_fakes import make_session_store
 from tests._integration_fixtures import contract_compatibility
 
 _DIGEST = "a" * 64
@@ -132,7 +132,7 @@ def _app() -> tuple[FastAPI, SimpleNamespace]:
         integration_ingress=ingress,
         host_manifest=manifest,
         semantic_events=SimpleNamespace(),
-        session_store=InMemorySessionStore(),
+        session_store=make_session_store(),
         run_store=_RunStore(),
         run_manager=_RunManager(),
     )

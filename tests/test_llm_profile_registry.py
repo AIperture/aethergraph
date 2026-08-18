@@ -64,6 +64,13 @@ def test_registry_endpoints_exist_and_support_declared_defaults() -> None:
             assert operation in ENDPOINT_ADAPTERS[endpoint_id].implemented_operations
 
 
+def test_registered_runtime_endpoints_declare_manifest_observability() -> None:
+    assert all(
+        "llm_observation_manifest" in descriptor.implementation_capabilities
+        for descriptor in ENDPOINT_ADAPTERS.values()
+    )
+
+
 def test_registry_model_discovery_adapters_have_one_implementation_owner() -> None:
     for provider in PROVIDERS.values():
         if provider.model_discovery_adapter_id is not None:
@@ -198,9 +205,7 @@ def test_legacy_chat_profile_projection_separates_operation_concerns() -> None:
         context_window_tokens=128_000,
         vision_enabled=True,
         vision_max_images=3,
-        capability_overrides=ChatCapabilityOverrides(
-            native_tool_calling="unsupported"
-        ),
+        capability_overrides=ChatCapabilityOverrides(native_tool_calling="unsupported"),
     )
 
     canonical = chat_profile_from_legacy(legacy)
@@ -254,9 +259,7 @@ def test_explicit_image_capability_override_wins_over_legacy_vision_projection()
     canonical = chat_profile_from_legacy(
         LLMProfile(
             vision_enabled=True,
-            capability_overrides=ChatCapabilityOverrides(
-                image_input="unsupported"
-            ),
+            capability_overrides=ChatCapabilityOverrides(image_input="unsupported"),
         )
     )
 
@@ -323,9 +326,7 @@ def test_legacy_embedding_profile_projection_is_independent_from_chat() -> None:
         EmbeddingProfile(
             provider="google",
             model="text-embedding-004",
-            capability_overrides=EmbeddingCapabilityOverrides(
-                dimensions="unsupported"
-            ),
+            capability_overrides=EmbeddingCapabilityOverrides(dimensions="unsupported"),
         )
     )
 
@@ -380,9 +381,7 @@ def test_image_profile_projection_and_client_are_independent_from_chat() -> None
             model="gemini-image-test",
             count=2,
             output_format="png",
-            capability_overrides=ImageGenerationCapabilityOverrides(
-                image_editing="supported"
-            ),
+            capability_overrides=ImageGenerationCapabilityOverrides(image_editing="supported"),
         )
     )
     client = image_client_from_profile(canonical, _Secrets(), profile_name="design")
