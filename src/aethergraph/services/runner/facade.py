@@ -5,6 +5,7 @@ from threading import Event
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.contracts.integration import OriginBinding
 from aethergraph.core.runtime.run_cancellation import get_run_cancellation_registry
 from aethergraph.core.runtime.run_types import (
     RunImportance,
@@ -12,7 +13,7 @@ from aethergraph.core.runtime.run_types import (
     RunRecord,
     RunVisibility,
 )
-from aethergraph.services.tracing import resolve_tracer
+from aethergraph.observability.operations import resolve_operation_observer
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
@@ -51,6 +52,7 @@ class RunFacade:
         session_id: Optional default session id for child runs.
         agent_id: Optional default agent id for child runs.
         app_id: Optional default app id for child runs.
+        origin_binding: Optional immutable run origin propagated to child runs.
 
     Returns:
         RunFacade: Bound facade for child run orchestration APIs.
@@ -66,6 +68,48 @@ class RunFacade:
     agent_id: str | None = None
     app_id: str | None = None
     current_run_id: str | None = None
+    origin_binding: OriginBinding | None = None
+
+    def _child_run_config(self) -> dict[str, Any]:
+        """Build inherited runtime configuration for a child run.
+
+        The returned mapping carries the immutable run origin without mutating
+        shared Channel services.
+
+        Examples:
+            Build configuration with a run origin:
+            ```python
+            binding = OriginBinding(
+                integration_id="endpoint",
+                route_id="route.endpoint",
+                session_id="s-1",
+                channel_key="endpoint:sessions/s-1",
+                external_conversation_id="s-1",
+                capability_profile_id="agent-endpoint/v1",
+            )
+            facade = RunFacade(manager, origin_binding=binding)
+            config = facade._child_run_config()
+            ```
+
+            Build configuration without a scoped channel:
+            ```python
+            facade = RunFacade(manager)
+            config = facade._child_run_config()
+            ```
+
+        Args:
+            None: This helper takes no arguments.
+
+        Returns:
+            dict[str, Any]: A mapping containing serialized `origin_binding`,
+            or an empty mapping when the parent run has no origin.
+
+        Notes:
+            The mapping is passed through the existing `run_config` path.
+        """
+        if self.origin_binding is None:
+            return {}
+        return {"origin_binding": self.origin_binding.model_dump(mode="json")}
 
     async def spawn_run(
         self,
@@ -129,8 +173,8 @@ class RunFacade:
         effective_session_id = session_id or self.session_id
         effective_agent_id = agent_id if agent_id is not None else self.agent_id
         effective_app_id = app_id if app_id is not None else self.app_id
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="spawn_run",
             request={
@@ -157,6 +201,7 @@ class RunFacade:
                 agent_id=effective_agent_id,
                 app_id=effective_app_id,
                 identity=self.identity,
+                run_config=self._child_run_config(),
             )
             await span.finish(
                 response={"run_id": record.run_id},
@@ -230,8 +275,8 @@ class RunFacade:
         effective_session_id = session_id or self.session_id
         effective_agent_id = agent_id if agent_id is not None else self.agent_id
         effective_app_id = app_id if app_id is not None else self.app_id
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="run_and_wait",
             request={
@@ -259,6 +304,7 @@ class RunFacade:
                 app_id=effective_app_id,
                 identity=self.identity,
                 count_slot=False,
+                run_config=self._child_run_config(),
             )
             if has_waits:
                 await span.wait(
@@ -320,8 +366,8 @@ class RunFacade:
             When `return_outputs=True`, succeeded runs now resolve durable outputs
             even after process boundaries when persisted results are available.
         """
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="wait_run",
             request={"run_id": run_id, "timeout_s": timeout_s, "return_outputs": return_outputs},
@@ -340,11 +386,13 @@ class RunFacade:
             await span.fail(exc, metadata={"target_run_id": run_id})
             raise
 
-    async def cancel_run(self, run_id: str) -> None:
-        """
-        Request best-effort cancellation for a run id.
-
-        This method delegates to `run_manager.cancel_run(...)`.
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> None:
+        """Request best-effort cancellation with an exact semantic cause.
 
         Examples:
             Cancel a spawned run:
@@ -358,30 +406,65 @@ class RunFacade:
                 await runner().cancel_run(run_id)
             ```
 
+            Cancel a child because its parent stopped:
+            ```python
+            await runner().cancel_run(run_id, reason="parent_cancelled")
+            ```
+
         Args:
             run_id: Run identifier to cancel.
+            reason: Exact cancellation cause transported to the target run.
 
         Returns:
             None: Cancellation is requested asynchronously.
 
         Notes:
-            Cancellation may not be immediate; scheduler termination is
-            best-effort.
+            Supported causes are enforced by the run manager. Cancellation may
+            not be immediate; scheduler termination is best-effort.
         """
-        tracer = resolve_tracer()
-        span = await tracer.start_span(
+        observer = resolve_operation_observer()
+        span = await observer.start_span(
             service="runner",
             operation="cancel_run",
-            request={"run_id": run_id},
+            request={"run_id": run_id, "reason": reason},
             tags=["runner", "cancel"],
             metadata={"target_run_id": run_id},
         )
         try:
-            await self.run_manager.cancel_run(run_id)
+            await self.run_manager.cancel_run(run_id, reason=reason)
             await span.finish(response={"cancelled": True}, metadata={"target_run_id": run_id})
         except Exception as exc:
             await span.fail(exc, metadata={"target_run_id": run_id})
             raise
+
+    async def cancellation_reason(self) -> str:
+        """Return the exact cancellation cause for the current bound run.
+
+        Examples:
+            Read the cause after cancellation:
+            ```python
+            reason = await runner().cancellation_reason()
+            ```
+
+            Read an unbound facade:
+            ```python
+            assert await unbound_runner.cancellation_reason() == ""
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str: Exact stored cause, or an empty string when unavailable.
+
+        Notes:
+            This method does not request cancellation or mutate its handle.
+        """
+
+        if not self.current_run_id:
+            return ""
+        handle = await get_run_cancellation_registry().get(self.current_run_id)
+        return "" if handle is None else str(handle.cancel_reason or "")
 
     async def is_cancel_requested(self) -> bool:
         if not self.current_run_id:

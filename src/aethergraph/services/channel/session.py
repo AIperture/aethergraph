@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 import inspect
 import logging
 from pathlib import Path, PurePath
@@ -10,15 +11,23 @@ from typing import Any, Literal
 import uuid
 
 from aethergraph.contracts.services.artifacts import Artifact
-from aethergraph.contracts.services.channel import Button, ChoiceOption, FileRef, OutEvent
+from aethergraph.contracts.services.channel import (
+    Button,
+    ChannelRoutingError,
+    ChoiceOption,
+    ChoiceResult,
+    FileInteractionResult,
+    FileRef,
+    OutEvent,
+)
+from aethergraph.observability.operations import resolve_operation_observer
 from aethergraph.services.channel.choices import (
     build_choice_options,
     choice_prompt_payload,
     normalize_choice_reply,
     prompt_choices_from_prompt,
 )
-from aethergraph.services.continuations.continuation import Correlator
-from aethergraph.services.tracing import resolve_tracer
+from aethergraph.services.continuations.continuation import ContinuationStatus, Correlator
 
 
 def _artifact_filename(artifact: Artifact, fallback: str | None = None) -> str:
@@ -178,8 +187,8 @@ class ChannelSession:
         return self.ctx.session_id
 
     @property
-    def _tracer(self):
-        return resolve_tracer(getattr(self.ctx.services, "tracer", None))
+    def _operation_observer(self):
+        return resolve_operation_observer()
 
     def _begin_reply_lifecycle(self) -> str:
         self._phase_group_counter += 1
@@ -281,44 +290,36 @@ class ChannelSession:
             "severity": severity,
             "signal": signal,
         }
-        append_chat_turn = getattr(mem, "append_chat_turn", None)
-        if callable(append_chat_turn):
-            await append_chat_turn(role, text, **payload)
-            return
-        record_chat = getattr(mem, "record_chat", None)
-        if callable(record_chat):
-            await record_chat(role, text, **payload)
+        await mem.append_chat_turn(role, text, **payload)
 
     def _resolve_default_key(self) -> str:
-        """Unified default resolver (bus default → console)."""
-        return self._bus.get_default_channel_key() or "console:stdin"
+        """Resolve the immutable run origin channel."""
+        origin_binding = getattr(self.ctx, "origin_binding", None)
+        channel_key = origin_binding.channel_key if origin_binding is not None else None
+        if not channel_key:
+            raise ChannelRoutingError(
+                code="channel.origin_required",
+                message=(
+                    "ChannelSession requires an explicit channel address or an immutable "
+                    "run OriginBinding."
+                ),
+            )
+        return channel_key
 
     def _resolve_key(self, channel: str | None = None) -> str:
         """
-        Priority: explicit arg → bound override → resolved default,
-        then run through ChannelBus alias resolver for canonical form.
+        Priority: explicit arg → bound override → immutable run origin.
         """
         raw = channel or self._override_key or self._resolve_default_key()
         if not raw:
-            # Should never happen given the fallback, but fail fast if misconfigured
-            raise RuntimeError("ChannelSession: unable to resolve a channel key")
-        # NEW: alias → canonical resolution
-        return self._bus.resolve_channel_key(raw)
-
-    def _extract_ui_session_id(self, channel: str | None = None) -> str:
-        channel_key = self._resolve_key(channel)
-        prefix = "ui:session/"
-        if not channel_key.startswith(prefix):
-            raise RuntimeError(
-                "ChannelSession.work_status() requires a ui:session channel; "
-                f"got {channel_key!r}."
+            raise ChannelRoutingError(
+                code="channel.origin_required",
+                message=(
+                    "ChannelSession requires an explicit channel address or an immutable "
+                    "run OriginBinding."
+                ),
             )
-        session_id = channel_key[len(prefix) :]
-        if not session_id:
-            raise RuntimeError(
-                "ChannelSession.work_status() requires a resolved ui:session/<session_id> channel."
-            )
-        return session_id
+        return raw
 
     def _ensure_channel(self, event: "OutEvent", channel: str | None = None) -> "OutEvent":
         """
@@ -328,28 +329,6 @@ class ChannelSession:
         if not getattr(event, "channel", None):
             event.channel = self._resolve_key(channel)
         return event
-
-    class _ChannelResult(dict):
-        """
-        Dict-compatible result that also supports tuple-style unpacking.
-
-        This preserves backward compatibility for call sites that expect mapping
-        access while allowing:
-
-        ```python
-        approved, choice, choice_label, text, matched = await context.channel().ask_approval(...)
-        ```
-        """
-
-        __slots__ = ("_iter_keys",)
-
-        def __init__(self, *args, iter_keys: tuple[str, ...], **kwargs):
-            super().__init__(*args, **kwargs)
-            self._iter_keys = iter_keys
-
-        def __iter__(self):
-            for key in self._iter_keys:
-                yield self.get(key)
 
     @property
     def _inbox_kv_key(self) -> str:
@@ -396,31 +375,162 @@ class ChannelSession:
         event.meta = self._inject_context_meta(event.meta)
         await self._bus.publish(event)
 
+    async def send_structured_output(
+        self,
+        *,
+        output_name: str,
+        value: Any,
+        upsert_key: str | None = None,
+        channel: str | None = None,
+    ) -> None:
+        """Send one named transport-neutral structured output.
+
+        The method constructs the canonical Channel `structured.output` Event,
+        injects the active run metadata through `send`, and publishes it to the
+        exact run origin or explicit Channel address.
+
+        Examples:
+            Publish a complete domain snapshot:
+            ```python
+            await context.channel().send_structured_output(
+                output_name="workflow.result",
+                value={"status": "ready"},
+            )
+            ```
+
+            Publish a revision with stable upsert identity:
+            ```python
+            await context.channel().send_structured_output(
+                output_name="agstudio.workbench.suggestion",
+                value={"suggestion_id": "sug-1", "revision": 2},
+                upsert_key="suggestion:sug-1",
+            )
+            ```
+
+        Args:
+            output_name: Non-empty semantic output discriminator.
+            value: JSON-compatible authored output value.
+            upsert_key: Optional stable identity for successive revisions.
+            channel: Optional exact Channel address overriding the session origin.
+
+        Returns:
+            None: Complete after the Channel bus accepts the Event.
+
+        Notes:
+            Rendering belongs to the selected Channel adapter. This method does
+            not name UI components, mutate application state, or provide a
+            transport fallback.
+        """
+        normalized_name = str(output_name or "").strip()
+        if not normalized_name:
+            raise ValueError("send_structured_output requires a non-empty output_name")
+        await self.send(
+            OutEvent(
+                type="structured.output",
+                channel=self._resolve_key(channel),
+                rich={"output_name": normalized_name, "value": value},
+                upsert_key=upsert_key,
+            )
+        )
+
+    async def send_tool_activity(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        status: Literal["started", "running", "waiting", "completed", "failed", "canceled"],
+        message: str | None = None,
+        error: dict[str, Any] | None = None,
+        channel: str | None = None,
+    ) -> None:
+        """Send one transport-neutral Tool lifecycle update.
+
+        Intro:
+            The lifecycle identity and status remain structured while a concise text
+            projection keeps non-UI Channel adapters useful.
+
+        Examples:
+            Mark a Tool call as started:
+            ```python
+            await context.channel().send_tool_activity(
+                tool_call_id="call-1",
+                tool_name="inspect_project",
+                status="started",
+            )
+            ```
+
+            Mark the same Tool call as completed:
+            ```python
+            await context.channel().send_tool_activity(
+                tool_call_id="call-1",
+                tool_name="inspect_project",
+                status="completed",
+                message="Project inspected.",
+            )
+            ```
+
+        Args:
+            tool_call_id: Non-empty stable identity of the Tool invocation.
+            tool_name: Non-empty registered Tool name.
+            status: Exact lifecycle state for the invocation.
+            message: Optional bounded human-readable activity detail.
+            error: Optional canonical prompt-safe Tool error for a failed activity.
+            channel: Optional exact Channel address overriding the session origin.
+
+        Returns:
+            None: Complete after the Channel bus accepts the Event.
+
+        Notes:
+            This method reports execution activity only. Tool results remain in the
+            Engine Ledger and authored user messages retain their existing path.
+        """
+        normalized_call_id = str(tool_call_id or "").strip()
+        normalized_tool_name = str(tool_name or "").strip()
+        if not normalized_call_id:
+            raise ValueError("send_tool_activity requires a non-empty tool_call_id")
+        if not normalized_tool_name:
+            raise ValueError("send_tool_activity requires a non-empty tool_name")
+        await self.send(
+            OutEvent(
+                type="agent.tool.activity",
+                channel=self._resolve_key(channel),
+                text=message or f"{normalized_tool_name}: {status}",
+                rich={
+                    "tool_call_id": normalized_call_id,
+                    "tool_name": normalized_tool_name,
+                    "status": status,
+                    "message": message,
+                    **({"error": dict(error)} if error is not None else {}),
+                },
+                upsert_key=f"tool:{normalized_call_id}",
+            )
+        )
+
     class _SessionWorkStatusHandle:
         def __init__(
             self,
             outer: "ChannelSession",
             *,
-            session_id: str,
             channel_key: str,
             workflow_id: str | None = None,
         ) -> None:
             self._outer = outer
-            self._session_id = session_id
             self._channel_key = channel_key
             self._workflow_id = workflow_id
 
-        def _meta(self) -> dict[str, Any]:
-            return self._outer._inject_context_meta({"channel_key": self._channel_key})
+        async def _emit(self, value: dict[str, Any]) -> dict[str, Any]:
+            await self._outer.send(
+                OutEvent(
+                    type="structured.output",
+                    channel=self._channel_key,
+                    rich={"output_name": "workflow.status", "value": value},
+                    upsert_key="workflow.status",
+                )
+            )
+            return value
 
         async def replace(self, work_status: dict[str, Any]) -> dict[str, Any]:
-            from aethergraph.services.channel.session_work_status import replace_session_work_status
-
-            return await replace_session_work_status(
-                session_id=self._session_id,
-                work_status=work_status,
-                meta=self._meta(),
-            )
+            return await self._emit({"operation": "replace", "work_status": work_status})
 
         async def patch(
             self,
@@ -431,54 +541,48 @@ class ChannelSession:
             active_item_id: str | None = None,
             item_updates: list[dict[str, Any]] | None = None,
         ) -> dict[str, Any]:
-            from aethergraph.services.channel.session_work_status import patch_session_work_status
-
             resolved_workflow_id = workflow_id if workflow_id is not None else self._workflow_id
-            return await patch_session_work_status(
-                session_id=self._session_id,
-                workflow_id=resolved_workflow_id,
-                status=status,
-                summary=summary,
-                active_item_id=active_item_id,
-                item_updates=item_updates,
-                meta=self._meta(),
+            return await self._emit(
+                {
+                    "operation": "patch",
+                    "workflow_id": resolved_workflow_id,
+                    "status": status,
+                    "summary": summary,
+                    "active_item_id": active_item_id,
+                    "item_updates": item_updates or [],
+                }
             )
 
         async def clear(self) -> dict[str, Any]:
-            from aethergraph.services.channel.session_work_status import clear_session_work_status
-
-            return await clear_session_work_status(
-                session_id=self._session_id,
-                meta=self._meta(),
-            )
+            return await self._emit({"operation": "clear"})
 
     class _SessionDashboardStateHandle:
         def __init__(
             self,
             outer: "ChannelSession",
             *,
-            session_id: str,
             channel_key: str,
             dashboard_id: str,
         ) -> None:
             self._outer = outer
-            self._session_id = session_id
             self._channel_key = channel_key
             self._dashboard_id = dashboard_id
 
-        def _meta(self) -> dict[str, Any]:
-            return self._outer._inject_context_meta({"channel_key": self._channel_key})
+        async def _emit(self, value: dict[str, Any]) -> dict[str, Any]:
+            await self._outer.send(
+                OutEvent(
+                    type="structured.output",
+                    channel=self._channel_key,
+                    rich={"output_name": "workflow.dashboard", "value": value},
+                    upsert_key=f"workflow.dashboard:{self._dashboard_id}",
+                )
+            )
+            return value
 
         async def replace(self, state: dict[str, Any]) -> dict[str, Any]:
-            from aethergraph.services.channel.session_dashboard_state import (
-                replace_session_dashboard_state,
-            )
-
-            return await replace_session_dashboard_state(
-                session_id=self._session_id,
-                dashboard_state=state,
-                meta=self._meta(),
-            )
+            if state.get("dashboard_id") != self._dashboard_id:
+                raise ValueError("dashboard state must match the bound dashboard_id")
+            return await self._emit({"operation": "replace", "dashboard": state})
 
         async def patch(
             self,
@@ -487,36 +591,25 @@ class ChannelSession:
             status: str | None = None,
             ops: list[dict[str, Any]] | None = None,
         ) -> dict[str, Any]:
-            from aethergraph.services.channel.session_dashboard_state import (
-                patch_session_dashboard_state,
-            )
-
-            return await patch_session_dashboard_state(
-                session_id=self._session_id,
-                dashboard_id=self._dashboard_id,
-                revision=revision,
-                status=status,
-                ops=ops,
-                meta=self._meta(),
+            return await self._emit(
+                {
+                    "operation": "patch",
+                    "patch": {
+                        "dashboard_id": self._dashboard_id,
+                        "revision": revision,
+                        "status": status,
+                        "ops": ops or [],
+                    },
+                }
             )
 
         async def clear(self) -> dict[str, Any]:
-            from aethergraph.services.channel.session_dashboard_state import (
-                clear_session_dashboard_state,
-            )
-
-            return await clear_session_dashboard_state(
-                session_id=self._session_id,
-                dashboard_id=self._dashboard_id,
-                meta=self._meta(),
-            )
+            return await self._emit({"operation": "clear", "dashboard_id": self._dashboard_id})
 
     def work_status(self, *, workflow_id: str | None = None) -> "_SessionWorkStatusHandle":
         channel_key = self._resolve_key()
-        session_id = self._extract_ui_session_id(channel_key)
         return ChannelSession._SessionWorkStatusHandle(
             self,
-            session_id=session_id,
             channel_key=channel_key,
             workflow_id=workflow_id,
         )
@@ -525,10 +618,8 @@ class ChannelSession:
         if not dashboard_id:
             raise ValueError("dashboard_state requires a non-empty dashboard_id")
         channel_key = self._resolve_key()
-        session_id = self._extract_ui_session_id(channel_key)
         return ChannelSession._SessionDashboardStateHandle(
             self,
-            session_id=session_id,
             channel_key=channel_key,
             dashboard_id=dashboard_id,
         )
@@ -538,6 +629,7 @@ class ChannelSession:
         phase: str,
         status: Literal["pending", "active", "done", "failed", "skipped"],
         *,
+        phase_key: str | None = None,
         label: str | None = None,
         detail: str | None = None,
         channel: str | None = None,
@@ -546,28 +638,38 @@ class ChannelSession:
         Emit a phase-style progress update event.
 
         Phases are decoupled from the reply lifecycle. Each call creates a
-        unique timeline entry (no upsert) so the frontend can accumulate them
-        as pending phases until a message claims them.
+        unique transport event while optionally carrying a stable logical
+        `phase_key` that UI consumers can use to merge updates for the same
+        phase run.
 
         Examples:
             Send a pending phase update:
-            ```python
-            await context.channel().send_phase("routing", "pending")
-            ```
+                ```python
+                await context.channel().send_phase("routing", "pending")
+                ```
 
-            Send an active phase update with details:
-            ```python
-            await context.channel().send_phase(
-                "planning",
-                "active",
-                label="Planning Phase",
-                detail="Calculating optimal routes",
-            )
-            ```
+            Send paired updates for one logical phase:
+                ```python
+                await context.channel().send_phase(
+                    "planning",
+                    "active",
+                    phase_key="builder:planning",
+                    label="Planning Phase",
+                    detail="Calculating optimal routes",
+                )
+                await context.channel().send_phase(
+                    "planning",
+                    "done",
+                    phase_key="builder:planning",
+                    label="Plan ready",
+                )
+                ```
 
         Args:
             phase: Logical phase identifier.
             status: Phase status value. One of `"pending"`, `"active"`, `"done"`, `"failed"`, or `"skipped"`.
+            phase_key: Optional stable logical phase identity. When omitted,
+                the unique event id is used as an event-scoped fallback.
             label: Optional display label. Defaults to `phase.title()`.
             detail: Optional detail text. Defaults to an empty string.
             channel: Optional target channel key.
@@ -576,9 +678,10 @@ class ChannelSession:
             None: Complete when the progress update is published.
 
         Notes:
-            - Payload shape is UI-oriented and adapters may render or ignore it differently.
-            - The frontend shows LivePulse while a phase is "active" and hides it on terminal status.
-            - Phases accumulate until the next terminal message claims them for InlinePhaseBlock display.
+            `phase_event_id` remains unique for every emission. `phase_key`
+            is only authoritative for merging when `phase_key_source` is
+            `"explicit"`; omitted keys are marked `"event"` for backward
+            compatibility.
         """
         ch_key = self._resolve_key(channel)
         self._phase_seq += 1
@@ -586,10 +689,15 @@ class ChannelSession:
         phase_updated_at = time.time()
         # Each emission is unique (no upsert — every call is a new timeline entry)
         phase_event_id = f"{self._run_id}:{self._node_id}:phase:{phase_seq}"
+        explicit_phase_key = bool(phase_key)
+        resolved_phase_key = str(phase_key) if explicit_phase_key else phase_event_id
+        phase_key_source = "explicit" if explicit_phase_key else "event"
 
         rich = {
             "kind": "phase",
             "phase": phase,
+            "phase_key": resolved_phase_key,
+            "phase_key_source": phase_key_source,
             "status": status,
             "label": label or phase.title(),
             "detail": detail or "",
@@ -608,6 +716,8 @@ class ChannelSession:
                     {
                         "kind": "phase",
                         "phase": phase,
+                        "phase_key": resolved_phase_key,
+                        "phase_key_source": phase_key_source,
                         "status": status,
                     }
                 ),
@@ -619,13 +729,14 @@ class ChannelSession:
         text: str,
         *,
         meta: dict[str, Any] | None = None,
+        upsert_key: str | None = None,
         channel: str | None = None,
         prefer_stream: bool = False,
         stream_threshold_chars: int | None = None,
         stream_chars_per_second: float | None = None,
         stream_target_chunk_chars: int | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -649,6 +760,7 @@ class ChannelSession:
             await context.channel().send_text(
                 "Status update.",
                 meta={"priority": "high"},
+                upsert_key="assistant-output:turn-1:0",
                 channel="web:chat"
             )
             ```
@@ -656,6 +768,7 @@ class ChannelSession:
         Args:
             text: Message body to send.
             meta: Optional outbound event metadata.
+            upsert_key: Optional stable identity for idempotent delivery or revision.
             channel: Optional target channel key.
             prefer_stream: When True, attempt to stream longer text with a typing effect.
             stream_threshold_chars: Minimum text length required before streaming is attempted.
@@ -714,6 +827,7 @@ class ChannelSession:
             type="agent.message",
             channel=self._resolve_key(channel),
             text=text,
+            upsert_key=upsert_key,
             meta=self._inject_context_meta(
                 {
                     **(meta or {}),
@@ -732,7 +846,7 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -828,7 +942,7 @@ class ChannelSession:
         poll_ms: int | None = None,
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -836,7 +950,7 @@ class ChannelSession:
         memory_signal: float | None = None,
     ) -> None:
         """
-        Send a live run-monitor card into a rich-capable UI session.
+        Send a live run-monitor card to the run origin.
 
         The emitted rich payload is declarative. The frontend owns live polling
         from `run_id` and should not expect this helper to stream updates.
@@ -844,12 +958,12 @@ class ChannelSession:
         Examples:
             Send a default live run card:
             ```python
-            await context.channel("ui:session").send_run_card(run_id="run_123")
+            await context.channel().send_run_card(run_id="run_123")
             ```
 
             Send a card with custom title and disabled preview:
             ```python
-            await context.channel("ui:session").send_run_card(
+            await context.channel().send_run_card(
                 run_id="run_123",
                 graph_id="demo.graph",
                 title="Training run",
@@ -928,7 +1042,7 @@ class ChannelSession:
         channel: str | None = None,
         artifact_labels: dict[str, Any] | None = None,
         # memory logging...
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1024,7 +1138,7 @@ class ChannelSession:
         artifact_kind: str = "file",
         artifact_labels: dict[str, Any] | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -1184,7 +1298,7 @@ class ChannelSession:
         meta: dict[str, Any] | None = None,
         channel: str | None = None,
         # memory logging handled separately
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,  # extra structured data
@@ -1267,7 +1381,7 @@ class ChannelSession:
         timeout_s: int,
     ) -> dict:
         ch_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation=f"_ask_core:{kind}",
             request={
@@ -1294,12 +1408,13 @@ class ChannelSession:
 
             cont_payload = {
                 "_channel_wait_kind": kind,
+                "_interaction_id": f"interaction-{uuid.uuid4().hex}",
                 **payload,
             }
             cont = await self.ctx.create_continuation(
                 channel=ch_key, kind=kind, payload=cont_payload, deadline_s=timeout_s
             )
-            fut = self.ctx.prepare_wait_for_resume(cont.token)
+            fut = self.ctx.prepare_wait_for_resume(cont.continuation_id)
             wait_meta = self._inject_context_meta(
                 {"channel_key": ch_key, "continuation_token": cont.token}
             )
@@ -1309,12 +1424,16 @@ class ChannelSession:
             inline = (res or {}).get("payload")
             if inline is not None:
                 try:
-                    self.ctx.services.waits.resolve(cont.token, inline)
+                    self.ctx.services.waits.resolve(cont.continuation_id, inline)
                 except Exception:
                     logger = logging.getLogger("aethergraph.services.channel.session")
                     logger.debug("Continuation token %s already resolved inline", cont.token)
                 try:
-                    await self._cont_store.delete(self._run_id, self._node_id)
+                    cont.record = await self._cont_store.close(
+                        cont.record,
+                        status=ContinuationStatus.RESUMED,
+                        closed_at=datetime.now(UTC),
+                    )
                 except Exception:
                     logger.debug("Failed to delete continuation for token %s", cont.token)
                     logger.exception("Error occurred while deleting continuation")
@@ -1324,9 +1443,11 @@ class ChannelSession:
 
             corr = (res or {}).get("correlator")
             if corr:
-                await self._cont_store.bind_correlator(token=cont.token, corr=corr)
-                await self._cont_store.bind_correlator(
-                    token=cont.token,
+                cont.record = await self._cont_store.bind_correlator(
+                    continuation=cont.record, corr=corr
+                )
+                cont.record = await self._cont_store.bind_correlator(
+                    continuation=cont.record,
                     corr=Correlator(
                         scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
                     ),
@@ -1334,13 +1455,14 @@ class ChannelSession:
             else:
                 peek = await self._bus.peek_correlator(ch_key)
                 if peek:
-                    await self._cont_store.bind_correlator(
-                        token=cont.token,
+                    cont.record = await self._cont_store.bind_correlator(
+                        continuation=cont.record,
                         corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
                     )
                 else:
-                    await self._cont_store.bind_correlator(
-                        token=cont.token, corr=Correlator(self._bus._prefix(ch_key), ch_key, "", "")
+                    cont.record = await self._cont_store.bind_correlator(
+                        continuation=cont.record,
+                        corr=Correlator(self._bus._prefix(ch_key), ch_key, "", ""),
                     )
 
             result = await fut
@@ -1433,8 +1555,8 @@ class ChannelSession:
         silent: bool = False,  # kept for back-compat; same behavior as before
         channel: str | None = None,
         # memory config
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> str:
         """
@@ -1474,7 +1596,7 @@ class ChannelSession:
             Reply memory logging occurs only when returned text is non-empty.
         """
         channel_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_text",
             request={"prompt": prompt, "timeout_s": timeout_s, "channel_key": channel_key},
@@ -1522,7 +1644,7 @@ class ChannelSession:
         *,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_reply: bool = True,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
     ) -> str:
         """
@@ -1548,7 +1670,7 @@ class ChannelSession:
         Args:
             timeout_s: Maximum time in seconds to wait for a response (default: 3600).
             channel: Optional explicit channel key to override the default or session-bound channel.
-            memory_log_reply: Whether to log the user's reply to memory (default: True).
+            memory_log_reply: Whether to log the user's reply to memory (default: False).
             memory_tags: Optional list of tags to associate with the memory log entry.
 
         Returns:
@@ -1565,79 +1687,6 @@ class ChannelSession:
             memory_tags=memory_tags,
         )
 
-    async def ask_approval(
-        self,
-        prompt: str,
-        options: Iterable[str] = ("Approve", "Reject"),
-        *,
-        timeout_s: int = 3600,
-        channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
-        memory_tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Deprecated wrapper over `ask_choices()`.
-
-        Prompt for a button-style approval choice and return normalized result.
-
-        Send an `approval` continuation with button labels, wait for the user's
-        selected choice, preserve any typed text, then derive `approved` from
-        whether the first option was selected (case-insensitive).
-
-        Examples:
-            Use default approve/reject options:
-            ```python
-            result = await context.channel().ask_approval("Do you approve this action?")
-            # result: { "approved": True/False, "choice": "Approve"/"Reject", "text": "" }
-            ```
-
-            Use custom options:
-            ```python
-            result = await context.channel().ask_approval(
-                "Proceed with deployment?",
-                options=["Yes", "No", "Defer"],
-                timeout_s=120
-            )
-            ```
-
-        Args:
-            prompt: Prompt text shown to the user.
-            options: Ordered button labels. The first option maps to approved.
-            timeout_s: Continuation deadline in seconds.
-            channel: Optional target channel key.
-            memory_log_prompt: Enable memory logging for the prompt.
-            memory_log_reply: Enable memory logging for a selected choice.
-            memory_tags: Optional tags applied to memory entries.
-
-        Returns:
-            dict[str, Any]: `{"approved": bool, "choice": Any, "text": str}`.
-
-        Notes:
-            If no choice is returned, or `options` is empty, `approved` is `False`.
-        """
-        result = await self.ask_choices(
-            prompt,
-            options=options,
-            timeout_s=timeout_s,
-            channel=channel,
-            memory_log_prompt=memory_log_prompt,
-            memory_log_reply=memory_log_reply,
-            memory_tags=memory_tags,
-        )
-        choice_options = build_choice_options(options)
-        approved = bool(choice_options) and result.get("choice") == choice_options[0].id
-        return ChannelSession._ChannelResult(
-            {
-                "approved": approved,
-                "choice": result.get("choice"),
-                "choice_label": result.get("choice_label"),
-                "text": result.get("text", ""),
-                "matched": result.get("matched", False),
-            },
-            iter_keys=("approved", "choice", "choice_label", "text", "matched"),
-        )
-
     async def ask_choices(
         self,
         prompt: str,
@@ -1645,20 +1694,55 @@ class ChannelSession:
         *,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Prompt for a choice selection and return a normalized response.
+    ) -> ChoiceResult:
+        """Prompt for one normalized choice selection.
 
-        Returns a dict with canonical `choice`, human-facing `choice_label`,
-        the raw freeform `text`, and `matched` indicating whether the reply
-        resolved to one of the configured options.
+        The continuation reply is resolved against the configured identifiers,
+        labels, and aliases and returned as one immutable typed result.
+
+        Examples:
+            Ask with authored choice options:
+            ```python
+            result = await context.channel().ask_choices(
+                "Choose a mode",
+                options=[ChoiceOption(id="safe", label="Safe")],
+            )
+            selected = result.choice
+            ```
+
+            Ask with simple labels and a timeout:
+            ```python
+            result = await context.channel().ask_choices(
+                "Continue?",
+                options=["Yes", "No"],
+                timeout_s=120,
+            )
+            matched = result.matched
+            ```
+
+        Args:
+            prompt: Prompt text shown to the user.
+            options: Ordered choice labels, typed options, or option mappings.
+            timeout_s: Continuation deadline in seconds.
+            channel: Optional exact target channel address.
+            memory_log_prompt: Enable memory logging for the prompt.
+            memory_log_reply: Enable memory logging for the normalized reply.
+            memory_tags: Optional tags applied to memory entries.
+
+        Returns:
+            ChoiceResult: Immutable normalized choice, label, text, and match state.
+
+        Notes:
+            This is the only Channel API for approval and choice interactions;
+            approval semantics are derived by the calling policy from stable
+            option identifiers.
         """
         channel_key = self._resolve_key(channel)
         choice_options = build_choice_options(options)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_choices",
             request={
@@ -1713,17 +1797,19 @@ class ChannelSession:
                     channel=channel,
                 )
 
-            result = ChannelSession._ChannelResult(
-                {
-                    "choice": normalized.get("choice"),
-                    "choice_label": normalized.get("choice_label"),
-                    "text": normalized.get("text", ""),
-                    "matched": bool(normalized.get("matched")),
-                },
-                iter_keys=("choice", "choice_label", "text", "matched"),
+            result = ChoiceResult(
+                choice=normalized.get("choice"),
+                choice_label=normalized.get("choice_label"),
+                text=str(normalized.get("text", "")),
+                matched=bool(normalized.get("matched")),
             )
             await span.finish(
-                response=result,
+                response={
+                    "choice": result.choice,
+                    "choice_label": result.choice_label,
+                    "text": result.text,
+                    "matched": result.matched,
+                },
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
             )
             return result
@@ -1739,15 +1825,14 @@ class ChannelSession:
         multiple: bool = True,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
-    ) -> dict:
-        """
-        Prompt for file upload and return normalized text/files payload.
+    ) -> FileInteractionResult:
+        """Prompt for file upload and return a typed normalized reply.
 
         Send a `user_files` continuation prompt, wait for response, and return
-        a dictionary with text plus a list-valued `files` field.
+        immutable text and file fields.
 
         Examples:
             Ask for one or more files:
@@ -1755,7 +1840,7 @@ class ChannelSession:
             result = await context.channel().ask_files(
                 prompt="Please upload your report."
             )
-            # result: { "text": "...", "files": [FileRef(...), ...] }
+            uploaded = result.files
             ```
 
             Provide type hints for upload UI:
@@ -1778,13 +1863,13 @@ class ChannelSession:
             memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            dict: `{"text": str, "files": list}`.
+            FileInteractionResult: Immutable normalized text and uploaded files.
 
         Notes:
             `accept` is advisory and adapter-dependent, not strict server-side validation.
         """
         channel_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_files",
             request={
@@ -1824,14 +1909,13 @@ class ChannelSession:
                     channel=channel,
                 )
 
-            result = {
-                "text": text,
-                "files": payload.get("files", [])
-                if isinstance(payload.get("files", []), list)
-                else [],
-            }
+            raw_files = payload.get("files", [])
+            result = FileInteractionResult(
+                text=text,
+                files=tuple(raw_files) if isinstance(raw_files, list) else (),
+            )
             await span.finish(
-                response={"text": text, "files_count": len(result["files"])},
+                response={"text": text, "files_count": len(result.files)},
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
             )
             return result
@@ -1845,20 +1929,20 @@ class ChannelSession:
         prompt: str,
         timeout_s: int = 3600,
         channel: str | None = None,
-        memory_log_prompt: bool = True,
-        memory_log_reply: bool = True,
+        memory_log_prompt: bool = False,
+        memory_log_reply: bool = False,
         memory_tags: list[str] | None = None,
-    ) -> dict:
-        """
-        Prompt for either text or files and return normalized payload.
+    ) -> FileInteractionResult:
+        """Prompt for either text or files and return a typed normalized reply.
 
-        Send a `user_input_or_files` continuation request and return both `text`
-        and `files` fields after normalization.
+        Send a `user_input_or_files` continuation request and return immutable
+        text and file fields after normalization.
 
         Examples:
             Prompt for either modality:
             ```python
             result = await context.channel().ask_text_or_files(prompt="Reply or upload files")
+            text = result.text
             ```
 
             Send to a specific channel:
@@ -1878,13 +1962,13 @@ class ChannelSession:
             memory_tags: Optional tags applied to memory entries.
 
         Returns:
-            dict: `{"text": str, "files": list}`.
+            FileInteractionResult: Immutable normalized text and uploaded files.
 
         Notes:
             Prefer `ask_text` + `get_latest_uploads` or `ask_files` when modality is known.
         """
         channel_key = self._resolve_key(channel)
-        span = await self._tracer.start_span(
+        span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_text_or_files",
             request={"prompt": prompt, "timeout_s": timeout_s, "channel_key": channel_key},
@@ -1918,14 +2002,13 @@ class ChannelSession:
                     channel=channel,
                 )
 
-            result = {
-                "text": text,
-                "files": payload.get("files", [])
-                if isinstance(payload.get("files", []), list)
-                else [],
-            }
+            raw_files = payload.get("files", [])
+            result = FileInteractionResult(
+                text=text,
+                files=tuple(raw_files) if isinstance(raw_files, list) else (),
+            )
             await span.finish(
-                response={"text": text, "files_count": len(result["files"])},
+                response={"text": text, "files_count": len(result.files)},
                 metadata=self._inject_context_meta({"channel_key": channel_key}),
             )
             return result
@@ -2042,7 +2125,7 @@ class ChannelSession:
             self,
             full_text: str | None = None,
             *,
-            memory_log: bool = True,
+            memory_log: bool = False,
             memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
             memory_tags: list[str] | None = None,
             memory_data: dict[str, Any] | None = None,
@@ -2133,7 +2216,7 @@ class ChannelSession:
         full_text: str,
         *,
         channel: str | None = None,
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
@@ -2244,7 +2327,7 @@ class ChannelSession:
         thinking_detail_tail_chars: int = 300,
         emit_thinking_phase: bool = False,
         # Memory logging
-        memory_log: bool = True,
+        memory_log: bool = False,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
         memory_tags: list[str] | None = None,
         memory_data: dict[str, Any] | None = None,
@@ -2263,6 +2346,11 @@ class ChannelSession:
         last_thinking_ts = 0.0
         thinking_started = False
         text_started = False
+        thinking_phase_key = (
+            f"{self._run_id}:{self._node_id}:thinking:{uuid.uuid4().hex}"
+            if emit_thinking_phase
+            else None
+        )
 
         async with self.stream(channel=channel) as s:
 
@@ -2282,6 +2370,7 @@ class ChannelSession:
                         await self.send_phase(
                             phase=thinking_phase,
                             status="active",
+                            phase_key=thinking_phase_key,
                             label=thinking_label_active,
                             channel=channel,
                         )
@@ -2302,6 +2391,7 @@ class ChannelSession:
                         await self.send_phase(
                             phase=thinking_phase,
                             status="active",
+                            phase_key=thinking_phase_key,
                             label=thinking_label_active,
                             detail=detail,
                             channel=channel,
@@ -2323,6 +2413,7 @@ class ChannelSession:
                         await self.send_phase(
                             phase=thinking_phase,
                             status="done",
+                            phase_key=thinking_phase_key,
                             label=thinking_label_done,
                             detail=full,
                             channel=channel,
@@ -2361,6 +2452,7 @@ class ChannelSession:
                     await self.send_phase(
                         phase=thinking_phase,
                         status="done",
+                        phase_key=thinking_phase_key,
                         label=thinking_label_done,
                         detail=full,
                         channel=channel,

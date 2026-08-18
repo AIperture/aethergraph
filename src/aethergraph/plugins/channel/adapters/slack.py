@@ -84,6 +84,25 @@ class SlackChannelAdapter(ChannelAdapter):
     async def send(self, event: OutEvent) -> dict | None:
         channel, thread_ts = await self._ensure_thread(event.channel)
 
+        if event.type == "structured.output":
+            from aethergraph.services.channel.structured_outputs import (
+                project_messaging_text,
+            )
+
+            resp = await self.client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=project_messaging_text(event),
+            )
+            return {
+                "correlator": Correlator(
+                    scheme="slack",
+                    channel=event.channel,
+                    thread=thread_ts,
+                    message=resp.get("ts"),
+                )
+            }
+
         # streaming/upsert: we use chat.update keyed by upsert_key
         if (
             event.type
@@ -168,16 +187,12 @@ class SlackChannelAdapter(ChannelAdapter):
                 if getattr(b, "url", None):
                     btn["url"] = b.url
                 else:
-                    # pack choice + correlators into value for /slack/interact
+                    # Pack only the public interaction identity and selected option.
                     value_payload = {
                         "choice": getattr(b, "value", None) or b.label,
                         "choice_label": b.label,
+                        "interaction_id": (event.meta or {}).get("interaction_id"),
                     }
-                    # if passing correlators via event.meta
-                    if event.meta:
-                        for k in ("run_id", "node_id", "token"):
-                            if k in event.meta:
-                                value_payload[k] = event.meta[k]
                     import json
 
                     btn["value"] = json.dumps(value_payload)

@@ -1,23 +1,413 @@
+"""Frozen runtime continuation service contract."""
+
 from __future__ import annotations
 
-from typing import Any, Protocol
+from datetime import datetime
+from typing import Protocol
+
+from aethergraph.services.continuations.continuation import (
+    Continuation,
+    ContinuationDraft,
+    ContinuationPage,
+    ContinuationQuery,
+    ContinuationStatus,
+    Correlator,
+    CreatedContinuation,
+)
+from aethergraph.services.continuations.timer_lease import TimerLease
 
 
 class AsyncContinuationStore(Protocol):
-    async def mint_token(self, run_id: str, node_id: str, attempts: int) -> str: ...
-    async def save(self, cont: Any) -> None: ...
-    async def get(self, run_id: str, node_id: str) -> Any | None: ...
-    async def delete(self, run_id: str, node_id: str) -> None: ...
+    """Atomic token-safe continuation persistence used by the runtime."""
 
-    async def get_by_token(self, token: str) -> Any | None: ...
-    async def mark_closed(self, token: str) -> None: ...
-    async def verify_token(self, run_id: str, node_id: str, token: str) -> bool: ...
+    async def create(self, draft: ContinuationDraft) -> CreatedContinuation:
+        """Atomically mint and persist one continuation.
 
-    async def bind_correlator(self, *, token: str, corr: Any) -> None: ...
-    async def find_by_correlator(self, *, corr: Any) -> Any | None: ...
+        Intro:
+            Defines the single creation boundary for record and secret indexes.
 
-    # Optional helpers
-    async def last_open(self, *, channel: str, kind: str) -> Any | None: ...
-    async def list_waits(self) -> list[dict[str, Any]]: ...
-    async def clear(self) -> None: ...
-    async def alias_for(self, token: str) -> str | None: ...
+        Examples:
+            Create an approval wait:
+            ```python
+            created = await store.create(draft)
+            ```
+            Register its one-time token:
+            ```python
+            future = waits.register(created.record.continuation_id)
+            ```
+
+        Args:
+            draft: Immutable tokenless continuation content.
+
+        Returns:
+            CreatedContinuation: Revision-one record and one-time raw token.
+
+        Notes:
+            The raw token must not be persisted in the continuation document.
+        """
+        ...
+
+    async def get(self, run_id: str, node_id: str) -> Continuation | None:
+        """Read one current continuation by exact run/node identity.
+
+        Intro:
+            Retrieves a tokenless record through its scheduler-facing identity.
+
+        Examples:
+            Read a wait:
+            ```python
+            wait = await store.get("run-1", "approval")
+            ```
+            Detect absence:
+            ```python
+            assert await store.get("missing", "node") is None
+            ```
+
+        Args:
+            run_id: Exact run identity.
+            node_id: Exact node identity.
+
+        Returns:
+            Continuation | None: Current tokenless record or `None`.
+
+        Notes:
+            This lookup never authorizes bearer-token input.
+        """
+        ...
+
+    async def get_by_id(
+        self, run_id: str, node_id: str, continuation_id: str
+    ) -> Continuation | None:
+        """Read one continuation by stable identity.
+
+        Intro:
+            Retrieves a tokenless record for trusted internal delivery.
+
+        Examples:
+            Read a timer candidate:
+            ```python
+            wait = await store.get_by_id("run-1", "node-1", "cont-1")
+            ```
+            Detect absence:
+            ```python
+            assert await store.get_by_id("run-1", "node-1", "missing") is None
+            ```
+
+        Args:
+            run_id: Exact run identity.
+            node_id: Exact node identity.
+            continuation_id: Stable continuation identity.
+
+        Returns:
+            Continuation | None: Current tokenless record or `None`.
+
+        Notes:
+            Trusted internal delivery uses this identity, never a persisted token.
+        """
+        ...
+
+    async def resolve_token(self, token: str) -> Continuation | None:
+        """Resolve one external bearer token at the authorization boundary.
+
+        Intro:
+            Delegates secret protection and exact lookup to the configured store.
+
+        Examples:
+            Resolve an inbound token:
+            ```python
+            wait = await store.resolve_token(token)
+            ```
+            Reject an unknown token:
+            ```python
+            assert await store.resolve_token("invalid") is None
+            ```
+
+        Args:
+            token: Raw token supplied by the external caller.
+
+        Returns:
+            Continuation | None: Matching tokenless record or `None`.
+
+        Notes:
+            Providers own token protection and comparison; callers do not revalidate it.
+        """
+        ...
+
+    async def update(self, continuation: Continuation, *, expected_revision: int) -> Continuation:
+        """Replace one continuation with an exact next revision.
+
+        Intro:
+            Defines compare-and-set mutation for non-creation state changes.
+
+        Examples:
+            Reschedule a poll:
+            ```python
+            stored = await store.update(changed, expected_revision=current.revision)
+            ```
+            Close a delivered wait:
+            ```python
+            stored = await store.update(resumed, expected_revision=current.revision)
+            ```
+
+        Args:
+            continuation: Complete immutable next revision.
+            expected_revision: Revision that must currently be authoritative.
+
+        Returns:
+            Continuation: Newly stored authoritative revision.
+
+        Notes:
+            Identity and terminal lifecycle are immutable; stale updates fail explicitly.
+        """
+        ...
+
+    async def close(
+        self,
+        continuation: Continuation,
+        *,
+        status: ContinuationStatus,
+        closed_at: datetime,
+    ) -> Continuation:
+        """Atomically transition one waiting continuation to a terminal state.
+
+        Intro:
+            Retains a durable terminal receipt after successful or canceled delivery.
+
+        Examples:
+            Mark a successful resume:
+            ```python
+            closed = await store.close(wait, status=ContinuationStatus.RESUMED, closed_at=now)
+            ```
+            Cancel a wait:
+            ```python
+            closed = await store.close(wait, status=ContinuationStatus.CANCELED, closed_at=now)
+            ```
+
+        Args:
+            continuation: Exact current tokenless record.
+            status: Requested non-waiting terminal state.
+            closed_at: Timezone-aware terminal transition time.
+
+        Returns:
+            Continuation: Newly stored terminal revision.
+
+        Notes:
+            Successful resumes retain a durable terminal receipt; records are not deleted.
+        """
+        ...
+
+    async def bind_correlator(
+        self, *, continuation: Continuation, corr: Correlator
+    ) -> Continuation:
+        """Atomically bind one exact correlator to a continuation.
+
+        Intro:
+            Commits record revision and reverse lookup as one logical mutation.
+
+        Examples:
+            Bind a public interaction identity:
+            ```python
+            wait = await store.bind_correlator(continuation=wait, corr=interaction)
+            ```
+            Bind a channel delivery receipt:
+            ```python
+            wait = await store.bind_correlator(continuation=wait, corr=message)
+            ```
+
+        Args:
+            continuation: Exact current record and expected revision.
+            corr: Exact correlator to bind idempotently.
+
+        Returns:
+            Continuation: Current or newly revised tokenless record.
+
+        Notes:
+            Binding uses stable continuation identity rather than bearer-token lookup.
+        """
+        ...
+
+    async def query(self, query: ContinuationQuery) -> ContinuationPage:
+        """Execute one bounded continuation query.
+
+        Intro:
+            Selects indexed due, interaction, session, kind, or status records.
+
+        Examples:
+            Query due timers:
+            ```python
+            page = await store.query(ContinuationQuery(due_at_or_before=now, limit=50))
+            ```
+            Query one interaction:
+            ```python
+            page = await store.query(ContinuationQuery(correlator=interaction, limit=2))
+            ```
+
+        Args:
+            query: Exact indexed filters, bound, and optional cursor.
+
+        Returns:
+            ContinuationPage: Bounded records and optional continuation cursor.
+
+        Notes:
+            Implementations must not replace indexed filters with unbounded global scans.
+        """
+        ...
+
+
+class AsyncContinuationLeaseStore(Protocol):
+    """Asynchronous provider-neutral timer claim and receipt boundary."""
+
+    async def claim(
+        self,
+        *,
+        fire_id: str,
+        continuation_id: str,
+        run_id: str,
+        node_id: str,
+        scheduled_for: datetime,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> TimerLease | None:
+        """Atomically claim one scheduled continuation occurrence.
+
+        Intro:
+            Creates, retries, or reclaims one exact provider-owned lease.
+
+        Examples:
+            Claim a due occurrence:
+            ```python
+            lease = await store.claim(
+                fire_id=fire_id, continuation_id=wait_id, run_id=run_id,
+                node_id=node_id, scheduled_for=scheduled_for,
+                worker_id=worker_id, now=now, lease_until=lease_until,
+            )
+            ```
+
+            Detect contention:
+            ```python
+            assert await store.claim(**request) is None
+            ```
+
+        Args:
+            fire_id: Stable scheduled occurrence identity.
+            continuation_id: Stable continuation identity.
+            run_id: Exact run identity.
+            node_id: Exact node identity.
+            scheduled_for: Exact timezone-aware occurrence time.
+            worker_id: Claiming worker identity.
+            now: Injected timezone-aware transition time.
+            lease_until: Time after which another worker may reclaim.
+
+        Returns:
+            TimerLease | None: Worker-owned lease or `None` when ineligible.
+
+        Notes:
+            Raw continuation tokens never participate in claim identity.
+        """
+        ...
+
+    async def complete(self, lease: TimerLease, *, now: datetime) -> bool:
+        """Atomically mark one owned lease delivered.
+
+        Intro:
+            Uses the lease revision and worker identity to retain a terminal receipt.
+
+        Examples:
+            Complete delivery:
+            ```python
+            changed = await store.complete(lease, now=now)
+            ```
+
+            Detect lost ownership:
+            ```python
+            assert not await store.complete(stale, now=now)
+            ```
+
+        Args:
+            lease: Exact current worker-owned lease.
+            now: Injected timezone-aware completion time.
+
+        Returns:
+            bool: Whether the terminal transition committed.
+
+        Notes:
+            Delivered receipts remain durable and immutable.
+        """
+        ...
+
+    async def record_failure(
+        self,
+        lease: TimerLease,
+        *,
+        now: datetime,
+        next_attempt_at: datetime | None,
+        error: str,
+        dead_letter: bool,
+    ) -> bool:
+        """Atomically record retry or terminal delivery failure.
+
+        Intro:
+            Releases an owned lease into bounded backoff or a dead-letter receipt.
+
+        Examples:
+            Schedule retry:
+            ```python
+            changed = await store.record_failure(
+                lease, now=now, next_attempt_at=retry_at,
+                error="unavailable", dead_letter=False,
+            )
+            ```
+
+            Dead-letter exhaustion:
+            ```python
+            changed = await store.record_failure(
+                lease, now=now, next_attempt_at=None,
+                error="exhausted", dead_letter=True,
+            )
+            ```
+
+        Args:
+            lease: Exact current worker-owned lease.
+            now: Injected timezone-aware transition time.
+            next_attempt_at: Next eligible time or `None` for dead letter.
+            error: Bounded failure description.
+            dead_letter: Whether to terminalize instead of retry.
+
+        Returns:
+            bool: Whether the exact owned-lease transition committed.
+
+        Notes:
+            Continuation lifecycle is unchanged when delivery fails.
+        """
+        ...
+
+    async def get(self, run_id: str, node_id: str, fire_id: str) -> TimerLease | None:
+        """Read one lease or retained receipt.
+
+        Intro:
+            Returns diagnostic state without changing ownership or retry eligibility.
+
+        Examples:
+            Read a receipt:
+            ```python
+            receipt = await store.get("run-1", "node-1", "fire-1")
+            ```
+
+            Detect absence:
+            ```python
+            assert await store.get("run-1", "node-1", "missing") is None
+            ```
+
+        Args:
+            run_id: Exact run identity.
+            node_id: Exact node identity.
+            fire_id: Stable occurrence identity.
+
+        Returns:
+            TimerLease | None: Current lease/receipt or `None`.
+
+        Notes:
+            Exact run/node identity prevents diagnostics from becoming a global scan.
+        """
+        ...

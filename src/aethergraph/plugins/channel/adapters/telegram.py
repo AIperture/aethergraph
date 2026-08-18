@@ -150,6 +150,23 @@ class TelegramChannelAdapter(ChannelAdapter):
         chat_id = meta["chat"]
         topic_id = meta["topic"]  # None if not provided
 
+        if event.type == "structured.output":
+            from aethergraph.services.channel.structured_outputs import (
+                project_messaging_text,
+            )
+
+            text, markdown = _safe_text_md(project_messaging_text(event))
+            params = _mk_params(chat_id, topic_id, text=text, parse_mode=markdown)
+            response = await self._api("sendMessage", **params)
+            return {
+                "correlator": Correlator(
+                    scheme="tg",
+                    channel=event.channel,
+                    thread=str(topic_id or ""),
+                    message=str(response["result"]["message_id"]),
+                )
+            }
+
         # Streaming & upsert (editMessageText)
         if (
             event.type
@@ -209,15 +226,17 @@ class TelegramChannelAdapter(ChannelAdapter):
                     ),
                 ]
 
-            # Compact callback data: "i=<index>|k=<resume_key>"  (<< 64 bytes)
-            resume_key = (event.meta or {}).get("resume_key") or ""
+            # Public interaction identity plus option index stays below Telegram's limit.
+            interaction_id = (event.meta or {}).get("interaction_id") or ""
             rows = []
             for idx, b in enumerate(buttons[:8], start=1):
                 label = b.label
                 if getattr(b, "url", None):
                     rows.append([{"text": label, "url": b.url}])
                 else:
-                    data = f"i={idx}|k={resume_key}"
+                    data = f"i={interaction_id}|o={idx}"
+                    if len(data.encode("utf-8")) > 64:
+                        raise ValueError("Telegram interaction callback exceeds 64 bytes.")
                     rows.append([{"text": label, "callback_data": data}])
 
             reply_markup = {"inline_keyboard": rows}

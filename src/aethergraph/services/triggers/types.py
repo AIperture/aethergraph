@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from aethergraph.contracts.services.trigger import TriggerKind
@@ -29,7 +29,16 @@ class TriggerRecord:
     client_id: str | None = None
     mode: str | None = None  # "cloud", "demo", "local", etc.
 
-    app_id: str | None = None
+    app_id: str | None = field(
+        default=None,
+        metadata={
+            "deprecated": True,
+            "description": (
+                "Deprecated; retained for compatibility and scheduled for removal "
+                "in a future breaking release."
+            ),
+        },
+    )
     agent_id: str | None = None
     session_id: str | None = None
 
@@ -57,7 +66,7 @@ class TriggerRecord:
 
     # Lifecycle
     active: bool = True
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     last_fired_at: datetime | None = None
     next_fire_at: datetime | None = None
 
@@ -66,7 +75,32 @@ class TriggerRecord:
 
     # -------------- helpers --------------
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serializable representation for DocStore."""
+        """Return the JSON-serializable trigger service projection.
+
+        The result contains schedule, ownership, launch-context, and lifecycle fields
+        with timestamps normalized to ISO strings for public service transport.
+
+        Examples:
+            Serialize a scheduled trigger:
+                ```python
+                payload = trigger.to_dict()
+                ```
+
+            Read the stable trigger identity:
+                ```python
+                assert trigger.to_dict()["trigger_id"] == trigger.trigger_id
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, Any]: Detached JSON-compatible trigger fields.
+
+        Notes:
+            `app_id` is retained only as deprecated optional compatibility metadata;
+            canonical provider scope and authorization never depend on it.
+        """
 
         def _dt(d: datetime | None) -> str | None:
             return d.isoformat() if d is not None else None
@@ -132,7 +166,7 @@ class TriggerRecord:
             max_overlap_runs=data.get("max_overlap_runs"),
             catch_up_missed=data.get("catch_up_missed", False),
             active=data.get("active", True),
-            created_at=_dt(data.get("created_at")) or datetime.now(timezone.utc),
+            created_at=_dt(data.get("created_at")) or datetime.now(UTC),
             last_fired_at=_dt(data.get("last_fired_at")),
             next_fire_at=_dt(data.get("next_fire_at")),
             meta=data.get("meta") or {},
@@ -185,3 +219,16 @@ class TriggerRecord:
             catch_up_missed=catch_up_missed,
             meta=dict(meta or {}),
         )
+
+
+@dataclass(frozen=True)
+class TriggerClaim:
+    """One durable, worker-owned trigger occurrence."""
+
+    fire_id: str
+    trigger: TriggerRecord
+    scheduled_for: datetime
+    worker_id: str
+    lease_until: datetime
+    attempts: int
+    reclaimed: bool = False

@@ -6,11 +6,14 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
-from aethergraph.core.runtime.run_types import RunStatus
+from aethergraph.core.runtime.run_types import RunOrigin, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
-from aethergraph.storage.runs.inmen_store import InMemoryRunStore
-from aethergraph.storage.runs.result_store import InMemoryRunResultStore
+from aethergraph.storage.contracts.scope import StorageScope
+from tests._run_store_fakes import RunResultStoreFake, RunStoreFake
+
+InMemoryRunStore = RunStoreFake
+InMemoryRunResultStore = RunResultStoreFake
 
 
 class Identity:
@@ -24,21 +27,25 @@ class FakeGraphStateStore:
     def __init__(self):
         self.snapshots: dict[str, GraphSnapshot] = {}
 
-    async def save_snapshot(self, snap: GraphSnapshot) -> None:
+    async def save_snapshot(self, scope: StorageScope, snap: GraphSnapshot) -> None:
         self.snapshots[snap.run_id] = snap
 
-    async def load_latest_snapshot(self, run_id: str) -> GraphSnapshot | None:
+    async def load_latest_snapshot(self, scope: StorageScope, run_id: str) -> GraphSnapshot | None:
         return self.snapshots.get(run_id)
 
-    async def append_event(self, ev) -> None:  # pragma: no cover - not needed here
+    async def append_event(
+        self, scope: StorageScope, ev
+    ) -> None:  # pragma: no cover - not needed here
         return None
 
     async def load_events_since(
-        self, run_id: str, from_rev: int
+        self, scope: StorageScope, run_id: str, from_rev: int
     ):  # pragma: no cover - not needed here
         return []
 
-    async def list_run_ids(self, graph_id: str | None = None):  # pragma: no cover - not needed here
+    async def list_run_ids(
+        self, scope: StorageScope, graph_id: str | None = None
+    ):  # pragma: no cover - not needed here
         return list(self.snapshots.keys())
 
 
@@ -338,6 +345,79 @@ async def test_run_manager_submit_run_non_blocking(monkeypatch, dummy_meter):
 
 
 @pytest.mark.asyncio
+async def test_submit_run_gates_same_session_root_turns_but_not_agent_children(
+    monkeypatch, dummy_meter
+):
+    store = InMemoryRunStore()
+    reg = UnifiedRegistry()
+    rm = RunManager(run_store=store, registry=reg, max_concurrent_runs=10)
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    root_started = asyncio.Event()
+    release_root = asyncio.Event()
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        if inputs.get("name") == "root":
+            root_started.set()
+            await release_root.wait()
+        return {"name": inputs.get("name")}
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    root = await rm.submit_run(
+        graph_id="my-graph",
+        inputs={"name": "root"},
+        identity=Identity(user_id="u1", org_id="o1"),
+        session_id="sess-1",
+        origin=RunOrigin.chat,
+    )
+    await asyncio.wait_for(root_started.wait(), timeout=1.0)
+
+    child = await asyncio.wait_for(
+        rm.submit_run(
+            graph_id="my-graph",
+            inputs={"name": "child"},
+            identity=Identity(user_id="u1", org_id="o1"),
+            session_id="sess-1",
+            origin=RunOrigin.agent,
+        ),
+        timeout=0.5,
+    )
+    child_record, _ = await rm.wait_run(child.run_id, return_outputs=True)
+    assert child_record.status == RunStatus.succeeded
+
+    next_root_task = asyncio.create_task(
+        rm.submit_run(
+            graph_id="my-graph",
+            inputs={"name": "next-root"},
+            identity=Identity(user_id="u1", org_id="o1"),
+            session_id="sess-1",
+            origin=RunOrigin.chat,
+        )
+    )
+    await asyncio.sleep(0.12)
+    assert next_root_task.done() is False
+
+    release_root.set()
+    next_root = await asyncio.wait_for(next_root_task, timeout=1.0)
+
+    root_record, _ = await rm.wait_run(root.run_id, return_outputs=True)
+    next_root_record, _ = await rm.wait_run(next_root.run_id, return_outputs=True)
+    assert root_record.status == RunStatus.succeeded
+    assert next_root_record.status == RunStatus.succeeded
+
+
+@pytest.mark.asyncio
 async def test_run_manager_submit_run_persists_launch_metadata_and_run_config(
     monkeypatch, dummy_meter
 ):
@@ -459,16 +539,26 @@ async def test_run_facade_bound_cancellation_helpers(monkeypatch):
     cancel_registry = RunCancellationRegistry()
 
     class FakeRunManager:
-        async def cancel_run(self, run_id: str) -> None:
+        def __init__(self) -> None:
+            self.reasons: list[str] = []
+
+        async def cancel_run(
+            self,
+            run_id: str,
+            *,
+            reason: str = "user_requested",
+        ) -> None:
+            self.reasons.append(reason)
             handle = await cancel_registry.create(run_id)
-            await handle.request_cancel()
+            await handle.request_cancel(reason=reason)
 
     monkeypatch.setattr(
         "aethergraph.services.runner.facade.get_run_cancellation_registry",
         lambda: cancel_registry,
     )
 
-    facade = RunFacade(run_manager=FakeRunManager(), current_run_id="run-abc")
+    manager = FakeRunManager()
+    facade = RunFacade(run_manager=manager, current_run_id="run-abc")
     event = await facade.thread_cancel_event()
     assert event.is_set() is False
     assert await facade.is_cancel_requested() is False
@@ -477,8 +567,15 @@ async def test_run_facade_bound_cancellation_helpers(monkeypatch):
     await handle.request_cancel()
 
     assert await facade.is_cancel_requested() is True
+    assert await facade.cancellation_reason() == "user_requested"
     with pytest.raises(RuntimeError, match="cancellation requested"):
         await facade.raise_if_cancel_requested()
+
+    await facade.cancel_run("run-child", reason="parent_cancelled")
+    assert manager.reasons == ["parent_cancelled"]
+    child = await cancel_registry.get("run-child")
+    assert child is not None
+    assert child.cancel_reason == "parent_cancelled"
 
 
 @pytest.mark.asyncio
@@ -515,6 +612,117 @@ async def test_wait_run_return_outputs_same_process(monkeypatch, dummy_meter):
     waited_record, outputs = await rm.wait_run(record.run_id, return_outputs=True)
     assert waited_record.status == RunStatus.succeeded
     assert outputs == {"out": 123}
+
+
+@pytest.mark.asyncio
+async def test_submit_run_admission_callback_precedes_execution(monkeypatch, dummy_meter):
+    """Prove durable Host admission completes before graph code can run.
+
+    Examples:
+        Persist a Studio execution lease before the graph starts.
+        Inspect the already-created run record inside the callback.
+
+    Args:
+        monkeypatch: Pytest mutation fixture.
+        dummy_meter: Isolated runtime-meter fixture.
+
+    Returns:
+        None.
+
+    Notes:
+        The callback and graph share one ordered event list to expose scheduling races.
+    """
+    store = InMemoryRunStore()
+    manager = RunManager(run_store=store, registry=UnifiedRegistry())
+    events: list[str] = []
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        events.append("executed")
+        return {"out": 1}
+
+    async def admit(record) -> None:
+        persisted = await store.get(record.run_id)
+        assert persisted is not None
+        assert persisted.status == RunStatus.running
+        events.append("admitted")
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record = await manager.submit_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+        admission_callback=admit,
+    )
+    finished = await manager.wait_run(record.run_id)
+
+    assert finished.status == RunStatus.succeeded
+    assert events == ["admitted", "executed"]
+
+
+@pytest.mark.asyncio
+async def test_submit_run_admission_failure_never_executes(monkeypatch, dummy_meter):
+    """Prove a rejected Host binding terminalizes without scheduling work.
+
+    Examples:
+        Reject a turn when its external execution lease cannot be persisted.
+        Wait on the resulting durable failed record without a hanging future.
+
+    Args:
+        monkeypatch: Pytest mutation fixture.
+        dummy_meter: Isolated runtime-meter fixture.
+
+    Returns:
+        None.
+
+    Notes:
+        Admission failure is a single fail-closed path, not a retry or direct-run path.
+    """
+    store = InMemoryRunStore()
+    manager = RunManager(run_store=store, registry=UnifiedRegistry())
+    executed = False
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        nonlocal executed
+        executed = True
+        return {"out": 1}
+
+    async def reject(_record) -> None:
+        raise RuntimeError("lease store unavailable")
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    with pytest.raises(RuntimeError, match="Run admission callback failed"):
+        await manager.submit_run(
+            graph_id="my-graph",
+            inputs={"x": 1},
+            run_id="run-admission-rejected",
+            admission_callback=reject,
+        )
+
+    record = await manager.wait_run("run-admission-rejected")
+    assert record.status == RunStatus.failed
+    assert record.meta["error_code"] == "run_admission_failed"
+    assert executed is False
 
 
 @pytest.mark.asyncio
@@ -560,6 +768,60 @@ async def test_wait_run_return_outputs_uses_persisted_result_for_terminal_succes
 
 
 @pytest.mark.asyncio
+async def test_success_status_is_durable_before_result_save(
+    monkeypatch,
+    dummy_meter,
+    tmp_path,
+):
+    store = RunStoreFake()
+
+    class OrderingResultStore(InMemoryRunResultStore):
+        observed_status = None
+
+        async def save(self, run_id, result) -> None:
+            durable = await store.get(run_id)
+            self.observed_status = durable.status if durable is not None else None
+            assert durable is not None
+            assert durable.status == RunStatus.succeeded
+            assert durable.finished_at is not None
+            assert "output_preview" in durable.meta
+            await super().save(run_id, result)
+
+    result_store = OrderingResultStore()
+    manager = RunManager(
+        run_store=store,
+        result_store=result_store,
+        registry=UnifiedRegistry(),
+    )
+
+    async def fake_resolve(self, graph_id: str):
+        return object()
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.run_manager.RunManager._resolve_target",
+        fake_resolve,
+    )
+
+    async def fake_run_or_resume_async(target, inputs, run_id=None, **kwargs):
+        return {"out": 42}
+
+    monkeypatch.setattr(
+        "aethergraph.core.runtime.graph_runner.run_or_resume_async",
+        fake_run_or_resume_async,
+    )
+
+    record, _, _, _ = await manager.start_run(
+        graph_id="my-graph",
+        inputs={"x": 1},
+        identity=Identity(user_id="u1", org_id="o1"),
+    )
+    waited, outputs = await manager.wait_run(record.run_id, return_outputs=True)
+    assert waited.status == RunStatus.succeeded
+    assert outputs == {"out": 42}
+    assert result_store.observed_status == RunStatus.succeeded
+
+
+@pytest.mark.asyncio
 async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_result(
     monkeypatch, dummy_meter
 ):
@@ -597,6 +859,7 @@ async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_resul
     )
     await result_store.delete(record.run_id)
     await state_store.save_snapshot(
+        StorageScope(org_id="o1", user_id="u1", run_id=record.run_id, graph_id="my-graph"),
         GraphSnapshot(
             run_id=record.run_id,
             graph_id="my-graph",
@@ -604,7 +867,7 @@ async def test_wait_run_return_outputs_falls_back_to_snapshot_and_persists_resul
             created_at=0.0,
             spec_hash="demo",
             state={"graph_outputs": {"out": 99}},
-        )
+        ),
     )
 
     waited_record, outputs = await rm.wait_run(record.run_id, return_outputs=True)

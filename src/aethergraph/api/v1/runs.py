@@ -1,17 +1,16 @@
 # /runs
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request  #     type: ignore
+from fastapi import APIRouter, Depends, HTTPException, Query  #     type: ignore
 
-from aethergraph.api.v1.pagination import (
-    decode_cursor,
-    decode_cursor_v2,
-    encode_cursor,
-    encode_keyset_cursor,
-)
+from aethergraph.api.v1.pagination import decode_cursor, encode_cursor
 from aethergraph.api.v1.registry_helpers import scoped_registry
+from aethergraph.core.runtime.inspection import (
+    RuntimeInspectionService,
+    build_error_info,
+)
 from aethergraph.core.runtime.run_manager import DuplicateRunIdError, RunManager
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.core.runtime.runtime_services import current_services
@@ -20,8 +19,6 @@ from .deps import RequestIdentity, enforce_run_rate_limits, get_identity, requir
 from .run_presenters import to_run_summary
 from .schemas.runs import (
     NodeSnapshot,
-    RunChannelEvent,
-    RunChannelEventListResponse,
     RunCreateRequest,
     RunCreateResponse,
     RunListResponse,
@@ -29,39 +26,6 @@ from .schemas.runs import (
     RunStatus,
     RunSummary,
 )
-
-
-def _build_error_info(payload: Any, fallback_message: str | None = None):
-    if payload is None:
-        if not fallback_message:
-            return None
-        payload = {"message": fallback_message}
-    if isinstance(payload, dict):
-        message = payload.get("message") or fallback_message
-        detail = payload.get("detail")
-        if not message and not detail:
-            return None
-        return {
-            "message": message or "Run failed",
-            "detail": detail,
-            "kind": payload.get("kind"),
-            "stage": payload.get("stage"),
-            "code": payload.get("code"),
-            "hints": list(payload.get("hints") or []),
-            "is_traceback": bool(payload.get("is_traceback", False)),
-        }
-    if fallback_message or payload:
-        return {
-            "message": fallback_message or str(payload),
-            "detail": None,
-            "kind": None,
-            "stage": None,
-            "code": None,
-            "hints": [],
-            "is_traceback": False,
-        }
-    return None
-
 
 router = APIRouter(tags=["runs"])
 
@@ -83,9 +47,10 @@ async def create_run(
 
     app_vis = None
     app_imp = None
+    deprecated_app_id = body.model_dump(include={"app_id"})["app_id"]
     reg = scoped_registry(identity)
-    if body.app_id and reg is not None:
-        app_meta = reg.get_meta(nspace="app", name=body.app_id, include_global=True)
+    if deprecated_app_id and reg is not None:
+        app_meta = reg.get_meta(nspace="app", name=deprecated_app_id, include_global=True)
         if app_meta:
             app_vis = app_meta.get("run_visibility")
             app_imp = app_meta.get("run_importance")
@@ -104,7 +69,7 @@ async def create_run(
             visibility=body.visibility or app_vis or RunVisibility.normal,
             importance=body.importance or app_imp or RunImportance.normal,
             agent_id=body.agent_id or None,
-            app_id=body.app_id or None,
+            app_id=deprecated_app_id or None,
             app_name=body.app_name or None,
             run_config=body.run_config or {},
         )
@@ -245,13 +210,13 @@ def _coerce_ts_to_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         # Ensure it's tz-aware; default to UTC if naive.
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+            return value.replace(tzinfo=UTC)
         return value
 
     # Epoch seconds (int/float)
     if isinstance(value, int | float):
         try:
-            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+            return datetime.fromtimestamp(float(value), tz=UTC)
         except Exception:
             return None
 
@@ -260,7 +225,7 @@ def _coerce_ts_to_dt(value: Any) -> datetime | None:
         try:
             dt = datetime.fromisoformat(value)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.replace(tzinfo=UTC)
             return dt
         except Exception:
             return None
@@ -296,61 +261,6 @@ def _coerce_node_status(value: Any, fallback: RunStatus) -> RunStatus:
     return fallback
 
 
-def _is_terminal_node_status(value: Any) -> bool:
-    status = str(value or "").upper()
-    return status in {"DONE", "FAILED", "CANCELLED", "CANCELED", "SKIPPED"}
-
-
-def _apply_state_events_to_nodes_state(
-    *,
-    nodes_state: dict[str, dict[str, Any]],
-    events: list[Any],
-) -> dict[str, dict[str, Any]]:
-    merged = {str(node_id): dict(state or {}) for node_id, state in nodes_state.items()}
-
-    def _ensure_node(node_id: str) -> dict[str, Any]:
-        return merged.setdefault(
-            str(node_id),
-            {
-                "status": "PENDING",
-                "started_at": None,
-                "finished_at": None,
-                "outputs": None,
-                "error": None,
-                "error_info": None,
-            },
-        )
-
-    ordered_events = sorted(
-        list(events or []),
-        key=lambda ev: (getattr(ev, "rev", -1), getattr(ev, "ts", 0.0)),
-    )
-    for ev in ordered_events:
-        kind = str(getattr(ev, "kind", "") or "").upper()
-        payload = getattr(ev, "payload", None) or {}
-        if not isinstance(payload, dict):
-            continue
-        node_id = payload.get("node_id")
-        if not node_id:
-            continue
-        node_state = _ensure_node(str(node_id))
-
-        if kind == "STATUS":
-            status = payload.get("status")
-            if status is not None:
-                node_state["status"] = status
-                event_dt = _coerce_ts_to_dt(getattr(ev, "ts", None))
-                event_iso = event_dt.isoformat() if event_dt is not None else None
-                if str(status).upper() == "RUNNING" and not node_state.get("started_at"):
-                    node_state["started_at"] = event_iso
-                if _is_terminal_node_status(status) and not node_state.get("finished_at"):
-                    node_state["finished_at"] = event_iso
-        elif kind == "OUTPUT":
-            node_state["outputs"] = payload.get("outputs")
-
-    return merged
-
-
 @router.get("/runs/{run_id}/snapshot", response_model=RunSnapshot)
 async def get_run_snapshot(
     run_id: str,
@@ -371,10 +281,13 @@ async def get_run_snapshot(
         raise HTTPException(status_code=503, detail="Run manager not configured")
 
     state_store = getattr(container, "state_store", None)
-
-    rec = await rm.get_record(run_id)
-    if rec is None:
+    inspection = await RuntimeInspectionService(
+        run_manager=rm,
+        state_store=state_store,
+    ).inspect(run_id)
+    if inspection is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    rec = inspection.record
 
     graph_id = rec.graph_id
     graph_kind = rec.kind
@@ -395,43 +308,8 @@ async def get_run_snapshot(
         flow_id = meta.get("flow_id")
         entrypoint = bool(meta.get("entrypoint", False))
 
-    # --- Load latest GraphSnapshot (if we have a state store) ---
-    snap = None
-    incremental_events: list[Any] = []
-    if state_store is not None:
-        snap = await state_store.load_latest_snapshot(run_id)
-        from_rev = getattr(snap, "rev", -1) if snap is not None else -1
-        if hasattr(state_store, "load_events_since"):
-            incremental_events = await state_store.load_events_since(run_id, from_rev)
-
-    # print(f"Run {run_id} snapshot: record status={rec.status}, graph_id={graph_id}, graph_kind={graph_kind}, flow_id={flow_id}, entrypoint={entrypoint}")
-    # print(snap)
-    nodes_state: dict[str, dict[str, Any]] = {}
-    snapshot_edges: list[dict[str, str]] = []
-
-    if snap is not None and isinstance(snap.state, dict):
-        raw_nodes = snap.state.get("nodes") or snap.state.get("node_state") or {}
-        if isinstance(raw_nodes, dict):
-            nodes_state = {str(k): (v or {}) for k, v in raw_nodes.items()}
-
-        raw_edges = snap.state.get("edges") or []
-        if isinstance(raw_edges, list):
-            snapshot_edges = [
-                {
-                    "source": e.get("from", e.get("source")),
-                    "target": e.get("to", e.get("target")),
-                }
-                for e in raw_edges
-                if isinstance(e, dict)
-                and (e.get("from") or e.get("source"))
-                and (e.get("to") or e.get("target"))
-            ]
-
-    if incremental_events:
-        nodes_state = _apply_state_events_to_nodes_state(
-            nodes_state=nodes_state,
-            events=incremental_events,
-        )
+    nodes_state = inspection.nodes_state
+    snapshot_edges = list(inspection.snapshot_edges)
 
     # --- Load static TaskGraph spec when snapshot does not include explicit edges ---
     spec = None
@@ -467,7 +345,7 @@ async def get_run_snapshot(
             finished_at = _coerce_ts_to_dt(st.get("finished_at"))
             outputs = st.get("outputs")
             error = st.get("error")
-            error_info = _build_error_info(st.get("error_info"), error)
+            error_info = build_error_info(st.get("error_info"), error)
 
             nodes.append(
                 NodeSnapshot(
@@ -487,7 +365,7 @@ async def get_run_snapshot(
             graph_id=graph_id,
             nodes=nodes,
             edges=edges,
-            run_error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
+            run_error_info=inspection.run_error_info,
             graph_kind=graph_kind,
             flow_id=flow_id,
             entrypoint=entrypoint,
@@ -501,7 +379,7 @@ async def get_run_snapshot(
             finished_at = _coerce_ts_to_dt(st.get("finished_at"))
             outputs = st.get("outputs")
             error = st.get("error")
-            error_info = _build_error_info(st.get("error_info"), error)
+            error_info = build_error_info(st.get("error_info"), error)
 
             nodes.append(
                 NodeSnapshot(
@@ -521,7 +399,7 @@ async def get_run_snapshot(
             graph_id=graph_id,
             nodes=nodes,
             edges=edges,
-            run_error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
+            run_error_info=inspection.run_error_info,
             graph_kind=graph_kind,
             flow_id=flow_id,
             entrypoint=entrypoint,
@@ -536,99 +414,15 @@ async def get_run_snapshot(
         finished_at=rec.finished_at,
         outputs=None,
         error=rec.error,
-        error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
+        error_info=inspection.run_error_info,
     )
     return RunSnapshot(
         run_id=rec.run_id,
         graph_id=graph_id,
         nodes=[node],
         edges=[],
-        run_error_info=_build_error_info((rec.meta or {}).get("error_info"), rec.error),
+        run_error_info=inspection.run_error_info,
         graph_kind=graph_kind,
         flow_id=flow_id,
         entrypoint=entrypoint,
     )
-
-
-@router.get("/runs/{run_id}/channel/events", response_model=RunChannelEventListResponse)
-async def get_run_channel_events(
-    run_id: str,
-    request: Request,
-    since_ts: float | None = None,
-    cursor: str | None = Query(None),  # noqa: B008
-    limit: int = Query(100, ge=1, le=500),  # noqa: B008
-    identity: RequestIdentity = Depends(get_identity),  # noqa: B008
-) -> RunChannelEventListResponse:
-    """
-    Fetch normalized UI channel events for a run.
-
-    - Optionally enforces a demo-only `client_id` filter by checking the run's tags.
-    - Frontend can poll with `since_ts` for incremental updates.
-    - Supports cursor-based pagination via `cursor` and `limit`.
-    """
-    container = request.app.state.container
-    event_log = getattr(container, "eventlog", None)
-    rm = getattr(container, "run_manager", None)
-
-    if event_log is None or rm is None:
-        raise HTTPException(status_code=503, detail="Event log or run manager not configured")
-
-    # --- Build the time filter ---
-    since_dt: datetime | None = None
-    if since_ts is not None:
-        since_dt = datetime.fromtimestamp(since_ts, tz=timezone.utc)
-
-    # Decode cursor
-    cursor_info = decode_cursor_v2(cursor)
-    after_id: int | None = None
-    query_offset: int = 0
-    if cursor_info is not None:
-        if cursor_info.kind == "keyset":
-            after_id = cursor_info.value
-        else:
-            query_offset = cursor_info.value
-
-    # Fetch limit+1 to detect next page
-    fetch_limit = limit + 1
-
-    # Query only this run's channel events
-    events = await event_log.query(
-        scope_id=run_id,
-        since=since_dt,
-        kinds=["run_channel"],
-        limit=fetch_limit,
-        after_id=after_id,
-        offset=query_offset,
-    )
-
-    # Determine next_cursor before trimming
-    has_more = len(events) > limit
-    events = events[:limit]
-
-    next_cursor: str | None = None
-    if has_more and events:
-        last_row_id = events[-1].get("_row_id")
-        if last_row_id is not None:
-            next_cursor = encode_keyset_cursor(last_row_id)
-        else:
-            next_cursor = encode_cursor(query_offset + limit)
-
-    out: list[RunChannelEvent] = []
-    for e in events:
-        payload = e.get("payload", {})
-
-        ev = RunChannelEvent(
-            id=e.get("id"),
-            run_id=e.get("scope_id") or run_id,
-            type=payload.get("type") or "agent.message",
-            text=payload.get("text"),
-            buttons=payload.get("buttons") or [],
-            file=payload.get("file"),
-            meta=payload.get("meta") or {},
-            ts=e.get("ts"),
-        )
-        out.append(ev)
-
-    # Sort ascending by ts for stable UI
-    out.sort(key=lambda ev: ev.ts)
-    return RunChannelEventListResponse(events=out, next_cursor=next_cursor)

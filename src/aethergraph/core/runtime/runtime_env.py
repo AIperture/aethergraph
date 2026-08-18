@@ -4,38 +4,69 @@ import logging
 from typing import Any
 
 from aethergraph.api.v1.deps import RequestIdentity
-from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
-
-# ---- artifact services ----
-from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
-from aethergraph.services.agent_state import AgentStateFacade
+from aethergraph.contracts.integration import OriginBinding
 
 # ---- channel services ----
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.container.default_container import DefaultContainer, get_container
-from aethergraph.services.continuations.stores.fs_store import (
-    FSContinuationStore,  # AsyncContinuationStore
-)
 
 # ---- memory services ----
-from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.knowledge.node_kb import NodeKB
-from aethergraph.services.memory.facade import MemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.runner.facade import RunFacade
-from aethergraph.services.tracing import NoopTracer
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
 from aethergraph.services.waits.wait_registry import WaitRegistry
-from aethergraph.services.websearch.facade import WebSearchFacade
+from aethergraph.storage.contracts import StorageScope
 
 from ..graph.task_node import TaskNodeRuntime
 from .execution_context import ExecutionContext
 from .node_services import NodeServices
 
 logger = logging.getLogger(__name__)
+
+
+def _canonical_scope(scope: Any) -> StorageScope:
+    return StorageScope(
+        org_id=getattr(scope, "org_id", None),
+        user_id=getattr(scope, "user_id", None),
+        session_id=getattr(scope, "session_id", None),
+        run_id=getattr(scope, "run_id", None),
+        graph_id=getattr(scope, "graph_id", None),
+        node_id=getattr(scope, "node_id", None),
+        agent_id=getattr(scope, "agent_id", None),
+    )
+
+
+def _canonical_memory_scope(scope: Any) -> StorageScope:
+    common = {
+        "org_id": getattr(scope, "org_id", None),
+        "user_id": getattr(scope, "user_id", None),
+    }
+    custom_scope = getattr(scope, "_memory_scope_id", None)
+    if custom_scope:
+        return StorageScope(**common, scope_key=custom_scope)
+    level = getattr(scope, "memory_level", None)
+    if level == "session":
+        return StorageScope(**common, session_id=getattr(scope, "session_id", None))
+    if level == "run":
+        return StorageScope(**common, run_id=getattr(scope, "run_id", None))
+    if level == "user":
+        return StorageScope(**common)
+    if level == "org":
+        return StorageScope(org_id=getattr(scope, "org_id", None))
+    if level == "scope":
+        return StorageScope()
+    if getattr(scope, "session_id", None):
+        return StorageScope(**common, session_id=scope.session_id)
+    if getattr(scope, "user_id", None):
+        return StorageScope(**common)
+    if getattr(scope, "run_id", None):
+        return StorageScope(**common, run_id=scope.run_id)
+    if getattr(scope, "org_id", None):
+        return StorageScope(org_id=scope.org_id)
+    return StorageScope()
 
 
 @dataclass
@@ -45,6 +76,7 @@ class RuntimeEnv:
     run_id: str
     graph_id: str | None = None
     session_id: str | None = None
+    origin_binding: OriginBinding | None = None
     identity: RequestIdentity | None = None
     graph_inputs: dict[str, Any] = field(default_factory=dict)
     outputs_by_node: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -65,10 +97,6 @@ class RuntimeEnv:
 
     # --- convenience projections of commonly used services ---
     @property
-    def schedulers(self) -> dict[str, Any]:
-        return self.container.schedulers
-
-    @property
     def registry(self):
         return self.container.registry
 
@@ -85,20 +113,12 @@ class RuntimeEnv:
         return self.container.channels
 
     @property
-    def continuation_store(self) -> FSContinuationStore:
+    def continuation_store(self) -> Any:
         return self.container.cont_store
 
     @property
     def wait_registry(self) -> WaitRegistry:
         return self.container.wait_registry
-
-    @property
-    def artifacts(self) -> AsyncArtifactStore:
-        return self.container.artifacts
-
-    @property
-    def artifact_index(self) -> AsyncArtifactIndex:
-        return self.container.artifact_index
 
     @property
     def memory_factory(self):
@@ -109,12 +129,12 @@ class RuntimeEnv:
         return self.container.llm
 
     @property
-    def mcp_service(self):
-        return self.container.mcp
+    def embedding_service(self):
+        return self.container.embed_service
 
     @property
-    def web_search_service(self):
-        return self.container.web_search
+    def image_model_service(self):
+        return self.container.image_service
 
     @property
     def resume_router(self) -> ResumeRouter:
@@ -162,39 +182,23 @@ class RuntimeEnv:
             else None
         )
 
-        indices: ScopedIndices | None = None  # scoped indices for this node
-        if self.container.global_indices is not None and node_scope is not None:
-            # Attach scoped indices to container for this node's scope
-            # Prefer memory scope id if available for memory-tied corpora
-            base_scope = mem_scope or node_scope
-            if base_scope:
-                scope_id = mem_scope.memory_scope_id() if mem_scope else None
-                indices = self.container.global_indices.for_scope(
-                    scope=base_scope,
-                    scope_id=scope_id,
-                )
-
-        mem: MemoryFacade = self.memory_factory.for_session(
-            run_id=self.run_id,
-            graph_id=self.graph_id,
-            node_id=node.node_id,
-            session_id=self.session_id,
-            scope=mem_scope,
-            scoped_indices=indices,
+        if mem_scope is None or node_scope is None:
+            raise RuntimeError("RuntimeEnv requires a scope factory for canonical storage")
+        memory_storage_scope = _canonical_memory_scope(mem_scope)
+        memory_provenance_scope = _canonical_scope(mem_scope)
+        node_storage_scope = _canonical_scope(node_scope)
+        mem = self.memory_factory.for_public_execution(
+            memory_storage_scope,
+            logical_scope_id=mem_scope.memory_scope_id(),
+            provenance_scope=memory_provenance_scope,
+            deprecated_app_id=self.app_id,
         )
 
-        from aethergraph.services.artifacts.facade import ArtifactFacade
-
-        artifact_facade = ArtifactFacade(
-            run_id=self.run_id,
-            graph_id=self.graph_id or "",
-            node_id=node.node_id,
+        artifact_facade = self.container.artifact_factory.for_public_execution(
+            node_storage_scope,
             tool_name=node.tool_name,
-            tool_version=node.tool_version,  # to be filled from node if available
-            art_store=self.artifacts,
-            art_index=self.artifact_index,
-            scoped_indices=indices,
-            scope=mem_scope,
+            tool_version=node.tool_version,
+            deprecated_app_id=self.app_id,
         )
 
         # ------- Viz Service tied to this node/run -------'
@@ -209,11 +213,6 @@ class RuntimeEnv:
             scope=node_scope,
         )
 
-        kb = NodeKB(
-            backend=self.container.kb_backend,
-            scope=mem_scope,
-        )
-
         # ----- TriggerFacade tied to this node/run -----
         # trigger_scope = self.container.scope_factory.for_trigger(identity=self.identity)
         trigger_scope = (
@@ -225,10 +224,6 @@ class RuntimeEnv:
             scope=trigger_scope,
         )
 
-        web_search = None
-        if self.web_search_service is not None:
-            web_search = WebSearchFacade(self.web_search_service)
-
         runner = RunFacade(
             run_manager=self.container.run_manager,
             identity=self.identity,
@@ -236,6 +231,7 @@ class RuntimeEnv:
             agent_id=self.agent_id,
             app_id=self.app_id,
             current_run_id=self.run_id,
+            origin_binding=self.origin_binding,
         )
 
         services = NodeServices(
@@ -245,43 +241,26 @@ class RuntimeEnv:
             wait_registry=self.wait_registry,
             clock=self.clock,
             logger=self.logger_factory,
-            kv=self.container.kv_hot,  # keep using hot kv for ephemeral
+            kv=self.container.kv,
             memory=self.memory_factory,  # factory (for other sessions if needed)
             memory_facade=mem,  # bound memory for this run/node
-            agent_state=AgentStateFacade(memory=mem),
+            agent_state=self.container.storage_services.agent_state(node_storage_scope),
             viz=vis_facade,
             llm=self.llm_service,  # LLMService
-            mcp=self.mcp_service,  # MCPService
+            embedding=self.embedding_service,  # EmbeddingService
+            image_model=self.image_model_service,  # ImageGenerationService
             runner=runner,  # RunFacade
-            indices=indices,  # ScopedIndices for this node
-            execution=self.container.execution
-            if self.container.execution is not None
-            else None,  # ExecutionService
-            planner_service=self.container.planner_service,
-            skills=self.container.skills_registry,
-            kb=kb,  # NodeKB
             triggers=triggers,  # TriggerFacade for this node
-            web_search=web_search,  # WebSearchFacade or None
             registry=RegistryFacade(
                 registry=self.registry,
                 scope=mem_scope or node_scope,
                 registration_service=getattr(self.container, "registration_service", None),
             ),
-            tracer=self.container.tracer or NoopTracer(),
         )
-        try:
-            from aethergraph.services.harness.overrides import wrap_node_services
-
-            services = wrap_node_services(
-                services,
-                graph_id=self.graph_id,
-                node_id=node.node_id,
-            )
-        except Exception:
-            pass
         return ExecutionContext(
             run_id=self.run_id,
             session_id=self.session_id,
+            origin_binding=self.origin_binding,
             identity=self.identity,
             graph_id=self.graph_id,
             agent_id=self.agent_id,
@@ -295,6 +274,7 @@ class RuntimeEnv:
             should_run_fn=self.should_run_fn,
             scope=node_scope,
             resume_router=self.resume_router,
+            runtime_output_sink=getattr(self.container, "runtime_output_sink", None),
         )
 
     def _resolve_memory_config(self) -> tuple[str, str | None]:

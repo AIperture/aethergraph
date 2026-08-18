@@ -3,13 +3,14 @@ from __future__ import annotations
 import argparse
 import sys
 
-from aethergraph.cli.commands import register, run, serve
+from aethergraph.cli.commands import host, register, run, serve
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aethergraph")
     subparsers = parser.add_subparsers(dest="cmd", required=True)
     serve.register_parser(subparsers)
+    host.register_parser(subparsers)
     run.register_parser(subparsers)
     register.register_parser(subparsers)
     return parser

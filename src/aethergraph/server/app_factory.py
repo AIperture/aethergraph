@@ -11,36 +11,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
+from aethergraph.api.v1.deployment_router import router as deployment_api_v1_router
 from aethergraph.api.v1.router import router as api_v1_router
 
 # include apis
 from aethergraph.config.config import AppSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
+from aethergraph.core.runtime.runtime_services import install_services, uninstall_services
 
-# register all skills in the builtin agent (this is optional but keeps them together for now)
-from aethergraph.core.runtime.runtime_services import (
-    install_services,
-    register_skills_from_path,
-)
-
-# from aethergraph.plugins.agents.agnet_buider_agent import *  # noqa: F403
-# import built-in agents and plugins to register them
-from aethergraph.plugins.agents.chat_agent.default_chat_agent import *  # noqa: F403
-
-# from aethergraph.plugins.agents.graph_builder.agent import *  # noqa: F403
-# from aethergraph.plugins.agents.aether_agent import *  # noqa: F403
-# from aethergraph.plugins.agents.default_chat_agent_v2 import *  # noqa: F403
 # channel routes
 from aethergraph.server.loading import GraphLoader, LoadSpec, emit_load_errors
 from aethergraph.services.container.default_container import build_default_container
+from aethergraph.services.integration import IntegrationManager
 from aethergraph.services.triggers.engine import TriggerEngine
-from aethergraph.utils.optdeps import require
-
-builtin_agent_skills_path = (
-    Path(__file__).parent.parent / "plugins" / "agents" / "graph_builder" / "skills"
-)
-
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +34,46 @@ def create_app(
     workspace: str = "./aethergraph_workspace",
     cfg: Optional["AppSettings"] = None,
     log_level: str = "info",
+    container=None,
+    integration_manager: IntegrationManager | None = None,
+    deployment_mode: bool = False,
 ) -> FastAPI:
-    """
-    Builds the FastAPI app, registers routers, and installs all services
-    into app.state.container (and globally via install_services()).
+    """Build an AetherGraph FastAPI application around one service container.
+
+    Development callers may let the factory build a mutable sidecar container.
+    Immutable AG Host callers supply their verified container and explicit
+    Integration Manager so provider lifecycle has one owner.
+
+    Examples:
+        Build a development sidecar:
+            ```python
+            app = create_app(workspace="./workspace", cfg=settings)
+            ```
+
+        Build an immutable Host application:
+            ```python
+            app = create_app(
+                workspace=str(host.workspace),
+                cfg=host.container.settings,
+                container=host.container,
+                integration_manager=host.integration_manager,
+            )
+            ```
+
+    Args:
+        workspace: Operational root used only when constructing a container.
+        cfg: Exact application settings or None for development defaults.
+        log_level: Console log level used when settings omit one.
+        container: Prebuilt immutable Host container or None for development.
+        integration_manager: Explicit provider lifecycle owner for this Host.
+        deployment_mode: True to expose only the closed immutable Host API.
+
+    Returns:
+        FastAPI: Configured application with services installed and lifespan bound.
+
+    Notes:
+        Mutable source replay and built-in graph registration occur only when the
+        factory constructs the development container itself.
     """
 
     # Resolve settings and container up front so lifespan can capture them
@@ -61,79 +81,100 @@ def create_app(
     if settings.logging.console_level is None:
         settings.logging.console_level = log_level
 
-    container = build_default_container(root=workspace, cfg=settings)
+    development_container = container is None
+    container = container or build_default_container(root=workspace, cfg=settings)
+    if development_container:
+        # Developer sidecars retain the built-in chat agent. Immutable Hosts pass
+        # a prebuilt container and register only their verified compiled package.
+        from aethergraph.plugins.agents.chat_agent import default_chat_agent  # noqa: F401
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        # --- Startup: attach settings/container and start external transports ---
+        # --- Startup: attach settings/container and start owned services ---
         app.state.settings = settings
         app.state.container = container
+        app.state.integration_manager = integration_manager
 
         trigger_engine_task = None
-
-        # Start trigger engine if trigger_service is present
-        if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
-            trigger_engine: TriggerEngine = container.trigger_engine
-            trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
-            app.state.trigger_engine_task = trigger_engine_task
-            logger.info("TriggerEngine background task started")
-
-        slack_task = None
-        tg_task = None
-
-        # Slack Socket Mode
-        slack_cfg = settings.slack
-        if (
-            slack_cfg
-            and slack_cfg.enabled
-            and slack_cfg.socket_mode_enabled
-            and slack_cfg.bot_token
-            and slack_cfg.app_token
-        ):
-            require("slack_sdk", "slack")
-            from ..plugins.channel.websockets.slack_ws import SlackSocketModeRunner
-
-            runner = SlackSocketModeRunner(container=container, settings=settings)
-            app.state.slack_socket_runner = runner
-            slack_task = asyncio.create_task(runner.start())
-
-        # Telegram polling
-        tg_cfg = settings.telegram
-        if tg_cfg and tg_cfg.enabled and tg_cfg.polling_enabled and tg_cfg.bot_token:
-            from ..plugins.channel.websockets.telegram_polling import TelegramPollingRunner
-
-            tg_runner = TelegramPollingRunner(container=container, settings=settings)
-            app.state.telegram_polling_runner = tg_runner
-            tg_task = asyncio.create_task(tg_runner.start())
-
-        # Register skills from the builtin path (optional, but keeps them together for now)
-        logger.info(f"Registering skills from {builtin_agent_skills_path} for builtin agent...")
-        register_skills_from_path(builtin_agent_skills_path, overwrite=True)
-
-        # Replay persisted source registrations (tenant/global manifests).
-        replay_strict = os.environ.get("AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0").lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        replay_report = await container.registration_service.replay_registered_sources(
-            strict=replay_strict
-        )
-        logger.info(
-            "Registry replay complete: total=%s loaded=%s failed=%s",
-            replay_report.total,
-            replay_report.loaded,
-            replay_report.failed,
-        )
-        if replay_report.errors:
-            for err in replay_report.errors:
-                logger.warning("Registry replay error: %s", err)
+        retention_stop = asyncio.Event()
+        retention_task = None
+        integration_started = False
         try:
+            await container.start_storage()
+            if container.retention_janitor is not None:
+                retention_task = asyncio.create_task(
+                    container.retention_janitor.run_forever(retention_stop)
+                )
+
+            await container.continuation_timer.start()
+            logger.info("ContinuationTimerService background task started")
+
+            if hasattr(container, "trigger_engine") and container.trigger_engine is not None:
+                trigger_engine: TriggerEngine = container.trigger_engine
+                trigger_engine_task = asyncio.create_task(trigger_engine.run_forever())
+                app.state.trigger_engine_task = trigger_engine_task
+                logger.info("TriggerEngine background task started")
+
+            if integration_manager is not None:
+                await integration_manager.start()
+                integration_started = True
+
+            if development_container:
+                replay_strict = os.environ.get(
+                    "AETHERGRAPH_REGISTRY_REPLAY_STRICT", "0"
+                ).lower() in ("1", "true", "yes")
+                replay_report = await container.registration_service.replay_registered_sources(
+                    strict=replay_strict
+                )
+                logger.info(
+                    "Registry replay complete: total=%s loaded=%s failed=%s",
+                    replay_report.total,
+                    replay_report.loaded,
+                    replay_report.failed,
+                )
+                if replay_report.errors:
+                    for err in replay_report.errors:
+                        logger.warning("Registry replay error: %s", err)
+
+                # The mutable sidecar still uses the canonical integration protocol.
+                # A process-local manifest gives each registered agent an immutable
+                # endpoint identity without reviving the deleted WebUI transport.
+                from aethergraph.services.host.development import (
+                    build_development_ui_manifest,
+                    development_ui_endpoints,
+                )
+                from aethergraph.services.host.endpoint_credentials import (
+                    EndpointCredentialRegistry,
+                )
+                from aethergraph.services.integration import install_integration_ingress
+
+                development_manifest = build_development_ui_manifest(
+                    registry=container.registry,
+                    workspace_identity=str(Path(workspace).resolve()),
+                )
+                install_integration_ingress(container=container, manifest=development_manifest)
+                app.state.endpoint_credentials = EndpointCredentialRegistry.from_manifest(
+                    development_manifest
+                )
+                endpoints = development_ui_endpoints(development_manifest)
+                app.state.development_ui_enabled = True
+                app.state.development_ui_bootstrap = {
+                    "mode": "development",
+                    "default_agent_id": development_manifest.entry_agent_id,
+                    "endpoints": endpoints,
+                }
+
             # Hand control back to FastAPI / TestClient
             yield
         finally:
             # --- Shutdown: best-effort cleanup of background tasks ---
-            # 1) Stop TriggerEngine gracefully
+            # 1) Stop continuation delivery before other runtime services.
+            try:
+                await container.continuation_timer.stop()
+            except Exception:
+                logger.exception("Error stopping ContinuationTimerService")
+
+            # 2) Stop TriggerEngine gracefully
             if trigger_engine_task is not None:
                 trigger_engine: TriggerEngine = container.trigger_engine
                 try:
@@ -147,12 +188,24 @@ def create_app(
                     with suppress(asyncio.CancelledError):
                         await trigger_engine_task
 
-            # 2) Stop Slack / Telegram tasks
-            for task in (slack_task, tg_task):
-                if task is not None and not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
+            # 3) Stop explicitly configured provider transports
+            if integration_manager is not None and integration_started:
+                try:
+                    await integration_manager.stop()
+                except Exception:
+                    logger.exception("Error stopping IntegrationManager")
+
+            if retention_task is not None:
+                retention_stop.set()
+                with suppress(asyncio.CancelledError):
+                    await retention_task
+
+            try:
+                await container.close_storage()
+            except Exception:
+                logger.exception("Error closing canonical storage")
+            finally:
+                uninstall_services(container)
 
     # Create app with lifespan
     app = FastAPI(
@@ -203,26 +256,29 @@ def create_app(
             )
 
     # CORS
+    # Origins come from settings (env: AETHERGRAPH_CORS_ALLOW_ORIGINS) so the API
+    # can be opened to additional local UIs (e.g. AG Studio on :4186) without a
+    # code change. Note: allow_credentials=True forbids a "*" wildcard per the
+    # CORS spec, so this must stay an explicit origin list.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://localhost:5185",
-            "null",
-        ],  # dev UI + sim UI + file:// admin page
+        allow_origins=settings.cors_allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
     # Routers
-    app.include_router(router=api_v1_router, prefix="/api/v1")
+    app.include_router(
+        router=deployment_api_v1_router if deployment_mode else api_v1_router,
+        prefix="/api/v1",
+    )
 
     # Conditionally load demo admin routes (not part of OSS core)
     _demo_svc_dir = (
         str(Path(settings.demo_service_dir).resolve()) if settings.demo_service_dir else None
     )
-    if _demo_svc_dir and Path(_demo_svc_dir).is_dir():
+    if not deployment_mode and _demo_svc_dir and Path(_demo_svc_dir).is_dir():
         sys.path.insert(0, _demo_svc_dir)
         try:
             from admin_routes import router as demo_admin_router  # type: ignore[import-not-found]
@@ -236,20 +292,6 @@ def create_app(
             )
         finally:
             sys.path.pop(0)
-
-    # Webui router
-    from aethergraph.plugins.channel.routes.webui_routes import router as webui_router
-
-    app.include_router(router=webui_router, prefix="/api/v1")
-
-    # Mount engine trace router if the engine package is installed
-    try:
-        from aethergraph_engine._internal.trace import trace_router
-
-        app.include_router(trace_router)
-        logger.info("Engine trace router mounted at /api/trace")
-    except ImportError:
-        pass
 
     # Install services globally so run()/tools see the same container
     install_services(container)

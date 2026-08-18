@@ -4,35 +4,84 @@ from typing import Literal
 from pydantic import BaseModel, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .llm import EmbeddingSettings, LLMSettings
-from .search import KnowledgeSettings, SearchBackendSettings
-from .storage import StorageSettings
+from .llm import EmbeddingSettings, ImageGenerationSettings, LLMSettings
+from .observability import ObservabilitySettings
+from .storage_provider import StorageProviderSettings
 
 
 class RateLimitSettings(BaseSettings):
     enabled: bool = True
 
     # Concurrency
-    max_concurrent_runs: int = 8
+    max_concurrent_runs: int = Field(default=8, gt=0)
 
     # Per-identity, per-window run limits (using metering)
     runs_window: str = "1h"
-    max_runs_per_window: int = 100
+    max_runs_per_window: int = Field(default=100, gt=0)
 
     # Short-burst, in-memory limiter for POST /runs
-    burst_max_runs: int = 10
-    burst_window_seconds: int = 10
+    burst_max_runs: int = Field(default=10, gt=0)
+    burst_window_seconds: int = Field(default=10, gt=0)
 
-    # Optional LLM caps *per run*
-    max_llm_calls_per_run: int = 200
-    max_llm_tokens_per_run: int = 200_000
+
+class LLMUsageQuotaSettings(BaseSettings):
+    """Configure optional infrastructure-owned LLM quotas.
+
+    Quotas are disabled when their value is ``None``. Agent-loop budgets belong
+    to the agent engine and are intentionally not given implicit AG defaults.
+    """
+
+    max_calls_per_run: int | None = Field(default=None, ge=0)
+    max_input_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_output_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_total_tokens_per_run: int | None = Field(default=None, ge=0)
+
+
+class EmbeddingUsageQuotaSettings(BaseModel):
+    """Configure optional per-run embedding-operation quotas.
+
+    Exact call and text counts are reserved before provider dispatch. Token
+    totals are reconciled only when the provider returns a usable receipt.
+    Every limit is disabled when its value is `None`.
+    """
+
+    max_calls_per_run: int | None = Field(default=None, ge=0)
+    max_texts_per_run: int | None = Field(default=None, ge=0)
+    max_input_tokens_per_run: int | None = Field(default=None, ge=0)
+
+
+class ImageGenerationUsageQuotaSettings(BaseModel):
+    """Configure optional per-run image-generation quotas.
+
+    Exact call and requested-image counts are reserved before provider
+    dispatch. Token totals are reconciled only from provider usage receipts.
+    Every limit is disabled when its value is `None`.
+    """
+
+    max_calls_per_run: int | None = Field(default=None, ge=0)
+    max_images_per_run: int | None = Field(default=None, ge=0)
+    max_input_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_output_tokens_per_run: int | None = Field(default=None, ge=0)
+    max_total_tokens_per_run: int | None = Field(default=None, ge=0)
+
+
+class ModelOperationUsageQuotaSettings(BaseModel):
+    """Group non-Chat model-operation quotas under one host policy boundary."""
+
+    embedding: EmbeddingUsageQuotaSettings = Field(default_factory=EmbeddingUsageQuotaSettings)
+    image_generation: ImageGenerationUsageQuotaSettings = Field(
+        default_factory=ImageGenerationUsageQuotaSettings
+    )
 
 
 class LoggingSettings(BaseModel):
     nspace: str = Field("aethergraph", description="Root logger namespace")
     level: str = Field("INFO", description="Root log level")
     console_level: str | None = Field(None, description="Console log level")
-    file_level: str | None = Field("INFO", description="File log level")
+    file_level: str | None = Field(
+        None,
+        description="Optional rotating-file log level; structured observation persistence is default.",
+    )
     json_logs: bool = Field(False, description="Emit JSON logs")
     enable_queue: bool = Field(default=False, description="Enable async logging via queue")
 
@@ -44,65 +93,16 @@ class LoggingSettings(BaseModel):
 
 
 class SlackSettings(BaseModel):
-    # Turn Slack integration on/off globally
+    integration_id: str | None = None
     enabled: bool = Field(default=False)
-
-    # Tokens
     bot_token: SecretStr | None = None  # xoxb-...
     app_token: SecretStr | None = None  # xapp-... (Socket Mode)
-    signing_secret: SecretStr | None = None  # only needed for HTTP/webhook
-
-    # Transport mode flags
-    #
-    # Local / individual default:
-    #   enabled = true
-    #   socket_mode_enabled = true
-    #   webhook_enabled = false
-    #
-    # Production / webhook default:
-    #   enabled = true
-    #   socket_mode_enabled = false (optional)
-    #   webhook_enabled = true
-
-    socket_mode_enabled: bool = Field(
-        default=True, description="Use Slack Socket Mode (WS outbound) when app_token is set."
-    )
-    webhook_enabled: bool = Field(
-        default=False,
-        description="Expose /slack/events & /slack/interact HTTP endpoints for Slack.",
-    )
-
-    # Default routing
-    #
-    # For simple setups likely only need default_channel_id (+ maybe default_team_id).
-    # default_channel_key is the more general 'slack:team/T:chan/C' form.
-    # TODO: later we might deprecate the default setting in .env and require explicit channel keys in code.
-    default_team_id: str | None = None  # e.g. 'T...'
-    default_channel_id: str | None = None  # e.g. 'C...'
-    default_channel_key: str | None = None  # e.g. 'slack:team/T...:chan/C...'
-    default_agent_id: str | None = None
 
 
 class TelegramSettings(BaseModel):
+    integration_id: str | None = None
     enabled: bool = Field(default=False)
     bot_token: SecretStr | None = None
-
-    # for webhook mode
-    webhook_enabled: bool = False
-    webhook_secret: SecretStr | None = None  # used ONLY for HTTP webhook verification
-
-    # for local / dev mode
-    polling_enabled: bool = True  # use getUpdates loop by default for local
-
-    # default chat key
-    default_chat_id: str | None = None
-    default_agent_id: str | None = None
-
-
-class ContinuationStoreSettings(BaseModel):
-    kind: Literal["fs", "inmem"] = "fs"
-    secret: SecretStr | None = None
-    root: str = "./artifacts/continuations"
 
 
 class MemorySettings(BaseModel):
@@ -112,17 +112,7 @@ class MemorySettings(BaseModel):
 
 
 class ChannelSettings(BaseModel):
-    # room for Telegram / Console etc.
-    default: str = "console:stdin"
-
-
-class RAGSettings(BaseModel):
-    root: str = (
-        "./aethergraph_workspace/rag"  # base dir for rag; should not use it unless customized
-    )
-    backend: str = "sqlite"  # "sqlite" | "faiss"
-    index_path: str | None = None  # defaults set at runtime if None
-    dim: int | None = None  # only for faiss; optional
+    """Reserved host-level Channel configuration namespace."""
 
 
 class AuthSettings(BaseModel):
@@ -143,6 +133,22 @@ class AppSettings(BaseSettings):
 
     # top-level workspace root directory
     workspace: str = "./aethergraph_workspace"
+
+    # Browser origins allowed by CORS for the HTTP API. Covers the local dev
+    # UIs, the AG Studio UI (both 127.0.0.1 and localhost forms — browsers treat
+    # them as distinct origins), and the file:// admin page ("null"). Override
+    # via env with a JSON list, e.g.:
+    #   AETHERGRAPH_CORS_ALLOW_ORIGINS='["http://127.0.0.1:4186","http://localhost:4186"]'
+    cors_allow_origins: list[str] = Field(
+        default_factory=lambda: [
+            "http://localhost:5173",  # dev UI
+            "http://localhost:5185",  # sim UI
+            "http://127.0.0.1:4186",  # AG Studio UI (127.0.0.1 form)
+            "http://localhost:4186",  # AG Studio UI (localhost form)
+            "null",  # file:// admin page
+        ],
+        description="Browser origins allowed by CORS for the HTTP API.",
+    )
 
     # Deployment mode controls identity resolution and tenant scoping.
     #
@@ -166,19 +172,21 @@ class AppSettings(BaseSettings):
     deploy_mode: Literal["local", "demo", "cloud"] = "local"
 
     rate_limit: RateLimitSettings = RateLimitSettings()
+    llm_usage_quota: LLMUsageQuotaSettings = LLMUsageQuotaSettings()
+    model_operation_usage_quota: ModelOperationUsageQuotaSettings = Field(
+        default_factory=ModelOperationUsageQuotaSettings
+    )
     logging: LoggingSettings = LoggingSettings()
     slack: SlackSettings = SlackSettings()
     telegram: TelegramSettings = TelegramSettings()
     llm: LLMSettings = LLMSettings()
+    observability: ObservabilitySettings = ObservabilitySettings()
     embed: EmbeddingSettings = EmbeddingSettings()
-    cont: ContinuationStoreSettings = ContinuationStoreSettings()
+    image_generation: ImageGenerationSettings = ImageGenerationSettings()
     memory: MemorySettings = MemorySettings()
     channels: ChannelSettings = ChannelSettings()
-    rag: RAGSettings = RAGSettings()
     auth: AuthSettings = AuthSettings()
-    storage: StorageSettings = StorageSettings()
-    search: SearchBackendSettings = SearchBackendSettings()
-    knowledge: KnowledgeSettings = KnowledgeSettings()
+    storage_provider: StorageProviderSettings = StorageProviderSettings(provider="local.sqlite")
 
     # Optional path to demo-service directory (for admin routes).
     # Set via env: AETHERGRAPH_DEMO_SERVICE_DIR=/path/to/demo-service
@@ -187,4 +195,3 @@ class AppSettings(BaseSettings):
     # Future fields:
     # authn: ...
     # authz: ...
-    # tracer: ...

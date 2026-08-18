@@ -18,7 +18,7 @@ async def create_and_notify_continuation(
     bus = context.services.channels  # ChannelBus
     store = context.services.continuation_store  # ContinuationStore
 
-    ch_key = channel or bus.get_default_channel_key() or "console:stdin"
+    ch_key = context.channel(channel)._resolve_key()
 
     cont = await context.create_continuation(
         channel=ch_key, kind=kind, payload=payload, deadline_s=timeout_s
@@ -33,10 +33,10 @@ async def create_and_notify_continuation(
 
     corr = (res or {}).get("correlator")
     if corr:
-        await store.bind_correlator(token=cont.token, corr=corr)
+        cont.record = await store.bind_correlator(continuation=cont.record, corr=corr)
         # also bind a message-less thread root for loopup by thread only
-        await store.bind_correlator(
-            token=cont.token,
+        cont.record = await store.bind_correlator(
+            continuation=cont.record,
             corr=Correlator(
                 scheme=corr.scheme, channel=corr.channel, thread=corr.thread, message=""
             ),
@@ -46,12 +46,14 @@ async def create_and_notify_continuation(
         # best-effort
         peek = await bus.peek_correlator(ch_key)
         if peek:
-            await store.bind_correlator(
-                token=cont.token, corr=Correlator(peek.scheme, peek.channel, peek.thread, "")
+            cont.record = await store.bind_correlator(
+                continuation=cont.record,
+                corr=Correlator(peek.scheme, peek.channel, peek.thread, ""),
             )
         else:
-            await store.bind_correlator(
-                token=cont.token, corr=Correlator(bus._prefix(ch_key), ch_key, "", "")
+            cont.record = await store.bind_correlator(
+                continuation=cont.record,
+                corr=Correlator(bus._prefix(ch_key), ch_key, "", ""),
             )
 
     return str(cont.token), inline

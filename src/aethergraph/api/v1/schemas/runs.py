@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field  # type: ignore
+from pydantic import BaseModel, ConfigDict, Field  # type: ignore
 
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 
@@ -21,6 +21,8 @@ class RunStatus(str, Enum):
 
 
 class RunSummary(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     run_id: str
     graph_id: str
     status: RunStatus
@@ -35,7 +37,7 @@ class RunSummary(BaseModel):
     entrypoint: bool | None = None
     meta: dict[str, Any] = Field(default_factory=dict)
     error_info: RunErrorInfo | None = None
-    app_id: str | None = Field(default=None, alias="appId")
+    app_id: str | None = Field(default=None, alias="appId", deprecated=True)
     app_name: str | None = Field(default=None, alias="appName")
     agent_id: str | None = Field(default=None, alias="agentId")
     origin: RunOrigin | None = None
@@ -46,11 +48,10 @@ class RunSummary(BaseModel):
     result_available: bool | None = None
     result_updated_at: datetime | None = None
 
-    class Config:
-        populate_by_name = True
-
 
 class RunCreateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     run_id: str | None = None
     inputs: dict[str, Any]
     run_config: dict[str, Any] = Field(default_factory=dict)
@@ -60,11 +61,8 @@ class RunCreateRequest(BaseModel):
     visibility: RunVisibility | None = None
     importance: RunImportance | None = None
     agent_id: str | None = Field(default=None, alias="agentId")
-    app_id: str | None = Field(default=None, alias="appId")
+    app_id: str | None = Field(default=None, alias="appId", deprecated=True)
     app_name: str | None = Field(default=None, alias="appName")
-
-    class Config:
-        populate_by_name = True
 
 
 class RunCreateResponse(BaseModel):
@@ -76,22 +74,6 @@ class RunCreateResponse(BaseModel):
     continuations: list[dict[str, Any]] = Field(default_factory=list)
     started_at: datetime | None = None
     finished_at: datetime | None = None
-
-
-class RunChannelEvent(BaseModel):
-    id: str
-    run_id: str
-    type: str
-    text: str | None
-    buttons: list[dict[str, Any]] = Field(default_factory=list)
-    file: dict[str, Any] | None
-    meta: dict[str, Any] = Field(default_factory=dict)
-    ts: float
-
-
-class RunChannelEventListResponse(BaseModel):
-    events: list[RunChannelEvent]
-    next_cursor: str | None = None
 
 
 class RunErrorInfo(BaseModel):

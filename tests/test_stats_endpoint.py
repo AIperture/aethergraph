@@ -26,6 +26,9 @@ class FakeMetering(MeteringService):
         provider: str,
         prompt_tokens: int,
         completion_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+        uncached_input_tokens: int = 0,
         latency_ms: int | None = None,
     ) -> None:
         return None
@@ -83,6 +86,9 @@ class FakeMetering(MeteringService):
             "llm_calls": 3,
             "llm_prompt_tokens": 120,
             "llm_completion_tokens": 45,
+            "llm_cache_read_tokens": 25,
+            "llm_cache_write_tokens": 5,
+            "llm_uncached_input_tokens": 90,
             "runs": 2,
             "runs_succeeded": 1,
             "runs_failed": 1,
@@ -105,11 +111,17 @@ class FakeMetering(MeteringService):
                 "calls": 2,
                 "prompt_tokens": 80,
                 "completion_tokens": 30,
+                "cache_read_tokens": 20,
+                "cache_write_tokens": 5,
+                "uncached_input_tokens": 55,
             },
             "gpt-4.1": {
                 "calls": 1,
                 "prompt_tokens": 40,
                 "completion_tokens": 15,
+                "cache_read_tokens": 5,
+                "cache_write_tokens": 0,
+                "uncached_input_tokens": 35,
             },
         }
 
@@ -238,6 +250,9 @@ def test_stats_overview(client: TestClient):
     # Check shape & a couple of fields
     assert data["llm_calls"] == 3
     assert data["llm_prompt_tokens"] == 120
+    assert data["llm_cache_read_tokens"] == 25
+    assert data["llm_cache_write_tokens"] == 5
+    assert data["llm_uncached_input_tokens"] == 90
     assert data["runs"] == 2
     assert data["artifacts"] == 4
     assert data["events"] == 7
@@ -314,6 +329,9 @@ def test_stats_llm(client: TestClient):
     assert mini_stats["calls"] == 2
     assert mini_stats["prompt_tokens"] == 80
     assert mini_stats["completion_tokens"] == 30
+    assert mini_stats["cache_read_tokens"] == 20
+    assert mini_stats["cache_write_tokens"] == 5
+    assert mini_stats["uncached_input_tokens"] == 55
 
 
 def test_stats_overview_no_metering(monkeypatch):

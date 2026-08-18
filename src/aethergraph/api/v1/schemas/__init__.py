@@ -5,7 +5,6 @@ from .artifacts import (
     ArtifactSearchRequest,
     ArtifactSearchResponse,
 )
-from .channels import ChannelEvent, ChannelEventListResponse, ChannelIngressRequest
 from .graphs import GraphDetail, GraphEdgeInfo, GraphListItem, GraphNodeInfo
 from .input_schema import InputFieldSpec
 from .memory import (
@@ -28,7 +27,6 @@ from .registry import (
 from .runs import (
     EdgeSnapshot,
     NodeSnapshot,
-    RunChannelEvent,
     RunCreateRequest,
     RunCreateResponse,
     RunErrorInfo,
@@ -39,21 +37,12 @@ from .runs import (
 )
 from .session import (
     Session,
-    SessionChatEvent,
-    SessionChatFile,
     SessionCreateRequest,
-    SessionDashboardEnvelope,
-    SessionDashboardPatchOp,
-    SessionDashboardState,
-    SessionDashboardStateResponse,
     SessionInferTitleRequest,
     SessionInferTitleResponse,
     SessionListResponse,
     SessionRunsResponse,
     SessionUpdateRequest,
-    SessionWorkStatus,
-    SessionWorkStatusItem,
-    SessionWorkStatusResponse,
 )
 from .stats import (
     ArtifactStats,
@@ -77,9 +66,6 @@ __all__ = [
     "ArtifactSearchResponse",
     "ArtifactStats",
     "ArtifactStatsEntry",
-    "ChannelEvent",
-    "ChannelEventListResponse",
-    "ChannelIngressRequest",
     "ConfigLLMProvider",
     "ConfigResponse",
     "EdgeSnapshot",
@@ -102,7 +88,6 @@ __all__ = [
     "MemorySummaryEntry",
     "MemorySummaryListResponse",
     "NodeSnapshot",
-    "RunChannelEvent",
     "RunCreateRequest",
     "RunCreateResponse",
     "RunErrorInfo",
@@ -114,20 +99,11 @@ __all__ = [
     "RegistryRegisterRequest",
     "RegistryRegisterResponse",
     "Session",
-    "SessionDashboardEnvelope",
-    "SessionDashboardPatchOp",
-    "SessionDashboardState",
-    "SessionDashboardStateResponse",
-    "SessionChatEvent",
-    "SessionChatFile",
     "SessionCreateRequest",
     "SessionInferTitleRequest",
     "SessionInferTitleResponse",
     "SessionListResponse",
     "SessionRunsResponse",
-    "SessionWorkStatus",
-    "SessionWorkStatusItem",
-    "SessionWorkStatusResponse",
     "SessionUpdateRequest",
     "SlashCommandDescriptor",
     "StatsOverview",

@@ -2,31 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _mask_secret(value: str | None) -> str | None:
-    """Return a masked version of a secret string, or None if empty."""
-    if not value:
-        return None
-    if len(value) <= 8:
-        return "****"
-    return value[:4] + "****" + value[-4:]
-
-
-MASKED_SENTINEL = "****"
-
-
-def _is_masked(value: str | None) -> bool:
-    """Return True if the value looks like a masked secret (should not be persisted)."""
-    if not value:
-        return True
-    return MASKED_SENTINEL in value
-
 
 # ---------------------------------------------------------------------------
 # Status (lightweight check)
@@ -52,6 +30,7 @@ class LLMProfileView(BaseModel):
 
     provider: str = "openai"
     model: str = "gpt-4o-mini"
+    endpoint_id: str | None = None
     base_url: str | None = None
     timeout: float = 60.0
     api_key: str | None = None  # masked
@@ -60,6 +39,19 @@ class LLMProfileView(BaseModel):
     thinking_budget: int | None = None
     reasoning_summary: str | None = None
     compatibility_policy: str = "compat"
+    structured_output_policy: Literal["best_available", "native_required"] = "best_available"
+    prompt_cache_policy: Literal["disabled", "auto", "required"] = "auto"
+    context_window_tokens: int | None = None
+    vision_enabled: bool = False
+    vision_max_images: int | None = None
+    vision_max_image_bytes: int | None = None
+    vision_resize_enabled: bool = True
+    vision_resize_max_dimension: int = 1280
+    vision_resize_max_pixels: int = 1_500_000
+    vision_resize_jpeg_quality: int = 85
+    vision_resize_min_jpeg_quality: int = 70
+    vision_accepted_mime_prefixes: list[str] = Field(default_factory=lambda: ["image/"])
+    vision_accepted_mime_types: list[str] = Field(default_factory=list)
 
 
 class LLMProfilePayload(BaseModel):
@@ -67,12 +59,26 @@ class LLMProfilePayload(BaseModel):
 
     provider: str | None = None
     model: str | None = None
+    endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
     api_key: str | None = None
     base_url: str | None = None
     timeout: float | None = None
     reasoning_effort: str | None = None
     thinking_mode: str | None = None
     compatibility_policy: str | None = None
+    structured_output_policy: Literal["best_available", "native_required"] | None = None
+    prompt_cache_policy: Literal["disabled", "auto", "required"] | None = None
+    context_window_tokens: int | None = Field(default=None, gt=0)
+    vision_enabled: bool | None = None
+    vision_max_images: int | None = None
+    vision_max_image_bytes: int | None = None
+    vision_resize_enabled: bool | None = None
+    vision_resize_max_dimension: int | None = None
+    vision_resize_max_pixels: int | None = None
+    vision_resize_jpeg_quality: int | None = None
+    vision_resize_min_jpeg_quality: int | None = None
+    vision_accepted_mime_prefixes: list[str] | None = None
+    vision_accepted_mime_types: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -102,29 +108,27 @@ class EmbeddingProfilePayload(BaseModel):
 
 
 class SlackView(BaseModel):
+    integration_id: str | None = None
     enabled: bool = False
     bot_token: str | None = None  # masked
-    signing_secret: str | None = None  # masked
-    default_agent_id: str | None = None
 
 
 class SlackPayload(BaseModel):
+    integration_id: str | None = None
     enabled: bool | None = None
     bot_token: str | None = None
-    signing_secret: str | None = None
-    default_agent_id: str | None = None
 
 
 class TelegramView(BaseModel):
+    integration_id: str | None = None
     enabled: bool = False
     bot_token: str | None = None  # masked
-    default_agent_id: str | None = None
 
 
 class TelegramPayload(BaseModel):
+    integration_id: str | None = None
     enabled: bool | None = None
     bot_token: str | None = None
-    default_agent_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

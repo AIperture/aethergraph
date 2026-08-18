@@ -10,6 +10,7 @@ from ..graph.graph_builder import current_builder
 from ..graph.node_handle import NodeHandle
 from ..runtime.injection import resolve_node_context_param
 from ..runtime.runtime_registry import current_registry
+from .declaration import ToolDiscoveryMetadata, build_tool_definition
 from .waitable import DualStageTool, waitable_tool
 
 
@@ -125,32 +126,91 @@ def _execute_immediate_tool(fn_or_path, kwargs: dict[str, Any]):
 
 
 def tool(
-    outputs: list[str],
+    outputs: list[str] | None = None,
     inputs: list[str] | None = None,
     *,
     name: str | None = None,
-    version: str = "0.1.0",
+    version: str = "1",
+    description: str | None = None,
+    args_schema: dict[str, Any] | None = None,
+    result_schema: dict[str, Any] | None = None,
+    examples: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    slot_outputs: list[Any] | tuple[Any, ...] | None = None,
+    availability: str = "normal",
+    approval: str = "none",
+    exposure: str = "immediate",
+    discovery: ToolDiscoveryMetadata | None = None,
 ):
-    """
-    Dual-mode decorator for plain functions and DualStageTool classes.
+    """Declare a dual-mode Tool for graph and immediate execution.
 
-    - Graph mode: builds a tool node inside `@graphify`
-    - Immediate mode: executes native Python directly everywhere else
+    The decorator records one versioned Tool definition, including optional
+    semantic slot outputs, and preserves the existing immediate/graph
+    execution behavior.
+
+    Examples:
+        Declare a normal Tool:
+        ```python
+        @tool(description="Read a document.")
+        def read_document(path: str) -> dict:
+            return {"path": path}
+        ```
+
+        Declare a required semantic slot output:
+        ```python
+        @tool(slot_outputs=[{"slot_key": "report", "required": True}])
+        def build_report() -> dict:
+            return {"summary": "created"}
+        ```
+
+    Args:
+        outputs: Graph-node output names for the legacy graph execution layer.
+        inputs: Optional explicit model-visible input parameter names.
+        name: Optional public Tool name.
+        version: Authored Tool version.
+        description: Optional public Tool description.
+        args_schema: Optional complete Draft 2020-12 object schema or compact
+            field-map shorthand for model arguments.
+        result_schema: Optional object schema for structured result data.
+        examples: Optional bounded authored examples.
+        slot_outputs: Optional semantic slot-output declarations.
+        availability: Runtime surface stage for the Tool.
+        approval: Approval tier for Tool execution.
+        exposure: Whether the Tool is immediately surfaced or requires an
+            Engine-owned activation lease.
+        discovery: Optional compact provider-neutral discovery metadata.
+
+    Returns:
+        Callable: Decorator that attaches the canonical Tool definition and
+        preserves immediate and graph-mode invocation.
+
+    Notes:
+        Slot output declarations contain semantic keys only. The executed Tool
+        reports actual resource effects in its result. Tool definitions always
+        store one normalized full object schema regardless of authoring form.
+        Deferred Tools require explicit discovery metadata.
     """
 
     def _wrap(obj):
         waitable = inspect.isclass(obj) and issubclass(obj, DualStageTool)
         impl = waitable_tool(obj) if waitable else obj
         sig = inspect.signature(impl)
-        declared_inputs = (
-            inputs
-            or getattr(impl, "__aether_inputs__", None)
-            or [
-                p.name
-                for p in sig.parameters.values()
-                if p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)
-            ]
+        definition = build_tool_definition(
+            impl,
+            name=name,
+            description=description,
+            version=version,
+            inputs=inputs or getattr(impl, "__aether_inputs__", None),
+            outputs=outputs,
+            args_schema=args_schema,
+            result_schema=result_schema,
+            examples=examples,
+            slot_outputs=slot_outputs,
+            availability=availability,
+            approval=approval,
+            exposure=exposure,
+            discovery=discovery,
         )
+        declared_inputs = list(definition.inputs)
 
         @wraps(impl)
         def proxy(*args, **kwargs):
@@ -173,8 +233,11 @@ def tool(
             return _execute_immediate_tool(proxy, call_kwargs)
 
         proxy.__aether_inputs__ = list(declared_inputs)
-        proxy.__aether_outputs__ = list(outputs)
+        proxy.__aether_outputs__ = list(definition.outputs)
         proxy.__aether_impl__ = impl
+        proxy.__aether_tool_definition__ = definition
+        proxy.__aether_definition__ = definition
+        proxy.__version__ = definition.version
 
         if waitable:
             proxy.__aether_waitable__ = True
@@ -185,11 +248,12 @@ def tool(
             meta = {
                 "kind": "tool",
                 "tags": [],
+                "definition": definition.to_dict(),
             }
             registry.register(
                 nspace="tool",
-                name=name or getattr(impl, "__name__", "tool"),
-                version=version,
+                name=definition.name,
+                version=definition.version,
                 obj=impl,
                 meta=meta,
             )

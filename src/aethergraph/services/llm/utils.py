@@ -289,7 +289,11 @@ def _to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
                 continue
             t = p.get("type")
             if t in ("text", "input_text", "output_text"):
-                blocks.append({"type": "text", "text": p.get("text", "")})
+                block = {"type": "text", "text": p.get("text", "")}
+                cache_control = p.get("cache_control")
+                if isinstance(cache_control, dict):
+                    block["cache_control"] = dict(cache_control)
+                blocks.append(block)
             elif t == "image" and "source" in p:
                 blocks.append(p)
             elif t in ("image_url", "input_image"):
@@ -354,8 +358,9 @@ def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[di
     """
     Make OpenAI Responses input robust:
       - If content is str: keep as-is
-      - If content is OpenAI chat multimodal parts (text/image_url): convert to input_text/input_image
-      - If already input_text/input_image: passthrough
+      - User/system/developer text parts become input_text
+      - Assistant text parts become output_text
+      - Images remain input-only
     """
     out: list[dict[str, Any]] = []
     for m in messages:
@@ -363,7 +368,12 @@ def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[di
         c = m.get("content")
 
         if isinstance(c, str):
-            out.append({"role": role, "content": c})
+            out.append(
+                {
+                    "role": role,
+                    "content": ([{"type": "output_text", "text": c}] if role == "assistant" else c),
+                }
+            )
             continue
 
         if isinstance(c, list):
@@ -372,10 +382,28 @@ def _normalize_openai_responses_input(messages: list[dict[str, Any]]) -> list[di
                 if not isinstance(p, dict):
                     continue
                 t = p.get("type")
-                if t in ("input_text", "input_image"):
-                    blocks.append(p)
-                elif t in ("text", "output_text"):
-                    blocks.append({"type": "input_text", "text": p.get("text", "")})
+                if role == "assistant" and t in (
+                    "text",
+                    "input_text",
+                    "output_text",
+                ):
+                    block = {"type": "output_text", "text": p.get("text", "")}
+                    if "prompt_cache_breakpoint" in p:
+                        block["prompt_cache_breakpoint"] = p["prompt_cache_breakpoint"]
+                    blocks.append(block)
+                elif role == "assistant" and t == "refusal":
+                    blocks.append(dict(p))
+                elif role == "assistant" and t in ("input_image", "image_url"):
+                    raise ValueError(
+                        "OpenAI Responses assistant history cannot contain " "input images"
+                    )
+                elif role != "assistant" and t in ("input_text", "input_image"):
+                    blocks.append(dict(p))
+                elif role != "assistant" and t in ("text", "output_text"):
+                    block = {"type": "input_text", "text": p.get("text", "")}
+                    if "prompt_cache_breakpoint" in p:
+                        block["prompt_cache_breakpoint"] = p["prompt_cache_breakpoint"]
+                    blocks.append(block)
                 elif t == "image_url":
                     url = (p.get("image_url") or {}).get("url") or p.get("url")
                     if isinstance(url, str):

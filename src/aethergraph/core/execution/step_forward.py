@@ -1,12 +1,15 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import functools
 import inspect
 import traceback
 from typing import Any
+from uuid import uuid4
 
 from aethergraph.contracts.services.channel import OutEvent
 from aethergraph.core.runtime.run_cancellation import RunCancellationRequestedError
-from aethergraph.services.continuations.continuation import Continuation
+from aethergraph.observability.runtime_output import capture_runtime_output
+from aethergraph.services.continuations.continuation import ContinuationDraft
 
 from ..graph.task_node import NodeStatus, TaskNodeRuntime
 from ..runtime.execution_context import ExecutionContext
@@ -228,14 +231,24 @@ async def step_forward(
         node_ctx=node_ctx,  # <-- pass node_ctx explicitly for convenience
         runtime_ctx=ctx,  # <-- pass runtime explicitly to resolve resume payload
     )
+    execution_id = f"exec-{uuid4().hex}"
     try:
-        with enter_tool_execution():
-            result = (
-                await logic_fn(**kwargs)
-                if inspect.iscoroutinefunction(logic_fn)
-                or (callable(logic_fn) and inspect.iscoroutinefunction(logic_fn.__call__))
-                else logic_fn(**kwargs)
-            )
+        async with capture_runtime_output(
+            sink=getattr(ctx, "runtime_output_sink", None),
+            execution_id=execution_id,
+            run_id=ctx.run_id,
+            session_id=getattr(ctx, "session_id", None),
+            graph_id=getattr(ctx, "graph_id", None),
+            node_id=node.node_id,
+            tool_name=node.tool_name or getattr(logic_fn, "__name__", None),
+        ):
+            with enter_tool_execution():
+                result = (
+                    await logic_fn(**kwargs)
+                    if inspect.iscoroutinefunction(logic_fn)
+                    or (callable(logic_fn) and inspect.iscoroutinefunction(logic_fn.__call__))
+                    else logic_fn(**kwargs)
+                )
 
         if inspect.isawaitable(result):
             raise TypeError(
@@ -322,7 +335,7 @@ def normalize_wait_spec(spec: dict[str, Any], *, node_ctx: "NodeContext") -> dic
         - kind: str (default "external")
         - prompt: str | dict | None
         - resume_schema: dict | None
-        - channel: str (default from node_ctx or "console:stdin")
+        - channel: str (explicit or from the immutable run origin)
         - deadline: datetime | None
         - poll: dict | None
 
@@ -341,7 +354,7 @@ def normalize_wait_spec(spec: dict[str, Any], *, node_ctx: "NodeContext") -> dic
     if isinstance(ch, dict):
         ch = None
     if not ch:
-        ch = node_ctx.channel()._resolve_default_key() or "console:stdin"
+        ch = node_ctx.channel()._resolve_default_key()
     out["channel"] = ch
 
     # Deadline
@@ -384,58 +397,59 @@ async def _enter_wait(
 
     cont = None
     if token:
-        try:
-            cont = await store.get_by_token(token)
-        except Exception:
-            cont = None
+        cont = await store.resolve_token(token)
+        if cont is None:
+            raise PermissionError("Wait specification references an invalid continuation token")
+
+    poll = spec.get("poll")
+    deadline = spec.get("deadline")
+    if poll and "interval_sec" in poll:
+        next_wakeup_at = ctx.now() + timedelta(seconds=int(poll["interval_sec"]))
+    elif deadline:
+        next_wakeup_at = deadline
+    else:
+        next_wakeup_at = None
 
     if cont is None:
-        # fall back to minting (legacy path)
-        token = token or await store.mint_token(ctx.run_id, node.node_id, attempts)
-        cont = Continuation(
-            run_id=ctx.run_id,
-            node_id=node.node_id,
-            kind=spec["kind"],
-            token=token,
-            prompt=spec.get("prompt"),
-            resume_schema=spec.get("resume_schema"),
-            channel=spec["channel"],
-            deadline=spec.get("deadline"),
-            poll=spec.get("poll"),
-            next_wakeup_at=None,
-            created_at=ctx.now(),
+        created = await store.create(
+            ContinuationDraft(
+                run_id=ctx.run_id,
+                node_id=node.node_id,
+                kind=spec["kind"],
+                prompt=spec.get("prompt"),
+                resume_schema=spec.get("resume_schema"),
+                channel=spec["channel"],
+                deadline=deadline,
+                poll=poll,
+                next_wakeup_at=next_wakeup_at,
+                created_at=ctx.now(),
+                attempts=attempts,
+            )
+        )
+        cont = created.record
+        token = created.token
+    else:
+        changed = replace(
+            cont,
+            revision=cont.revision + 1,
+            kind=spec.get("kind", cont.kind),
+            prompt=spec.get("prompt", cont.prompt),
+            resume_schema=spec.get("resume_schema", cont.resume_schema),
+            channel=spec.get("channel", cont.channel),
+            deadline=deadline,
+            poll=poll,
+            next_wakeup_at=next_wakeup_at,
             attempts=attempts,
         )
-    else:
-        # update mutable fields
-        cont.kind = spec.get("kind", cont.kind)
-        cont.prompt = spec.get("prompt", cont.prompt)
-        cont.resume_schema = spec.get("resume_schema", cont.resume_schema)
-        cont.channel = spec.get("channel", cont.channel)
-        cont.deadline = spec.get("deadline", cont.deadline)
-        cont.poll = spec.get("poll", cont.poll)
-        cont.attempts = attempts
-
-    # schedule next wakeup
-    if cont.poll and "interval_sec" in cont.poll:
-        from datetime import timedelta
-
-        cont.next_wakeup_at = ctx.now() + timedelta(seconds=int(cont.poll["interval_sec"]))
-    elif cont.deadline:
-        cont.next_wakeup_at = cont.deadline
-    else:
-        cont.next_wakeup_at = None
-
-    # persist (create or update)
-    await store.save(cont)
+        cont = await store.update(changed, expected_revision=cont.revision)
 
     # 2) If inline payload was captured during setup, resume immediately
     inline = spec.get("inline_payload")
     if inline is not None:
         try:
-            await ctx.resume_router.resume(cont.run_id, cont.node_id, cont.token, inline)
+            await ctx.resume_router.resume(cont.run_id, cont.node_id, token, inline)
             if lg:
-                lg.debug("inline resume dispatched for token=%s", cont.token)
+                lg.debug("inline resume dispatched for continuation=%s", cont.continuation_id)
             # No need to notify again
             return StepResult(
                 status=_waiting_status(cont.kind),
@@ -455,7 +469,7 @@ async def _enter_wait(
                 type=cont.kind,
                 channel=cont.channel,
                 text=cont.prompt,
-                meta={"continuation_token": cont.token},
+                meta={"continuation_token": token},
             )
             await bus.publish(event)
             if lg:

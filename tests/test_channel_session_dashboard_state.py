@@ -8,53 +8,39 @@ from aethergraph.services.channel.session import ChannelSession
 
 
 class _FakeBus:
-    def __init__(self, default_channel_key: str = "ui:session/test-session") -> None:
-        self.default_channel_key = default_channel_key
+    def __init__(self) -> None:
+        self.events = []
 
-    def get_default_channel_key(self) -> str:
-        return self.default_channel_key
-
-    def resolve_channel_key(self, key: str) -> str:
-        if key == "ui:session":
-            return "ui:session/test-session"
-        if key == "ui:run":
-            return "ui:run/test-run"
-        return key
+    async def publish(self, event) -> None:
+        self.events.append(event)
 
 
 class _FakeContext:
-    def __init__(self, *, default_channel_key: str = "ui:session/test-session") -> None:
+    def __init__(self, *, origin_channel_key: str) -> None:
         self.run_id = "run-1"
         self.node_id = "node-1"
         self.session_id = "session-1"
         self.graph_id = "graph-1"
         self.agent_id = "agent-1"
         self.app_id = "app-1"
+        self.origin_binding = SimpleNamespace(channel_key=origin_channel_key)
         self.services = SimpleNamespace(
-            channels=_FakeBus(default_channel_key=default_channel_key),
+            channels=_FakeBus(),
             continuation_store=None,
             memory_facade=None,
         )
 
 
 @pytest.mark.asyncio
-async def test_dashboard_state_replace_uses_default_ui_session_channel(monkeypatch) -> None:
-    ctx = _FakeContext()
-    chan = ChannelSession(ctx)
-    captured = {}
-
-    async def fake_replace_session_dashboard_state(*, session_id, dashboard_state, meta):
-        captured["session_id"] = session_id
-        captured["dashboard_state"] = dashboard_state
-        captured["meta"] = meta
-        return {"ok": True}
-
-    monkeypatch.setattr(
-        "aethergraph.services.channel.session_dashboard_state.replace_session_dashboard_state",
-        fake_replace_session_dashboard_state,
-    )
-
-    payload = {
+@pytest.mark.parametrize(
+    "channel_key",
+    ["endpoint:sessions/session-1", "slack:team/T:chan/C", "tg:chat/123"],
+)
+async def test_dashboard_replace_emits_provider_neutral_structured_output(
+    channel_key: str,
+) -> None:
+    ctx = _FakeContext(origin_channel_key=channel_key)
+    state = {
         "dashboard_id": "dash-1",
         "dashboard_type": "generic.dashboard",
         "workflow_id": "wf-1",
@@ -63,62 +49,48 @@ async def test_dashboard_state_replace_uses_default_ui_session_channel(monkeypat
         "updated_at": "",
         "data": {},
     }
-    out = await chan.dashboard_state(dashboard_id="dash-1").replace(payload)
 
-    assert out == {"ok": True}
-    assert captured["session_id"] == "test-session"
-    assert captured["dashboard_state"] == payload
-    assert captured["meta"]["channel_key"] == "ui:session/test-session"
+    result = await ChannelSession(ctx).dashboard_state(dashboard_id="dash-1").replace(state)
+
+    assert result == {"operation": "replace", "dashboard": state}
+    event = ctx.services.channels.events[0]
+    assert event.type == "structured.output"
+    assert event.channel == channel_key
+    assert event.rich == {"output_name": "workflow.dashboard", "value": result}
+    assert event.meta["session_id"] == "session-1"
 
 
 @pytest.mark.asyncio
-async def test_dashboard_state_patch_uses_bound_dashboard_id(monkeypatch) -> None:
-    ctx = _FakeContext()
-    chan = ChannelSession(ctx, "ui:session")
-    captured = {}
+async def test_dashboard_patch_and_clear_carry_bound_dashboard_id() -> None:
+    ctx = _FakeContext(origin_channel_key="endpoint:sessions/session-1")
+    handle = ChannelSession(ctx).dashboard_state(dashboard_id="dash-bound")
 
-    async def fake_patch_session_dashboard_state(**kwargs):
-        captured.update(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr(
-        "aethergraph.services.channel.session_dashboard_state.patch_session_dashboard_state",
-        fake_patch_session_dashboard_state,
-    )
-
-    out = await chan.dashboard_state(dashboard_id="dash-bound").patch(
+    patch = await handle.patch(
         revision=2,
         status="running",
         ops=[{"op": "replace", "path": "/status", "value": "running"}],
     )
+    clear = await handle.clear()
 
-    assert out == {"ok": True}
-    assert captured["session_id"] == "test-session"
-    assert captured["dashboard_id"] == "dash-bound"
-    assert captured["revision"] == 2
-    assert captured["status"] == "running"
+    assert patch == {
+        "operation": "patch",
+        "patch": {
+            "dashboard_id": "dash-bound",
+            "revision": 2,
+            "status": "running",
+            "ops": [{"op": "replace", "path": "/status", "value": "running"}],
+        },
+    }
+    assert clear == {"operation": "clear", "dashboard_id": "dash-bound"}
 
 
 @pytest.mark.asyncio
-async def test_dashboard_state_clear_uses_explicit_ui_session_channel(monkeypatch) -> None:
-    ctx = _FakeContext()
-    chan = ChannelSession(ctx, "ui:session/custom-session")
-    captured = {}
+async def test_dashboard_replace_rejects_mismatched_identity() -> None:
+    ctx = _FakeContext(origin_channel_key="endpoint:sessions/session-1")
 
-    async def fake_clear_session_dashboard_state(*, session_id, dashboard_id, meta=None):
-        captured["session_id"] = session_id
-        captured["dashboard_id"] = dashboard_id
-        captured["meta"] = meta
-        return {"ok": True}
-
-    monkeypatch.setattr(
-        "aethergraph.services.channel.session_dashboard_state.clear_session_dashboard_state",
-        fake_clear_session_dashboard_state,
-    )
-
-    out = await chan.dashboard_state(dashboard_id="dash-clear").clear()
-
-    assert out == {"ok": True}
-    assert captured["session_id"] == "custom-session"
-    assert captured["dashboard_id"] == "dash-clear"
-    assert captured["meta"]["channel_key"] == "ui:session/custom-session"
+    with pytest.raises(ValueError, match="bound dashboard_id"):
+        await (
+            ChannelSession(ctx)
+            .dashboard_state(dashboard_id="dash-1")
+            .replace({"dashboard_id": "dash-2"})
+        )

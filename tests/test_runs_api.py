@@ -1,5 +1,6 @@
 # tests/test_runs_api.py
-from datetime import datetime, timezone
+from dataclasses import fields
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -7,11 +8,13 @@ from fastapi.testclient import TestClient
 import pytest
 
 from aethergraph.api.v1 import runs as runs_api
+from aethergraph.api.v1.run_presenters import to_run_summary
+from aethergraph.api.v1.schemas.runs import RunCreateRequest, RunSummary
 
 # If your RateLimitSettings lives elsewhere, adjust this import:
 from aethergraph.config.config import RateLimitSettings
 from aethergraph.core.runtime.run_types import RunRecord, RunStatus
-from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
+from aethergraph.server.admission import RunBurstLimiter
 
 
 class FakeIdentity:
@@ -62,8 +65,8 @@ class FakeRunManager:
             graph_id=graph_id,
             kind="taskgraph",
             status=RunStatus.succeeded,
-            started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+            started_at=datetime(2024, 1, 1, tzinfo=UTC),
+            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC),
             tags=tags or [],
             user_id=identity.user_id,
             org_id=identity.org_id,
@@ -77,8 +80,8 @@ class FakeRunManager:
                 graph_id="failed-graph",
                 kind="taskgraph",
                 status=RunStatus.failed,
-                started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-                finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+                started_at=datetime(2024, 1, 1, tzinfo=UTC),
+                finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC),
                 tags=["t1"],
                 user_id="u1",
                 org_id="o1",
@@ -109,8 +112,8 @@ class FakeRunManager:
             graph_id="my-graph",
             kind="taskgraph",
             status=RunStatus.succeeded,
-            started_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=timezone.utc),
+            started_at=datetime(2024, 1, 1, tzinfo=UTC),
+            finished_at=datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC),
             tags=["t1"],
             user_id="u1",
             org_id="o1",
@@ -261,6 +264,36 @@ def test_get_run_endpoint(client: TestClient):
     assert data["tags"] == ["t1"]
     assert data["user_id"] == "u1"
     assert data["org_id"] == "o1"
+    assert data["appId"] is None
+
+
+def test_run_app_id_is_explicit_deprecated_compatibility_metadata_only() -> None:
+    service_field = next(item for item in fields(RunRecord) if item.name == "app_id")
+    assert service_field.metadata["deprecated"] is True
+    assert service_field.metadata["compatibility_only"] is True
+    assert RunSummary.model_fields["app_id"].deprecated is True
+    assert RunCreateRequest.model_fields["app_id"].deprecated is True
+
+    tagged = RunRecord(
+        run_id="run-tagged",
+        graph_id="graph-1",
+        kind="taskgraph",
+        status=RunStatus.running,
+        started_at=datetime(2024, 1, 1, tzinfo=UTC),
+        tags=["formerly-inferred-app"],
+        meta={"app_id": "formerly-inferred-meta-app"},
+    )
+    assert to_run_summary(tagged, reg=None).model_dump()["app_id"] is None
+
+    explicit = RunRecord(
+        run_id="run-explicit",
+        graph_id="graph-1",
+        kind="taskgraph",
+        status=RunStatus.running,
+        started_at=datetime(2024, 1, 1, tzinfo=UTC),
+        app_id="explicit-compatibility-app",
+    )
+    assert to_run_summary(explicit, reg=None).model_dump()["app_id"] == "explicit-compatibility-app"
 
 
 def test_get_run_endpoint_includes_error_info(client: TestClient):
@@ -282,7 +315,7 @@ def test_get_run_snapshot_includes_node_and_run_error_info(monkeypatch):
     fake_authz = FakeAuthz()
 
     class FakeStateStore:
-        async def load_latest_snapshot(self, run_id: str):
+        async def load_latest_snapshot(self, scope, run_id: str):
             assert run_id == "run-failed"
             return type(
                 "Snapshot",
@@ -312,7 +345,7 @@ def test_get_run_snapshot_includes_node_and_run_error_info(monkeypatch):
                 },
             )()
 
-        async def load_events_since(self, run_id: str, from_rev: int):
+        async def load_events_since(self, scope, run_id: str, from_rev: int):
             assert run_id == "run-failed"
             assert from_rev == -1
             return []
@@ -356,7 +389,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
     fake_authz = FakeAuthz()
 
     class FakeStateStore:
-        async def load_latest_snapshot(self, run_id: str):
+        async def load_latest_snapshot(self, scope, run_id: str):
             assert run_id == "run-xyz"
             return SimpleNamespace(
                 rev=1,
@@ -375,7 +408,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                 },
             )
 
-        async def load_events_since(self, run_id: str, from_rev: int):
+        async def load_events_since(self, scope, run_id: str, from_rev: int):
             assert run_id == "run-xyz"
             assert from_rev == 1
             return [
@@ -383,7 +416,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                     run_id=run_id,
                     graph_id="my-graph",
                     rev=2,
-                    ts=datetime(2024, 1, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp(),
+                    ts=datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC).timestamp(),
                     kind="STATUS",
                     payload={"node_id": "node-a", "status": "RUNNING"},
                 ),
@@ -391,7 +424,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                     run_id=run_id,
                     graph_id="my-graph",
                     rev=3,
-                    ts=datetime(2024, 1, 1, 0, 0, 2, tzinfo=timezone.utc).timestamp(),
+                    ts=datetime(2024, 1, 1, 0, 0, 2, tzinfo=UTC).timestamp(),
                     kind="OUTPUT",
                     payload={"node_id": "node-a", "outputs": {"value": 42}},
                 ),
@@ -399,7 +432,7 @@ def test_get_run_snapshot_merges_incremental_state_events(monkeypatch):
                     run_id=run_id,
                     graph_id="my-graph",
                     rev=4,
-                    ts=datetime(2024, 1, 1, 0, 0, 3, tzinfo=timezone.utc).timestamp(),
+                    ts=datetime(2024, 1, 1, 0, 0, 3, tzinfo=UTC).timestamp(),
                     kind="STATUS",
                     payload={"node_id": "node-a", "status": "DONE"},
                 ),
@@ -505,7 +538,7 @@ def test_run_endpoint_burst_rate_limit(monkeypatch):
         burst_window_seconds=60,
     )
 
-    burst_limiter = SimpleRateLimiter(
+    burst_limiter = RunBurstLimiter(
         max_events=fake_settings.rate_limit.burst_max_runs,
         window_seconds=fake_settings.rate_limit.burst_window_seconds,
     )

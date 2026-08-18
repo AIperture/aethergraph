@@ -1,4 +1,4 @@
-__version__ = "0.1.0a15"
+__version__ = "0.1.0a17"
 
 import logging
 
@@ -14,6 +14,7 @@ from .core.runtime.base_service import Service  # base service class for custom 
 
 # Runtime
 from .core.runtime.node_context import NodeContext  # per-node execution context (run_id)
+from .core.tools.declaration import ToolDefinition, ToolDiscoveryMetadata
 
 # Tools
 from .core.tools.toolkit import tool
@@ -32,6 +33,8 @@ __all__ = [
     "start_server_async",
     # Tools
     "tool",
+    "ToolDefinition",
+    "ToolDiscoveryMetadata",
     "graph_fn",
     "graphify",
     "TaskGraph",

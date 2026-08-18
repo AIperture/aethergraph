@@ -39,16 +39,40 @@ class RunStore(Protocol):
         run_id: str,
         *,
         artifact_id: str,
+        occurrence_id: str,
         created_at: datetime | None = None,
     ) -> None:
-        """
-        Update artifact-related metadata for a run:
+        """Count one exact artifact occurrence and retain its content identity.
 
-          - increment artifact_count
-          - update first_artifact_at / last_artifact_at
-          - optionally maintain recent_artifact_ids (bounded list)
+        Occurrence identity makes retries idempotent while artifact identity remains
+        available for the bounded recent-artifact preview.
 
-        No-op if run_id does not exist.
+        Examples:
+            Count an artifact occurrence:
+                ```python
+                await runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+            Replay the same occurrence:
+                ```python
+                await runs.record_artifact(
+                    "run-1", artifact_id="artifact-1", occurrence_id="occurrence-1"
+                )
+                ```
+
+        Args:
+            run_id: Exact run identity to update.
+            artifact_id: Stable content artifact identity retained for presentation.
+            occurrence_id: Stable occurrence idempotency identity.
+            created_at: Optional occurrence time; defaults to current UTC.
+
+        Returns:
+            None: The occurrence was counted, replayed, or its run was absent.
+
+        Notes:
+            Reusing one occurrence identity with different content or time fails.
         """
 
 

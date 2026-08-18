@@ -18,13 +18,36 @@ class TriggerService(Protocol):
         interval_seconds: int | None = None,
         run_at: datetime | None = None,
         event_key: str | None = None,
+        tz: str | None = None,
         max_overlap_runs: int | None = None,
         catch_up_missed: bool = False,
         origin: str = "schedule",
+        trigger_name: str | None = None,
         meta: dict[str, Any] | None = None,
     ) -> Any: ...  # should return TriggerRecord, but we avoid importing it here to keep this protocol decoupled from the data layer
 
-    async def cancel(self, trigger_id: str) -> None: ...
-    async def get(self, trigger_id: str) -> Any | None: ...
-    async def delete(self, trigger_id: str) -> None: ...
-    async def list_for_owner(self, org_id: str, user_id: str) -> list[Any]: ...
+    async def cancel(
+        self,
+        trigger_id: str,
+        *,
+        org_id: str | None,
+        user_id: str | None,
+        client_id: str | None,
+    ) -> bool: ...
+    async def get(
+        self,
+        trigger_id: str,
+        *,
+        org_id: str | None,
+        user_id: str | None,
+        client_id: str | None,
+    ) -> Any | None: ...
+    async def delete(
+        self,
+        trigger_id: str,
+        *,
+        org_id: str | None,
+        user_id: str | None,
+        client_id: str | None,
+    ) -> bool: ...
+    async def list_for_owner(self, *, org_id: str | None, user_id: str | None) -> list[Any]: ...

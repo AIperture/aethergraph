@@ -1,20 +1,34 @@
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from pathlib import Path
 from threading import RLock
 from typing import Any
+import warnings
 
 from aethergraph.contracts.services.llm import LLMClientProtocol
 from aethergraph.core.runtime.base_service import Service
-from aethergraph.services.skills.skill_registry import SkillRegistry
-from aethergraph.services.skills.skills import Skill
 
 _current = ContextVar("aeg_services", default=None)
 # process-wide fallback (handles contextvar boundary issues)
 _services_global: Any = None
 # allow registering external services before main services are ready
 _pending_ext_services: dict[str, Any] = {}
+
+_REMOVED_FIRST_CLASS_SERVICE_NAMES = frozenset(
+    {
+        "execute",
+        "execution",
+        "harness",
+        "kb",
+        "knowledge",
+        "mcp",
+        "planner",
+        "planning",
+        "skills",
+        "web_search",
+        "websearch",
+    }
+)
 
 
 _pending_lock = RLock()
@@ -86,6 +100,42 @@ def install_services(services: Any) -> None:
     return _current.set(services)
 
 
+def uninstall_services(services: Any) -> None:
+    """Remove one exact closed container from runtime service resolution.
+
+    Intro:
+        Clears only references that still point at the supplied container so a
+        stopped app cannot leak a closed provider bundle into later runtimes.
+
+    Examples:
+        Uninstall after app shutdown:
+            ```python
+            uninstall_services(container)
+            ```
+
+        Preserve a newer replacement:
+            ```python
+            install_services(replacement)
+            uninstall_services(previous)
+            ```
+
+    Args:
+        services: Exact container whose owned lifecycle has ended.
+
+    Returns:
+        None: Matching context-local and process-wide references are cleared.
+
+    Notes:
+        Identity comparison prevents an older host from uninstalling a newer host.
+        Deferred extension registrations are intentionally preserved.
+    """
+    global _services_global
+    if _services_global is services:
+        _services_global = None
+    if _current.get() is services:
+        _current.set(None)
+
+
 def ensure_services_installed(factory: Callable[[], Any]) -> Any:
     global _services_global, _pending_ext_services
     svc = _current.get() or _services_global
@@ -131,23 +181,6 @@ def get_channel_service() -> Any:
     return svc.channels  # ChannelBus
 
 
-def set_default_channel(key: str) -> None:
-    def _op(svc: Any) -> None:
-        svc.channels.set_default_channel_key(key)
-
-    return _try_apply_or_defer(key, _op)
-
-
-def get_default_channel() -> str:
-    svc = current_services()
-    return svc.channels.default_channel_key
-
-
-def set_channel_alias(alias: str, channel_key: str) -> None:
-    svc = current_services()
-    svc.channels.register_alias(alias, channel_key)
-
-
 def register_channel_adapter(name: str, adapter: Any) -> None:
     svc = current_services()
     svc.channels.register_adapter(name, adapter)
@@ -159,11 +192,6 @@ def get_llm_service() -> Any:
     return svc.llm
 
 
-def get_tracer_service() -> Any:
-    svc = current_services()
-    return getattr(svc, "tracer", None)
-
-
 def register_llm_client(
     profile: str,
     provider: str,
@@ -172,17 +200,81 @@ def register_llm_client(
     base_url: str | None = None,
     api_key: str | None = None,
     timeout: float | None = None,
-) -> None:
+) -> LLMClientProtocol | None:
+    """Register Chat and optional legacy embedding profiles independently.
+
+    Intro:
+        Configures the named Chat client immediately when services are installed,
+        or defers the same operation until installation. A supplied legacy
+        `embed_model` is routed to the separate embedding service.
+
+    Examples:
+        Register one Chat profile:
+            ```python
+            register_llm_client("default", "openai", "gpt-5-mini")
+            ```
+
+        Preserve a legacy combined registration:
+            ```python
+            register_llm_client(
+                "search",
+                "openai",
+                "gpt-5-mini",
+                embed_model="text-embedding-3-small",
+            )
+            ```
+
+    Args:
+        profile: Exact Chat and optional embedding profile name.
+        provider: Registered provider identity.
+        model: Chat model identity.
+        embed_model: Deprecated embedding model compatibility input.
+        base_url: Optional provider base URL override.
+        api_key: Optional in-memory provider credential.
+        timeout: Optional HTTP timeout in seconds.
+
+    Returns:
+        LLMClientProtocol | None: Configured Chat client when services are
+            installed, otherwise `None` after deferring registration.
+
+    Notes:
+        `embed_model` remains only as a public migration boundary. New code must
+        configure embeddings through `NodeContext.embedding()` settings or the
+        embedding service. Missing embedding services fail before Chat mutation.
+    """
+
+    normalized_embed_model = str(embed_model or "").strip() or None
+    if normalized_embed_model is not None:
+        warnings.warn(
+            "register_llm_client(embed_model=...) is deprecated; configure an "
+            "independent embedding profile instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     def _op(svc: Any) -> LLMClientProtocol:
+        embed_service = getattr(svc, "embed_service", None)
+        if normalized_embed_model is not None and embed_service is None:
+            raise RuntimeError(
+                "Legacy embed_model registration requires an enabled embedding service."
+            )
         client = svc.llm.configure_profile(
             profile=profile,
             provider=provider,
             model=model,
-            embed_model=embed_model,
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
         )
+        if normalized_embed_model is not None:
+            embed_service.configure_profile(
+                name=profile,
+                provider=provider,
+                model=normalized_embed_model,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+            )
         return client
 
     key = f"llm_client:profile={profile}:provider={provider}:model={model}"
@@ -228,6 +320,12 @@ def register_context_service(name: str, service: Service) -> None:
     """
     global _pending_ext_services
 
+    if name in _REMOVED_FIRST_CLASS_SERVICE_NAMES:
+        raise ValueError(
+            f"External context service name {name!r} is reserved for a removed "
+            "first-class capability; expose it through an Engine Tool plugin instead."
+        )
+
     try:
         svc = current_services()
     except RuntimeError:
@@ -261,6 +359,8 @@ def get_ext_context_service(name: str) -> Service:
     Raises:
         RuntimeError: If no services container is installed.
     """
+    if name in _REMOVED_FIRST_CLASS_SERVICE_NAMES:
+        raise KeyError(f"Removed first-class capability is not available: {name}")
     svc = current_services()
     return svc.ext_services.get(name)
 
@@ -291,354 +391,3 @@ def list_ext_context_services() -> list[str]:
     """
     svc = current_services()
     return list(svc.ext_services.keys())
-
-
-# --------- MCP service helpers ---------
-def set_mcp_service(mcp_service: Any) -> None:
-    """
-    Set the MCP service in the current service container.
-
-    This function assigns the provided MCP service instance to the current application's
-    service container, making it available for subsequent MCP client registrations and lookups.
-
-    Examples:
-        ```python
-        from aethergraph.runtime import set_mcp_service
-        set_mcp_service(MyMCPService())
-        ```
-
-    Args:
-        mcp_service: An instance implementing the MCP service interface.
-
-    Returns:
-        None
-
-    Notes:
-        - This should be called once during application startup before registering MCP clients.
-        - This is an internal function; users typically interact with MCP services via higher-level APIs.
-    """
-    svc = current_services()
-    svc.mcp = mcp_service
-
-
-def get_mcp_service() -> Any:
-    """
-    Retrieve the currently configured MCP service.
-
-    This function returns the MCP service instance from the current application's
-    service container. It is used to access MCP-related functionality throughout the app.
-
-    Examples:
-        ```python
-        mcp = get_mcp_service()
-        ```
-
-    Args:
-        None
-
-    Returns:
-        The MCP service instance currently set in the service container.
-
-    Raises:
-        RuntimeError: If no MCP service has been set.
-
-    Notes:
-        - Ensure that set_mcp_service() has been called during application initialization.
-        - This is an internal function; users typically interact with MCP services via higher-level APIs.
-    """
-    svc = current_services()
-    return svc.mcp
-
-
-def register_mcp_client(name: str, client: Any) -> None:
-    """
-    Register a new MCP client with the current MCP service.
-
-    This function adds a client instance to the MCP service under the specified name,
-    allowing it to be accessed and managed by the MCP infrastructure.
-
-    Examples:
-        ```python
-        from aethergraph.runtime import register_mcp_client
-        from aethergraph.services.mcp import HttpMCPClient
-        my_client = HttpMCPClient("https://mcp.example.com", ...)
-        register_mcp_client("myclient", my_client)
-        ```
-
-    Args:
-        name: The unique name to associate with the MCP client.
-        client: The client instance to register.
-
-    Returns:
-        None
-
-    Raises:
-        RuntimeError: If no MCP service has been installed via set_mcp_service().
-
-    """
-    svc = current_services()
-    if svc.mcp is None:
-        raise RuntimeError("No MCP service installed. Call set_mcp_service() first.")
-    svc.mcp.register(name, client)
-
-
-def list_mcp_clients() -> list[str]:
-    """
-    List all registered MCP client names in the current MCP service.
-
-    This function returns a list of all client names that have been registered
-    with the MCP service, allowing for discovery and management of available clients.
-
-    Examples:
-        ```python
-        from aethergraph.runtime import list_mcp_clients
-        clients = list_mcp_clients()
-        print(clients)
-        ```
-
-    Args:
-        None
-
-    Returns:
-        A list of strings representing the names of registered MCP clients.
-        Returns an empty list if no MCP service is installed or no clients are registered.
-    """
-    svc = current_services()
-    if svc.mcp:
-        return svc.mcp.list_clients()
-    return []
-
-
-# --------- Skill registry helpers ---------
-def get_skill_registry() -> SkillRegistry:
-    svc = current_services()
-    return svc.skills_registry
-
-
-def register_skill(skill: Skill, *, overwrite: bool = False) -> Skill:
-    """
-    Register an existing Skill object into the global registry.
-
-    This method adds a `Skill` instance to the global `SkillRegistry`, making it
-    available for use throughout the application. The `overwrite` flag determines
-    whether an existing skill with the same ID will be replaced.
-
-    Examples:
-        Registering a skill object:
-        ```python
-        skill = Skill(id="example.skill", title="Example Skill")
-        register_skill(skill)
-        ```
-
-        Overwriting an existing skill:
-        ```python
-        skill = Skill(id="example.skill", title="Updated Skill")
-        register_skill(skill, overwrite=True)
-        ```
-
-    Args:
-        skill: The `Skill` object to register.
-        overwrite: Whether to overwrite an existing skill with the same ID. Default is `False`.
-
-    Returns:
-        Skill: The registered `Skill` instance.
-
-    """
-
-    def _op(svc: Any) -> "Skill":
-        reg = svc.skills_registry
-        reg.register(skill, overwrite=overwrite)
-        return skill
-
-    # Key should be stable and allow overwriting the deferred op if called again.
-    # Usually skill.id is the right identity here.
-    key = f"skills:obj:{skill.id}:overwrite={overwrite}"
-    return _try_apply_or_defer(key, _op)
-
-
-def register_skill_inline(
-    *,
-    id: str,
-    title: str,
-    description: str = "",
-    tags: list[str] | None = None,
-    domain: str | None = None,
-    modes: list[str] | None = None,
-    version: str | None = None,
-    config: dict[str, Any] | None = None,
-    sections: dict[str, str] | None = None,
-    overwrite: bool = False,
-) -> Skill:
-    """
-    Define and register a Skill entirely in Python.
-
-    This method allows you to define a Skill inline with all its metadata and sections,
-    and directly register it into the global Skill registry.
-
-    Examples:
-        Registering a skill with basic metadata and sections:
-        ```python
-        register_skill_inline(
-            id="surrogate.workflow",
-            title="Surrogate workflow planning",
-            description="Prompts and patterns for surrogate planning.",
-            tags=["surrogate", "planning"],
-            modes=["planning"],
-            sections={
-                "planning.header": "...",
-                "planning.binding_hints": "...",
-                "chat.system": "...",
-            },
-        )
-        ```
-
-    Args:
-        id (str): The unique identifier for the Skill. (Required)
-        title (str): A human-readable title for the Skill. (Required)
-        description (str): A short description of the Skill's purpose. (Optional)
-        tags (list[str]): A list of tags for categorization. (Optional)
-        domain (str): The domain or namespace for the Skill. (Optional)
-        modes (list[str]): The operational modes supported by the Skill. (Optional)
-        version (str): The version string for the Skill. (Optional)
-        config (dict[str, Any]): Additional configuration data. (Optional)
-        sections (dict[str, str]): A dictionary mapping section names to their content. (Optional)
-        overwrite (bool): Whether to overwrite an existing Skill with the same ID. (Optional)
-
-    Returns:
-        Skill: The registered Skill instance.
-    """
-
-    def _op(svc: Any) -> "Skill":
-        reg = svc.skills_registry
-        return reg.register_inline(
-            id=id,
-            title=title,
-            description=description,
-            tags=tags,
-            domain=domain,
-            modes=modes,
-            version=version,
-            config=config,
-            sections=sections,
-            overwrite=overwrite,
-        )
-
-    # Include overwrite, and optionally version to avoid surprising replacements.
-    key = f"skills:inline:{id}:overwrite={overwrite}:version={version or ''}"
-    return _try_apply_or_defer(key, _op)
-
-
-def register_skill_file(path: str | Path, *, overwrite: bool = False) -> Skill:
-    """
-    Load a single markdown skill file and register it.
-
-    This function processes a markdown file containing skill definitions and
-    registers it into the global skill registry. The file must adhere to the
-    expected format for parsing skill metadata and sections.
-
-    Examples:
-        Registering a skill from a markdown file:
-        ```python
-        skill = register_skill_file("skills/surrogate-workflow.md")
-        ```
-
-    Args:
-        path: The path to the markdown file to load.
-        overwrite: Whether to overwrite an existing skill with the same ID. (Optional, default: False)
-
-    Returns:
-        Skill: The registered `Skill` instance.
-
-    Notes:
-        To start the server and load all desired packages:
-        1. Open a terminal and navigate to the project directory.
-        2. Run the server using the appropriate command (e.g., `python -m aethergraph.server`).
-        3. Ensure all required dependencies are installed via `pip install -r requirements.txt`.
-
-    """
-
-    p = str(path)
-
-    def _op(svc: Any) -> Skill:
-        reg = svc.skills_registry
-        return reg.load_file(path, overwrite=overwrite)
-
-    p = str(path)
-
-    def _op(svc: Any) -> "Skill":
-        reg = svc.skills_registry
-        return reg.load_file(path, overwrite=overwrite)
-
-    key = f"skills:file:{p}:overwrite={overwrite}"
-    return _try_apply_or_defer(key, _op)
-
-
-def register_skills_from_path(
-    root: str | Path,
-    *,
-    pattern: str = "*.md",
-    recursive: bool = True,
-    overwrite: bool = False,
-) -> list[Skill]:
-    """
-    Load and register all skill markdown files under a directory.
-
-    This method scans the specified directory for markdown files matching the
-    given pattern, parses their content into `Skill` objects, and registers
-    them into the global skill registry. The directory can have a flat or
-    nested structure.
-
-    Examples:
-        Register all skills in a flat directory:
-        ```python
-        register_skills_from_path("skills/")
-        ```
-
-        Register skills in a nested directory structure:
-        ```python
-        register_skills_from_path("skills/", recursive=True)
-        ```
-
-        Use a custom file pattern to filter files:
-        ```python
-        register_skills_from_path("skills/", pattern="*.skill.md")
-        ```
-
-    Args:
-        root: The root directory to scan for skill files.
-        pattern: A glob pattern to match skill files. Default is `"*.md"`.
-        recursive: Whether to scan subdirectories recursively. Default is `True`.
-        overwrite: Whether to overwrite existing skills with the same ID. Default is `False`.
-
-    Returns:
-        list[Skill]: A list of all registered `Skill` objects.
-
-    Notes:
-        To start the server and load all desired packages:
-        1. Open a terminal and navigate to the project directory.
-        2. Run the server using the appropriate command (e.g., `python -m aethergraph.server`).
-        3. Ensure all required dependencies are installed via `pip install -r requirements.txt`.
-
-    """
-    root_str = str(root)
-
-    def _op(svc: Any) -> list[Skill]:
-        return svc.skills_registry.load_path(
-            root=root_str,
-            pattern=pattern,
-            recursive=recursive,
-            overwrite=overwrite,
-        )
-
-    key = f"skills:path:{root_str}:pattern={pattern}:recursive={recursive}:overwrite={overwrite}"
-    return _try_apply_or_defer(key, _op)
-
-
-# --------- Scheduler helpers --------- - (Not used)
-def ensure_global_scheduler_started() -> None:
-    svc = current_services()
-    sched = svc.schedulers.get("global")
-    if sched and not sched.is_running():
-        import asyncio
-
-        asyncio.create_task(sched.run_forever())

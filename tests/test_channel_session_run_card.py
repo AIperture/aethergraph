@@ -11,12 +11,6 @@ class _FakeBus:
     def __init__(self) -> None:
         self.published = []
 
-    def get_default_channel_key(self) -> str:
-        return "ui:session/test-session"
-
-    def resolve_channel_key(self, key: str) -> str:
-        return key
-
     async def publish(self, event):
         self.published.append(event)
 
@@ -25,7 +19,16 @@ class _FakeMemoryFacade:
     def __init__(self) -> None:
         self.calls = []
 
-    async def record_chat(self, role, text, *, tags=None, data=None, severity=2, signal=None):
+    async def append_chat_turn(
+        self,
+        role,
+        text,
+        *,
+        tags=None,
+        data=None,
+        severity=2,
+        signal=None,
+    ):
         self.calls.append(
             {
                 "role": role,
@@ -46,6 +49,7 @@ class _FakeContext:
         self.graph_id = "graph-ctx"
         self.agent_id = "agent-ctx"
         self.app_id = "app-ctx"
+        self.origin_binding = SimpleNamespace(channel_key="endpoint:sessions/test-session")
         self.services = SimpleNamespace(
             channels=_FakeBus(),
             continuation_store=None,
@@ -54,7 +58,7 @@ class _FakeContext:
 
 
 @pytest.mark.asyncio
-async def test_send_run_card_emits_rich_component_payload() -> None:
+async def test_send_run_card_emits_rich_component_without_implicit_memory_log() -> None:
     ctx = _FakeContext()
     chan = ChannelSession(ctx)
 
@@ -94,16 +98,16 @@ async def test_send_run_card_emits_rich_component_payload() -> None:
     assert event.meta["graph_id"] == "graph-ctx"
     assert event.meta["session_id"] == "session-ctx"
 
-    assert len(ctx.services.memory_facade.calls) == 1
-    assert ctx.services.memory_facade.calls[0]["text"] == "This is a live run: run-123"
+    assert ctx.services.memory_facade.calls == []
 
 
 @pytest.mark.asyncio
-async def test_send_run_card_respects_memory_log_false() -> None:
+async def test_send_run_card_logs_memory_only_when_explicitly_enabled() -> None:
     ctx = _FakeContext()
     chan = ChannelSession(ctx)
 
-    await chan.send_run_card("run-456", memory_log=False)
+    await chan.send_run_card("run-456", memory_log=True)
 
     assert len(ctx.services.channels.published) == 1
-    assert ctx.services.memory_facade.calls == []
+    assert len(ctx.services.memory_facade.calls) == 1
+    assert ctx.services.memory_facade.calls[0]["text"] == "This is a live run: run-456"

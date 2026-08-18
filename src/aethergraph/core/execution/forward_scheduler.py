@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 import inspect
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.contracts.services.resume import ResumeEvent
-from aethergraph.contracts.services.wakeup import WakeupEvent
 
 from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID
 from ..graph.node_spec import NodeEvent
@@ -45,7 +44,7 @@ class ForwardScheduler(BaseScheduler):
     • Start nodes (async) and invoke `step_forward(...)` for the work
     • Transition node state to DONE, SKIPPED, FAILED, or WAITING_*
     • Persist and publish Continuations when a node requests a wait
-    • Handle Resume/Wakeup events and re-start waiting nodes with a payload
+    • Handle Resume events and re-start waiting nodes with a payload
     • Enforce max concurrency and apply retry/backoff policy
     • Optionally: stop early on the first terminal failure and/or mark dependents SKIPPED
 
@@ -55,14 +54,13 @@ class ForwardScheduler(BaseScheduler):
     • Waiting states: {WAITING_HUMAN, WAITING_ROBOT, WAITING_TIME, WAITING_EVENT}
     • Control events:
         - ResumeEvent(node_id, payload): resume a WAITING_* node with payload
-        - WakeupEvent(node_id): resume due to timer/poll (payload supplied upstream)
     • Concurrency: bounded by `max_concurrency`; resumed nodes are prioritized
     • Retries: delegated to RetryPolicy (attempts, backoff); backoff sleepers are tracked
 
     Data Structures
     ---------------
     • running_tasks: {node_id -> asyncio.Task}
-    • _events: asyncio.Queue[ResumeEvent | WakeupEvent]  (control plane)
+    • _events: asyncio.Queue[ResumeEvent | None]         (control plane)
     • _resume_payloads: {node_id -> dict}                (payload stash until start)
     • _resume_pending: set[node_id]                      (resumed but awaiting capacity)
     • _backoff_tasks: {node_id -> asyncio.Task}          (sleepers before retry)
@@ -366,7 +364,7 @@ class ForwardScheduler(BaseScheduler):
         self._resume_pending.clear()
         self._ready_pending.clear()
         self._nudge.set()
-        await self._events.put(WakeupEvent("__cancel__"))
+        await self._events.put(None)
 
     async def run_node(self, node):
         """Explicitly run a specific node (e.g. for testing)."""
@@ -739,7 +737,7 @@ class ForwardScheduler(BaseScheduler):
                         node_id=node.node_id,
                         status=str(NodeStatus.DONE),
                         outputs=node.outputs or {},
-                        timestamp=datetime.utcnow().timestamp(),
+                        timestamp=datetime.now(UTC).timestamp(),
                     )
                     await self._emit(event)
 
@@ -757,7 +755,7 @@ class ForwardScheduler(BaseScheduler):
                         node_id=node.node_id,
                         status=result.status,
                         outputs=node.outputs or {},
-                        timestamp=datetime.utcnow().timestamp(),
+                        timestamp=datetime.now(UTC).timestamp(),
                     )
                     await self._emit(event)
 
@@ -775,7 +773,7 @@ class ForwardScheduler(BaseScheduler):
                         node_id=node.node_id,
                         status=str(NodeStatus.FAILED),
                         outputs=node.outputs or {},
-                        timestamp=datetime.utcnow().timestamp(),
+                        timestamp=datetime.now(UTC).timestamp(),
                     )
                     await self._emit(event)
 
@@ -808,7 +806,7 @@ class ForwardScheduler(BaseScheduler):
                         node_id=node.node_id,
                         status=str(NodeStatus.SKIPPED),
                         outputs=node.outputs or {},
-                        timestamp=datetime.utcnow().timestamp(),
+                        timestamp=datetime.now(UTC).timestamp(),
                     )
                     await self._emit(event)
                 elif result.status == NodeStatus.CANCELLED:
@@ -830,7 +828,7 @@ class ForwardScheduler(BaseScheduler):
                             node_id=node.node_id,
                             status=str(NodeStatus.CANCELLED),
                             outputs=node.outputs or {},
-                            timestamp=datetime.utcnow().timestamp(),
+                            timestamp=datetime.now(UTC).timestamp(),
                         )
                     )
 
@@ -901,8 +899,6 @@ class ForwardScheduler(BaseScheduler):
             - Cancel any backoff task for the node.
             - If the node is already running or max concurrency reached, mark it as pending and return.
             - Otherwise, start the node.
-        - If the event is a WakeupEvent:
-            - If the node is not running and max concurrency not reached, start the node.
         NOTE: This function assumes that the event queue is drained before scheduling new nodes.
         """
         # resume event for WAITING_* nodes
@@ -921,11 +917,6 @@ class ForwardScheduler(BaseScheduler):
                 self._resume_pending.add(ev.node_id)
             return
 
-        elif isinstance(ev, WakeupEvent):
-            started = await self._try_start_immediately(ev.node_id)
-            # If capacity is full, nothing else to do. When a slot frees, _schedule_ready will pick it.
-            return
-
     def _all_nodes_terminal(self) -> bool:
         # treat plan nodes as ignorable for completion
         for node in self.graph.nodes:
@@ -939,9 +930,3 @@ class ForwardScheduler(BaseScheduler):
         return any(
             (not _is_plan(n)) and (n.state.status in WAITING_STATES) for n in self.graph.nodes
         )
-
-    def post_resume_event_threadsafe(self, run_id: str, node_id: str, payload: dict):
-        if not self.loop or not self.loop.is_running():
-            # no-op or log; bus will warn
-            return
-        asyncio.run_coroutine_threadsafe(self.on_resume_event(run_id, node_id, payload), self.loop)

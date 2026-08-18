@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import warnings
 
-from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
+from aethergraph.contracts.services.channel import (
+    Button,
+    ChannelAdapter,
+    ChannelRoutingError,
+    OutEvent,
+)
 from aethergraph.services.channel.choices import build_choice_options, prompt_choices_from_prompt
 from aethergraph.services.continuations.continuation import Correlator
 
@@ -10,69 +15,72 @@ from aethergraph.services.continuations.continuation import Correlator
 class ChannelBus:
     """
     Transport layer:
-      - publish(event) : send any OutEvent with smart fallbacks
+      - publish(event) : deliver an OutEvent unchanged to its exact adapter
       - notify(cont)   : raise a prompt from a Continuation; inline-resume if adapter can read input
       - peek_correlator(channel_key): ask adapter for a thread hint (optional)
     Optionally aware of:
       - resume_router  : used for inline resume (console/local-web)
-      - store          : used to bind correlator↔token and to mint short resume_key
+      - store          : used to bind transport correlators to internal continuations
     """
 
     def __init__(
         self,
         adapters: dict[str, ChannelAdapter],
         *,
-        default_channel: str = "console:stdin",
-        channel_aliases: dict[str, str] | None = None,
         logger=None,
         resume_router=None,
         store=None,
     ):
+        """Create an exact-delivery Channel bus.
+
+        Examples:
+            Register adapters at construction:
+            ```python
+            bus = ChannelBus({"ui": ui_adapter, "console": console_adapter})
+            ```
+
+            Attach continuation services:
+            ```python
+            bus = ChannelBus(adapters, resume_router=router, store=store)
+            ```
+
+        Args:
+            adapters: Adapter mapping keyed by exact channel prefix.
+            logger: Optional Channel logger.
+            resume_router: Optional continuation resume router.
+            store: Optional continuation store.
+
+        Returns:
+            None.
+
+        Notes:
+            The bus owns neither a default address nor an alias registry.
+        """
         self.adapters = dict(adapters)
-        self.default_channel = default_channel
         self.logger = logger
         self.resume_router = resume_router
         self.store = store
-        self.channel_aliases: dict[str, str] = dict(channel_aliases or {})
 
     # ---- admin ----
     def register_adapter(self, prefix: str, adapter: ChannelAdapter) -> None:
         self.adapters[prefix] = adapter
-
-    def set_default_channel_key(self, channel_key: str) -> None:
-        self.default_channel = channel_key
-
-    def get_default_channel_key(self) -> str:
-        return self.default_channel
-
-    def register_alias(self, alias: str, target: str) -> None:
-        """Register or overwrite a human-friendly alias -> canonical key."""
-        if self._prefix(target) not in self.adapters:
-            raise RuntimeError(
-                f"Cannot alias to unknown channel prefix: {self._prefix(target)}. Please check if you have enabled the required channel service in .env and registered the adapter."
-            )
-
-        self.channel_aliases[alias] = target
-
-    def resolve_channel_key(self, key: str) -> str:
-        """
-        Resolve a channel key via the alias map.
-        If `key` matches an alias exactly, return the mapped canonical key;
-        otherwise return `key` as-is.
-        """
-        return self.channel_aliases.get(key, key)
 
     # ---- internals ----
     def _prefix(self, channel_key: str) -> str:
         return channel_key.split(":", 1)[0]
 
     def _pick(self, channel_key: str) -> ChannelAdapter:
-        # IMPORTANT: resolve aliases *before* looking up adapter
-        resolved_key = self.resolve_channel_key(channel_key)
-        prefix = self._prefix(resolved_key)
+        prefix = self._prefix(channel_key)
         if prefix not in self.adapters:
-            raise RuntimeError(
-                f"No adapter for prefix={prefix}; known: {list(self.adapters.keys())}; Check if you have enabled the required channel service in .env and registered the adapter."
+            known_prefixes = tuple(sorted(self.adapters))
+            raise ChannelRoutingError(
+                code="channel.adapter_not_found",
+                channel_key=channel_key,
+                known_prefixes=known_prefixes,
+                message=(
+                    f"No channel adapter is registered for prefix {prefix!r}; "
+                    f"known prefixes: {list(known_prefixes)}."
+                ),
             )
         return self.adapters[prefix]
 
@@ -82,110 +90,60 @@ class ChannelBus:
         else:
             warnings.warn(msg, stacklevel=2)
 
-    async def _bind_correlator_if_any(self, event: OutEvent, send_result: dict | None):
-        if not self.store or not send_result:
+    async def _bind_correlator_if_any(
+        self,
+        send_result: dict | None,
+        *,
+        continuation,
+    ):
+        if not self.store or not send_result or continuation is None:
             return
         corr = send_result.get("correlator")
-        token = (event.meta or {}).get("token")
-        if isinstance(corr, Correlator) and token:
+        if isinstance(corr, Correlator):
             try:
-                await self.store.bind_correlator(token=token, corr=corr)
+                record = getattr(continuation, "record", continuation)
+                updated = await self.store.bind_correlator(continuation=record, corr=corr)
+                if hasattr(continuation, "record"):
+                    continuation.record = updated
             except Exception as e:
                 self._warn(f"Failed to bind correlator: {e}")
 
-    def _smart_fallback(self, adapter: ChannelAdapter, event: OutEvent) -> OutEvent | None:
-        # Determine required capability for the event type
-        need = None
-        if event.type in (
-            "agent.message",
-            "agent.message.update",
-            "session.waiting",
-            "session.need_input",
-        ):
-            need = "text"
-        elif event.type in ("agent.stream.start", "agent.stream.delta", "agent.stream.end"):
-            need = "stream"
-        elif event.type in ("session.need_approval", "link.buttons"):
-            need = "buttons"
-        elif event.type == "file.upload":
-            need = "file"
-
-        caps: set[str] = getattr(adapter, "capabilities", set())
-
-        # Supported as-is
-        if (need is None) or (need in caps):
-            return event
-
-        # buttons → text (numbered list)
-        if need == "buttons" and "text" in caps:
-            opts = []
-            if event.buttons:
-                for b in event.buttons:
-                    lbl = (
-                        getattr(b, "label", None)
-                        or str(getattr(b, "value", "") or "").title()
-                        or "Option"
-                    )
-                    val = getattr(b, "value", None) or str(lbl)
-                    opts.append({"label": str(lbl), "value": str(val)})
-            else:
-                for o in build_choice_options(
-                    (event.meta or {}).get("choices") or (event.meta or {}).get("options", [])
-                ):
-                    opts.append({"label": o.label, "value": o.id})
-            if not opts:
-                opts = [
-                    {"label": "Approve", "value": "Approve"},
-                    {"label": "Reject", "value": "Reject"},
-                ]
-            lines = [f"{i + 1}. {o['label']}" for i, o in enumerate(opts)]
-            hint = "Reply with the number or the label."
-            txt = (event.text or "Choose an option:") + "\n" + "\n".join(lines) + f"\n{hint}"
-            meta = dict(event.meta or {})
-            meta["options"] = [o["label"] for o in opts]
-            meta["options_map"] = {str(i + 1): o["value"] for i, o in enumerate(opts)}
-            meta["choices"] = [{"id": o["value"], "label": o["label"]} for o in opts]
-            meta["options_label_to_value"] = {o["label"].lower(): o["value"] for o in opts}
-            return OutEvent(type="agent.message", channel=event.channel, text=txt, meta=meta)
-
-        # stream → text
-        if need == "stream" and "text" in caps:
-            if event.type == "agent.stream.delta":
-                return OutEvent(
-                    type="agent.message",
-                    channel=event.channel,
-                    text=event.text or "",
-                    meta=event.meta,
-                )
-            return None  # drop start/end
-
-        # file → text link if available
-        if need == "file" and "text" in caps:
-            if event.file and "url" in event.file:
-                return OutEvent(
-                    type="agent.message",
-                    channel=event.channel,
-                    text=f"[file] {event.file.get('filename', 'file')}: {event.file['url']}",
-                    meta=event.meta,
-                )
-            self._warn("Binary file not representable on this adapter.")
-            return None
-
-        self._warn(f"Adapter lacks '{need}', dropping event type={event.type}.")
-        return None
-
     # ---- core send path ----
     async def publish(self, event: OutEvent) -> dict | None:
-        """
-        Send any OutEvent; apply smart fallbacks; bind correlator if adapter returns one.
-        No inline resume here (use notify for interactions).
+        """Deliver one event unchanged to its exact channel adapter.
+
+        Examples:
+            Deliver a text event:
+            ```python
+            event = OutEvent(
+                type="agent.message",
+                channel="endpoint:sessions/s1",
+                text="Done",
+            )
+            await bus.publish(event)
+            ```
+
+            Inspect an adapter delivery receipt:
+            ```python
+            receipt = await bus.publish(event)
+            delivery_id = (receipt or {}).get("delivery_id")
+            ```
+
+        Args:
+            event: Fully formed event with a concrete channel address.
+
+        Returns:
+            Adapter-defined delivery metadata, or `None` when the adapter does
+            not return metadata.
+
+        Notes:
+            Projection and capability validation belong to the configured
+            adapter boundary. This method never converts or drops an event and
+            never performs inline continuation resume; use `notify` for an
+            interaction prompt.
         """
         adapter = self._pick(event.channel)
-        evt = self._smart_fallback(adapter, event)
-        if evt is None:
-            return None
-        res = await adapter.send(evt)
-        await self._bind_correlator_if_any(evt, res)
+        res = await adapter.send(event)
         return res
 
     # ---- continuation-aware notify (used by ChannelSession.ask_*) ----
@@ -200,28 +158,39 @@ class ChannelBus:
         kind = continuation.kind
         prompt = continuation.prompt
 
-        # Short token for constrained transports
-        resume_key = None
-        if self.store and hasattr(self.store, "alias_for"):
-            try:
-                resume_key = await self.store.alias_for(continuation.token)
-            except Exception:
-                resume_key = None
-        if not resume_key:
-            resume_key = str(continuation.token)[:24]
+        continuation_payload = getattr(continuation, "payload", None)
+        interaction_id = (
+            continuation_payload.get("_interaction_id")
+            if isinstance(continuation_payload, dict)
+            else None
+        )
+        if not isinstance(interaction_id, str) or not interaction_id:
+            raise ValueError("Continuation is missing its public interaction identity.")
 
         meta = {
-            "run_id": continuation.run_id,
-            "node_id": continuation.node_id,
-            "token": continuation.token,
-            "resume_key": resume_key,
+            "interaction_id": interaction_id,
+            "interaction_kind": kind,
         }
+        if isinstance(continuation_payload, dict) and kind in (
+            "user_files",
+            "user_input_or_files",
+        ):
+            meta["accept"] = list(continuation_payload.get("accept") or [])
+            meta["multiple"] = bool(continuation_payload.get("multiple", True))
 
         # Enrich continuation meta with the same context fields we attach
         # on normal channel events (if present on the continuation object).
         session_id = getattr(continuation, "session_id", None)
         if session_id is not None:
             meta.setdefault("session_id", session_id)
+
+        run_id = getattr(continuation, "run_id", None)
+        if run_id is not None:
+            meta.setdefault("run_id", run_id)
+
+        node_id = getattr(continuation, "node_id", None)
+        if node_id is not None:
+            meta.setdefault("node_id", node_id)
 
         agent_id = getattr(continuation, "agent_id", None)
         if agent_id is not None:
@@ -287,9 +256,14 @@ class ChannelBus:
 
         else:
             txt = str(prompt) if isinstance(prompt, str) else "Waiting…"
-            return await self.publish(
-                OutEvent(type="session.waiting", channel=ch, text=txt, meta=meta)
+            event = OutEvent(type="session.waiting", channel=ch, text=txt, meta=meta)
+            adapter = self._pick(ch)
+            res = await adapter.send(event)
+            await self._bind_correlator_if_any(
+                res,
+                continuation=continuation,
             )
+            return res
 
         # Inline vs push-only
         adapter = self._pick(ch)
@@ -301,11 +275,19 @@ class ChannelBus:
         if (needed_cap in caps) and not force_push:
             # Inline path
             res = await adapter.send(event)
-            await self._bind_correlator_if_any(event, res)
+            await self._bind_correlator_if_any(
+                res,
+                continuation=continuation,
+            )
             return res
 
         # Push-only path
-        return await self.publish(event)
+        res = await adapter.send(event)
+        await self._bind_correlator_if_any(
+            res,
+            continuation=continuation,
+        )
+        return res
 
     # ---- optional: ask adapter for correlator/“thread” without sending ----
     async def peek_correlator(self, channel_key: str) -> Correlator | None:

@@ -14,7 +14,8 @@ def test_build_parser_exposes_current_top_level_commands() -> None:
     subparsers_action = next(
         action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
     )
-    assert {"serve", "run", "register"} <= set(subparsers_action.choices)
+    assert {"serve", "host", "run", "register"} <= set(subparsers_action.choices)
+    assert "observability" not in subparsers_action.choices
 
 
 @pytest.mark.parametrize(

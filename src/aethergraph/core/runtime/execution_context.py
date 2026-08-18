@@ -8,13 +8,14 @@ import importlib
 from typing import TYPE_CHECKING, Any
 
 from aethergraph.api.v1.deps import RequestIdentity
+from aethergraph.contracts.integration import OriginBinding
+from aethergraph.observability.logger import StdLoggerService
 from aethergraph.services.scope.scope import Scope
 
 if TYPE_CHECKING:
     from aethergraph.core.graph.task_node import TaskNodeRuntime
 
 from aethergraph.services.clock.clock import SystemClock
-from aethergraph.services.logger.std import StdLoggerService
 from aethergraph.services.resume.router import ResumeRouter
 
 from ..graph.graph_refs import GRAPH_INPUTS_NODE_ID, RESERVED_INJECTABLES
@@ -27,6 +28,7 @@ class ExecutionContext:
     run_id: str
     graph_id: str | None
     session_id: str | None
+    origin_binding: OriginBinding | None
     agent_id: str | None
     app_id: str | None
     identity: RequestIdentity | None
@@ -39,12 +41,14 @@ class ExecutionContext:
     should_run_fn: Callable[[], bool] | None = None
     resume_router: ResumeRouter | None = None  # ResumeRouter
     scope: Scope | None = None  # Node Scope
+    runtime_output_sink: Any | None = None
 
     def create_node_context(self, node: TaskNodeRuntime) -> NodeContext:
         return NodeContext(
             run_id=self.run_id,
             graph_id=self.graph_id or "",
             session_id=self.session_id,
+            origin_binding=self.origin_binding,
             node_id=node.node_id,
             services=self.services,
             identity=self.identity,

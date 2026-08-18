@@ -1,0 +1,347 @@
+{
+  "schema_version": "aethergraph.provider-discovery-fixture/v2",
+  "capability_authority": "aethergraph.services.llm.catalog",
+  "captured_at": "2026-08-07",
+  "records": [
+    {
+      "binding": {
+        "provider": "openai",
+        "model": "gpt-5.6",
+        "endpoint_family": "responses",
+        "endpoint_path": "/v1/responses"
+      },
+      "adapter_status": "native_client_implemented",
+      "modes": [
+        {
+          "mode": "native_client",
+          "replay_requirement": "previous_response",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "responses.tool_search",
+          "bindable": true,
+          "limit_source": "aethergraph_request_contract"
+        },
+        {
+          "mode": "native_hosted",
+          "replay_requirement": "none",
+          "result_limit_behavior": "provider_fixed",
+          "max_results": null,
+          "protocol_version": "responses.tool_search",
+          "bindable": false,
+          "blocker": "provider_reference_limit_not_documented"
+        }
+      ],
+      "baseline": {
+        "request": {
+          "model": "gpt-5.6",
+          "input": "Find the weather tool.",
+          "tools": [
+            {
+              "type": "namespace",
+              "name": "weather",
+              "description": "Weather operations.",
+              "tools": [
+                {
+                  "type": "function",
+                  "name": "get_weather",
+                  "description": "Get weather for one city.",
+                  "defer_loading": true,
+                  "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                    "additionalProperties": false
+                  }
+                }
+              ]
+            },
+            {
+              "type": "tool_search",
+              "execution": "client",
+              "description": "Find project tools needed to continue the task.",
+              "parameters": {
+                "type": "object",
+                "properties": {"goal": {"type": "string"}},
+                "required": ["goal"],
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        "response_items": [
+          {
+            "type": "tool_search_call",
+            "execution": "client",
+            "call_id": "ts_openai_1",
+            "status": "completed",
+            "arguments": {"goal": "weather lookup"}
+          },
+          {
+            "type": "tool_search_output",
+            "execution": "client",
+            "call_id": "ts_openai_1",
+            "status": "completed",
+            "tools": [{"type": "function", "name": "get_weather"}]
+          },
+          {
+            "type": "function_call",
+            "call_id": "call_openai_1",
+            "name": "get_weather",
+            "arguments": "{\"city\":\"Seattle\"}"
+          }
+        ],
+        "continuation": {
+          "previous_response_id": "resp_openai_1",
+          "input_item_type": "tool_search_output",
+          "call_id_must_match": true
+        },
+        "cache_observation": {
+          "strategy": "append_loaded_tools",
+          "expected_catalog_prefix": "stable",
+          "provider_signal": "usage.input_tokens_details.cached_tokens"
+        }
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/guides/tools-tool-search"
+      ]
+    },
+    {
+      "binding": {
+        "provider": "azure",
+        "model": "gpt-5.5",
+        "endpoint_family": "responses",
+        "endpoint_path": "/openai/v1/responses"
+      },
+      "adapter_status": "native_client_implemented",
+      "modes": [
+        {
+          "mode": "native_client",
+          "replay_requirement": "previous_response",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "responses.tool_search",
+          "bindable": true,
+          "limit_source": "aethergraph_request_contract"
+        },
+        {
+          "mode": "native_hosted",
+          "replay_requirement": "none",
+          "result_limit_behavior": "provider_fixed",
+          "max_results": null,
+          "protocol_version": "responses.tool_search",
+          "bindable": false,
+          "blocker": "provider_reference_limit_not_documented"
+        }
+      ],
+      "baseline": {
+        "request": {
+          "model": "gpt-5.5",
+          "input": "Find the shipping ETA tool.",
+          "tools": [
+            {
+              "type": "tool_search",
+              "execution": "client",
+              "description": "Find project tools needed to continue the task.",
+              "parameters": {
+                "type": "object",
+                "properties": {"goal": {"type": "string"}},
+                "required": ["goal"],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "parallel_tool_calls": false
+        },
+        "response_items": [
+          {
+            "type": "tool_search_call",
+            "execution": "client",
+            "call_id": "ts_azure_1",
+            "status": "completed",
+            "arguments": {"goal": "shipping ETA"}
+          },
+          {
+            "type": "tool_search_output",
+            "execution": "client",
+            "call_id": "ts_azure_1",
+            "status": "completed",
+            "tools": [{"type": "function", "name": "get_shipping_eta"}]
+          }
+        ],
+        "continuation": {
+          "input_includes_previous_output": true,
+          "input_item_type": "tool_search_output",
+          "call_id_must_match": true
+        },
+        "cache_observation": {
+          "strategy": "append_loaded_tools",
+          "expected_catalog_prefix": "stable",
+          "provider_signal": "usage.input_tokens_details.cached_tokens"
+        }
+      },
+      "sources": [
+        "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/tool-search",
+        "https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/responses"
+      ]
+    },
+    {
+      "binding": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5-20250929",
+        "endpoint_family": "messages",
+        "endpoint_path": "/v1/messages"
+      },
+      "adapter_status": "native_hosted_and_client_implemented",
+      "required_headers": {"anthropic-version": "2023-06-01"},
+      "modes": [
+        {
+          "mode": "native_hosted",
+          "replay_requirement": "full_history",
+          "result_limit_behavior": "provider_fixed",
+          "max_results": 5,
+          "protocol_version": "tool_search_tool_bm25_20251119",
+          "bindable": true,
+          "limit_source": "provider_default"
+        },
+        {
+          "mode": "native_client",
+          "replay_requirement": "full_history",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "messages.tool_reference",
+          "bindable": true,
+          "limit_source": "aethergraph_request_contract"
+        }
+      ],
+      "baseline": {
+        "request": {
+          "model": "claude-sonnet-4-5-20250929",
+          "max_tokens": 2048,
+          "messages": [{"role": "user", "content": "Find the weather tool."}],
+          "tools": [
+            {
+              "type": "tool_search_tool_bm25_20251119",
+              "name": "tool_search_tool_bm25"
+            },
+            {
+              "name": "get_weather",
+              "description": "Get weather for one city.",
+              "input_schema": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"]
+              },
+              "defer_loading": true
+            }
+          ]
+        },
+        "response_items": [
+          {
+            "type": "server_tool_use",
+            "id": "srvtoolu_anthropic_1",
+            "name": "tool_search_tool_bm25",
+            "input": {"query": "weather lookup"}
+          },
+          {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_anthropic_1",
+            "content": {
+              "type": "tool_search_tool_search_result",
+              "tool_references": [
+                {"type": "tool_reference", "tool_name": "get_weather"}
+              ]
+            }
+          },
+          {
+            "type": "tool_use",
+            "id": "toolu_anthropic_1",
+            "name": "get_weather",
+            "input": {"city": "Seattle"}
+          }
+        ],
+        "continuation": {
+          "replay_assistant_content_unchanged": true,
+          "send_same_tools_array": true,
+          "do_not_return_server_tool_result": true
+        },
+        "cache_observation": {
+          "strategy": "inline_tool_reference_after_prefix",
+          "expected_catalog_prefix": "stable",
+          "provider_signal": "usage.cache_read_input_tokens"
+        }
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool",
+        "https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching"
+      ]
+    },
+    {
+      "binding": {
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+        "endpoint_family": "generateContent",
+        "endpoint_path": "/v1/models/gemini-2.5-pro:generateContent"
+      },
+      "adapter_status": "projected_contract_available",
+      "modes": [
+        {
+          "mode": "engine_projected",
+          "replay_requirement": "full_history",
+          "result_limit_behavior": "request_bound",
+          "max_results": 50,
+          "protocol_version": "generateContent.v1",
+          "bindable": true,
+          "limit_source": "aethergraph_request_contract"
+        }
+      ],
+      "baseline": {
+        "request_before_activation": {
+          "contents": [
+            {"role": "user", "parts": [{"text": "Find a weather tool."}]}
+          ],
+          "tools": [
+            {
+              "functionDeclarations": [
+                {"name": "tool_search"},
+                {"name": "tool_load"}
+              ]
+            }
+          ]
+        },
+        "request_after_activation": {
+          "tools": [
+            {
+              "functionDeclarations": [
+                {"name": "tool_search"},
+                {"name": "tool_load"},
+                {"name": "get_weather"}
+              ]
+            }
+          ]
+        },
+        "response_items": [
+          {
+            "functionCall": {
+              "id": "gemini_call_1",
+              "name": "tool_search",
+              "args": {"query": "weather"}
+            }
+          }
+        ],
+        "continuation": {
+          "replay_full_contents": true,
+          "preserve_function_call_parts": true
+        },
+        "cache_observation": {
+          "strategy": "projected_surface_rotates",
+          "expected_catalog_prefix": "changed_after_activation",
+          "provider_signal": "usageMetadata.cachedContentTokenCount"
+        }
+      },
+      "sources": [
+        "https://ai.google.dev/gemini-api/docs/generate-content/function-calling",
+        "https://ai.google.dev/gemini-api/docs/generate-content/caching"
+      ]
+    }
+  ]
+}

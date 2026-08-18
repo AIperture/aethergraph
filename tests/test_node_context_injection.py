@@ -6,8 +6,28 @@ from typing import Any
 import pytest
 
 from aethergraph import NodeContext, graph_fn, graphify, tool
+from aethergraph.config.config import AppSettings
+import aethergraph.core.runtime.graph_runner as graph_runner
 from aethergraph.core.runtime.graph_runner import run_async
+from aethergraph.core.runtime.runtime_services import install_services, uninstall_services
 from aethergraph.core.tools.waitable import DualStageTool
+from aethergraph.services.container.default_container import build_default_container
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    container = build_default_container(
+        root=str(tmp_path),
+        cfg=AppSettings(workspace=str(tmp_path)),
+    )
+    asyncio.run(container.start_storage())
+    install_services(container)
+    monkeypatch.setattr(graph_runner, "_get_container", lambda: container)
+    yield
+    try:
+        asyncio.run(container.close_storage())
+    finally:
+        uninstall_services(container)
 
 
 @tool(outputs=["graph_id"])
@@ -49,6 +69,16 @@ async def test_graph_fn_injects_arbitrary_typed_name():
 
     result = await run_async(injected, {})
     assert result["graph_id"] == "test_ctx_injection_runtime_graph"
+
+
+@pytest.mark.asyncio
+async def test_graph_fn_injects_canonical_node_context_name():
+    @graph_fn(name="test_ctx_injection_node_context_graph", inputs=[], outputs=["graph_id"])
+    async def injected(*, node_context: NodeContext) -> dict[str, str]:
+        return {"graph_id": node_context.graph_id}
+
+    result = await run_async(injected, {})
+    assert result["graph_id"] == "test_ctx_injection_node_context_graph"
 
 
 @pytest.mark.asyncio
@@ -121,6 +151,20 @@ async def test_nested_graph_call_preserves_explicit_ctx_alias():
     assert result["graph_id"] == "test_nested_explicit_ctx_outer"
 
 
+@pytest.mark.asyncio
+async def test_nested_graph_call_preserves_explicit_node_context_name():
+    @graph_fn(name="test_nested_explicit_node_context_inner", inputs=[], outputs=["graph_id"])
+    async def inner(*, runtime: NodeContext) -> dict[str, str]:
+        return {"graph_id": runtime.graph_id}
+
+    @graph_fn(name="test_nested_explicit_node_context_outer", inputs=[], outputs=["graph_id"])
+    async def outer(*, node_context: NodeContext) -> dict[str, str]:
+        return await inner(node_context=node_context)
+
+    result = await run_async(outer, {})
+    assert result["graph_id"] == "test_nested_explicit_node_context_outer"
+
+
 def test_ambiguous_node_context_signature_fails_fast():
     with pytest.raises(TypeError, match="multiple NodeContext parameters"):
 
@@ -130,10 +174,36 @@ def test_ambiguous_node_context_signature_fails_fast():
 
 
 @pytest.mark.asyncio
+async def test_ambiguous_explicit_node_context_forwarding_fails_fast():
+    @graph_fn(name="test_ambiguous_explicit_context_inner", inputs=[], outputs=["graph_id"])
+    async def inner(*, runtime: NodeContext) -> dict[str, str]:
+        return {"graph_id": runtime.graph_id}
+
+    @graph_fn(name="test_ambiguous_explicit_context_outer", inputs=[], outputs=["graph_id"])
+    async def outer(*, context: NodeContext) -> dict[str, str]:
+        return await inner(context=context, node_context=context)
+
+    with pytest.raises(TypeError, match="Pass only one explicit NodeContext argument"):
+        await run_async(outer, {})
+
+
+@pytest.mark.asyncio
 async def test_untyped_arbitrary_name_remains_regular_input():
     @graph_fn(name="test_untyped_runtime_input_graph", inputs=["runtime"], outputs=["value"])
     async def passthrough(runtime: str) -> dict[str, str]:
         return {"value": runtime}
 
     result = await run_async(passthrough, {"runtime": "user-value"})
+    assert result["value"] == "user-value"
+
+
+@pytest.mark.asyncio
+async def test_untyped_node_context_remains_regular_input():
+    @graph_fn(
+        name="test_untyped_node_context_input_graph", inputs=["node_context"], outputs=["value"]
+    )
+    async def passthrough(node_context: str) -> dict[str, str]:
+        return {"value": node_context}
+
+    result = await run_async(passthrough, {"node_context": "user-value"})
     assert result["value"] == "user-value"

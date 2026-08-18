@@ -5,6 +5,15 @@ class StatsOverview(BaseModel):
     llm_calls: int = Field(0, description="Total LLM calls in the window")
     llm_prompt_tokens: int = Field(0, description="Total prompt tokens in the window")
     llm_completion_tokens: int = Field(0, description="Total completion tokens in the window")
+    llm_cache_read_tokens: int = Field(
+        0, description="Total prompt-cache read tokens in the window"
+    )
+    llm_cache_write_tokens: int = Field(
+        0, description="Total prompt-cache write tokens in the window"
+    )
+    llm_uncached_input_tokens: int = Field(
+        0, description="Total non-cache input tokens in the window"
+    )
     runs: int = Field(0, description="Total runs started in the window")
     runs_succeeded: int = Field(0, description="Runs that completed successfully")
     runs_failed: int = Field(0, description="Runs that failed")
@@ -46,6 +55,9 @@ class LLMStatsEntry(BaseModel):
     calls: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    uncached_input_tokens: int = 0
 
 
 class LLMStats(RootModel[dict[str, LLMStatsEntry]]):

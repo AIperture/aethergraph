@@ -66,9 +66,16 @@ class RunRecord:
     visibility: RunVisibility = RunVisibility.normal
     importance: RunImportance = RunImportance.normal
 
-    # optional agent/app linkage
+    # optional agent linkage and explicitly deprecated App compatibility metadata
     agent_id: str | None = None
-    app_id: str | None = None
+    app_id: str | None = field(
+        default=None,
+        metadata={
+            "deprecated": True,
+            "compatibility_only": True,
+            "scheduled_removal": "future breaking release",
+        },
+    )
 
     # Artifact statistics
     artifact_count: int = 0

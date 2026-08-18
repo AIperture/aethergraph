@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aethergraph"
-version = "0.1.0a15"
+version = "0.1.0a17"
 description = "Python-first agentic DAG execution framework"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -24,7 +24,7 @@ dependencies = [
   "httpx>=0.27",
   "aiohttp>=3.9",
   "croniter>=5.0.0",
-  "pypdf>=6.7.3",
+  "python-dateutil>=2.9.0",
 ]
 
 keywords = [
@@ -67,6 +67,7 @@ channels = [
   "aethergraph[webhook]"
 ]
 faiss    = ["faiss-cpu>=1.7.4"]      # optional vector index accel
+media    = ["Pillow>=10.0"]
 
 dev = [
   "ruff>=0.5",
@@ -160,3 +161,6 @@ exclude = [
 addopts = "-q"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+  'error::DeprecationWarning:aethergraph\.',
+]

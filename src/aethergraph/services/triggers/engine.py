@@ -1,145 +1,210 @@
-# aethergraph/services/triggers/engine.py
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.services.runs import RunStore
-from aethergraph.contracts.storage.event_log import EventLog
+from aethergraph.contracts.storage.trigger_store import TriggerStore
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunStatus, RunVisibility
-from aethergraph.storage.triggers.trigger_docstore import TriggerStore
+from aethergraph.observability.canonical_service import CanonicalObservationService
+from aethergraph.observability.models import ObservationRecord
 
-from .types import TriggerRecord
+from .trigger_service import _trigger_observation_scope
+from .types import TriggerClaim, TriggerRecord
 
 if TYPE_CHECKING:
     from aethergraph.core.runtime.run_manager import RunManager
 
 
+_RUNNING_STATUSES = (
+    RunStatus.pending,
+    RunStatus.running,
+    RunStatus.cancellation_requested,
+)
+
+
 @dataclass
 class TriggerEngine:
-    """
-    Background engine that:
-
-    - Periodically scans for time-based triggers that are due and fires them.
-    - Allows explicit event-based firing via fire_event(event_key, payload).
-
-    It does NOT manage graph resumption; it only *starts new runs*.
-    """
+    """Claim scheduled occurrences and submit new runs through one durable path."""
 
     store: TriggerStore
     run_manager: RunManager
-    event_log: EventLog | None = None
-    run_store: RunStore | None = None  # optional, for overlap checks
+    observation_sink: CanonicalObservationService | None = None
+    run_store: RunStore | None = None
     logger: Any | None = None
+    claim_limit: int = 100
+    lease_seconds: float = 60.0
+    worker_id: str = field(default_factory=lambda: f"trigger-worker-{uuid4().hex[:12]}")
 
     _stop_event: asyncio.Event | None = field(default=None, init=False, repr=False)
 
     async def run_forever(self, poll_interval_s: float = 5.0) -> None:
-        """
-        Main loop for time-based triggers. Call this from app startup
-        in an asyncio.create_task.
-        """
+        """Run the lifespan-owned trigger claim loop until stopped."""
         self._stop_event = asyncio.Event()
+        started_at = datetime.now(UTC)
+        first_scan = True
         if self.logger:
-            self.logger.info("TriggerEngine started")
+            self.logger.info("TriggerEngine started worker_id=%s", self.worker_id)
         while not self._stop_event.is_set():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             try:
-                await self._process_due_triggers(now)
-            except Exception as e:
+                await self._process_due_triggers(
+                    now,
+                    skip_missed_before=started_at if first_scan else None,
+                )
+                first_scan = False
+            except Exception:
                 if self.logger:
-                    self.logger.error(f"Error processing triggers: {e}")
-
+                    self.logger.exception("Error processing triggers")
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=poll_interval_s)
-            except asyncio.TimeoutError:
-                # timeout is expected; it just means it's time for the next poll
+            except TimeoutError:
                 continue
-
         if self.logger:
-            self.logger.info("TriggerEngine stopped")
+            self.logger.info("TriggerEngine stopped worker_id=%s", self.worker_id)
 
     async def stop(self) -> None:
+        """Request cooperative shutdown of the trigger loop."""
         if self._stop_event is not None:
             self._stop_event.set()
 
-    # --------- main logic for time-based triggers ---------
-    async def _process_due_triggers(self, now: datetime) -> None:
-        due = await self.store.list_due(now)
-        for trig in due:
-            try:
-                await self._fire_trigger(trig, now, extra_inputs=None)
-            except Exception as e:
-                if self.logger:
-                    self.logger.error(f"Error firing trigger {trig.trigger_id}: {e}")
+    async def _process_due_triggers(
+        self,
+        now: datetime,
+        *,
+        skip_missed_before: datetime | None = None,
+    ) -> None:
+        claims = await self.store.claim_due(
+            now,
+            worker_id=self.worker_id,
+            lease_until=now + timedelta(seconds=self.lease_seconds),
+            limit=self.claim_limit,
+            skip_missed_before=skip_missed_before,
+        )
+        for claim in claims:
+            await self._process_claim(claim, now)
 
     async def fire_event(
         self,
         event_key: str,
         payload: dict[str, Any] | None = None,
         *,
-        # optional tenant scoping for event-based triggers; if provided, only triggers matching these will be fired
         org_id: str | None = None,
         user_id: str | None = None,
         client_id: str | None = None,
     ) -> None:
-        """
-        Fire all active event-based triggers for this event_key.
-
-        payload, if provided, will be merged into default_inputs under key 'event'
-        (we can change this merging policy).
-        """
-        now = datetime.now(timezone.utc)
+        """Fire matching event triggers inside one explicit tenant scope."""
+        if org_id is None and user_id is None and client_id is None:
+            raise ValueError("Event firing requires an explicit tenant scope")
+        now = datetime.now(UTC)
         triggers = await self.store.list_by_event_key(
             event_key, org_id=org_id, user_id=user_id, client_id=client_id
         )
-
         for trig in triggers:
             try:
-                extra_inputs = {"event": payload} if payload else None
-                await self._fire_trigger(trig, now, extra_inputs=extra_inputs)
-            except Exception as e:
+                if await self._overlap_limit_reached(trig):
+                    await self._log_trigger_fire(
+                        trig, now, action="skipped_overlap", run_id=None, fire_id=None
+                    )
+                    continue
+                inputs = dict(trig.default_inputs or {})
+                if payload:
+                    inputs["event"] = payload
+                record = await self._submit(trig, inputs=inputs, run_id=None, fire_id=None)
+                trig.last_fired_at = now
+                await self.store.update(trig)
+                await self._log_trigger_fire(
+                    trig, now, action="fired", run_id=record.run_id, fire_id=None
+                )
+            except Exception:
                 if self.logger:
-                    self.logger.error(
-                        f"Error firing trigger {trig.trigger_id} for event {event_key}: {e}"
+                    self.logger.exception(
+                        "Error firing trigger %s for event %s", trig.trigger_id, event_key
                     )
 
-    async def _fire_trigger(
-        self,
-        trig: TriggerRecord,
-        now: datetime,
-        extra_inputs: dict[str, Any] | None = None,
-    ) -> None:
-        if not trig.active:
-            return
-
-        # Overlap policy check
-        if trig.max_overlap_runs is not None:
-            running = await self._count_running_for_trigger(trig.trigger_id)
-            if running > trig.max_overlap_runs:
-                await self._log_trigger_file(trig, now, action="skipped_overlap", run_id=None)
-                # still bump next_fire_at so we don't spin
-                await self._update_next_fire(trig, now)
-
+    async def _process_claim(self, claim: TriggerClaim, now: datetime) -> None:
+        trig = claim.trigger
+        try:
+            if await self._overlap_limit_reached(trig):
+                await self.store.skip_claim(
+                    claim.fire_id,
+                    worker_id=self.worker_id,
+                    reason="overlap",
+                    completed_at=now,
+                )
+                await self._log_trigger_fire(
+                    trig,
+                    now,
+                    action="skipped_overlap",
+                    run_id=None,
+                    fire_id=claim.fire_id,
+                )
                 return
 
-        # build inputs
+            run_id = f"trg-{claim.fire_id.removeprefix('trigfire-')}"
+            existing = await self.run_store.get(run_id) if self.run_store else None
+            if existing is None:
+                record = await self._submit(
+                    trig,
+                    inputs=dict(trig.default_inputs or {}),
+                    run_id=run_id,
+                    fire_id=claim.fire_id,
+                )
+            else:
+                record = existing
+            completed = await self.store.complete_claim(
+                claim.fire_id,
+                worker_id=self.worker_id,
+                run_id=record.run_id,
+                completed_at=now,
+            )
+            if not completed:
+                raise RuntimeError(f"Trigger claim ownership lost: {claim.fire_id}")
+            await self._log_trigger_fire(
+                trig,
+                now,
+                action="fired" if existing is None else "deduplicated",
+                run_id=record.run_id,
+                fire_id=claim.fire_id,
+            )
+        except Exception as exc:
+            retry_delay = min(300.0, float(2 ** min(claim.attempts, 8)))
+            await self.store.fail_claim(
+                claim.fire_id,
+                worker_id=self.worker_id,
+                error=str(exc),
+                retry_at=now + timedelta(seconds=retry_delay),
+            )
+            if self.logger:
+                self.logger.exception(
+                    "Error processing trigger claim %s for %s", claim.fire_id, trig.trigger_id
+                )
+
+    async def _submit(
+        self,
+        trig: TriggerRecord,
+        *,
+        inputs: dict[str, Any],
+        run_id: str | None,
+        fire_id: str | None,
+    ) -> Any:
         identity = RequestIdentity(
             user_id=trig.user_id,
             org_id=trig.org_id,
-            mode=trig.mode,
+            mode=trig.mode or "local",
             client_id=trig.client_id,
         )
-        inputs = dict(trig.default_inputs or {})  # shallow copy
-        if extra_inputs:
-            inputs.update(extra_inputs)
-
-        record = await self.run_manager.submit_run(
+        tags = [f"trigger:{trig.trigger_id}"]
+        if fire_id is not None:
+            tags.append(f"trigger-fire:{fire_id}")
+        return await self.run_manager.submit_run(
             graph_id=trig.graph_id,
             inputs=inputs,
+            run_id=run_id,
             session_id=trig.session_id,
             identity=identity,
             origin=RunOrigin.schedule,
@@ -147,107 +212,71 @@ class TriggerEngine:
             importance=RunImportance.normal,
             agent_id=trig.agent_id,
             app_id=trig.app_id,
-            tags=[f"trigger:{trig.trigger_id}"],
+            tags=tags,
         )
 
-        # Update trigger and log
-        trig.last_fired_at = now
-        await self._update_next_fire(trig, now)
-        await self._log_trigger_fire(trig, now, action="fired", run_id=record.run_id)
+    async def _overlap_limit_reached(self, trig: TriggerRecord) -> bool:
+        if trig.max_overlap_runs is None:
+            return False
+        if self.run_store is None:
+            raise RuntimeError(
+                f"Trigger {trig.trigger_id} declares max_overlap_runs without a run store"
+            )
+        running = await self._count_running_for_trigger(trig.trigger_id)
+        return running >= trig.max_overlap_runs
 
-    async def _update_next_fire(self, trig: TriggerRecord, now: datetime) -> None:
-        """
-        Compute and persist next_fire_at after a fire or skip. For event triggers,
-        this is always None.
-        """
-        from aethergraph.services.triggers.trigger_service import (
-            _cron_next,  # avoid circular import
-        )
-
-        if not trig.active or trig.kind == "event":
-            trig.next_fire_at = None
-        elif trig.kind == "one_shot":
-            # one_shot triggers only fire once, so we deactivate them after firing
-            trig.active = False
-            trig.next_fire_at = None
-        elif trig.kind == "interval":
-            if trig.interval_seconds is None:
-                trig.next_fire_at = None
-            else:
-                trig.next_fire_at = now + timedelta(seconds=trig.interval_seconds)
-        elif trig.kind == "cron":
-            if not trig.cron_expr:
-                trig.next_fire_at = None
-            else:
-                trig.next_fire_at = _cron_next(trig.cron_expr, now)
-        else:
-            # unknown kind; play it safe and don't schedule next fire
-            trig.next_fire_at = None
-
-        await self.store.update(trig)
+    async def _count_running_for_trigger(self, trigger_id: str) -> int:
+        if self.run_store is None:
+            raise RuntimeError("A run store is required for trigger overlap counting")
+        tag = f"trigger:{trigger_id}"
+        count = 0
+        page_size = 500
+        for status in _RUNNING_STATUSES:
+            offset = 0
+            while True:
+                records = await self.run_store.list(
+                    graph_id=None,
+                    status=status,
+                    limit=page_size,
+                    offset=offset,
+                )
+                count += sum(tag in (record.tags or []) for record in records)
+                if len(records) < page_size:
+                    break
+                offset += len(records)
+        return count
 
     async def _log_trigger_fire(
         self,
         trig: TriggerRecord,
         now: datetime,
+        *,
         action: str,
         run_id: str | None,
+        fire_id: str | None,
     ) -> None:
-        if not self.event_log:
+        if self.observation_sink is None:
             return
-
         try:
-            await self.event_log.append(
-                {
-                    "id": f"trig-fire-{trig.trigger_id}-{now.timestamp()}",
-                    "ts": now.timestamp(),
-                    "scope_id": trig.trigger_id,
-                    "kind": "trigger_fire",
-                    "payload": {
+            await self.observation_sink.append_observation(
+                ObservationRecord(
+                    observation_id=f"trig-fire-{uuid4().hex[:12]}",
+                    occurred_at=now.isoformat(),
+                    category="trigger_fire",
+                    name=action,
+                    summary=f"Trigger fire {action}",
+                    scope=_trigger_observation_scope(trig, run_id=run_id),
+                    attributes={
                         "action": action,
                         "trigger_id": trig.trigger_id,
+                        "fire_id": fire_id,
                         "kind": trig.kind,
                         "graph_id": trig.graph_id,
                         "run_id": run_id,
                         "meta": trig.meta or {},
                     },
-                }
+                )
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             if self.logger:
-                self.logger.error(f"Failed to log trigger fire event for trigger {trig.trigger_id}")
-
-    async def _count_running_for_trigger(self, trigger_id: str) -> int:
-        """
-        Count non-terminal runs tagged with this trigger.
-
-        Requires a RunStore that can list by tag. If unavailable, returns 0.
-        """
-        if not self.run_store:
-            return 0
-
-        try:
-            records = await self.run_store.list(
-                graph_id=None,
-                status=None,
-                user_id=None,
-                org_id=None,
-                session_id=None,
-                limit=1000,  # arbitrary large limit; we just want to check if there are any, not paginate
-                offset=0,
-            )
-
-        except Exception as e:
-            if self.logger:
-                self.logger.error(f"Error listing runs for overlap check: {e}")
-            return 0
-
-        running_statuses = {RunStatus.pending, RunStatus.running, RunStatus.cancellation_requested}
-        count = 0
-        for r in records:
-            if r.status not in running_statuses:
-                continue
-            tags = r.tags or []
-            if f"trigger:{trigger_id}" in tags:
-                count += 1
-        return count
+                self.logger.exception("Failed to log trigger fire for %s", trig.trigger_id)

@@ -6,20 +6,17 @@ import os
 
 from pydantic import SecretStr
 
+from aethergraph.config.config import EmbeddingUsageQuotaSettings
 from aethergraph.config.llm import EmbeddingProfile, EmbeddingSettings
+from aethergraph.contracts.services.metering import MeteringService
+from aethergraph.server.security.credentials import SecretStore
 from aethergraph.services.llm.generic_embed_client import GenericEmbeddingClient
-from aethergraph.services.metering.eventlog_metering import MeteringService
+from aethergraph.services.llm.provider_transport import ProviderRateGate
 
-from ..secrets.base import Secrets
-from .factory import _provider_default_base_url  # reuse from LLM factory if possible
-
-
-def _resolve_key(direct: SecretStr | None, ref: str | None, secrets: Secrets) -> str | None:
-    if direct:
-        return direct.get_secret_value()
-    if ref:
-        return secrets.get(ref)
-    return None
+from .compat import embedding_profile_from_legacy
+from .credentials import resolve_provider_credential
+from .profiles import EmbeddingProfileSpec
+from .registry import provider_default_base_url
 
 
 def _apply_env_overrides_to_embed_profile(
@@ -27,7 +24,7 @@ def _apply_env_overrides_to_embed_profile(
     p: EmbeddingProfile,
     *,
     is_default: bool,
-    secrets: Secrets,
+    secrets: SecretStore,
 ) -> EmbeddingProfile:
     """
     Mutate + return profile with env-based overrides.
@@ -59,35 +56,21 @@ def _apply_env_overrides_to_embed_profile(
 
     # 2) Provider-specific base_url fallback
     if not p.base_url:
-        p.base_url = _provider_default_base_url(p.provider)  # type: ignore[arg-type]
+        p.base_url = provider_default_base_url(p.provider)
 
     # 3) API key resolution:
     #    - prefer explicit api_key on profile
     #    - else api_key_ref + Secrets
     #    - else provider-specific env name
-    api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
-
-    if not api_key:
-        # Fallback to provider-specific env if nothing else was set
-        if p.provider == "openai":
-            api_key = os.getenv("OPENAI_API_KEY")
-        elif p.provider == "anthropic":
-            api_key = os.getenv("ANTHROPIC_API_KEY")
-        elif p.provider == "google":
-            api_key = os.getenv("GOOGLE_API_KEY")
-        elif p.provider == "openrouter":
-            api_key = os.getenv("OPENROUTER_API_KEY")
-        elif p.provider == "azure":
-            api_key = os.getenv("AZURE_OPENAI_KEY")
-
-        if api_key and not p.api_key_ref:
-            p.api_key_ref = {
-                "openai": "OPENAI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY",
-                "google": "GOOGLE_API_KEY",
-                "openrouter": "OPENROUTER_API_KEY",
-                "azure": "AZURE_OPENAI_KEY",
-            }.get(p.provider, None)  # type: ignore[index]
+    credential = resolve_provider_credential(
+        provider_id=p.provider,
+        direct=p.api_key,
+        secret_ref=p.api_key_ref,
+        secrets=secrets,
+    )
+    api_key = credential.value
+    if api_key and not p.api_key_ref and credential.source_ref:
+        p.api_key_ref = credential.source_ref
 
     if api_key:
         p.api_key = SecretStr(api_key)
@@ -96,33 +79,120 @@ def _apply_env_overrides_to_embed_profile(
 
 
 def embed_client_from_profile(
-    p: EmbeddingProfile,
-    secrets: Secrets,
+    p: EmbeddingProfileSpec,
+    secrets: SecretStore,
     *,
     metering: MeteringService | None = None,
+    rate_gate: ProviderRateGate | None = None,
+    operation_quota_cfg: EmbeddingUsageQuotaSettings | None = None,
+    profile_name: str | None = None,
 ) -> GenericEmbeddingClient:
-    api_key = _resolve_key(p.api_key, p.api_key_ref, secrets)
+    """Build one embedding client from a canonical embedding profile.
+
+    Intro:
+        Embedding construction consumes its own operation contract and never
+        inherits Chat model or capability configuration.
+
+    Examples:
+        Build a default embedding client:
+            ```python
+            client = embed_client_from_profile(canonical_profile, secrets)
+            ```
+
+        Attach shared controls:
+            ```python
+            client = embed_client_from_profile(
+                canonical_profile, secrets, metering=metering, rate_gate=gate
+            )
+            ```
+
+    Args:
+        p: Canonical immutable embedding profile.
+        secrets: Secret store used for an exact configured reference.
+        metering: Optional shared embedding metering service.
+        rate_gate: Optional shared provider quota gate.
+        operation_quota_cfg: Optional infrastructure-owned per-run embedding
+            quota policy.
+        profile_name: Optional configured profile identity for observations.
+
+    Returns:
+        GenericEmbeddingClient: Configured provider-neutral embedding client.
+
+    Notes:
+        Endpoint selection has already occurred in the compatibility codec.
+    """
+
+    api_key = resolve_provider_credential(
+        provider_id=p.connection.provider_id,
+        direct=p.credentials.inline_secret,
+        secret_ref=p.credentials.secret_ref,
+        secrets=secrets,
+    ).value
 
     return GenericEmbeddingClient(
-        provider=p.provider,
-        model=p.model,
-        base_url=p.base_url,
+        provider=p.connection.provider_id,
+        model=p.model.model_id,
+        base_url=p.connection.base_url,
         api_key=api_key,
-        azure_deployment=p.azure_deployment,
-        timeout=p.timeout,
+        azure_deployment=p.connection.deployment,
+        timeout=p.transport.timeout_s,
+        retry_settings=p.transport.retry,
+        rate_limit_group=p.transport.rate_limit_group,
+        rate_gate=rate_gate,
         metering=metering,
+        operation_quota_cfg=operation_quota_cfg,
+        endpoint_id=p.connection.endpoint_id,
+        default_dimensions=p.defaults.dimensions,
+        profile_name=profile_name,
     )
 
 
 def build_embedding_clients(
     cfg: EmbeddingSettings,
-    secrets: Secrets,
+    secrets: SecretStore,
     *,
     metering: MeteringService | None = None,
+    rate_gate: ProviderRateGate | None = None,
+    operation_quota_cfg: EmbeddingUsageQuotaSettings | None = None,
 ) -> dict[str, GenericEmbeddingClient]:
-    """Returns dict of {profile_name: GenericEmbeddingClient}, always includes 'default' if enabled."""
+    """Build all enabled embedding clients through their canonical boundary.
+
+    Intro:
+        Public embedding settings retain environment compatibility, then each
+        profile is projected once into the separate embedding contract.
+
+    Examples:
+        Build enabled embedding clients:
+            ```python
+            clients = build_embedding_clients(settings, secrets)
+            assert "default" in clients
+            ```
+
+        Respect disabled settings:
+            ```python
+            clients = build_embedding_clients(disabled_settings, secrets)
+            assert clients == {}
+            ```
+
+    Args:
+        cfg: Public legacy-compatible embedding settings.
+        secrets: Secret store for configured credential references.
+        metering: Optional shared embedding metering service.
+        rate_gate: Optional shared provider quota gate.
+        operation_quota_cfg: Optional infrastructure-owned per-run embedding
+            quota policy shared by every profile.
+
+    Returns:
+        dict[str, GenericEmbeddingClient]: Clients keyed by profile name.
+
+    Notes:
+        One rate gate is shared across the clients produced by this call.
+    """
+
     if not cfg.enabled:
         return {}
+
+    shared_rate_gate = rate_gate or ProviderRateGate()
 
     # Default profile
     default_profile = _apply_env_overrides_to_embed_profile(
@@ -132,7 +202,14 @@ def build_embedding_clients(
         secrets=secrets,
     )
     clients: dict[str, GenericEmbeddingClient] = {
-        "default": embed_client_from_profile(default_profile, secrets, metering=metering)
+        "default": embed_client_from_profile(
+            embedding_profile_from_legacy(default_profile),
+            secrets,
+            metering=metering,
+            rate_gate=shared_rate_gate,
+            operation_quota_cfg=operation_quota_cfg,
+            profile_name="default",
+        )
     }
 
     # Extra profiles
@@ -143,6 +220,13 @@ def build_embedding_clients(
             is_default=False,
             secrets=secrets,
         )
-        clients[name] = embed_client_from_profile(prof, secrets, metering=metering)
+        clients[name] = embed_client_from_profile(
+            embedding_profile_from_legacy(prof),
+            secrets,
+            metering=metering,
+            rate_gate=shared_rate_gate,
+            operation_quota_cfg=operation_quota_cfg,
+            profile_name=name,
+        )
 
     return clients

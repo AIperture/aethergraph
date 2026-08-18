@@ -1,14 +1,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 import warnings
 
-from aethergraph.contracts.services.execution import (
-    CodeExecutionRequest,
-    CodeExecutionResult,
-    ExecutionService,
-    Language,
+from aethergraph.contracts.integration import OriginBinding
+from aethergraph.contracts.services.llm import (
+    EmbeddingClientProtocol,
+    ImageGenerationClientProtocol,
 )
 from aethergraph.core.runtime.run_types import (
     RunImportance,
@@ -17,23 +16,22 @@ from aethergraph.core.runtime.run_types import (
     RunVisibility,
 )
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
-from aethergraph.services.agent_state import AgentStateBackend, AgentStateHandle
-from aethergraph.services.artifacts.facade import ArtifactFacade
+from aethergraph.services.agent_state import AgentStateBackend, CanonicalAgentStateHandle
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.channel.session import ChannelSession
-from aethergraph.services.continuations.continuation import Continuation
-from aethergraph.services.indices.scoped_indices import ScopedIndices
-from aethergraph.services.knowledge.node_kb import NodeKB
+from aethergraph.services.continuations.continuation import (
+    ContinuationDraft,
+    Correlator,
+    CreatedContinuation,
+)
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
-from aethergraph.services.memory.facade import MemoryFacade
-from aethergraph.services.planning.node_planner import NodePlanner
+from aethergraph.services.memory.canonical_public import CanonicalPublicMemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
 from aethergraph.services.runner.facade import RunFacade
-from aethergraph.services.scope.scope import Scope
-from aethergraph.services.skills.skill_registry import SkillRegistry
+from aethergraph.services.scope.scope import Scope, ScopeLevel
 from aethergraph.services.triggers.trigger_facade import TriggerFacade
 from aethergraph.services.viz.facade import VizFacade
-from aethergraph.services.websearch.facade import WebSearchFacade
 
 from .base_service import _ServiceHandle
 from .node_services import NodeServices
@@ -46,42 +44,17 @@ class NodeContext:
     graph_id: str
     node_id: str
     services: NodeServices
+    origin_binding: OriginBinding | None = None
     identity: Any = None
     resume_payload: dict[str, Any] | None = None
     scope: Scope | None = None
     agent_id: str | None = None  # for agent-invoked runs
     app_id: str | None = None  # for app-invoked runs
-    _planner_facade: NodePlanner | None = None  # lazy init
     chat_tag_provider: Callable[[], list[str]] | None = None
 
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:
         return self.services
-
-    async def execute(
-        self,
-        code: str,
-        *,
-        language: Language = "python",
-        timeout_s: float = 30.0,
-        args: list[str] | None = None,
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> CodeExecutionResult:
-        """ """
-        exe_svs: ExecutionService | None = getattr(self.services, "execution", None)
-        if exe_svs is None:
-            raise RuntimeError("NodeContext.services.execution is not configured")
-
-        req = CodeExecutionRequest(
-            language=language,
-            code=code,
-            args=args or [],
-            timeout_s=timeout_s,
-            workdir=workdir,
-            env=env,
-        )
-        return await exe_svs.execute(req)
 
     async def spawn_run(
         self,
@@ -271,7 +244,12 @@ class NodeContext:
             return_outputs=return_outputs,
         )
 
-    async def cancel_run(self, run_id: str) -> None:
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> None:
         """
         Deprecated wrapper for `context.runner().cancel_run(...)`.
 
@@ -289,8 +267,14 @@ class NodeContext:
             await context.runner().cancel_run(run_id)
             ```
 
+            Preserve a parent-driven cause:
+            ```python
+            await context.cancel_run(run_id, reason="parent_cancelled")
+            ```
+
         Args:
             run_id: Run identifier to cancel.
+            reason: Exact cancellation cause transported to the target run.
 
         Returns:
             None: Cancellation is requested asynchronously.
@@ -303,17 +287,7 @@ class NodeContext:
             DeprecationWarning,
             stacklevel=2,
         )
-        await self.runner().cancel_run(run_id)
-
-    def planner(self) -> "NodePlanner":
-        if self._planner_facade is None:
-            if self.services.planner_service is None:
-                raise RuntimeError("NodeContext.services.planner_service is not configured")
-            self._planner_facade = NodePlanner(
-                service=self.services.planner_service,
-                node_ctx=self,
-            )
-        return self._planner_facade
+        await self.runner().cancel_run(run_id, reason=reason)
 
     def logger(self):
         if not self.services.logger:
@@ -337,7 +311,7 @@ class NodeContext:
         parent_event_id: str | None = None,
         caused_by_event_id: str | None = None,
     ) -> dict[str, Any]:
-        from aethergraph.services.inspect import emit_agent_event
+        from aethergraph.observability import emit_agent_event
 
         return await emit_agent_event(
             event_type=event_type,
@@ -353,93 +327,10 @@ class NodeContext:
             caused_by_event_id=caused_by_event_id,
         )
 
-    async def replace_work_status(self, *, work_status: dict[str, Any]) -> dict[str, Any]:
-        warnings.warn(
-            "NodeContext.replace_work_status() is deprecated; "
-            "use context.channel('ui:session').work_status().replace().",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.channel("ui:session").work_status().replace(work_status)
-
-    async def patch_work_status(
-        self,
-        *,
-        workflow_id: str | None = None,
-        status: str | None = None,
-        summary: str | None = None,
-        active_item_id: str | None = None,
-        item_updates: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
-        warnings.warn(
-            "NodeContext.patch_work_status() is deprecated; "
-            "use context.channel('ui:session').work_status(...).patch().",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return (
-            await self.channel("ui:session")
-            .work_status(workflow_id=workflow_id)
-            .patch(
-                status=status,
-                summary=summary,
-                active_item_id=active_item_id,
-                item_updates=item_updates,
-            )
-        )
-
-    async def clear_work_status(self) -> dict[str, Any]:
-        warnings.warn(
-            "NodeContext.clear_work_status() is deprecated; "
-            "use context.channel('ui:session').work_status().clear().",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return await self.channel("ui:session").work_status().clear()
-
-    def ui_session_channel(self) -> "ChannelSession":
-        """
-        Creates a new ChannelSession for the current node context with session key as
-        `ui:session/<session_id>`.
-
-        This method is a convenience helper for the AG UI to get the default session channel.
-
-        Returns:
-            ChannelSession: The channel session associated with the current session.
-        """
-        warnings.warn(
-            "NodeContext.ui_session_channel() is deprecated; use context.channel('ui:session').",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.channel("ui:session")
-
-    def ui_run_channel(self) -> "ChannelSession":
-        """
-        Creates a new ChannelSession for the current node context with session key as
-        `ui:run/<run_id>`.
-
-        This method is a convenience helper for the AG UI to get the default run channel.
-
-        Returns:
-            ChannelSession: The channel session associated with the current run.
-        """
-        warnings.warn(
-            "NodeContext.ui_run_channel() is deprecated; use context.channel('ui:run').",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.channel("ui:run")
-
     def triggers(self) -> TriggerFacade:
         if not self.services.triggers:
             raise RuntimeError("NodeContext.services.triggers is not configured")
         return self.services.triggers
-
-    def skills(self) -> SkillRegistry:
-        if not self.services.skills:
-            raise RuntimeError("NodeContext.services.skills is not configured")
-        return self.services.skills
 
     def registry(self) -> RegistryFacade:
         if not self.services.registry:
@@ -450,12 +341,20 @@ class NodeContext:
         """
         Set up a new ChannelSession for the current node context.
 
+        Examples:
+            Use the immutable run origin:
+            ```python
+            await context.channel().send_text("Done")
+            ```
+
+            Address a deliberate provider channel:
+            ```python
+            await context.channel("slack:team/T:chan/C").send_phase("planning", "active")
+            ```
+
         Args:
-            channel_key (str | None): An optional key to specify a particular channel.
-            If not provided, the default channel will be used.
-            Special shorthand values are supported:
-            - `ui:session` -> `ui:session/<current_session_id>`
-            - `ui:run` -> `ui:run/<current_run_id>`
+            channel_key: Optional exact address. If omitted, the immutable run
+                origin channel is used.
 
         Returns:
             ChannelSession: An instance representing the session for the specified channel.
@@ -468,23 +367,14 @@ class NodeContext:
             | Console              | `console:stdin`                               | Console input/output                  |
             | Slack                | `slack:team/{team_id}:chan/{channel_id}`      | Needs additional configuration        |
             | Telegram             | `tg:chat/{chat_id}`                           | Needs additional configuration        |
-            | UI Session           | `ui:session/{session_id}`                     | Requires AG web UI                    |
-            | UI Session (current) | `ui:session`                                  | Expands to current `session_id`       |
-            | UI Run               | `ui:run/{run_id}`                             | Requires AG web UI                    |
-            | UI Run (current)     | `ui:run`                                      | Expands to current `run_id`           |
+            | Agent Endpoint       | `endpoint:sessions/{session_id}`              | Installed by an AG Host               |
             | Webhook              | `webhook:{unique_identifier}`                 | For Slack, Discord, Zapier, etc.      |
             | File-based channel   | `file:path/to/directory`                      | File system based channels            |
         """
-        resolved_key = channel_key
-        if channel_key == "ui:session":
-            resolved_key = f"ui:session/{self.session_id}"
-        elif channel_key == "ui:run":
-            resolved_key = f"ui:run/{self.run_id}"
-
-        return ChannelSession(self, resolved_key)
+        return ChannelSession(self, channel_key)
 
     # New way: prefer memory_facade directly
-    def memory(self) -> MemoryFacade:
+    def memory(self) -> CanonicalPublicMemoryFacade:
         if not self.services.memory_facade:
             raise RuntimeError("MemoryFacade not bound")
         return self.services.memory_facade
@@ -495,12 +385,55 @@ class NodeContext:
         *,
         model: type | None = None,
         default_factory: Any | None = None,
-        level: str | None = None,
+        level: ScopeLevel | None = None,
+        scope: Scope | None = None,
         backend: AgentStateBackend = "hybrid",
         tags: list[str] | None = None,
         meta: dict[str, Any] | None = None,
         kind: str = "state.snapshot",
-    ) -> AgentStateHandle:
+    ) -> CanonicalAgentStateHandle:
+        """Bind typed Agent state in the canonical provider store.
+
+        The default binding uses this node's trusted runtime scope. Callers that
+        coordinate multiple Agents may pass an existing narrower `Scope`; its
+        populated identity dimensions are validated by the canonical facade.
+
+        Examples:
+            Bind ordinary Agent-scoped session state:
+                ```python
+                state = context.state("planner", model=PlannerState, level="session")
+                ```
+
+            Bind orchestration state shared across Agents in one session:
+                ```python
+                shared_scope = replace(context.scope, agent_id=None)
+                state = context.state(
+                    "session_envelope",
+                    model=dict,
+                    level="session",
+                    scope=shared_scope,
+                )
+                ```
+
+        Args:
+            key: Stable caller-owned state key.
+            model: Optional model type used to hydrate stored mappings.
+            default_factory: Optional callable producing missing state.
+            level: Logical scope projection for the state handle.
+            scope: Optional existing runtime `Scope` validated against this
+                context's trusted storage owner and identity.
+            backend: Exact cache policy: `hybrid`, `memory`, or `local`.
+            tags: Optional commit audit tags.
+            meta: Optional JSON-compatible commit audit metadata.
+            kind: Exact state family separating same-named keys.
+
+        Returns:
+            CanonicalAgentStateHandle: A handle bound to one exact state identity.
+
+        Notes:
+            Passing `scope` does not select a provider, workspace, or alternate
+            persistence path. Omitting it preserves Agent-scoped behavior.
+        """
         if not self.services.agent_state:
             raise RuntimeError("Agent state facade not bound")
         return self.services.agent_state.bind(
@@ -508,6 +441,7 @@ class NodeContext:
             model=model,
             default_factory=default_factory,
             level=level,
+            scope=scope,
             backend=backend,
             tags=tags,
             meta=meta,
@@ -515,11 +449,11 @@ class NodeContext:
         )
 
     # Back-compat: old ctx.mem() now returns the bound MemoryFacade directly.
-    def mem(self) -> MemoryFacade:
+    def mem(self) -> CanonicalPublicMemoryFacade:
         return self.memory()
 
     # Artifacts / index
-    def artifacts(self) -> ArtifactFacade:
+    def artifacts(self) -> CanonicalPublicArtifactFacade:
         return self.services.artifact_store
 
     def kv(self):
@@ -531,16 +465,6 @@ class NodeContext:
         if not self.services.viz:
             raise RuntimeError("Viz service (facade) not available")
         return self.services.viz
-
-    def kb(self) -> NodeKB:
-        if not self.services.kb:
-            raise RuntimeError("NodeKB service not available")
-        return self.services.kb
-
-    def web_search(self) -> WebSearchFacade:
-        if not self.services.web_search:
-            raise RuntimeError("Web search service not available")
-        return self.services.web_search
 
     def runner(self) -> RunFacade:
         """
@@ -648,6 +572,80 @@ class NodeContext:
             timeout=timeout,
         )
 
+    def embedding(self, profile: str = "default") -> EmbeddingClientProtocol:
+        """Return a configured embedding client for this node context.
+
+        Intro:
+            Resolves a named client from the container-owned embedding service so
+            graph code uses the same profiles, retry controls, rate gate, and
+            metering configuration as other AG services.
+
+        Examples:
+            Embed with the default profile:
+                ```python
+                vector = await context.embedding().embed_one("hello")
+                ```
+
+            Select a named profile:
+                ```python
+                vectors = await context.embedding("search").embed(["north", "south"])
+                ```
+
+        Args:
+            self: Active node context with container-bound services.
+            profile: Configured embedding profile name.
+
+        Returns:
+            EmbeddingClientProtocol: Exact configured embedding client.
+
+        Notes:
+            AG owns this service boundary and does not require or import AG Engine.
+            Runtime profile mutation is intentionally not exposed here.
+        """
+
+        service = self.services.embedding
+        if service is None:
+            raise RuntimeError("Embedding service not available")
+        return service.get(profile)
+
+    def image_model(self, profile: str = "default") -> ImageGenerationClientProtocol:
+        """Return a configured image-generation client for this node context.
+
+        Intro:
+            Resolves a named client from the container-owned image service so
+            graph code does not reuse Chat model identity or connection state.
+
+        Examples:
+            Generate with the default image profile:
+                ```python
+                result = await context.image_model().generate_image(
+                    "A quiet observatory"
+                )
+                ```
+
+            Select a named design profile:
+                ```python
+                client = context.image_model("design")
+                result = await client.generate_image("A glass compass")
+                ```
+
+        Args:
+            self: Active node context with container-bound services.
+            profile: Configured image-generation profile name.
+
+        Returns:
+            ImageGenerationClientProtocol: Exact configured image client.
+
+        Notes:
+            AG owns this service boundary and does not require or import AG Engine.
+            Missing services and profiles fail without a Chat-client fallback.
+        """
+
+        service = self.services.image_model
+        if service is None:
+            raise RuntimeError("Image generation service not available")
+        return service.get(profile)
+
     def llm_set_key(self, provider: str, model: str, api_key: str, profile: str = "default"):
         """
         Quickly configure or override the LLM provider, model, and API key for a given profile.
@@ -690,16 +688,6 @@ class NodeContext:
         if svc is None:
             raise RuntimeError("LLM service not available")
         svc.set_key(provider=provider, model=model, api_key=api_key, profile=profile)
-
-    def mcp(self, name):
-        if not self.services.mcp:
-            raise RuntimeError("MCPService not available")
-        return self.services.mcp.get(name)
-
-    def indices(self) -> ScopedIndices:
-        if not self.services.indices:
-            raise RuntimeError("ScopedIndices not available")
-        return self.services.indices
 
     # def run_manager(self):
     #     # Deprecated legacy accessor; use context.runner() instead.
@@ -833,10 +821,7 @@ class NodeContext:
     def _now(self):
         if self.services.clock:
             return self.services.clock.now()
-        else:
-            from datetime import datetime
-
-            return datetime.utcnow()
+        return datetime.now(UTC)
 
     # ---- continuation helpers ----
     async def create_continuation(
@@ -848,20 +833,62 @@ class NodeContext:
         deadline_s: int | None = None,
         poll: dict | None = None,
         attempts: int = 0,
-    ) -> Continuation:
-        """Create and store a continuation for this node in the continuation store."""
-        token = await self.services.continuation_store.mint_token(
-            self.run_id, self.node_id, attempts=attempts
-        )
+    ) -> CreatedContinuation:
+        """Atomically create a continuation for this node.
+
+        Intro:
+            Builds tokenless continuation content and delegates token minting plus
+            persistence to the configured continuation store.
+
+        Examples:
+            Create a text wait:
+            ```python
+            created = await context.create_continuation(
+                kind="user_input", payload={"prompt": "Reply"}, channel="ui:session"
+            )
+            ```
+
+            Create a timed poll:
+            ```python
+            created = await context.create_continuation(
+                kind="external", payload={}, channel=None, poll={"interval_sec": 30}
+            )
+            ```
+
+        Args:
+            kind: Runtime wait kind.
+            payload: Setup-time payload merged into resume delivery.
+            channel: Exact channel key, if the wait is user-facing.
+            deadline_s: Optional lifetime in seconds from the injected clock.
+            poll: Optional provider-neutral polling configuration.
+            attempts: Current wait-attempt count.
+
+        Returns:
+            CreatedContinuation: Tokenless record and one-time raw token.
+
+        Notes:
+            A public interaction ID is bound as an initial indexed correlator;
+            deprecated App identity remains optional compatibility metadata only.
+        """
         deadline = None
         if deadline_s:
             deadline = self._now() + timedelta(seconds=deadline_s)
 
-        continuation = Continuation(
+        session_id = getattr(self, "session_id", None)
+        interaction_id = payload.get("_interaction_id") if payload else None
+        correlators = ()
+        if isinstance(interaction_id, str) and interaction_id and isinstance(session_id, str):
+            correlators = (
+                Correlator(
+                    scheme="interaction",
+                    channel="public",
+                    message=interaction_id,
+                ),
+            )
+        draft = ContinuationDraft(
             run_id=self.run_id,
             node_id=self.node_id,
             kind=kind,
-            token=token,
             prompt=payload.get("prompt") if payload else None,
             resume_schema=payload.get("resume_schema") if payload else None,
             channel=channel,
@@ -871,13 +898,13 @@ class NodeContext:
             created_at=self._now(),
             attempts=attempts,
             payload=payload,
-            session_id=getattr(self, "session_id", None),
+            session_id=session_id,
             agent_id=getattr(self, "agent_id", None),
             app_id=getattr(self, "app_id", None),
             graph_id=getattr(self, "graph_id", None),
+            correlators=correlators,
         )
-        await self.services.continuation_store.save(continuation)
-        return continuation
+        return await self.services.continuation_store.create(draft)
 
     async def wait_for_resume(self, token: str) -> dict:
         """Wait for a continuation to be resumed, and return the payload.

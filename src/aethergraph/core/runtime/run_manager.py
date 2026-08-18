@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 import json
+import logging
 import traceback
 from typing import Any
 from uuid import uuid4
@@ -11,8 +13,6 @@ from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPendingWaits
 from aethergraph.contracts.services.runs import RunResultStore, RunStore
 from aethergraph.contracts.services.state_stores import GraphStateStore
-from aethergraph.core.execution.forward_scheduler import ForwardScheduler
-from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
 from aethergraph.core.runtime.run_cancellation import (
     RunCancellationHandle,
     RunCancellationRegistry,
@@ -65,12 +65,74 @@ def _clone_jsonish_dict(value: dict[str, Any] | None) -> dict[str, Any]:
     return json.loads(json.dumps(value, default=repr))
 
 
+def _run_status(value: Any) -> RunStatus | None:
+    if isinstance(value, RunStatus):
+        return value
+    try:
+        return RunStatus(str(value))
+    except Exception:
+        return None
+
+
+def _run_status_text(value: Any) -> str:
+    status = _run_status(value)
+    return status.value if status is not None else str(value)
+
+
+_log = logging.getLogger("aethergraph.runtime.run_manager")
+
+# Root-turn admission is a session-consistency guard, not a general scheduler
+# throttle. It exists because UI/channel callers may submit the next visible
+# user turn as soon as a planner message is displayed, while the previous root
+# run is still saving final session state. Starting the next root run during
+# that finalization window lets the new planner observe stale session artifacts.
+#
+# Only statuses that still imply "the prior root turn may be mutating session
+# state" block admission. RunStatus.waiting is intentionally excluded: approval
+# and resume traffic must be able to enter a session once the previous root turn
+# has deliberately parked on a continuation.
+_SESSION_ROOT_TURN_BARRIER_STATUSES = frozenset(
+    {
+        RunStatus.pending,
+        RunStatus.running,
+        RunStatus.cancellation_requested,
+    }
+)
+_SESSION_ROOT_TURN_BARRIER_TIMEOUT_S = 10.0
+_SESSION_ROOT_TURN_BARRIER_POLL_S = 0.05
+
+# These runs are orchestration/runtime work created underneath an already
+# admitted root turn. They must be allowed to overlap the parent; otherwise
+# async children, completion notifiers, and resumption helpers can deadlock
+# behind the very root run they are supposed to finish.
+_INTERNAL_RUN_TAGS = frozenset(
+    {
+        "aethergraph_engine._internal",
+        "async_hop",
+        "notifier",
+        "runner_resumption",
+    }
+)
+_INTERNAL_RUN_TAG_PREFIXES = ("plan_step:", "trigger:")
+
+# These origins represent visible/user-facing root turns. RunOrigin.agent and
+# RunOrigin.schedule are intentionally excluded so child/subagent runs and
+# scheduled work do not inherit chat-turn serialization semantics by accident.
+_ROOT_TURN_ORIGINS = frozenset(
+    {
+        RunOrigin.app,
+        RunOrigin.chat,
+        RunOrigin.playground,
+        RunOrigin.api,
+        RunOrigin.cli,
+        RunOrigin.local,
+    }
+)
+
+
 class RunManager:
     """
-    TODO: for global schedulers, we may want to have a dedicated run manager -- current
-    implementation utilize the async_run which create a local ForwardScheduler instance
-    each graph run. This is fine for concurrent graphs under thousands but may
-    not scale well for large number of concurrent graphs.
+    Manage graph runs executed by one local scheduler per active run.
     """
 
     def __init__(
@@ -97,6 +159,8 @@ class RunManager:
         self._run_waiters_lock = (
             asyncio.Lock()
         )  # no need for thread lock because run_manager is used within event loop
+        self._session_root_turn_locks: dict[str, asyncio.Lock] = {}
+        self._session_root_turn_locks_lock = asyncio.Lock()
 
     # -------- concurrency helpers --------
     async def _acquire_run_slot(self) -> None:
@@ -117,6 +181,177 @@ class RunManager:
             return
         async with self._lock:
             self._running = max(0, self._running - 1)
+
+    async def _acquire_session_root_turn_admission(
+        self,
+        *,
+        session_id: str | None,
+        graph_id: str,
+        run_id: str | None,
+        tags: list[str] | None,
+        origin: RunOrigin | None,
+        visibility: RunVisibility | None,
+        run_config: dict[str, Any] | None,
+    ) -> asyncio.Lock | None:
+        """Acquire same-session root-turn admission when this run needs it.
+
+        This protects only the short admission window: we hold the per-session
+        lock while checking persisted blockers and creating the new run record.
+        After the record exists, later callers can rely on the run store to see
+        that this root turn is running and should block behind it.
+        """
+        if not self._should_gate_session_root_turn(
+            session_id=session_id,
+            tags=tags,
+            origin=origin,
+            visibility=visibility,
+            run_config=run_config,
+        ):
+            return None
+        session_key = str(session_id)
+        async with self._session_root_turn_locks_lock:
+            lock = self._session_root_turn_locks.get(session_key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._session_root_turn_locks[session_key] = lock
+        await lock.acquire()
+        try:
+            await self._wait_for_session_root_turn_barrier(
+                session_id=session_key,
+                graph_id=graph_id,
+                run_id=run_id,
+            )
+        except Exception:
+            lock.release()
+            raise
+        return lock
+
+    @staticmethod
+    def _release_session_root_turn_admission(lock: asyncio.Lock | None) -> None:
+        if lock is not None and lock.locked():
+            lock.release()
+
+    def _should_gate_session_root_turn(
+        self,
+        *,
+        session_id: str | None,
+        tags: list[str] | None,
+        origin: RunOrigin | None,
+        visibility: RunVisibility | None,
+        run_config: dict[str, Any] | None,
+    ) -> bool:
+        # Future control-plane implementations should decide deliberately
+        # whether they are root turns. Direct APIs such as cancel_run/get_record
+        # bypass this path already. If a natural-language "cancel/check status"
+        # message must go through submit_run, give it a distinct origin/tag or
+        # run_config marker and handle that marker here.
+        if self._store is None or not session_id:
+            return False
+        if visibility == RunVisibility.hidden:
+            return False
+        if self._is_internal_run_metadata(tags=tags, run_config=run_config):
+            return False
+        return (origin or RunOrigin.app) in _ROOT_TURN_ORIGINS
+
+    @staticmethod
+    def _is_internal_run_metadata(
+        *,
+        tags: list[str] | None,
+        run_config: dict[str, Any] | None = None,
+    ) -> bool:
+        tag_set = {str(tag) for tag in list(tags or [])}
+        if tag_set.intersection(_INTERNAL_RUN_TAGS):
+            return True
+        if any(tag.startswith(_INTERNAL_RUN_TAG_PREFIXES) for tag in tag_set):
+            return True
+        resume_mode = str((run_config or {}).get("resume_mode") or "")
+        return resume_mode == "runner_resumption"
+
+    def _is_session_root_turn_record(self, record: RunRecord) -> bool:
+        if getattr(record, "visibility", None) == RunVisibility.hidden:
+            return False
+        if self._is_internal_run_metadata(
+            tags=list(record.tags or []), run_config=record.meta or {}
+        ):
+            return False
+        return (getattr(record, "origin", None) or RunOrigin.app) in _ROOT_TURN_ORIGINS
+
+    async def _wait_for_session_root_turn_barrier(
+        self,
+        *,
+        session_id: str,
+        graph_id: str,
+        run_id: str | None,
+    ) -> None:
+        if self._store is None:
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _SESSION_ROOT_TURN_BARRIER_TIMEOUT_S
+        first_blocker_id = ""
+        waited = False
+        while True:
+            blocker = await self._find_session_root_turn_blocker(session_id=session_id)
+            if blocker is None:
+                if waited:
+                    _log.debug(
+                        "session root-turn barrier released",
+                        extra={
+                            "session_id": session_id,
+                            "graph_id": graph_id,
+                            "run_id": run_id,
+                            "blocked_by": first_blocker_id,
+                        },
+                    )
+                return
+            waited = True
+            if not first_blocker_id:
+                first_blocker_id = blocker.run_id
+                _log.debug(
+                    "session root-turn barrier waiting",
+                    extra={
+                        "session_id": session_id,
+                        "graph_id": graph_id,
+                        "run_id": run_id,
+                        "blocked_by": blocker.run_id,
+                        "blocked_status": _run_status_text(blocker.status),
+                    },
+                )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                _log.warning(
+                    "session root-turn barrier timed out; admitting run",
+                    extra={
+                        "session_id": session_id,
+                        "graph_id": graph_id,
+                        "run_id": run_id,
+                        "blocked_by": blocker.run_id,
+                        "blocked_status": _run_status_text(blocker.status),
+                    },
+                )
+                return
+            await asyncio.sleep(min(_SESSION_ROOT_TURN_BARRIER_POLL_S, remaining))
+
+    async def _find_session_root_turn_blocker(self, *, session_id: str) -> RunRecord | None:
+        if self._store is None:
+            return None
+        try:
+            records = await self._store.list(session_id=session_id, limit=25)
+        except Exception:
+            _log.exception(
+                "session root-turn barrier failed to list runs",
+                extra={"session_id": session_id},
+            )
+            return None
+        for record in records:
+            status = _run_status(record.status)
+            if status not in _SESSION_ROOT_TURN_BARRIER_STATUSES:
+                continue
+            # Non-root records may legitimately be newer than the prior root
+            # turn in the same session. Keep scanning until we find a visible
+            # root turn that can still be mutating shared session state.
+            if self._is_session_root_turn_record(record):
+                return record
+        return None
 
     # -------- registry helpers --------
 
@@ -204,7 +439,9 @@ class RunManager:
         store = self._get_state_store()
         if store is None:
             return None, None
-        snap = await store.load_latest_snapshot(record.run_id)
+        from aethergraph.services.state_stores.scope import scope_for_run_record
+
+        snap = await store.load_latest_snapshot(scope_for_run_record(record), record.run_id)
         if snap is None:
             return None, None
         graph_outputs = snap.state.get("graph_outputs")
@@ -217,7 +454,6 @@ class RunManager:
             _seed_outputs_from_snapshot,
         )
         from aethergraph.core.runtime.runtime_env import RuntimeEnv
-        from aethergraph.services.container.default_container import build_default_container
 
         identity = self._identity_for_record(record)
         self._resolve_target_identity = identity
@@ -231,10 +467,7 @@ class RunManager:
             return None, snap.rev
 
         inputs = dict((record.meta or {}).get("original_inputs") or {})
-        try:
-            container = current_services()
-        except Exception:
-            container = build_default_container()
+        container = current_services()
         env = RuntimeEnv(
             run_id=record.run_id,
             graph_id=record.graph_id,
@@ -474,6 +707,14 @@ class RunManager:
                 logging.getLogger("aethergraph.runtime.run_manager").exception(
                     "Error creating output preview for run_id=%s", record.run_id
                 )
+            if self._store is not None:
+                await self._store.update_status(
+                    record.run_id,
+                    record.status,
+                    finished_at=record.finished_at,
+                    error=record.error,
+                    meta_update=dict(record.meta),
+                )
             await self._persist_run_result(
                 record=record,
                 outputs=outputs,
@@ -597,21 +838,22 @@ class RunManager:
             status_str = getattr(record.status, "value", str(record.status))
             meter_status = status_str
 
-        try:
-            await meter.record_run(
-                user_id=user_id,
-                org_id=org_id,
-                run_id=record.run_id,
-                graph_id=graph_id,
-                status=meter_status,
-                duration_s=duration_s,
-            )
-        except Exception:  # noqa: BLE001
-            import logging
+        if meter is not None:
+            try:
+                await meter.record_run(
+                    user_id=user_id,
+                    org_id=org_id,
+                    run_id=record.run_id,
+                    graph_id=graph_id,
+                    status=meter_status,
+                    duration_s=duration_s,
+                )
+            except Exception:  # noqa: BLE001
+                import logging
 
-            logging.getLogger("aethergraph.runtime.run_manager").exception(
-                "Error recording run metering for run_id=%s", record.run_id
-            )
+                logging.getLogger("aethergraph.runtime.run_manager").exception(
+                    "Error recording run metering for run_id=%s", record.run_id
+                )
 
         try:
             if record.status in {RunStatus.succeeded, RunStatus.failed, RunStatus.canceled}:
@@ -647,26 +889,70 @@ class RunManager:
         app_id: str | None = None,
         app_name: str | None = None,
         run_config: dict[str, Any] | None = None,
+        admission_callback: Callable[[RunRecord], Awaitable[None]] | None = None,
     ) -> RunRecord:
-        """
-        Non-blocking entrypoint for the HTTP API.
+        """Persist and admit one run before scheduling background execution.
 
-        - Creates a RunRecord (status=running).
-        - Persists it to RunStore.
-        - Schedules background execution via asyncio.create_task.
-        - Returns immediately with the record (for run_id, status, etc).
+        Examples:
+            Submit an ordinary run::
+
+                record = await manager.submit_run("research", inputs={"topic": "AI"})
+
+            Bind an external execution lease before scheduling::
+
+                record = await manager.submit_run(
+                    "research",
+                    inputs={"topic": "AI"},
+                    admission_callback=persist_execution_lease,
+                )
+
+        Args:
+            graph_id: Exact registered graph or graph-function identity.
+            inputs: Inputs passed to the selected graph.
+            run_id: Optional caller-owned run identity.
+            session_id: Optional session used for root-turn serialization.
+            tags: Run classification tags.
+            identity: Authenticated request identity.
+            origin: Run origin used by scheduling and inspection.
+            visibility: Run visibility policy.
+            importance: Run retention importance.
+            agent_id: Optional owning Agent identity.
+            app_id: Optional owning application identity.
+            app_name: Optional application display name.
+            run_config: Optional trusted runtime configuration.
+            admission_callback: Optional Host callback invoked after durable run creation
+                and before execution becomes eligible to start.
+
+        Returns:
+            RunRecord: Persisted and admitted run metadata.
+
+        Notes:
+            A callback failure terminalizes the persisted run as failed and schedules
+            no graph work. There is no post-scheduling admission path.
         """
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
+        # Gate before creating the RunRecord. Once this method persists a root
+        # run, that record itself becomes the blocker for later same-session
+        # root turns; the in-process lock only closes the check/create race.
+        admission_lock = await self._acquire_session_root_turn_admission(
+            session_id=session_id,
+            graph_id=graph_id,
+            run_id=run_id,
+            tags=tags,
+            origin=origin,
+            visibility=visibility,
+            run_config=run_config,
+        )
         # Acquire run slot (rate limiting)
-        await self._acquire_run_slot()
         # Tracks whether responsibility for releasing the slot has been handed
         # over to the background runner (_bg). If False, submit_run must
         # release the slot on exception; if True, _bg will do it its finally.
         slot_handed_to_bg = False
 
         try:
+            await self._acquire_run_slot()
             tags = tags or []
 
             record: RunRecord | None = None
@@ -720,6 +1006,41 @@ class RunManager:
             if record is None:
                 raise RuntimeError("Failed to create run record")
             await self._ensure_cancellation_handle(record.run_id)
+            if admission_callback is not None:
+                try:
+                    await admission_callback(record)
+                except Exception as exc:
+                    record.status = RunStatus.failed
+                    record.finished_at = _utcnow()
+                    record.error = "Run admission callback failed"
+                    record.meta.update(
+                        {
+                            "error_kind": "admission",
+                            "error_code": "run_admission_failed",
+                            "error_stage": "run_admission",
+                            "error_message": record.error,
+                            "error_detail": None,
+                            "error_is_traceback": False,
+                        }
+                    )
+                    if self._store is not None:
+                        await self._store.update_status(
+                            record.run_id,
+                            RunStatus.failed,
+                            finished_at=record.finished_at,
+                            error=record.error,
+                            meta_update={
+                                "error_kind": "admission",
+                                "error_code": "run_admission_failed",
+                                "error_stage": "run_admission",
+                                "error_message": record.error,
+                                "error_detail": None,
+                                "error_is_traceback": False,
+                            },
+                        )
+                    await self._resolve_run_future(record.run_id, (record, None))
+                    await self._get_cancellation_registry().pop(record.run_id)
+                    raise RuntimeError("Run admission callback failed") from exc
 
             async def _bg():
                 try:
@@ -755,6 +1076,8 @@ class RunManager:
             if not slot_handed_to_bg:
                 await self._release_run_slot()
             raise
+        finally:
+            self._release_session_root_turn_admission(admission_lock)
 
     async def run_and_wait(
         self,
@@ -788,10 +1111,22 @@ class RunManager:
         if identity is None:
             identity = RequestIdentity(user_id="local", org_id="local", mode="local")
 
-        if count_slot:
-            await self._acquire_run_slot()
-
+        # run_and_wait also creates persisted root records, so it participates
+        # in the same session admission semantics as submit_run. The lock is
+        # released immediately after record creation; execution can still run
+        # inline while later root turns observe this record in the store.
+        admission_lock = await self._acquire_session_root_turn_admission(
+            session_id=session_id,
+            graph_id=graph_id,
+            run_id=run_id,
+            tags=tags,
+            origin=origin,
+            visibility=visibility,
+            run_config=run_config,
+        )
         try:
+            if count_slot:
+                await self._acquire_run_slot()
             tags = tags or []
 
             record, target = await self._build_run_record(
@@ -824,6 +1159,8 @@ class RunManager:
 
             if self._store is not None:
                 await self._store.create(record)
+            self._release_session_root_turn_admission(admission_lock)
+            admission_lock = None
             await self._ensure_cancellation_handle(record.run_id)
 
             finalize_kwargs = {
@@ -837,6 +1174,7 @@ class RunManager:
                 finalize_kwargs["run_config"] = run_config
             return await self._run_and_finalize(**finalize_kwargs)
         finally:
+            self._release_session_root_turn_admission(admission_lock)
             if count_slot:
                 await self._release_run_slot()
 
@@ -894,21 +1232,41 @@ class RunManager:
     async def _ensure_cancellation_handle(self, run_id: str) -> RunCancellationHandle:
         return await self._get_cancellation_registry().create(run_id)
 
-    async def cancel_run(self, run_id: str) -> RunRecord | None:
-        """
-        Best-effort cancellation for a run.
+    async def cancel_run(
+        self,
+        run_id: str,
+        *,
+        reason: str = "user_requested",
+    ) -> RunRecord | None:
+        """Request best-effort cancellation and preserve its semantic cause.
 
-        Behaviour:
-        - If the run is found and not yet terminal:
-            - Mark status = cancellation_requested and persist.
-            - Look up scheduler in sched_registry and call terminate().
-        - If the run is already terminal, return it unchanged.
-        - If no record is found, we still try scheduler-level termination
-          (in case the run hasn't been persisted yet), then return None.
+        Examples:
+            Cancel a user-requested run:
+            ```python
+            await manager.cancel_run("run-1")
+            ```
 
-        The actual transition to RunStatus.canceled happens inside
-        _run_and_finalize() when the scheduler raises asyncio.CancelledError.
+            Cancel a child owned by a stopped parent:
+            ```python
+            await manager.cancel_run("run-child", reason="parent_cancelled")
+            ```
+
+        Args:
+            run_id: Exact run identity to cancel.
+            reason: Exact supported cancellation cause.
+
+        Returns:
+            RunRecord | None: Current run record when present, otherwise
+            `None` after best-effort cancellation dispatch.
+
+        Notes:
+            The scheduler remains responsible for physical termination and the
+            existing terminal `RunStatus.canceled` transition.
         """
+
+        reason = str(reason or "")
+        if reason not in {"user_requested", "parent_cancelled"}:
+            raise ValueError(f"Unsupported cancellation reason: {reason}")
         record: RunRecord | None = None
         if self._store is not None:
             record = await self._store.get(run_id)
@@ -924,22 +1282,12 @@ class RunManager:
                 return None
 
             try:
-                # if local scheduler -> terminate
-                # if global scheduler -> terminate_run(run_id)
-                if isinstance(sched, GlobalForwardScheduler):
-                    await sched.terminate_run(run_id)
-                    return {
-                        "kind": sched.__class__.__name__,
-                        "run_id": run_id,
-                        "state": "cancellation_requested",
-                    }
-                elif isinstance(sched, ForwardScheduler):
-                    await sched.terminate()
-                    return {
-                        "kind": sched.__class__.__name__,
-                        "run_id": run_id,
-                        "state": "cancellation_requested",
-                    }
+                await sched.terminate()
+                return {
+                    "kind": sched.__class__.__name__,
+                    "run_id": run_id,
+                    "state": "cancellation_requested",
+                }
             except Exception:  # noqa: BLE001
                 import logging
 
@@ -950,9 +1298,11 @@ class RunManager:
 
         # No record in store – still try to terminate scheduler, then bail
         if record is None:
-            if handle is not None:
-                await handle.request_cancel()
-            else:
+            if handle is None:
+                handle = await self._ensure_cancellation_handle(run_id)
+            has_adapter = handle.adapter_kind not in {None, "none"}
+            await handle.request_cancel(reason=reason)
+            if not has_adapter:
                 await _terminate_scheduler()
             return None
 
@@ -981,8 +1331,9 @@ class RunManager:
                 else None,
             )
 
-        await handle.request_cancel(reason="user_requested")
-        if handle.adapter_kind is None:
+        has_adapter = handle.adapter_kind not in {None, "none"}
+        await handle.request_cancel(reason=reason)
+        if not has_adapter:
             backend_state = await _terminate_scheduler()
             if backend_state:
                 handle.backend_state_value = dict(backend_state)

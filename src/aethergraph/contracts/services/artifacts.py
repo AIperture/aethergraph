@@ -32,13 +32,15 @@ class Artifact:
         preview_uri (str | None): URI for previewing the artifact. Defaults to None.
         org_id (str | None): Organization identifier for multi-tenant support. Defaults to None.
         user_id (str | None): User identifier for multi-tenant support. Defaults to None.
-        client_id (str | None): Client identifier for multi-tenant support. Defaults to None.
-        app_id (str | None): Application identifier for multi-tenant support. Defaults to None.
+        client_id (str | None): Deprecated optional client compatibility metadata. It
+            is never canonical storage identity or authorization scope. Defaults to None.
+        app_id (str | None): Deprecated optional compatibility metadata. It is never
+            canonical storage identity or authorization scope. Defaults to None.
         session_id (str | None): Session identifier for multi-tenant support. Defaults to None.
 
     Properties:
-        mimetype (str | None): Alias property for accessing and setting the 'mime' attribute.
-            Provides backward compatibility with alternative naming conventions.
+        mimetype (str | None): Deprecated public-response alias for `mime`; canonical
+            storage uses `media_type` only.
     """
 
     artifact_id: str
@@ -63,12 +65,12 @@ class Artifact:
     # tenant fields
     org_id: str | None = None
     user_id: str | None = None
-    client_id: str | None = None
-    app_id: str | None = None
+    client_id: str | None = None  # Deprecated optional compatibility metadata only.
+    app_id: str | None = None  # Deprecated optional compatibility metadata only.
     session_id: str | None = None
     occurrence_id: str | None = None
 
-    # ---- alias: mimetype <-> mime ----
+    # Deprecated frozen public-response alias; canonical storage has only media_type.
     @property
     def mimetype(self) -> str | None:
         return self.mime

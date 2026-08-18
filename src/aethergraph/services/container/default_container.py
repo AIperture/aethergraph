@@ -1,124 +1,81 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-import os
+import hashlib
 from pathlib import Path
 from typing import Any
 
 # ---- core services ----
 from aethergraph.config.config import AppSettings
-from aethergraph.contracts.services.execution import ExecutionService
-
-# ---- optional services (not used by default) ----
-# ---- scheduler ---- TODO: move to a separate server to handle scheduling across threads/processes
-from aethergraph.contracts.services.metering import MeteringService
-from aethergraph.contracts.services.runs import RunResultStore, RunStore
-from aethergraph.contracts.services.sessions import SessionStore
-from aethergraph.contracts.services.state_stores import GraphStateStore
+from aethergraph.contracts.integration import HostManifest
+from aethergraph.contracts.services.llm import EmbeddingClientProtocol
 
 # ---- trigger services ----
 from aethergraph.contracts.services.trigger import TriggerService
-from aethergraph.contracts.storage.artifact_index import AsyncArtifactIndex
-from aethergraph.contracts.storage.artifact_store import AsyncArtifactStore
-from aethergraph.contracts.storage.doc_store import DocStore
-from aethergraph.contracts.storage.event_log import EventLog
-from aethergraph.contracts.storage.trigger_store import TriggerStore
-from aethergraph.core.execution.global_scheduler import GlobalForwardScheduler
-
-# ---- artifact services ----
+from aethergraph.core.runtime.continuation_timer import ContinuationTimerService
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
 from aethergraph.core.runtime.runtime_registry import current_registry, set_current_registry
-from aethergraph.services.auth.authn import AuthnService
+from aethergraph.observability import (
+    AgentEventTypeRegistry,
+    CanonicalMeteringService,
+    LoggingConfig,
+    ObservationPolicy,
+    RetentionPolicy,
+    StdLoggerService,
+    register_default_agent_event_types,
+)
+from aethergraph.observability.canonical_retention import ProviderRetentionJanitor
+from aethergraph.observability.canonical_service import CanonicalObservationService
+from aethergraph.observability.workspace import ObservabilityFacade
+from aethergraph.server.admission import RunBurstLimiter
+from aethergraph.server.security.credentials import EnvironmentSecretStore, resolve_auth_secret
+from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
 from aethergraph.services.auth.authz import AllowAllAuthz
+from aethergraph.services.auth.canonical_authn import CanonicalAuthnService
 from aethergraph.services.channel.channel_bus import ChannelBus
-
-# from aethergraph.services.eventhub.event_hub import EventHub
-from aethergraph.services.channel.event_hub import EventHub
 
 # ---- channel services ----
 from aethergraph.services.channel.factory import build_bus, make_channel_adapters_from_env
-from aethergraph.services.channel.ingress import ChannelIngress
 from aethergraph.services.clock.clock import SystemClock
-from aethergraph.services.continuations.stores.fs_store import (
-    FSContinuationStore,  # AsyncContinuationStore
-)
-from aethergraph.services.eventbus.inmem import InMemoryEventBus
-from aethergraph.services.execution.local_python import LocalPythonExecutionService
-
-# ---- Global Indices ----
-from aethergraph.services.indices.global_indices import GlobalIndices
-from aethergraph.services.inspect import (
-    AgentEventTypeRegistry,
-    JsonlLLMObservationStore,
-    register_default_agent_event_types,
-)
-from aethergraph.services.knowledge.chunker import TextSplitter
-
-# ---- kv services ----
-from aethergraph.services.knowledge.local_fs_backend import LocalFSKnowledgeBackend
 from aethergraph.services.llm.embed_factory import build_embedding_clients
 from aethergraph.services.llm.embedding_service import EmbeddingService
 from aethergraph.services.llm.factory import build_llm_clients
-from aethergraph.services.llm.observability import (
-    ConsoleLLMObservationSink,
-    JsonlLLMObservationSink,
-)
+from aethergraph.services.llm.image_factory import build_image_generation_clients
+from aethergraph.services.llm.image_service import ImageGenerationService
+from aethergraph.services.llm.provider_transport import ProviderRateGate
 from aethergraph.services.llm.service import LLMService
-from aethergraph.services.logger.std import LoggingConfig, StdLoggerService
-from aethergraph.services.mcp.service import MCPService
 
 # ---- memory services ----
-from aethergraph.services.memory.factory import MemoryFactory
-from aethergraph.services.metering.eventlog_metering import EventLogMeteringService
-
-# ---- Planning components ----
-from aethergraph.services.planning.action_catalog import ActionCatalog
-from aethergraph.services.planning.flow_validator import FlowValidator
-from aethergraph.services.planning.planner_service import PlannerService
+from aethergraph.services.memory.canonical_factory import CanonicalMemoryFacadeFactory
 
 # ---- Other components ----
-from aethergraph.services.rate_limit.inmem_rate_limit import SimpleRateLimiter
-from aethergraph.services.redactor.simple import RegexRedactor  # Simple PII redactor
 from aethergraph.services.registry.registration_service import RegistrationService
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.resume.multi_scheduler_resume_bus import MultiSchedulerResumeBus
 from aethergraph.services.resume.router import ResumeRouter
 from aethergraph.services.schedulers.registry import SchedulerRegistry
 from aethergraph.services.scope.scope_factory import ScopeFactory
-from aethergraph.services.secrets.env import EnvSecrets
-from aethergraph.services.skills.skill_registry import SkillRegistry
-from aethergraph.services.tracing import EventLogTracer, NoopTracer
 from aethergraph.services.triggers.engine import TriggerEngine
 from aethergraph.services.triggers.trigger_service import TriggerServiceImpl
-from aethergraph.services.viz.viz_service import VizService
+from aethergraph.services.viz.canonical_service import CanonicalVizService
 from aethergraph.services.waits.wait_registry import WaitRegistry
-from aethergraph.services.wakeup.memory_queue import ThreadSafeWakeupQueue
-from aethergraph.services.websearch.httpx_fetcher import HttpxWebPageFetcher
-from aethergraph.services.websearch.providers.default import DefaultWebSearchProvider
-from aethergraph.services.websearch.service import WebSearchService
-from aethergraph.services.websearch.types import WebSearchEngine
-
-# ---- storage builders ----
-from aethergraph.storage.factory import (
-    build_artifact_index,
-    build_artifact_store,
-    build_continuation_store,
-    build_doc_store,
-    build_event_log,
-    build_graph_state_store,
-    build_memory_hotlog,
-    build_memory_persistence,
-    build_run_result_store,
-    build_run_store,
-    build_session_store,
+from aethergraph.storage.builtin_local import build_builtin_local_storage_registry
+from aethergraph.storage.composition import StorageComposition
+from aethergraph.storage.contracts import (
+    StorageConfigurationError,
+    StorageOpenMode,
+    StorageOpenRequest,
+    StorageProviderSelection,
+    StorageScope,
+    StorageSecretResolver,
 )
-from aethergraph.storage.kv.inmem_kv import InMemoryKV as EphemeralKV
-from aethergraph.storage.kv.sqlite_kv_sync import SQLiteKVSync
-from aethergraph.storage.metering.meter_event import EventLogMeteringStore
-from aethergraph.storage.registry.registration_docstore import RegistrationManifestStore
-from aethergraph.storage.search_factory import build_kb_search_backend, build_search_backend
-from aethergraph.storage.triggers.trigger_docstore import DocTriggerStore
+from aethergraph.storage.provider_registry import StorageProviderFactory, StorageProviderRegistry
+from aethergraph.storage.providers.local_sqlite.manifest import LOCAL_PROVIDER_NAME
+from aethergraph.storage.runtime_requirements import create_runtime_storage_composition
+
+from .canonical_storage import CanonicalStorageServices, bind_canonical_storage_services
 
 SERVICE_KEYS = [
     # core
@@ -132,24 +89,53 @@ SERVICE_KEYS = [
     "wait_registry",
     "resume_bus",
     "resume_router",
-    "wakeup_queue",
+    "continuation_timer",
     # storage and artifacts
-    "kv_hot",
-    "artifacts",
-    "artifact_index",
+    "kv",
+    "artifact_factory",
     # memory
     "memory_factory",
     # optional
     "llm",
-    "event_bus",
     "prompts",
     "authn",
     "authz",
-    "redactor",
     "metering",
-    "tracer",
-    "secrets",
+    "observability",
 ]
+
+
+class _UnavailableStorageSecrets:
+    async def resolve(self, reference: str) -> str | bytes:
+        raise StorageConfigurationError(
+            f"No storage secret resolver was supplied for {reference!r}"
+        )
+
+
+def _default_workspace_id(root: Path) -> str:
+    normalized = str(root.resolve()).replace("\\", "/").casefold()
+    return "workspace-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def _runtime_storage_registry(
+    *,
+    selection: StorageProviderSelection,
+    workspace_id: str,
+    auth_secret: str,
+    embedder: EmbeddingClientProtocol | None,
+    providers: Mapping[str, StorageProviderFactory],
+) -> StorageProviderRegistry:
+    if selection.provider == LOCAL_PROVIDER_NAME:
+        registry = build_builtin_local_storage_registry(
+            selection=selection,
+            workspace_id=workspace_id,
+            auth_signing_secret=auth_secret,
+            embedder=embedder,
+        )
+        for name, factory in providers.items():
+            registry.register(name, factory)
+        return registry
+    return StorageProviderRegistry(providers)
 
 
 @dataclass
@@ -160,81 +146,61 @@ class DefaultContainer:
     # scope
     scope_factory: ScopeFactory
 
-    # schedulers
-    schedulers: dict[str, Any]
-
     # core
     registry: UnifiedRegistry
     logger: StdLoggerService
     clock: SystemClock
+    storage_composition: StorageComposition
+    storage_services: CanonicalStorageServices
 
     # channels and interactions
     channels: ChannelBus
-    eventhub: EventHub
 
     # continuations and resume
-    cont_store: FSContinuationStore
+    cont_store: Any
     sched_registry: SchedulerRegistry
     wait_registry: WaitRegistry
     resume_bus: MultiSchedulerResumeBus
     resume_router: ResumeRouter
-    wakeup_queue: ThreadSafeWakeupQueue
-    state_store: GraphStateStore
+    continuation_timer: ContinuationTimerService
+    state_store: Any
     trigger_engine: TriggerEngine
     trigger_service: TriggerService
-    trigger_store: TriggerStore
+    trigger_store: Any
 
-    # storage and artifacts
-    doc_store: DocStore
-    kv_hot: EphemeralKV
-    artifacts: AsyncArtifactStore
-    artifact_index: AsyncArtifactIndex
-    registration_manifest_store: RegistrationManifestStore
+    # provider-backed runtime services
+    kv: Any
+    artifact_factory: Any
+    artifact_service: CanonicalPublicArtifactFacade
+    registration_manifest_store: Any
     registration_service: RegistrationService
-    eventlog: EventLog
-    global_indices: GlobalIndices
-    kb_backend: LocalFSKnowledgeBackend  # for now just use the local FS backend as the default; in the future, we can make this swappable like the global indices backend, and add auto-indexing to the NodeKB facade
-
-    # memory
-    memory_factory: MemoryFactory
+    memory_factory: CanonicalMemoryFacadeFactory
 
     # viz - only useful with frontend; otherwise this is a pure storage service for metrics and images
-    viz_service: VizService | None = None
+    viz_service: CanonicalVizService | None = None
 
     # optional llm service
     llm: LLMService | None = None
-    llm_observation_sink: Any | None = None
-    llm_observation_path: str | None = None
-    llm_observation_store: Any | None = None
-    mcp: MCPService | None = None
+    observability: ObservabilityFacade | None = None
+    observation_sink: CanonicalObservationService | None = None
+    retention_janitor: ProviderRetentionJanitor | None = None
     embed_service: EmbeddingService | None = None
-    web_search: WebSearchService | None = None
+    image_service: ImageGenerationService | None = None
 
     # run controls -- for http endpoints and run manager
-    run_store: RunStore | None = None
-    run_result_store: RunResultStore | None = None
+    run_store: Any | None = None
+    run_result_store: Any | None = None
     run_manager: RunManager | None = None  # RunManager
     run_cancellation_registry: RunCancellationRegistry | None = None
-    session_store: SessionStore | None = None  # SessionStore
-
-    # planner
-    planner_service: PlannerService | None = None
-
-    # skills
-    skills_registry: SkillRegistry | None = None
+    session_store: Any | None = None
 
     # optional services (not used by default)
-    execution: ExecutionService | None = None
-    event_bus: InMemoryEventBus | None = None
-    authn: AuthnService | None = None
+    authn: CanonicalAuthnService | None = None
     authz: AllowAllAuthz | None = None
-    redactor: RegexRedactor | None = None
 
-    metering: MeteringService | None = None
-    rate_limiter: SimpleRateLimiter | None = None
-    tracer: NoopTracer | EventLogTracer | None = None
+    metering: CanonicalMeteringService | None = None
+    run_burst_limiter: RunBurstLimiter | None = None
     agent_event_registry: AgentEventTypeRegistry | None = None
-    secrets: EnvSecrets | None = None
 
     # extensible services
     ext_services: dict[str, Any] = field(default_factory=dict)
@@ -242,18 +208,165 @@ class DefaultContainer:
     # settings -- not a service, but useful to have around
     settings: AppSettings | None = None
 
-    # channel ingress (set after init to avoid circular dependency)
-    channel_ingress: ChannelIngress | None = None  # set after init to avoid circular dependency
+    # installed only by an explicit immutable AG Host deployment
+    host_manifest: HostManifest | None = None
+    integration_ingress: Any | None = None
+    semantic_events: Any | None = None
+    semantic_turn_monitor: Any | None = None
+
+    # opt-in host runtime output capture; disabled for normal CLI/server hosts
+    runtime_output_sink: Any | None = None
+
+    _storage_ready: bool = field(default=False, init=False, repr=False)
+
+    async def start_storage(self) -> None:
+        """Validate and publish the one prepared storage bundle.
+
+        Intro:
+            Completes capability and health admission before any background service
+            or persistent runtime operation is allowed to start.
+
+        Examples:
+            Start an application container:
+                ```python
+                await container.start_storage()
+                ```
+
+            Reuse the idempotent readiness barrier:
+                ```python
+                await container.start_storage()
+                await container.start_storage()
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            None: The exact prepared bundle is operationally ready.
+
+        Notes:
+            Failure is terminal for selection and never opens a fallback provider.
+        """
+        await self.storage_composition.start()
+        self._storage_ready = True
+
+    async def close_storage(self) -> None:
+        """Close the one provider-owned storage composition.
+
+        Intro:
+            Delegates shutdown once background writers and schedulers have stopped,
+            retaining retryability when provider close fails.
+
+        Examples:
+            Close application storage:
+                ```python
+                await container.close_storage()
+                ```
+
+            Close an unstarted prepared container:
+                ```python
+                await prepared.close_storage()
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            None: Provider resources are closed or were already closed.
+
+        Notes:
+            Individual stores are never closed by the container.
+        """
+        self.logger.close()
+        try:
+            await self.storage_composition.close()
+        finally:
+            self._storage_ready = False
+
+    def require_storage_ready(self) -> None:
+        """Fail a persistent operation before provider readiness.
+
+        Intro:
+            Provides the synchronous assertion used by public runtime boundaries
+            after their asynchronous readiness barrier.
+
+        Examples:
+            Assert readiness before a query:
+                ```python
+                container.require_storage_ready()
+                ```
+
+            Reject a merely prepared container:
+                ```python
+                with pytest.raises(RuntimeError):
+                    prepared.require_storage_ready()
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            None: Storage was admitted and published by the lifecycle owner.
+
+        Notes:
+            This method performs no health probe and cannot transition lifecycle state.
+        """
+        if not self._storage_ready:
+            raise RuntimeError("Canonical storage is not ready.")
 
 
 def build_default_container(
     *,
     root: str | None = None,
     cfg: AppSettings | None = None,
+    channel_adapters: Mapping[str, Any] | None = None,
+    storage_selection: StorageProviderSelection | None = None,
+    storage_providers: Mapping[str, StorageProviderFactory] | None = None,
+    storage_secrets: StorageSecretResolver | None = None,
+    workspace_id: str | None = None,
+    owner_scope: StorageScope | None = None,
 ) -> DefaultContainer:
-    """Build the default service container with standard services.
-    if "root" is provided, use it as the base directory for storage; else use from cfg.workspace.
-    if cfg is not provided, load from default AppSettings.
+    """Build one prepared runtime container over exactly one storage provider.
+
+    Intro:
+        Resolves and synchronously prepares one canonical bundle, binds every
+        provider-backed runtime service to it, and leaves health publication to the
+        explicit asynchronous container readiness barrier.
+
+    Examples:
+        Build a development container from application settings:
+            ```python
+            container = build_default_container(root="./workspace", cfg=settings)
+            ```
+
+        Build an explicitly injected external-provider container:
+            ```python
+            container = build_default_container(
+                root="./deployment",
+                cfg=settings,
+                channel_adapters={},
+                storage_selection=external_selection,
+                storage_providers={"company.external": external_factory},
+            )
+            ```
+
+    Args:
+        root: Operational workspace root overriding `cfg.workspace`.
+        cfg: Exact application settings or None to load development settings.
+        channel_adapters: Exact adapter mapping. None selects development adapters
+            from `cfg`; an empty mapping installs no transport adapters.
+        storage_selection: Optional exact selection overriding `cfg.storage_provider`.
+        storage_providers: Explicit trusted external provider factories.
+        storage_secrets: Optional resolver required by selected external providers.
+        workspace_id: Optional stable exact workspace identity.
+        owner_scope: Optional trusted canonical storage owner.
+
+    Returns:
+        DefaultContainer: Prepared container awaiting `start_storage()`.
+
+    Notes:
+        The builder performs no readiness publication or fallback. A selected
+        external provider is never replaced with the built-in local provider.
     """
     if cfg is None:
         from aethergraph.config.context import set_current_settings
@@ -263,181 +376,150 @@ def build_default_container(
         set_current_settings(cfg)
 
     root = root or cfg.workspace
-    # override workspace in cfg to match
     cfg.workspace = root
-
-    # we use user specified root if provided, else from config/env
     root_p = Path(root).resolve() if root else Path(cfg.workspace).resolve()
-    (root_p / "kv").mkdir(parents=True, exist_ok=True)
-    (root_p / "index").mkdir(parents=True, exist_ok=True)
-    (root_p / "memory").mkdir(parents=True, exist_ok=True)
+    resolved_workspace_id = workspace_id or _default_workspace_id(root_p)
+    resolved_owner_scope = owner_scope or StorageScope(project_id=resolved_workspace_id)
+    auth_secret = resolve_auth_secret(deploy_mode=cfg.deploy_mode, configured=cfg.auth.secret)
+    selection = storage_selection or cfg.storage_provider.to_selection()
+    credential_store = EnvironmentSecretStore()
+    provider_rate_gate = ProviderRateGate()
 
-    # Scope factory
-    scope_factory = ScopeFactory()
-
-    # event log for metering and channel events --
-    # TODO: make configurable from cfg
-    eventlog = build_event_log(cfg)
-
-    # core services
-    logger_factory = StdLoggerService.build(
-        LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs")),
-        event_log=eventlog,
+    observation_policy = ObservationPolicy(
+        capture_mode=cfg.llm.observability.capture_mode,
+        full_prompt_ttl_days=cfg.observability.retention.max_full_prompt_age_days,
     )
 
+    # Model clients are inert during construction. Persistence services are bound
+    # immediately after provider preparation and before any client can be published.
+    llm_clients = build_llm_clients(
+        cfg.llm,
+        credential_store,
+        observation_sink=None,
+        observation_capture_mode=cfg.llm.observability.capture_mode,
+        rate_gate=provider_rate_gate,
+    )
+    embed_clients = build_embedding_clients(
+        cfg.embed,
+        credential_store,
+        metering=None,
+        rate_gate=provider_rate_gate,
+        operation_quota_cfg=cfg.model_operation_usage_quota.embedding,
+    )
+    embed_client = embed_clients["default"] if embed_clients else None
+    image_clients = build_image_generation_clients(
+        cfg.image_generation,
+        credential_store,
+        metering=None,
+        rate_gate=provider_rate_gate,
+        operation_quota_cfg=cfg.model_operation_usage_quota.image_generation,
+    )
+
+    storage_registry = _runtime_storage_registry(
+        selection=selection,
+        workspace_id=resolved_workspace_id,
+        auth_secret=auth_secret,
+        embedder=embed_client,
+        providers=dict(storage_providers or {}),
+    )
+    storage_composition = create_runtime_storage_composition(storage_registry)
     clock = SystemClock()
-    # registry = UnifiedRegistry()
+    bundle = storage_composition.prepare(
+        StorageOpenRequest(
+            workspace_id=resolved_workspace_id,
+            workspace_root=root_p,
+            owner_scope=resolved_owner_scope,
+            selection=selection,
+            mode=StorageOpenMode.READ_WRITE,
+            expected_format_version=1,
+            clock=clock,
+            secrets=storage_secrets or _UnavailableStorageSecrets(),
+        )
+    )
+    services = bind_canonical_storage_services(
+        bundle=bundle,
+        owner_scope=resolved_owner_scope,
+        clock=clock.now,
+        observation_policy=observation_policy,
+        llm=llm_clients.get("default"),
+        memory_hot_max_events=cfg.memory.hot_limit,
+        memory_hot_ttl_seconds=cfg.memory.hot_ttl_s,
+        memory_signal_threshold=cfg.memory.signal_threshold,
+    )
+    metering_service = CanonicalMeteringService(services.metering)
+    for client in llm_clients.values():
+        client.observation_sink = services.observations
+        client.metering = metering_service
+    for client in embed_clients.values():
+        client.metering = metering_service
+    for client in image_clients.values():
+        client.metering = metering_service
+
+    llm_profiles = {"default": cfg.llm.default, **dict(cfg.llm.profiles or {})}
+    llm_service = (
+        LLMService(clients=llm_clients, secrets=credential_store, profiles=llm_profiles)
+        if llm_clients
+        else None
+    )
+    embed_service = EmbeddingService(clients=embed_clients) if embed_clients else None
+    image_service = ImageGenerationService(image_clients) if image_clients else None
+    if llm_service is not None and image_service is not None:
+        llm_service.bind_image_service(image_service)
+
+    logger_factory = StdLoggerService.build(
+        LoggingConfig.from_cfg(cfg, log_dir=str(root_p / "logs")),
+        observation_store=services.observations if cfg.observability.persist_logs else None,
+    )
     registry: UnifiedRegistry = current_registry()
-    set_current_registry(registry)  # set global registry, ensure singleton (optional)
-
-    # continuations and resume
-    cont_store = build_continuation_store(cfg)
-
+    set_current_registry(registry)
+    scope_factory = ScopeFactory()
     sched_registry = SchedulerRegistry()
     wait_registry = WaitRegistry()
     resume_bus = MultiSchedulerResumeBus(
         registry=sched_registry,
-        store=cont_store,
+        store=services.continuations,
         logger=logger_factory.for_service(ns="resume_bus"),
     )
     resume_router = ResumeRouter(
-        store=cont_store,
+        store=services.continuations,
         runner=resume_bus,
         logger=logger_factory.for_service(ns="resume_router"),
         wait_registry=wait_registry,
     )
-    wakeup_queue = ThreadSafeWakeupQueue()  # TODO: this is a placeholder, not fully implemented
-    # state_store = JsonGraphStateStore(root=str(root_p / "graph_states"))
-    state_store = build_graph_state_store(cfg)
-
-    # global scheduler
-    global_sched = GlobalForwardScheduler(
-        registry=sched_registry,
-        global_max_concurrency=None,  # TODO: make configurable
-        logger=logger_factory.for_scheduler(),
+    continuation_timer = ContinuationTimerService(
+        continuation_store=services.continuations,
+        lease_store=services.continuation_leases,
+        resume_router=resume_router,
+        clock=clock,
+        logger=logger_factory.for_service(ns="continuation_timer"),
     )
-    schedulers = {
-        "global": global_sched,
-        "registry": sched_registry,
-    }
-
-    # channels
-    event_hub = (
-        EventHub()
-    )  # in-memory event hub for WebUI and other real-time events; not configurable yet
-    channel_adapters = make_channel_adapters_from_env(cfg, event_log=eventlog, event_hub=event_hub)
+    selected_channel_adapters = (
+        make_channel_adapters_from_env(cfg) if channel_adapters is None else dict(channel_adapters)
+    )
     channels = build_bus(
-        channel_adapters,
-        default="console:stdin",
+        selected_channel_adapters,
         logger=logger_factory.for_channel(),
         resume_router=resume_router,
-        cont_store=cont_store,
+        cont_store=services.continuations,
     )
 
-    # storage and artifacts -- kv_hot has special methods for hot data, do not use other persistent kv here
-    kv_hot = EphemeralKV()
-
-    artifacts = build_artifact_store(cfg)
-    artifact_index = build_artifact_index(cfg)
-
-    viz_service = VizService(event_log=eventlog)
-
-    # Metering service
-    # TODO: make metering service configurable
-    metering_store = EventLogMeteringStore(event_log=eventlog)
-    metering = EventLogMeteringService(store=metering_store)
-
-    # optional services
-    secrets = (
-        EnvSecrets()
-    )  # get secrets from env vars -- for local development; in prod, use a proper secrets manager
-    obs_cfg = cfg.llm.observability
-    llm_observation_sink = None
-    llm_observation_path: str | None = None
-    llm_observation_store = None
-    if obs_cfg.enabled:
-        if obs_cfg.sink == "console":
-            llm_observation_sink = ConsoleLLMObservationSink(prompt_view=obs_cfg.prompt_view)
-        elif obs_cfg.sink == "file":
-            obs_path = Path(obs_cfg.path)
-            if not obs_path.is_absolute():
-                obs_path = root_p / obs_path
-            llm_observation_sink = JsonlLLMObservationSink(obs_path)
-            llm_observation_path = str(obs_path)
-            llm_observation_store = JsonlLLMObservationStore(obs_path)
-        else:
-            raise ValueError(f"Unsupported LLM observability sink: {obs_cfg.sink!r}")
-    llm_clients = build_llm_clients(
-        cfg.llm,
-        secrets,
-        observation_sink=llm_observation_sink,
-        observation_capture_mode=obs_cfg.capture_mode,
-    )  # return {profile: GenericLLMClient}
-    llm_service = LLMService(clients=llm_clients) if llm_clients else None
-
-    embed_clients = build_embedding_clients(
-        cfg.embed, secrets, metering=metering
-    )  # return {profile: GenericEmbeddingClient}
-    embed_service = EmbeddingService(clients=embed_clients) if embed_clients else None
-    embed_client = embed_clients["default"] if embed_clients else None
-
-    mcp = MCPService()  # empty MCP service; users can register clients as needed
-
-    # web search service uses a provider-agnostic default no-op provider.
-    # This keeps `fetch` always available even when search providers are not configured.
-    default_web_provider = DefaultWebSearchProvider()
-    web_search: WebSearchService | None = WebSearchService(
-        providers={WebSearchEngine.custom: default_web_provider},
-        default_engine=WebSearchEngine.custom,
-        page_fetcher=HttpxWebPageFetcher(),
-    )
-
-    # memory factory
-    persistence = build_memory_persistence(cfg)
-    hotlog = build_memory_hotlog(cfg)
-    memory_factory = MemoryFactory(
-        hotlog=hotlog,
-        persistence=persistence,
-        artifacts=artifacts,
-        hot_limit=int(cfg.memory.hot_limit),
-        hot_ttl_s=int(cfg.memory.hot_ttl_s),
-        default_signal_threshold=float(cfg.memory.signal_threshold),
-        logger=logger_factory.for_service(ns="memory"),
-        llm_service=llm_service.get("default") if llm_service else None,
-    )
-
-    # run store and manager
-    run_store = build_run_store(cfg)
-    run_result_store = build_run_result_store(cfg)
     run_cancellation_registry = RunCancellationRegistry()
     run_manager = RunManager(
-        run_store=run_store,
-        result_store=run_result_store,
-        state_store=state_store,
+        run_store=services.control.runs,
+        result_store=services.control.run_results,
+        state_store=services.graph_state,
         registry=registry,
         sched_registry=sched_registry,
         cancellation_registry=run_cancellation_registry,
         max_concurrent_runs=cfg.rate_limit.max_concurrent_runs,
     )
-    session_store = build_session_store(cfg)
-
-    # rate limiter
     rl_settings = cfg.rate_limit
-    rate_limiter = SimpleRateLimiter(
+    run_burst_limiter = RunBurstLimiter(
         max_events=rl_settings.burst_max_runs,
         window_seconds=rl_settings.burst_window_seconds,
     )
-
-    # auth services
-    auth_secret = (
-        cfg.auth.secret.get_secret_value()
-        if cfg.auth.secret is not None
-        else "aethergraph-dev-secret"
-    )
-    auth_db_path = str(root_p / "auth" / "auth_kv.db")
-    auth_grant_store = SQLiteKVSync(auth_db_path, prefix="grant:")
-    auth_invite_store = SQLiteKVSync(auth_db_path, prefix="invite:")
-    authn = AuthnService(
+    authn = CanonicalAuthnService(
+        store=services.auth,
         secret=auth_secret,
         cookie_name=cfg.auth.cookie_name,
         cookie_secure=cfg.auth.cookie_secure,
@@ -445,141 +527,88 @@ def build_default_container(
         session_ttl_seconds=cfg.auth.session_ttl_seconds,
         grant_ttl_seconds=cfg.auth.grant_ttl_seconds,
         public_demo_fallback_enabled=cfg.auth.public_demo_fallback_enabled,
-        grant_store=auth_grant_store,
-        invite_store=auth_invite_store,
     )
-    authn.load_persisted()
     authz = AllowAllAuthz()
-
-    # global scoped indices
-    # from aethergraph.storage.search_backend.generic_vector_backend import SQLiteVectorSearchBackend
-
-    # search_backend = SQLiteVectorSearchBackend(
-    #     index=vec_index,
-    #     embedder=embed_client,
-    # )
-
-    global_indices_backend = build_search_backend(cfg=cfg, embedder=embed_client)
-    global_indices = GlobalIndices(backend=global_indices_backend)  # to be set up later as needed
-
-    kb_search_backend = build_kb_search_backend(cfg, embedder=embed_client)
-    kb_backend = LocalFSKnowledgeBackend(
-        corpus_root=os.path.join(os.path.abspath(cfg.workspace), cfg.knowledge.corpus_root),
-        artifacts=artifacts,  # this is store, not Facade with auto-indexing, long doc has its own indexing method
-        search_backend=kb_search_backend,
-        embed_client=embed_client,
-        llm_client=llm_clients.get("default") if llm_clients else None,
-        chunker=TextSplitter(),
-        logger=logger_factory.for_service(ns="kb_backend"),
-    )
-
-    # Execution service
-    execution = (
-        LocalPythonExecutionService()
-    )  # simple local python executor -- NOT SANDBOXED; just for local functionality testing
-
-    # Planner service
-    catalog = ActionCatalog(registry=registry)
-    flow_validator = FlowValidator(catalog=catalog)
-    planner_service = PlannerService(
-        catalog=catalog,
-        llm=llm_service.get("default") if llm_service else None,
-        validator=flow_validator,
-        run_manager=run_manager,
-    )
-
-    # skills registry
-    skills_registry = SkillRegistry()
     agent_event_registry = register_default_agent_event_types(AgentEventTypeRegistry())
-
-    # trigger services
-    doc_store = build_doc_store(cfg)
-    registration_manifest_store = RegistrationManifestStore(doc_store=doc_store)
+    artifact_service = services.artifact_factory.for_public_execution(StorageScope())
     registration_service = RegistrationService(
         registry=registry,
-        manifest_store=registration_manifest_store,
-        artifact_store=artifacts,
-        artifact_index=artifact_index,
+        manifest_store=services.registration_manifests,
+        artifacts=artifact_service,
     )
-    trigger_store = DocTriggerStore(
-        doc_store=doc_store
-    )  # for simplicity, we use the event log as the backing store for triggers; in the future, we can make this swappable like other storage services
     trigger_service = TriggerServiceImpl(
-        store=trigger_store,
-        event_log=eventlog,
+        store=services.triggers,
+        observation_sink=services.observations,
         logger=logger_factory.for_service(ns="trigger_service"),
     )
     trigger_engine = TriggerEngine(
-        store=trigger_store,
+        store=services.triggers,
         run_manager=run_manager,
-        event_log=eventlog,
-        run_store=run_store,
+        run_store=services.control.runs,
+        observation_sink=services.observations,
         logger=logger_factory.for_service(ns="trigger_engine"),
+    )
+    retention_cfg = cfg.observability.retention
+    retention_janitor = ProviderRetentionJanitor(
+        services.observations,
+        RetentionPolicy(
+            max_age_days=retention_cfg.max_age_days,
+            error_max_age_days=retention_cfg.error_max_age_days,
+            max_full_prompt_age_days=retention_cfg.max_full_prompt_age_days,
+            max_bytes_per_trace=retention_cfg.max_bytes_per_trace,
+            max_total_bytes=retention_cfg.max_total_bytes,
+            max_retained_traces=retention_cfg.max_retained_traces,
+            max_retained_runs=retention_cfg.max_retained_runs,
+            max_observations_per_purge=retention_cfg.max_observations_per_purge,
+        ),
+        interval_seconds=retention_cfg.janitor_interval_seconds,
     )
 
     container = DefaultContainer(
         root=str(root_p),
         scope_factory=scope_factory,
-        schedulers=schedulers,
         registry=registry,
         logger=logger_factory,
         clock=clock,
+        storage_composition=storage_composition,
+        storage_services=services,
         channels=channels,
-        eventhub=event_hub,
-        skills_registry=skills_registry,
-        cont_store=cont_store,
+        cont_store=services.continuations,
         sched_registry=sched_registry,
         wait_registry=wait_registry,
         resume_bus=resume_bus,
         resume_router=resume_router,
-        wakeup_queue=wakeup_queue,
-        trigger_store=trigger_store,
+        continuation_timer=continuation_timer,
+        trigger_store=services.triggers,
         trigger_engine=trigger_engine,
         trigger_service=trigger_service,
-        execution=execution,
-        planner_service=planner_service,
-        doc_store=doc_store,
-        kv_hot=kv_hot,
-        state_store=state_store,
-        artifacts=artifacts,
-        artifact_index=artifact_index,
-        registration_manifest_store=registration_manifest_store,
+        kv=services.key_value,
+        state_store=services.graph_state,
+        artifact_factory=services.artifact_factory,
+        artifact_service=artifact_service,
+        registration_manifest_store=services.registration_manifests,
         registration_service=registration_service,
-        global_indices=global_indices,
-        kb_backend=kb_backend,
-        viz_service=viz_service,
-        eventlog=eventlog,
-        memory_factory=memory_factory,
+        viz_service=services.viz,
+        memory_factory=services.memory_factory,
         llm=llm_service,
-        llm_observation_sink=llm_observation_sink,
-        llm_observation_path=llm_observation_path,
-        llm_observation_store=llm_observation_store,
+        observability=services.observability(),
+        observation_sink=services.observations,
+        retention_janitor=retention_janitor,
         embed_service=embed_service,
-        web_search=web_search,
-        mcp=mcp,
-        run_store=run_store,
-        run_result_store=run_result_store,
+        image_service=image_service,
+        run_store=services.control.runs,
+        run_result_store=services.control.run_results,
         run_manager=run_manager,
         run_cancellation_registry=run_cancellation_registry,
-        session_store=session_store,
-        secrets=secrets,
-        event_bus=None,
+        session_store=services.control.sessions,
         authn=authn,
         authz=authz,
-        redactor=None,
-        metering=metering,
-        rate_limiter=rate_limiter,
-        tracer=EventLogTracer(event_log=eventlog, event_hub=event_hub)
-        if eventlog is not None
-        else NoopTracer(),
+        metering=metering_service,
+        run_burst_limiter=run_burst_limiter,
         agent_event_registry=agent_event_registry,
         settings=cfg,
     )
 
-    # channel ingress (after container is built to avoid circular dependency)
-    container.channel_ingress = ChannelIngress(
-        container=container, logger=logger_factory.for_channel()
-    )
     return container
 
 

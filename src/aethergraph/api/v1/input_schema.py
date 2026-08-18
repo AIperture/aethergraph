@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from aethergraph.core.graph.action_spec import IOSlot
-from aethergraph.services.planning.graph_io_adapter import graph_io_to_slots
+from aethergraph.core.graph.io_schema import graph_io_to_slots
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 
 from .schemas.input_schema import InputFieldSpec

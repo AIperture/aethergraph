@@ -8,7 +8,12 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException  # type: ignore
 
 from aethergraph.config.dotenv_writer import write_dotenv
+from aethergraph.config.llm_env import aethergraph_env_key, encode_llm_profile_env
 from aethergraph.core.runtime.runtime_services import current_services
+from aethergraph.server.security.redaction import (
+    is_masked_secret as _is_masked,
+    mask_secret as _mask_secret,
+)
 
 from .deps import RequestIdentity, get_identity
 from .schemas.settings import (
@@ -23,8 +28,6 @@ from .schemas.settings import (
     SlackView,
     TelegramPayload,
     TelegramView,
-    _is_masked,
-    _mask_secret,
 )
 
 logger = logging.getLogger("aethergraph.api.settings")
@@ -96,6 +99,7 @@ def _llm_profile_view(profile) -> LLMProfileView:
     return LLMProfileView(
         provider=profile.provider,
         model=profile.model,
+        endpoint_id=getattr(profile, "endpoint_id", None),
         base_url=profile.base_url,
         timeout=profile.timeout,
         api_key=_mask_secret(_secret_str_value(profile.api_key)),
@@ -104,6 +108,31 @@ def _llm_profile_view(profile) -> LLMProfileView:
         thinking_budget=profile.thinking_budget,
         reasoning_summary=profile.reasoning_summary,
         compatibility_policy=getattr(profile, "compatibility_policy", "compat"),
+        structured_output_policy=getattr(
+            profile,
+            "structured_output_policy",
+            "best_available",
+        ),
+        prompt_cache_policy=getattr(profile, "prompt_cache_policy", "auto"),
+        context_window_tokens=getattr(profile, "context_window_tokens", None),
+        vision_enabled=bool(getattr(profile, "vision_enabled", False)),
+        vision_max_images=getattr(profile, "vision_max_images", None),
+        vision_max_image_bytes=getattr(profile, "vision_max_image_bytes", None),
+        vision_resize_enabled=bool(getattr(profile, "vision_resize_enabled", True)),
+        vision_resize_max_dimension=int(
+            getattr(profile, "vision_resize_max_dimension", 1280) or 1280
+        ),
+        vision_resize_max_pixels=int(
+            getattr(profile, "vision_resize_max_pixels", 1_500_000) or 1_500_000
+        ),
+        vision_resize_jpeg_quality=int(getattr(profile, "vision_resize_jpeg_quality", 85) or 85),
+        vision_resize_min_jpeg_quality=int(
+            getattr(profile, "vision_resize_min_jpeg_quality", 70) or 70
+        ),
+        vision_accepted_mime_prefixes=list(
+            getattr(profile, "vision_accepted_mime_prefixes", ["image/"]) or []
+        ),
+        vision_accepted_mime_types=list(getattr(profile, "vision_accepted_mime_types", []) or []),
     )
 
 
@@ -121,6 +150,28 @@ def _embed_profile_view(profile) -> EmbeddingProfileView:
 async def get_settings(
     identity: RequestIdentity = Depends(get_identity),  # noqa: B008
 ) -> SettingsGetResponse:
+    """Return the local host configuration with secrets masked.
+
+    Examples:
+        Read settings through the API:
+        ```python
+        response = client.get("/api/v1/settings")
+        ```
+
+        Inspect configured provider delivery:
+        ```python
+        slack_enabled = response.json()["slack"]["enabled"]
+        ```
+
+    Args:
+        identity: Authenticated request identity for the local host.
+
+    Returns:
+        Current local settings with sensitive values masked.
+
+    Notes:
+        This endpoint is unavailable outside local deployment mode.
+    """
     _require_local(identity)
     cfg = _get_settings()
 
@@ -142,15 +193,14 @@ async def get_settings(
         llm=llm_profiles,
         embedding=embed_profiles,
         slack=SlackView(
+            integration_id=cfg.slack.integration_id,
             enabled=cfg.slack.enabled,
             bot_token=_mask_secret(_secret_str_value(cfg.slack.bot_token)),
-            signing_secret=_mask_secret(_secret_str_value(cfg.slack.signing_secret)),
-            default_agent_id=cfg.slack.default_agent_id,
         ),
         telegram=TelegramView(
+            integration_id=cfg.telegram.integration_id,
             enabled=cfg.telegram.enabled,
             bot_token=_mask_secret(_secret_str_value(cfg.telegram.bot_token)),
-            default_agent_id=cfg.telegram.default_agent_id,
         ),
     )
 
@@ -160,40 +210,6 @@ async def get_settings(
 # ---------------------------------------------------------------------------
 
 
-def _env_key(*parts: str) -> str:
-    """Build an AETHERGRAPH env var name from dot-path parts.
-
-    Example: _env_key("LLM", "DEFAULT", "API_KEY") -> "AETHERGRAPH_LLM__DEFAULT__API_KEY"
-    """
-    return "AETHERGRAPH_" + "__".join(p.upper() for p in parts)
-
-
-def _collect_llm_env(
-    profiles: dict[str, LLMProfilePayload],
-) -> dict[str, str]:
-    """Convert LLM profile payloads to env var updates."""
-    env: dict[str, str] = {}
-    for name, payload in profiles.items():
-        prefix = ("LLM", "DEFAULT") if name.lower() == "default" else ("LLM", "PROFILES", name)
-        if payload.provider is not None:
-            env[_env_key(*prefix, "PROVIDER")] = payload.provider
-        if payload.model is not None:
-            env[_env_key(*prefix, "MODEL")] = payload.model
-        if payload.api_key is not None and not _is_masked(payload.api_key):
-            env[_env_key(*prefix, "API_KEY")] = payload.api_key
-        if payload.base_url is not None:
-            env[_env_key(*prefix, "BASE_URL")] = payload.base_url
-        if payload.timeout is not None:
-            env[_env_key(*prefix, "TIMEOUT")] = str(payload.timeout)
-        if payload.reasoning_effort is not None:
-            env[_env_key(*prefix, "REASONING_EFFORT")] = payload.reasoning_effort
-        if payload.thinking_mode is not None:
-            env[_env_key(*prefix, "THINKING_MODE")] = payload.thinking_mode
-        if payload.compatibility_policy is not None:
-            env[_env_key(*prefix, "COMPATIBILITY_POLICY")] = payload.compatibility_policy
-    return env
-
-
 def _collect_embed_env(
     profiles: dict[str, EmbeddingProfilePayload],
 ) -> dict[str, str]:
@@ -201,39 +217,59 @@ def _collect_embed_env(
     for name, payload in profiles.items():
         prefix = ("EMBED", "DEFAULT") if name.lower() == "default" else ("EMBED", "PROFILES", name)
         if payload.provider is not None:
-            env[_env_key(*prefix, "PROVIDER")] = payload.provider
+            env[aethergraph_env_key(*prefix, "PROVIDER")] = payload.provider
         if payload.model is not None:
-            env[_env_key(*prefix, "MODEL")] = payload.model
+            env[aethergraph_env_key(*prefix, "MODEL")] = payload.model
         if payload.api_key is not None and not _is_masked(payload.api_key):
-            env[_env_key(*prefix, "API_KEY")] = payload.api_key
+            env[aethergraph_env_key(*prefix, "API_KEY")] = payload.api_key
         if payload.base_url is not None:
-            env[_env_key(*prefix, "BASE_URL")] = payload.base_url
+            env[aethergraph_env_key(*prefix, "BASE_URL")] = payload.base_url
         if payload.timeout is not None:
-            env[_env_key(*prefix, "TIMEOUT")] = str(payload.timeout)
+            env[aethergraph_env_key(*prefix, "TIMEOUT")] = str(payload.timeout)
     return env
 
 
 def _collect_slack_env(payload: SlackPayload) -> dict[str, str]:
+    """Encode supported Slack Socket Mode settings for persistence.
+
+    Examples:
+        Encode an enabled connection:
+        ```python
+        env = _collect_slack_env(SlackPayload(enabled=True))
+        ```
+
+        Preserve a masked token:
+        ```python
+        env = _collect_slack_env(SlackPayload(bot_token="********"))
+        ```
+
+    Args:
+        payload: Partial Slack settings update from the local settings API.
+
+    Returns:
+        Environment variables containing unmasked fields supplied by the caller.
+
+    Notes:
+        Slack HTTP webhook verification is not a supported transport path.
+    """
     env: dict[str, str] = {}
+    if payload.integration_id is not None:
+        env[aethergraph_env_key("SLACK", "INTEGRATION_ID")] = payload.integration_id
     if payload.enabled is not None:
-        env[_env_key("SLACK", "ENABLED")] = str(payload.enabled).lower()
+        env[aethergraph_env_key("SLACK", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
-        env[_env_key("SLACK", "BOT_TOKEN")] = payload.bot_token
-    if payload.signing_secret is not None and not _is_masked(payload.signing_secret):
-        env[_env_key("SLACK", "SIGNING_SECRET")] = payload.signing_secret
-    if payload.default_agent_id is not None:
-        env[_env_key("SLACK", "DEFAULT_AGENT_ID")] = payload.default_agent_id
+        env[aethergraph_env_key("SLACK", "BOT_TOKEN")] = payload.bot_token
     return env
 
 
 def _collect_telegram_env(payload: TelegramPayload) -> dict[str, str]:
     env: dict[str, str] = {}
+    if payload.integration_id is not None:
+        env[aethergraph_env_key("TELEGRAM", "INTEGRATION_ID")] = payload.integration_id
     if payload.enabled is not None:
-        env[_env_key("TELEGRAM", "ENABLED")] = str(payload.enabled).lower()
+        env[aethergraph_env_key("TELEGRAM", "ENABLED")] = str(payload.enabled).lower()
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
-        env[_env_key("TELEGRAM", "BOT_TOKEN")] = payload.bot_token
-    if payload.default_agent_id is not None:
-        env[_env_key("TELEGRAM", "DEFAULT_AGENT_ID")] = payload.default_agent_id
+        env[aethergraph_env_key("TELEGRAM", "BOT_TOKEN")] = payload.bot_token
     return env
 
 
@@ -250,6 +286,8 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["provider"] = payload.provider
         if payload.model is not None:
             kwargs["model"] = payload.model
+        if payload.endpoint_id is not None:
+            kwargs["endpoint_id"] = payload.endpoint_id
         if payload.api_key is not None and not _is_masked(payload.api_key):
             kwargs["api_key"] = payload.api_key
         if payload.base_url is not None:
@@ -262,6 +300,32 @@ def _hot_reload_llm(profiles: dict[str, LLMProfilePayload]) -> None:
             kwargs["thinking_mode"] = payload.thinking_mode
         if payload.compatibility_policy is not None:
             kwargs["compatibility_policy"] = payload.compatibility_policy
+        if payload.structured_output_policy is not None:
+            kwargs["structured_output_policy"] = payload.structured_output_policy
+        if payload.prompt_cache_policy is not None:
+            kwargs["prompt_cache_policy"] = payload.prompt_cache_policy
+        if payload.context_window_tokens is not None:
+            kwargs["context_window_tokens"] = payload.context_window_tokens
+        if payload.vision_enabled is not None:
+            kwargs["vision_enabled"] = payload.vision_enabled
+        if payload.vision_max_images is not None:
+            kwargs["vision_max_images"] = payload.vision_max_images
+        if payload.vision_max_image_bytes is not None:
+            kwargs["vision_max_image_bytes"] = payload.vision_max_image_bytes
+        if payload.vision_resize_enabled is not None:
+            kwargs["vision_resize_enabled"] = payload.vision_resize_enabled
+        if payload.vision_resize_max_dimension is not None:
+            kwargs["vision_resize_max_dimension"] = payload.vision_resize_max_dimension
+        if payload.vision_resize_max_pixels is not None:
+            kwargs["vision_resize_max_pixels"] = payload.vision_resize_max_pixels
+        if payload.vision_resize_jpeg_quality is not None:
+            kwargs["vision_resize_jpeg_quality"] = payload.vision_resize_jpeg_quality
+        if payload.vision_resize_min_jpeg_quality is not None:
+            kwargs["vision_resize_min_jpeg_quality"] = payload.vision_resize_min_jpeg_quality
+        if payload.vision_accepted_mime_prefixes is not None:
+            kwargs["vision_accepted_mime_prefixes"] = payload.vision_accepted_mime_prefixes
+        if payload.vision_accepted_mime_types is not None:
+            kwargs["vision_accepted_mime_types"] = payload.vision_accepted_mime_types
         if kwargs:
             llm_service.configure_profile(profile=name, **kwargs)
             logger.info("Hot-reloaded LLM profile %r", name)
@@ -292,33 +356,51 @@ def _hot_reload_embedding(profiles: dict[str, EmbeddingProfilePayload]) -> None:
 
 
 def _hot_reload_slack(payload: SlackPayload) -> None:
-    """Update Slack settings in-memory (adapter reconnect requires restart)."""
+    """Update supported Slack settings in memory.
+
+    Examples:
+        Enable an existing Slack connection:
+        ```python
+        _hot_reload_slack(SlackPayload(enabled=True))
+        ```
+
+        Replace its bot token:
+        ```python
+        _hot_reload_slack(SlackPayload(bot_token="xoxb-new"))
+        ```
+
+    Args:
+        payload: Partial Slack settings update from the local settings API.
+
+    Returns:
+        None.
+
+    Notes:
+        Reconnecting the Socket Mode transport or delivery adapter requires a
+        host restart.
+    """
     cfg = _get_settings()
+    if payload.integration_id is not None:
+        cfg.slack.integration_id = payload.integration_id
     if payload.enabled is not None:
         cfg.slack.enabled = payload.enabled
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
         from pydantic import SecretStr
 
         cfg.slack.bot_token = SecretStr(payload.bot_token)
-    if payload.signing_secret is not None and not _is_masked(payload.signing_secret):
-        from pydantic import SecretStr
-
-        cfg.slack.signing_secret = SecretStr(payload.signing_secret)
-    if payload.default_agent_id is not None:
-        cfg.slack.default_agent_id = payload.default_agent_id
 
 
 def _hot_reload_telegram(payload: TelegramPayload) -> None:
     """Update Telegram settings in-memory (adapter reconnect requires restart)."""
     cfg = _get_settings()
+    if payload.integration_id is not None:
+        cfg.telegram.integration_id = payload.integration_id
     if payload.enabled is not None:
         cfg.telegram.enabled = payload.enabled
     if payload.bot_token is not None and not _is_masked(payload.bot_token):
         from pydantic import SecretStr
 
         cfg.telegram.bot_token = SecretStr(payload.bot_token)
-    if payload.default_agent_id is not None:
-        cfg.telegram.default_agent_id = payload.default_agent_id
 
 
 @router.put("", response_model=SettingsGetResponse)
@@ -332,7 +414,11 @@ async def update_settings(
     # 1) Collect env var updates
     env_updates: dict[str, str] = {}
     if body.llm:
-        env_updates.update(_collect_llm_env(body.llm))
+        for name, payload in body.llm.items():
+            values = payload.model_dump(exclude_none=True)
+            if _is_masked(values.get("api_key")):
+                values.pop("api_key", None)
+            env_updates.update(encode_llm_profile_env(name, values))
     if body.embedding:
         env_updates.update(_collect_embed_env(body.embedding))
     if body.slack:

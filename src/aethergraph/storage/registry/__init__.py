@@ -1,3 +1,3 @@
-from .registration_docstore import RegistrationManifestStore
+"""Provider-owned registry persistence has no public physical implementation exports."""
 
-__all__ = ["RegistrationManifestStore"]
+__all__: list[str] = []
