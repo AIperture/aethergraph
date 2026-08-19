@@ -4,303 +4,169 @@
 
 # AetherGraph
 
-**AetherGraph** is a **Python-first agentic DAG execution framework** for building and orchestrating AI-powered workflows. It pairs a clean, function-oriented developer experience with a resilient runtime—event-driven waits, resumable runs, and pluggable services (LLM, memory, artifacts, RAG)—so you can start simple and scale to complex R&D pipelines.
+AetherGraph (AG) is a Python-first framework for tool-based workflows. Use native
+asynchronous Python for dynamic orchestration, or materialize an explicit task graph
+when work needs dependency scheduling, durable waits, persistence, and resumption.
 
-Use AetherGraph to prototype interactive assistants, simulation/optimization loops, data transforms, or multi-step automations without boilerplate. It works **with or without LLMs**—bring your own tools and services, and compose them into repeatable, observable graphs.
+- [Documentation](https://aiperture.github.io/ag-docs/)
+- [Runnable examples](https://github.com/AIperture/ag-examples)
 
-* **[Introduction](https://aiperture.io)**
-* **[Docs](https://aiperture.github.io/aethergraph-docs/)**
-* **[Examples](https://github.com/AIperture/aethergraph-examples)**
+## Requirements and installation
 
----
-
-## Requirements
-
-* Python **3.10+**
-* macOS, Linux, or Windows
-* *(Suggested)* LLM API keys (OpenAI, Anthropic, Google, etc.)
-* *(Optional hosting)* Slack Socket Mode or Telegram polling credentials configured by AG Studio
-* *(Optional UI)* A modern browser to use the built-in AetherGraph web UI
-
----
-
-## Install
-
-### Option A — PyPI (recommended)
+- Python 3.11 or newer
+- Windows, macOS, or Linux
 
 ```bash
-pip install aethergraph
+python -m pip install aethergraph
 ```
 
-Optional extras:
+Optional adapters are installed separately:
 
 ```bash
-# Slack adapter
-pip install "aethergraph[slack]"
-
-# Dev tooling (linting, tests, types)
-pip install "aethergraph[dev]"
+python -m pip install "aethergraph[slack]"
+python -m pip install "aethergraph[telegram]"
+python -m pip install "aethergraph[webhook]"
+python -m pip install "aethergraph[discord]"
 ```
 
-> The PyPI package ships with a prebuilt UI bundle, so `/ui` works out of the box
-> when you run the server locally.
+Pin alpha releases in deployed applications:
 
-### Option B — From source (editable dev mode)
+```text
+aethergraph==0.1.0a17
+```
+
+## Quickstart
+
+```python
+import asyncio
+
+from aethergraph import NodeContext, graph_fn
+from aethergraph.runner import run_async
+
+
+@graph_fn(name="hello", inputs=["name"], outputs=["message"])
+async def hello(name: str, *, context: NodeContext) -> dict[str, str]:
+    context.logger().info("building greeting")
+    return {"message": f"Hello, {name}!"}
+
+
+async def main() -> None:
+    result = await run_async(hello, {"name": "Ada"})
+    print(result["message"])
+
+
+asyncio.run(main())
+```
+
+No model provider is required for this program.
+
+## Programming model
+
+| Primitive | Use it for |
+| --- | --- |
+| `@graph_fn` | Native async control flow, dynamic branching, and loops |
+| `@tool` | Versioned reusable operations with declared inputs and outputs |
+| `@graphify` | An explicit `TaskGraph` with scheduler-visible dependencies |
+| `NodeContext` | Runtime-scoped services and execution identity |
+
+Decorated tools have two modes. In ordinary Python they execute immediately. While
+a `graphify` builder runs, they declare nodes and return handles to named outputs.
+
+```python
+from aethergraph import graphify, tool
+
+
+@tool(outputs=["value"])
+def double(value: int) -> dict[str, int]:
+    return {"value": value * 2}
+
+
+@graphify(name="double_graph", inputs=["value"], outputs=["value"])
+def double_graph(value: int):
+    result = double(value=value)
+    return {"value": result.value}
+```
+
+Use `graph_fn` by default. Choose `graphify` when the topology, durable execution,
+or wait/resume boundary must be explicit.
+
+## Runtime services
+
+Graph functions and tools can declare `*, context: NodeContext`. The context exposes
+scoped facades for:
+
+- channels and interaction
+- memory events and state history
+- artifacts
+- revisioned state and operational key-value data
+- chat, embedding, and image model profiles
+- child runs and cancellation
+- triggers, registration, visualization, clocks, and custom services
+
+Obtain these dependencies from the context rather than importing service singletons.
+
+## Server and CLI
+
+Load a graph file and expose the HTTP API:
+
+```bash
+aethergraph run double_graph \
+  --load-path ./graphs.py \
+  --workspace ./aethergraph_workspace \
+  --inputs '{"value":0}'
+
+aethergraph serve \
+  --project-root . \
+  --load-path ./graphs.py \
+  --workspace ./aethergraph_workspace \
+  --host 127.0.0.1 \
+  --port 8745 \
+  --strict-load
+```
+
+The initial in-process run creates the current workspace manifest required by
+0.1.0a17 before server coordination metadata is written. It is needed only when
+the local workspace has not been initialized yet.
+
+Run a graph in-process:
+
+```bash
+aethergraph run double_graph \
+  --load-path ./graphs.py \
+  --inputs '{"value":21}'
+```
+
+The server publishes OpenAPI at `/openapi.json`, interactive API documentation at
+`/docs`, health at `/api/v1/health`, and the optional bundled web client at `/ui`.
+
+## Model configuration
+
+Deterministic graphs need no provider. A minimal chat profile can be configured in
+the project's `.env` file:
+
+```ini
+AETHERGRAPH_LLM__ENABLED=true
+AETHERGRAPH_LLM__DEFAULT__PROVIDER=openai
+AETHERGRAPH_LLM__DEFAULT__MODEL=gpt-4o-mini
+AETHERGRAPH_LLM__DEFAULT__API_KEY=replace-me
+```
+
+Graph code then calls `context.llm("default")`. Embedding and image-generation
+profiles use their own configuration sections and do not fall back to chat.
+
+## Develop the framework
 
 ```bash
 git clone https://github.com/AIperture/aethergraph.git
 cd aethergraph
-
-# Base
-pip install -e .
-
-# With extras
-echo "(optional)" && pip install -e ".[slack,dev]"
-```
-
-> When running from source, the backend still works without the frontend bundle.
-> If you want the **built-in UI** from source, you’ll need to build the frontend
-> and copy the static bundle into `aethergraph/server/ui_static/`
-> (see the “UI Guide” in the docs).
-
----
-
-## Configure
-
-Aethergraph can run without an LLM, but for many LLM-backed flows in [examples](https://github.com/AIperture/aethergraph-examples), set keys via environment variables or a local secrets file.
-
-Minimal example (OpenAI):
-
-```ini
-# .env (example)
-AETHERGRAPH_LLM__ENABLED=true
-AETHERGRAPH_LLM__DEFAULT__PROVIDER=openai
-AETHERGRAPH_LLM__DEFAULT__MODEL=gpt-4o-mini
-AETHERGRAPH_LLM__DEFAULT__API_KEY=sk-...your-key...
-```
-
-Or inline in a script at runtime (for on-demand key setting):
-
-```python
-from aethergraph.runtime import register_llm_client
-
-open_ai_client = register_llm_client(
-    profile="my_llm",
-    provider="openai",
-    model="gpt-4o-mini",
-    api_key="sk-...your-key...",
-)
-```
-
-For hosted agents, bespoke applications, Slack, and Telegram, see
-[AG Host, Agent Endpoint, and integrations](docs/integrations_and_host.md). Provider
-credentials and routes belong to the Host deployment, not an agent `.env` file.
-
-Provider-neutral deferred Tool transport, exact mode binding, replay checkpoints, and
-semantic v2 Tool failures are documented in
-[Tool discovery transport](docs/tool_discovery_transport.md).
-
-> **Where should `.env` live?**
-> In your **project root** (the directory where you run your Python entry point).
-> You can override with `AETHERGRAPH_ENV_FILE=/path/to/.env` if needed.
-
-Runtime persistence uses one exact storage provider. `local.sqlite` is the default;
-external providers must be registered explicitly by an embedding Host, and provider
-failure never falls back to local storage. Configuration, external injection,
-workspace-format compatibility, backup/restore, and the clean-cut history warning are
-documented in [Storage providers and workspace operations](docs/storage_providers.md).
-
-Reasoning defaults can be set per profile in `.env` and overridden per call:
-
-```ini
-AETHERGRAPH_LLM__PROFILES__MY_PROFILE__REASONING_EFFORT=high
-AETHERGRAPH_LLM__PROFILES__MY_PROFILE__THINKING_MODE=auto
-```
-
-Normalized profile knobs:
-
-- `REASONING_EFFORT`: `low | medium | high | xhigh | max`
-- `THINKING_MODE`: `auto | on | off`
-
-Provider mapping:
-
-- OpenAI: `REASONING_EFFORT` -> `reasoning.effort`; `THINKING_MODE` has no direct wire knob and is treated as advisory only.
-- Anthropic: `REASONING_EFFORT` -> adaptive thinking effort on newer models; `THINKING_MODE=on` prefers thinking enabled/adaptive, `off` omits thinking.
-- Gemini: `REASONING_EFFORT` -> `thinkingLevel` on Gemini 3 or `thinkingBudget` on Gemini 2.5; `THINKING_MODE=off` maps to minimal/zero-thinking where supported.
-- DeepSeek: `REASONING_EFFORT` -> `reasoning_effort` (`low`/`medium` map to `high`, `xhigh` maps to `max`); `THINKING_MODE` -> `thinking.type`.
-
-`compat` policy ignores unsupported knobs when safe; `strict` fails fast. `output_format="json"` remains a deprecated alias for `json_object`, and `chat_stream()` is text-only by contract.
-
----
-
-## Verify install
-
-```bash
-python -c "import aethergraph; print('AetherGraph OK, version:', getattr(aethergraph, '__version__', 'dev'))"
-```
-
----
-
-## Run the built-in UI
-
-AetherGraph ships with a small web UI that lets you:
-
-* Browse and launch **apps** (click-to-run graphs)
-* Chat with **agents** (graph-backed chat endpoints)
-* Inspect **runs**, **sessions**, and **artifacts**
-
-### 1. Define a simple project module
-
-From your project root:
-
-```text
-my_project/
-  demos/
-    __init__.py
-    chat_demo.py
-  aethergraph_workspace/   # workspace (created automatically as needed)
-```
-
-Example `chat_demo.py`:
-
-```python
-# demos/chat_demo.py
-from aethergraph import graphify
-
-@graphify(
-    name="chat_with_memory_demo",
-    inputs=[],
-    outputs=["turns", "summary"],
-    as_app={
-        "id": "chat_with_memory_demo",
-        "name": "Chat with Memory",
-    },
-)
-def chat_with_memory_demo():
-    # Your graph implementation here – tools, nodes, etc.
-    ...
-```
-
-> `as_app={...}` tells AetherGraph to expose this graph in the **App Gallery** of the UI.
-> You can also define `graph_fn`-based **agents** with `as_agent={...}` to appear in the
-> **Agent Gallery**.
-
-### 2. Start the server with UI from the terminal (recommended)
-
-From `my_project/`:
-
-```bash
-aethergraph serve \
-  --project-root . \
-  --load-module demos \
-  --reload
-```
-
-This will:
-
-* Add `.` to `sys.path` so `demos` can be imported.
-* Load any graphs/apps/agents defined in the `demos` module.
-* Start the API + UI server on `http://127.0.0.1:8745`.
-* Enable **auto-reload**: editing your graph files triggers a restart and reload.
-
-You should see log lines like:
-
-```text
-[AetherGraph] 🚀  Server started at:  http://127.0.0.1:8745
-[AetherGraph] 🖥️  UI:                 http://127.0.0.1:8745/ui
-[AetherGraph] 📡  API:                http://127.0.0.1:8745/api/v1/
-[AetherGraph] 📂  Workspace:          ./aethergraph_workspace
-[AetherGraph] ♻️  Auto-reload:        enabled
-```
-
-Then open in your browser:
-
-* **UI:** `http://127.0.0.1:8745/ui` – App Gallery, Agent Gallery, runs, sessions, artifacts.
-* **API:** `http://127.0.0.1:8745/api/v1/` – for direct HTTP calls.
-
-### 3. (Optional) Start the server from a Python script
-
-If you prefer to embed the server in your own launcher:
-
-```python
-# start_server.py
-from aethergraph import start_server
-
-if __name__ == "__main__":
-    start_server(
-        workspace="./aethergraph_workspace",
-        project_root=".",
-        load_module=["demos"],
-        host="127.0.0.1",
-        port=8745,
-    )
-```
-
-```bash
-python start_server.py
-```
-
-> For **active development**, the CLI with `--reload` is recommended.
-> `start_server(...)` is better when you want a simple “ship a server in my app” story.
-
-For more details, see the **UI Guide** section in the docs (server setup, agents/apps, and common pitfalls).
-
----
-
-## Examples
-
-Quick-start scripts live under `examples/` in this repo.
-
-Run an example:
-
-```bash
-cd examples
-python hello_world.py
-```
-
-A growing gallery of standalone examples and recipes lives under:
-
-* **Repo:** [https://github.com/AIperture/aethergraph-examples](https://github.com/AIperture/aethergraph-examples)
-
----
-
-## Troubleshooting
-
-* **`ModuleNotFoundError`**: ensure you installed into the active venv and that your shell is using it.
-* **LLM/API errors**: confirm provider/model/key configuration (env vars or your local secrets file).
-* **Windows path quirks**: clear any local cache folders (e.g., `.rag/`) and re-run; verify write permissions.
-* **Slack Host dependency**: the selected Host interpreter must contain the Slack extra before a Socket Mode route can become ready.
-* **UI shows no apps/agents**:
-
-  * Make sure your module (e.g. `demos`) is importable under `--project-root`.
-  * Ensure at least one graph has `as_app={...}` or `graph_fn` has `as_agent={...}`.
-
----
-
-## Contributing (early phase)
-
-* Use feature branches and open a PR against `main`.
-* Keep public examples free of real secrets.
-* Run tests locally before pushing.
-
-Dev install:
-
-```bash
-pip install -e .[dev]
+python -m pip install -e ".[dev]"
 pytest -q
+ruff check .
+black --check .
 ```
 
----
-
-## Project Links
-
-* **Source:** [https://github.com/AIperture/aethergraph](https://github.com/AIperture/aethergraph)
-* **Issues:** [https://github.com/AIperture/aethergraph/issues](https://github.com/AIperture/aethergraph/issues)
-* **Examples:** [https://github.com/AIperture/aethergraph-examples](https://github.com/AIperture/aethergraph-examples)
-* **Docs (preview):** [https://aiperture.github.io/aethergraph-docs/](https://aiperture.github.io/aethergraph-docs/)
-
----
-
-## License
-
-**Apache-2.0** — see `LICENSE`.
+The complete public contracts, configuration, storage rules, interaction model,
+and HTTP route map are maintained in the
+[AG documentation](https://aiperture.github.io/ag-docs/). Full programs and their
+offline verification live in
+[`AIperture/ag-examples`](https://github.com/AIperture/ag-examples).
