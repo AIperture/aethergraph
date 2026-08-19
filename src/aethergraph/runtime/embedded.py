@@ -915,7 +915,7 @@ class EmbeddedRuntime:
             ```
 
         Args:
-            identity: Trusted Host identity used for artifact scope.
+            identity: Trusted Host actor used for unscoped artifact ownership.
             data: Exact authenticated bytes.
             name: Safe display filename.
             mime: Optional declared media type.
@@ -927,16 +927,27 @@ class EmbeddedRuntime:
             RuntimeStagedArtifact: Stable artifact identity, size, and URI.
 
         Notes:
+            A session-bound artifact uses the persisted canonical session scope;
+            actor identity is never substituted for that storage authority.
             Artifact stores and facades remain private to the runtime.
         """
         await self._ensure_ready()
-        resource = await ResourceStager(
-            container=self._container,
-            identity=RequestIdentity(
+        storage_scope = None
+        identity_value = None
+        if scope.session_id is not None:
+            storage_scope = await self._container.session_store.storage_scope(scope.session_id)
+            if storage_scope is None:
+                raise RuntimeNotReadyError(f"Artifact session does not exist: {scope.session_id}")
+        else:
+            identity_value = RequestIdentity(
                 user_id=identity.user_id,
                 org_id=identity.org_id,
                 mode=identity.mode,
-            ),
+            )
+        resource = await ResourceStager(
+            container=self._container,
+            identity=identity_value,
+            storage_scope=storage_scope,
         ).stage_bytes(
             data,
             name=name,

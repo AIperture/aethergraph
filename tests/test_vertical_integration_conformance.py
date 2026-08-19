@@ -214,8 +214,9 @@ def _envelope(
 
 
 class _ResourceIngress:
-    async def materialize(self, *, verified, route, binding, envelope):
+    async def materialize(self, *, verified, route, binding, session_scope, envelope):
         assert verified.integration_kind is route.integration_kind
+        assert session_scope.session_id == binding.ag_session_id
         return tuple(
             InputResource(
                 kind="artifact",

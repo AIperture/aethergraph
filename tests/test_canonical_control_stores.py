@@ -326,6 +326,14 @@ async def test_session_projection_cas_query_occurrence_and_delete(tmp_path: Path
     )
     projected = await store.get(created.session_id)
     assert projected is not None and projected.artifact_count == 1
+    assert await store.storage_scope(created.session_id) == StorageScope(
+        tenant_id="tenant-1",
+        project_id="project-1",
+        org_id="org-1",
+        user_id="user-1",
+        session_id=created.session_id,
+    )
+    assert await store.storage_scope("missing") is None
     assert await store.list_for_user(user_id="user-1", kind=SessionKind.chat) == [projected]
     await store.delete(created.session_id)
     assert await store.get(created.session_id) is None

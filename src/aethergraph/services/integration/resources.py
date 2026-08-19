@@ -18,6 +18,7 @@ from aethergraph.services.channel.resources import (
     ResourceSet,
     ResourceStager,
 )
+from aethergraph.storage.contracts import StorageNotFoundError, StorageScope
 
 from .context import VerifiedIntegrationContext
 
@@ -38,6 +39,7 @@ class ResourceIngressError(RuntimeError):
             "integration.attachment_size_mismatch",
             "integration.attachment_duplicate",
             "integration.artifact_not_found",
+            "integration.attachment_scope_invalid",
         ],
         message: str,
     ) -> None:
@@ -128,6 +130,7 @@ class ResourceIngress:
         verified: VerifiedIntegrationContext,
         route: IntegrationRoute,
         binding: ExternalSessionBinding,
+        session_scope: StorageScope,
         envelope: IngressEnvelope,
     ) -> tuple[InputResource, ...]:
         """Validate and materialize all attachments from one ingress envelope.
@@ -160,6 +163,7 @@ class ResourceIngress:
             verified: Authenticated transport context containing protected bytes.
             route: Exact resolved route and capability requirements.
             binding: Durable external-to-AG session binding.
+            session_scope: Canonical scope from the persisted bound session.
             envelope: Closed canonical ingress envelope.
 
         Returns:
@@ -168,6 +172,11 @@ class ResourceIngress:
         Notes:
             Every declared provider attachment must have one exact verified byte payload.
         """
+        if session_scope.session_id != binding.ag_session_id:
+            raise ResourceIngressError(
+                code="integration.attachment_scope_invalid",
+                message="The bound session and attachment storage scope do not match.",
+            )
         attachments = envelope.attachments
         if not attachments:
             if verified.attachments:
@@ -213,10 +222,10 @@ class ResourceIngress:
                         code="integration.attachment_total_exceeded",
                         message="Ingress attachment total exceeds the configured limit.",
                     )
-                resources.add(
-                    await ResourceStager(
+                try:
+                    resource = await ResourceStager(
                         container=self.container,
-                        identity=verified.request_identity,
+                        storage_scope=session_scope,
                     ).stage_bytes(
                         data,
                         name=attachment.filename,
@@ -237,7 +246,12 @@ class ResourceIngress:
                             "attachment_id": attachment.attachment_id,
                         },
                     )
-                )
+                except StorageNotFoundError as exc:
+                    raise ResourceIngressError(
+                        code="integration.attachment_scope_invalid",
+                        message="Attachment storage rejected the canonical session scope.",
+                    ) from exc
+                resources.add(resource)
             else:
                 resources.add(
                     InputResource(

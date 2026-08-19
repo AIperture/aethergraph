@@ -538,9 +538,18 @@ class ArtifactIngressScope:
 
 
 class ResourceStager:
-    def __init__(self, *, container: Any, identity: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        container: Any,
+        identity: Any | None = None,
+        storage_scope: StorageScope | None = None,
+    ) -> None:
+        if identity is not None and storage_scope is not None:
+            raise ValueError("ResourceStager accepts identity or storage_scope, not both")
         self.container = container
         self.identity = identity
+        self.storage_scope = storage_scope
 
     async def stage_bytes(
         self,
@@ -583,6 +592,24 @@ class ResourceStager:
         return _hydrate_public_artifact(resource, artifact)
 
     def _facade(self, scope: ArtifactIngressScope) -> CanonicalPublicArtifactFacade:
+        if self.storage_scope is not None:
+            values = self.storage_scope.as_filter()
+            for name, value in (
+                ("session_id", scope.session_id),
+                ("run_id", scope.run_id),
+                ("graph_id", scope.graph_id),
+                ("node_id", scope.node_id),
+            ):
+                if value is None:
+                    continue
+                if name in values and values[name] != value:
+                    raise ValueError(f"resource scope conflicts with canonical {name}")
+                values[name] = value
+            return self.container.artifact_factory.for_public_execution(
+                StorageScope(**values),
+                tool_name=scope.tool_name,
+                tool_version=scope.tool_version,
+            )
         scope_obj = self._scope(scope)
         storage_scope = StorageScope(
             org_id=scope_obj.org_id,

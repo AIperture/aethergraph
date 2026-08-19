@@ -21,6 +21,11 @@ from aethergraph.contracts.integration import (
 from aethergraph.core.runtime.run_types import SessionKind
 from aethergraph.services.host.endpoint_credentials import EndpointCredentialRegistry
 from aethergraph.services.integration import IntegrationSessionResolution, ManifestRouteResolver
+from aethergraph.storage.contracts import (
+    SessionKind as StorageSessionKind,
+    SessionRecord,
+    StorageScope,
+)
 from tests._canonical_storage_fakes import make_session_store
 from tests._integration_fixtures import contract_compatibility
 
@@ -85,11 +90,35 @@ class _Sessions:
             self.by_conversation[external_identity.conversation_id] = binding
             return IntegrationSessionResolution(
                 binding=binding,
+                session=SessionRecord(
+                    session_id=binding.ag_session_id,
+                    kind=StorageSessionKind.CHAT,
+                    scope=StorageScope(
+                        tenant_id=external_identity.tenant_id,
+                        user_id=external_identity.user_id,
+                        session_id=binding.ag_session_id,
+                    ),
+                    revision=1,
+                    created_at=now,
+                    updated_at=now,
+                ),
                 session_created=True,
                 binding_created=True,
             )
         return IntegrationSessionResolution(
             binding=binding,
+            session=SessionRecord(
+                session_id=binding.ag_session_id,
+                kind=StorageSessionKind.CHAT,
+                scope=StorageScope(
+                    tenant_id=external_identity.tenant_id,
+                    user_id=external_identity.user_id,
+                    session_id=binding.ag_session_id,
+                ),
+                revision=1,
+                created_at=binding.created_at,
+                updated_at=now,
+            ),
             session_created=False,
             binding_created=False,
         )

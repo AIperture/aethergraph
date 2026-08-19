@@ -38,6 +38,7 @@ from aethergraph.services.integration import (
     VerifiedIntegrationContext,
     install_integration_ingress,
 )
+from aethergraph.storage.contracts import SessionKind, SessionRecord, StorageScope
 from tests._canonical_storage_fakes import (
     make_integration_persistence,
     make_semantic_event_store,
@@ -140,10 +141,26 @@ def _binding() -> ExternalSessionBinding:
     )
 
 
+def _session() -> SessionRecord:
+    return SessionRecord(
+        session_id="session-1",
+        kind=SessionKind.CHAT,
+        scope=StorageScope(
+            tenant_id="team-T1",
+            project_id="project-1",
+            session_id="session-1",
+        ),
+        revision=1,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
 class _SessionStore:
     async def provision(self, **kwargs) -> IntegrationSessionResolution:
         return IntegrationSessionResolution(
             binding=_binding(),
+            session=_session(),
             session_created=False,
             binding_created=False,
         )
@@ -564,6 +581,7 @@ async def test_resource_ingress_validates_existing_artifact_reference(
         verified=_verified(),
         route=_route(),
         binding=_binding(),
+        session_scope=_session().scope,
         envelope=envelope,
     )
 
@@ -636,6 +654,7 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
         verified=verified,
         route=_route(),
         binding=_binding(),
+        session_scope=_session().scope,
         envelope=envelope,
     )
 
@@ -671,6 +690,7 @@ async def test_resource_ingress_rejects_mismatched_provider_bytes() -> None:
             verified=verified,
             route=_route(),
             binding=_binding(),
+            session_scope=_session().scope,
             envelope=envelope,
         )
 
@@ -699,6 +719,7 @@ async def test_resource_ingress_rejects_attachments_without_route_capability() -
             verified=_verified(),
             route=_route(attachments=False),
             binding=_binding(),
+            session_scope=_session().scope,
             envelope=envelope,
         )
     assert exc_info.value.code == "integration.attachments_unsupported"

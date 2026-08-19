@@ -80,6 +80,7 @@ class IntegrationSessionResolution:
     """Result of atomically provisioning a session and external binding."""
 
     binding: ExternalSessionBinding
+    session: SessionRecord
     session_created: bool
     binding_created: bool
 
@@ -335,6 +336,7 @@ class CanonicalIntegrationSessionStore:
             )
         return IntegrationSessionResolution(
             binding=_host_binding(result.binding, external_identity),
+            session=result.session,
             session_created=result.session_created,
             binding_created=result.binding_created,
         )

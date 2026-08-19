@@ -294,6 +294,7 @@ class IntegrationIngressCoordinator:
                 verified=verified,
                 route=route,
                 binding=binding,
+                session_scope=binding_resolution.session.scope,
                 envelope=envelope,
             )
             resolved = await self.interaction_resolver.resolve(
