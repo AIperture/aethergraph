@@ -613,6 +613,37 @@ class CanonicalSessionStore(SessionStore):
         )
         return _session_to_service(record) if record is not None else None
 
+    async def storage_scope(self, session_id: str) -> StorageScope | None:
+        """Read the canonical storage authority for one session.
+
+        Session-bound artifact and memory operations use this exact persisted
+        scope instead of reconstructing ownership from an actor identity.
+
+        Examples:
+            Resolve a stored session scope:
+                ```python
+                scope = await store.storage_scope("session-1")
+                assert scope.session_id == "session-1"
+                ```
+
+            Resolve an unknown session:
+                ```python
+                assert await store.storage_scope("missing") is None
+                ```
+
+        Args:
+            session_id: Exact stable session identity.
+
+        Returns:
+            StorageScope | None: Persisted session scope, or `None` when absent.
+
+        Notes:
+            The returned immutable scope is never widened with request identity.
+        """
+
+        record = await self._get_record(session_id)
+        return record.scope if record is not None else None
+
     async def list_for_user(
         self,
         *,

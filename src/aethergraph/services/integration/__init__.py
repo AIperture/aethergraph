@@ -45,21 +45,21 @@ from .manager import (
 from .resources import ResourceIngress, ResourceIngressError, ResourceIngressPolicy
 from .routes import IntegrationRouteError, ManifestRouteResolver
 from .session_bindings import (
-    BindingResolution,
-    CanonicalExternalSessionBindingStore,
-    ExternalSessionBindingStore,
+    CanonicalIntegrationSessionStore,
+    IntegrationSessionResolution,
+    IntegrationSessionStore,
     SessionBindingError,
 )
 
 __all__ = [
-    "BindingResolution",
-    "CanonicalExternalSessionBindingStore",
+    "CanonicalIntegrationSessionStore",
     "CanonicalIngressIdempotencyStore",
     "CanonicalInboundEventStore",
     "CanonicalIntegrationPersistence",
     "CanonicalSemanticEventStore",
     "AGRootTurnDispatcher",
-    "ExternalSessionBindingStore",
+    "IntegrationSessionResolution",
+    "IntegrationSessionStore",
     "IngressClaim",
     "IngressCoordinatorError",
     "IngressIdempotencyError",

@@ -18,8 +18,14 @@ from aethergraph.contracts.integration import (
     IntegrationSessionPolicy,
     SemanticEventKind,
 )
+from aethergraph.core.runtime.run_types import SessionKind
 from aethergraph.services.host.endpoint_credentials import EndpointCredentialRegistry
-from aethergraph.services.integration import BindingResolution, ManifestRouteResolver
+from aethergraph.services.integration import IntegrationSessionResolution, ManifestRouteResolver
+from aethergraph.storage.contracts import (
+    SessionKind as StorageSessionKind,
+    SessionRecord,
+    StorageScope,
+)
 from tests._canonical_storage_fakes import make_session_store
 from tests._integration_fixtures import contract_compatibility
 
@@ -63,11 +69,11 @@ def _manifest() -> HostManifest:
     )
 
 
-class _Bindings:
+class _Sessions:
     def __init__(self) -> None:
         self.by_conversation = {}
 
-    async def get_or_create(
+    async def provision(
         self, *, route, external_identity, build_id, binding_id, ag_session_id, now
     ):
         binding = self.by_conversation.get(external_identity.conversation_id)
@@ -82,18 +88,82 @@ class _Bindings:
                 last_seen_at=now,
             )
             self.by_conversation[external_identity.conversation_id] = binding
-            return BindingResolution(binding=binding, created=True)
-        return BindingResolution(binding=binding, created=False)
+            return IntegrationSessionResolution(
+                binding=binding,
+                session=SessionRecord(
+                    session_id=binding.ag_session_id,
+                    kind=StorageSessionKind.CHAT,
+                    scope=StorageScope(
+                        tenant_id=external_identity.tenant_id,
+                        user_id=external_identity.user_id,
+                        session_id=binding.ag_session_id,
+                    ),
+                    revision=1,
+                    created_at=now,
+                    updated_at=now,
+                ),
+                session_created=True,
+                binding_created=True,
+            )
+        return IntegrationSessionResolution(
+            binding=binding,
+            session=SessionRecord(
+                session_id=binding.ag_session_id,
+                kind=StorageSessionKind.CHAT,
+                scope=StorageScope(
+                    tenant_id=external_identity.tenant_id,
+                    user_id=external_identity.user_id,
+                    session_id=binding.ag_session_id,
+                ),
+                revision=1,
+                created_at=binding.created_at,
+                updated_at=now,
+            ),
+            session_created=False,
+            binding_created=False,
+        )
 
-    async def get(self, *, route, external_identity):
+    async def get_binding(self, *, route, external_identity):
         return self.by_conversation.get(external_identity.conversation_id)
 
 
 class _Ingress:
-    def __init__(self, manifest) -> None:
+    def __init__(self, manifest, canonical_sessions) -> None:
         self.route_resolver = ManifestRouteResolver(manifest)
-        self.binding_store = _Bindings()
+        self.session_store = _Sessions()
+        self.canonical_sessions = canonical_sessions
         self.calls = []
+
+    async def provision_session(
+        self,
+        *,
+        route_id,
+        external_identity,
+        binding_id,
+        ag_session_id,
+        now,
+        title=None,
+    ):
+        route = self.route_resolver.require(route_id)
+        tenant_id = external_identity.tenant_id
+        user_id = external_identity.user_id
+        await self.canonical_sessions.create(
+            session_id=ag_session_id,
+            kind=SessionKind.chat,
+            user_id=user_id,
+            org_id=tenant_id,
+            title=title,
+            source=route.integration_kind.value,
+            external_ref=f"agent-endpoint:{route.endpoint_id}",
+        )
+        return await self.session_store.provision(
+            route=route,
+            external_identity=external_identity,
+            build_id="build-1",
+            binding_id=binding_id,
+            ag_session_id=ag_session_id,
+            now=now,
+        )
 
     async def accept(self, *, verified, envelope):
         self.calls.append({"verified": verified, "envelope": envelope})
@@ -127,12 +197,13 @@ class _RunManager:
 
 def _app() -> tuple[FastAPI, SimpleNamespace]:
     manifest = _manifest()
-    ingress = _Ingress(manifest)
+    session_store = make_session_store()
+    ingress = _Ingress(manifest, session_store)
     container = SimpleNamespace(
         integration_ingress=ingress,
         host_manifest=manifest,
         semantic_events=SimpleNamespace(),
-        session_store=make_session_store(),
+        session_store=session_store,
         run_store=_RunStore(),
         run_manager=_RunManager(),
     )
@@ -190,7 +261,7 @@ async def test_endpoint_session_and_ingress_use_manifest_route() -> None:
     stored = await container.session_store.get(session_id)
     assert stored is not None
     assert stored.external_ref == "agent-endpoint:support"
-    binding = container.integration_ingress.binding_store.by_conversation[session_id]
+    binding = container.integration_ingress.session_store.by_conversation[session_id]
     assert binding.ag_session_id == session_id
 
 
@@ -239,8 +310,8 @@ async def test_endpoint_session_metadata_rejects_mismatched_durable_binding() ->
         )
         first_id = first.json()["session_id"]
         second_id = second.json()["session_id"]
-        first_binding = container.integration_ingress.binding_store.by_conversation[first_id]
-        container.integration_ingress.binding_store.by_conversation[first_id] = (
+        first_binding = container.integration_ingress.session_store.by_conversation[first_id]
+        container.integration_ingress.session_store.by_conversation[first_id] = (
             first_binding.model_copy(update={"ag_session_id": second_id})
         )
 

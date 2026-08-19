@@ -13,7 +13,7 @@ from typing import Any, Protocol
 from .capabilities import StorageCapabilities
 from .continuations import ContinuationLeaseRepository, ContinuationRepository
 from .control import RunRepository, RunResultRepository, SessionRepository
-from .integration import ExternalSessionBindingRepository, IngressIdempotencyRepository
+from .integration import IngressIdempotencyRepository, IntegrationSessionRepository
 from .observations import ObservationRepository
 from .scope import StorageScope
 from .stores import ArtifactRepository, BlobStore, EventStore, SearchBackend, StateStore
@@ -162,7 +162,7 @@ class StorageBundle(Protocol):
     triggers: TriggerRepository
     observations: ObservationRepository
     ingress_idempotency: IngressIdempotencyRepository
-    external_session_bindings: ExternalSessionBindingRepository
+    integration_sessions: IntegrationSessionRepository
     inbound_events: InboundEventRepository
     semantic_events: SemanticEventRepository
     runtime_output: RuntimeOutputSink

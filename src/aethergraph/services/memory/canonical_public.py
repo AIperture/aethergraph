@@ -8,6 +8,7 @@ import dataclasses
 from datetime import UTC, datetime
 import hashlib
 import json
+import logging
 import math
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
@@ -69,14 +70,6 @@ class PublicMemoryCommitReceipt:
     projection_diagnostic: str | None = None
 
 
-class MemoryProjectionError(RuntimeError):
-    """Search projection failed after the public Memory event became authoritative."""
-
-    def __init__(self, receipt: PublicMemoryCommitReceipt) -> None:
-        super().__init__(receipt.projection_diagnostic or "Memory search projection failed")
-        self.receipt = receipt
-
-
 class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
     """Project stable public Memory events onto one canonical facade."""
 
@@ -91,11 +84,15 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         default_signal_threshold: float = 0.0,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         event_id_factory: Callable[[], str] = lambda: f"event-{uuid4().hex}",
+        projection_logger: logging.Logger | logging.LoggerAdapter | None = None,
     ) -> None:
         """Bind public Memory behavior to one exact canonical execution scope.
 
-        The facade translates public Event DTO fields once and delegates persistence
-        only to the supplied canonical facade. Construction performs no I/O.
+        Intro:
+            The facade translates public Event DTO fields once and delegates persistence
+            only to the supplied canonical facade. Failed derived search projections are
+            reported through the optional context logger without changing authoritative
+            event success. Construction performs no I/O.
 
         Examples:
             Bind session Memory:
@@ -120,6 +117,15 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
                 )
                 ```
 
+            Bind context-scoped projection warnings:
+                ```python
+                memory = CanonicalPublicMemoryFacade(
+                    canonical=canonical,
+                    logical_scope_id="session:session-1",
+                    projection_logger=context.logger(),
+                )
+                ```
+
         Args:
             canonical: Exact canonical event/state/search facade for this scope.
             logical_scope_id: Stable public memory-bucket label; never provider scope.
@@ -129,6 +135,8 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             default_signal_threshold: Finite default distillation signal threshold.
             clock: Timezone-aware UTC event timestamp source.
             event_id_factory: Stable non-empty event identity source.
+            projection_logger: Optional context-scoped logger for failed derived
+                search projections.
 
         Returns:
             None: The public projection is ready without persistence I/O.
@@ -136,6 +144,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         Notes:
             `logical_scope_id` and deprecated App metadata never affect provider
             selection, authorization, partitioning, or canonical `StorageScope`.
+            Logger absence suppresses only observability and never changes persistence.
         """
         if not isinstance(logical_scope_id, str) or not logical_scope_id.strip():
             raise ValueError("logical_scope_id must be a non-empty string")
@@ -164,6 +173,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         self.default_signal_threshold = float(default_signal_threshold)
         self._clock = clock
         self._event_id_factory = event_id_factory
+        self._projection_logger = projection_logger
 
     async def record_raw(
         self,
@@ -211,6 +221,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         Notes:
             Scope overrides must equal canonical dimensions. Deprecated App identity
             is accepted only from facade construction as marked response metadata.
+            Failed derived search projection is warned once and remains non-terminal.
         """
         if (state_key is None) != (expected_state_revision is None):
             raise ValueError("state_key and expected_state_revision must be supplied together")
@@ -261,8 +272,6 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             severity=raw.get("severity", 2),
             signal=raw.get("signal"),
         )
-        if receipt.projection_status == "failed":
-            raise MemoryProjectionError(receipt)
         return receipt.event
 
     async def append_event(
@@ -284,8 +293,10 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
     ) -> Event:
         """Append one public Memory event through canonical event persistence.
 
-        Public aliases are normalized before one authoritative append. Search
-        projection follows the canonical facade's explicit commit semantics.
+        Intro:
+            Public aliases are normalized before one authoritative append. Search
+            projection follows the canonical facade's explicit commit semantics and a
+            failed derived projection never changes authoritative event success.
 
         Examples:
             Append a checkpoint:
@@ -327,7 +338,8 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
 
         Notes:
             Deprecated `app_id` is retained only in marked payload compatibility
-            metadata and never enters canonical scope or indexes.
+            metadata and never enters canonical scope or indexes. Use
+            `append_event_commit` when the caller needs the explicit projection receipt.
         """
         receipt = await self.append_event_commit(
             event_id=event_id,
@@ -344,8 +356,6 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             topic=topic,
             tool=tool,
         )
-        if receipt.projection_status == "failed":
-            raise MemoryProjectionError(receipt)
         return receipt.event
 
     async def append_event_commit(
@@ -366,6 +376,11 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         tool: str | None = None,
     ) -> PublicMemoryCommitReceipt:
         """Commit one public event and return authoritative and projection outcomes.
+
+        Intro:
+            Persists the authoritative event first, reports any failed derived search
+            projection through the bound context logger, and returns both outcomes in
+            one immutable receipt.
 
         Examples:
             Commit with a restart-stable identity:
@@ -404,7 +419,8 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
 
         Notes:
             A projection failure is represented in the receipt and never changes the
-            authoritative event result or selects another backend.
+            authoritative event result or selects another backend. Exactly one warning
+            is emitted for each failed receipt when a projection logger is bound.
         """
         resolved_topic = _topic(topic=topic, tool=tool)
         payload: dict[str, Any] = {"data": data}
@@ -438,7 +454,7 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             severity=severity,
             signal=signal,
         )
-        return PublicMemoryCommitReceipt(
+        public_receipt = PublicMemoryCommitReceipt(
             event=_public_event(receipt.events[0], logical_scope_id=self.memory_scope_id),
             authoritative=True,
             projection_status=receipt.projection_status,
@@ -446,6 +462,58 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             indexed_cursor=receipt.indexed_cursor,
             created=receipt.created[0],
             projection_diagnostic=receipt.projection_diagnostic,
+        )
+        self._warn_failed_projection(public_receipt)
+        return public_receipt
+
+    def _warn_failed_projection(self, receipt: PublicMemoryCommitReceipt) -> None:
+        """Report one degraded search projection without changing commit success.
+
+        Intro:
+            Emits a structured context-scoped warning only when the authoritative
+            receipt records a failed derived search projection.
+
+        Examples:
+            Report a failed receipt:
+                ```python
+                memory._warn_failed_projection(failed_receipt)
+                ```
+
+            Ignore an indexed receipt:
+                ```python
+                memory._warn_failed_projection(indexed_receipt)
+                ```
+
+        Args:
+            receipt: Public authoritative commit receipt to inspect.
+
+        Returns:
+            None: Logging completes synchronously or is skipped when unnecessary.
+
+        Notes:
+            The diagnostic was sanitized at the canonical storage boundary. This
+            method performs no retry, fallback, or secondary persistence.
+        """
+        if receipt.projection_status != "failed" or self._projection_logger is None:
+            return
+        event = receipt.event
+        scope = self.provenance_scope
+        self._projection_logger.warning(
+            "memory search projection failed",
+            extra={
+                "event_type": "memory_projection_failed",
+                "memory_event_id": event.event_id,
+                "memory_event_kind": event.kind,
+                "memory_scope_id": self.memory_scope_id,
+                "session_id": scope.session_id,
+                "agent_id": scope.agent_id,
+                "authoritative": receipt.authoritative,
+                "projection_status": receipt.projection_status,
+                "projection_diagnostic": receipt.projection_diagnostic,
+                "event_cursor": receipt.event_cursor,
+                "indexed_cursor": receipt.indexed_cursor,
+                "memory_event_created": receipt.created,
+            },
         )
 
     async def append_chat_turn(
@@ -460,8 +528,10 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
     ) -> Event:
         """Append one public chat turn through canonical Memory events.
 
-        Role is promoted to stage while the authored payload and searchable text are
-        retained in one canonical event.
+        Intro:
+            Promotes role to stage while retaining the authored payload and searchable
+            text in one canonical event. Failed derived search projection is reported
+            without changing authoritative chat persistence.
 
         Examples:
             Append user input:
@@ -491,7 +561,8 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
             Event: Persisted public chat Event DTO.
 
         Notes:
-            Channel emission remains separate; this method only records Memory.
+            Channel emission remains separate; this method only records Memory. A
+            projection warning never blocks the caller from publishing the chat turn.
         """
         if role not in {"user", "assistant", "system", "tool"}:
             raise ValueError(f"Unsupported chat role: {role!r}")

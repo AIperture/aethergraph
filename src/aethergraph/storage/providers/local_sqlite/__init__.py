@@ -19,8 +19,8 @@ from .database import (
 )
 from .event_store import LocalEventStore
 from .integration_repositories import (
-    LocalExternalSessionBindingRepository,
     LocalIngressIdempotencyRepository,
+    LocalIntegrationSessionRepository,
 )
 from .manifest import (
     LOCAL_STORAGE_FORMAT_VERSION,
@@ -51,7 +51,7 @@ __all__ = [
     "LocalDatabaseRole",
     "LocalDocumentStore",
     "LocalEventStore",
-    "LocalExternalSessionBindingRepository",
+    "LocalIntegrationSessionRepository",
     "LocalIngressIdempotencyRepository",
     "LocalInboundEventRepository",
     "LocalKeyValueStore",

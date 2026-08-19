@@ -26,10 +26,10 @@ from aethergraph.contracts.integration import (
 )
 from aethergraph.services.channel.resources import InputResource
 from aethergraph.services.integration import (
-    CanonicalExternalSessionBindingStore,
     CanonicalInboundEventStore,
     CanonicalIngressIdempotencyStore,
     CanonicalIntegrationPersistence,
+    CanonicalIntegrationSessionStore,
     CanonicalSemanticEventStore,
     IngressIdempotencyError,
     SemanticEventStoreError,
@@ -43,9 +43,9 @@ from aethergraph.storage.contracts import (
 )
 from aethergraph.storage.providers.local_sqlite import (
     LocalDatabaseRole,
-    LocalExternalSessionBindingRepository,
     LocalInboundEventRepository,
     LocalIngressIdempotencyRepository,
+    LocalIntegrationSessionRepository,
     LocalSemanticEventRepository,
     LocalSQLiteDatabase,
 )
@@ -254,12 +254,12 @@ async def test_canonical_ingress_projection_preserves_stable_host_failures(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_canonical_binding_projection_uses_candidates_only_for_creation(
+async def test_canonical_session_projection_uses_candidates_only_for_creation(
     tmp_path: Path,
 ) -> None:
     database = _database(tmp_path)
-    repository = LocalExternalSessionBindingRepository(database=database)
-    store = CanonicalExternalSessionBindingStore(
+    repository = LocalIntegrationSessionRepository(database=database)
+    store = CanonicalIntegrationSessionStore(
         repository=repository,
         owner_scope=_OWNER,
     )
@@ -267,7 +267,7 @@ async def test_canonical_binding_projection_uses_candidates_only_for_creation(
 
     results = await asyncio.gather(
         *(
-            store.get_or_create(
+            store.provision(
                 route=route,
                 external_identity=_identity(user_id=f"user-{index}"),
                 build_id="build-1",
@@ -278,11 +278,12 @@ async def test_canonical_binding_projection_uses_candidates_only_for_creation(
             for index in range(8)
         )
     )
-    assert sum(item.created for item in results) == 1
+    assert sum(item.binding_created for item in results) == 1
+    assert sum(item.session_created for item in results) == 1
     assert len({item.binding.binding_id for item in results}) == 1
     assert len({item.binding.ag_session_id for item in results}) == 1
 
-    resolved = await store.get_or_create(
+    resolved = await store.provision(
         route=route,
         external_identity=_identity(user_id="another-user"),
         build_id="build-1",
@@ -290,12 +291,13 @@ async def test_canonical_binding_projection_uses_candidates_only_for_creation(
         ag_session_id="unused-session",
         now=_NOW + timedelta(seconds=1),
     )
-    assert not resolved.created
+    assert not resolved.binding_created
+    assert not resolved.session_created
     assert resolved.binding.binding_id == results[0].binding.binding_id
     assert resolved.binding.external_identity.user_id == "another-user"
 
     with pytest.raises(SessionBindingError) as mismatch:
-        await store.get_or_create(
+        await store.provision(
             route=route,
             external_identity=_identity(),
             build_id="build-2",
@@ -308,15 +310,15 @@ async def test_canonical_binding_projection_uses_candidates_only_for_creation(
 
 
 @pytest.mark.asyncio
-async def test_canonical_binding_projection_requires_route_thread(tmp_path: Path) -> None:
+async def test_canonical_session_projection_requires_route_thread(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    store = CanonicalExternalSessionBindingStore(
-        repository=LocalExternalSessionBindingRepository(database=database),
+    store = CanonicalIntegrationSessionStore(
+        repository=LocalIntegrationSessionRepository(database=database),
         owner_scope=_OWNER,
     )
 
     with pytest.raises(SessionBindingError) as missing:
-        await store.get_or_create(
+        await store.provision(
             route=_route(),
             external_identity=_identity(thread_id=None),
             build_id="build-1",
@@ -426,10 +428,10 @@ async def test_canonical_semantic_projection_round_trips_and_resumes_by_delivery
 
 def test_canonical_integration_factory_maps_exact_bundle_fields_without_io() -> None:
     ingress = object()
-    bindings = object()
+    sessions = object()
     bundle = SimpleNamespace(
         ingress_idempotency=ingress,
-        external_session_bindings=bindings,
+        integration_sessions=sessions,
         inbound_events=object(),
         semantic_events=object(),
     )
@@ -441,14 +443,14 @@ def test_canonical_integration_factory_maps_exact_bundle_fields_without_io() -> 
     )
 
     assert isinstance(persistence.idempotency, CanonicalIngressIdempotencyStore)
-    assert isinstance(persistence.bindings, CanonicalExternalSessionBindingStore)
+    assert isinstance(persistence.sessions, CanonicalIntegrationSessionStore)
     assert isinstance(persistence.inbound_events, CanonicalInboundEventStore)
     assert isinstance(persistence.semantic_events, CanonicalSemanticEventStore)
     assert persistence.idempotency._repository is ingress
-    assert persistence.bindings._repository is bindings
+    assert persistence.sessions._repository is sessions
     assert {field.name for field in fields(CanonicalIntegrationPersistence)} == {
         "idempotency",
-        "bindings",
+        "sessions",
         "inbound_events",
         "semantic_events",
     }
@@ -474,7 +476,7 @@ def test_canonical_integration_bindings_reject_untrusted_owner_dimensions(
             clock=lambda: _NOW,
         )
     with pytest.raises(ValueError):
-        CanonicalExternalSessionBindingStore(
+        CanonicalIntegrationSessionStore(
             repository=object(),  # type: ignore[arg-type]
             owner_scope=scope,
         )
@@ -485,9 +487,9 @@ def test_canonical_integration_public_docstrings_follow_strict_contract() -> Non
         CanonicalIngressIdempotencyStore.__init__,
         CanonicalIngressIdempotencyStore.claim,
         CanonicalIngressIdempotencyStore.complete,
-        CanonicalExternalSessionBindingStore.__init__,
-        CanonicalExternalSessionBindingStore.get_or_create,
-        CanonicalExternalSessionBindingStore.get,
+        CanonicalIntegrationSessionStore.__init__,
+        CanonicalIntegrationSessionStore.provision,
+        CanonicalIntegrationSessionStore.get_binding,
         CanonicalInboundEventStore.__init__,
         CanonicalInboundEventStore.append,
         CanonicalSemanticEventStore.__init__,

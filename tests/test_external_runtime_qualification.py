@@ -407,7 +407,7 @@ async def test_external_runtime_repositories_execute_representative_operations_w
         session_id="session-1",
         scope_key="route-1",
     )
-    binding = await bundle.external_session_bindings.get_or_create(
+    binding = await bundle.integration_sessions.provision(
         ExternalSessionBindingRequest(
             binding_id="binding-1",
             route_id="route-1",
@@ -415,9 +415,11 @@ async def test_external_runtime_repositories_execute_representative_operations_w
             ag_session_id="session-1",
             scope=binding_scope,
             now=NOW,
-        )
+        ),
+        session,
     )
-    assert binding.created is True
+    assert binding.binding_created is True
+    assert binding.session_created is False
     inbound = await bundle.inbound_events.append(
         InboundEventDraft(
             event_id="inbound-1",

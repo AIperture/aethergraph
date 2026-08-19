@@ -1,4 +1,4 @@
-"""Durable provider-neutral external-session binding storage."""
+"""Canonical provisioning for integration sessions and their external bindings."""
 
 from __future__ import annotations
 
@@ -18,8 +18,10 @@ from aethergraph.services.canonical_storage_scope import (
 )
 from aethergraph.storage.contracts import (
     ExternalSessionBindingRecord,
-    ExternalSessionBindingRepository,
     ExternalSessionBindingRequest,
+    IntegrationSessionRepository,
+    SessionKind,
+    SessionRecord,
     StorageIntegrityError,
     StorageScope,
 )
@@ -37,51 +39,56 @@ class SessionBindingError(RuntimeError):
         ],
         message: str,
     ) -> None:
-        """Create one stable external-session binding failure.
+        """Create one stable integration-session provisioning failure.
+
+        Invalid route identity and build changes are reported through stable codes
+        without creating a competing session or binding.
 
         Examples:
             Reject a missing required thread:
-            ```python
-            SessionBindingError(
-                code="integration.binding_thread_required",
-                message="This route requires a thread identity.",
-            )
-            ```
+                ```python
+                SessionBindingError(
+                    code="integration.binding_thread_required",
+                    message="This route requires a thread identity.",
+                )
+                ```
 
             Reject an attempt to move a session to another build:
-            ```python
-            SessionBindingError(
-                code="integration.binding_build_mismatch",
-                message="Existing session is pinned to another build.",
-            )
-            ```
+                ```python
+                SessionBindingError(
+                    code="integration.binding_build_mismatch",
+                    message="Existing session is pinned to another build.",
+                )
+                ```
 
         Args:
-            code: Stable machine-readable binding failure code.
+            code: Stable machine-readable provisioning failure code.
             message: Human-readable failure explanation.
 
         Returns:
             None.
 
         Notes:
-            Binding failures never create a replacement session implicitly.
+            Provisioning failures never create a replacement session implicitly.
         """
         super().__init__(message)
         self.code = code
 
 
 @dataclass(frozen=True, slots=True)
-class BindingResolution:
-    """Result of atomically resolving or creating one external binding."""
+class IntegrationSessionResolution:
+    """Result of atomically provisioning a session and external binding."""
 
     binding: ExternalSessionBinding
-    created: bool
+    session: SessionRecord
+    session_created: bool
+    binding_created: bool
 
 
-class ExternalSessionBindingStore(Protocol):
-    """Provider-neutral persistence contract for durable session bindings."""
+class IntegrationSessionStore(Protocol):
+    """Provider-neutral service contract for integration session provisioning."""
 
-    async def get_or_create(
+    async def provision(
         self,
         *,
         route: IntegrationRoute,
@@ -90,142 +97,17 @@ class ExternalSessionBindingStore(Protocol):
         binding_id: str,
         ag_session_id: str,
         now: datetime,
-    ) -> BindingResolution:
-        """Resolve or create one exact route-scoped binding.
+        title: str | None = None,
+    ) -> IntegrationSessionResolution:
+        """Provision one canonical session and its route-scoped binding.
+
+        The operation guarantees that a successful binding always references an
+        existing canonical session in the same control-store transaction.
 
         Examples:
-            Resolve a conversation:
-            ```python
-            result = await store.get_or_create(
-                route=route,
-                external_identity=identity,
-                build_id="build-1",
-                binding_id="binding-1",
-                ag_session_id="session-1",
-                now=now,
-            )
-            ```
-
-            Inspect creation ownership:
-            ```python
-            if result.created:
-                await create_ag_session(result.binding.ag_session_id)
-            ```
-
-        Args:
-            route: Exact resolved route and session-scope policy.
-            external_identity: Authenticated external conversation identity.
-            build_id: Immutable build identity for the bound AG session.
-            binding_id: Candidate binding identifier.
-            ag_session_id: Candidate AG session identifier.
-            now: Authoritative acceptance timestamp.
-
-        Returns:
-            BindingResolution: Persisted binding and creation ownership.
-
-        Notes:
-            Implementations must make scope creation atomic.
-        """
-        ...
-
-    async def get(
-        self,
-        *,
-        route: IntegrationRoute,
-        external_identity: ExternalIdentity,
-    ) -> ExternalSessionBinding | None:
-        """Read one exact route-scoped binding.
-
-        Examples:
-            Read an existing binding:
-            ```python
-            binding = await store.get(route=route, external_identity=identity)
-            ```
-
-            Detect an unbound identity:
-            ```python
-            assert await store.get(route=route, external_identity=identity) is None
-            ```
-
-        Args:
-            route: Exact resolved route and session-scope policy.
-            external_identity: Authenticated external conversation identity.
-
-        Returns:
-            ExternalSessionBinding | None: Persisted binding when present.
-
-        Notes:
-            Implementations must use the same scope calculation as creation.
-        """
-        ...
-
-
-class CanonicalExternalSessionBindingStore:
-    """Project route-authored Host bindings onto one canonical repository."""
-
-    def __init__(
-        self,
-        *,
-        repository: ExternalSessionBindingRepository,
-        owner_scope: StorageScope,
-    ) -> None:
-        """Bind external sessions to one provider-authoritative owner.
-
-        The service computes the opaque route session key and merges it with trusted
-        provider ownership. Provider records receive no Host route or external-
-        identity DTO and this projection retains no physical path.
-
-        Examples:
-            Bind an opened bundle repository:
+            Provision a first conversation:
                 ```python
-                store = CanonicalExternalSessionBindingStore(
-                    repository=bundle.external_session_bindings,
-                    owner_scope=owner_scope,
-                )
-                ```
-
-            Bind a deterministic test repository:
-                ```python
-                store = CanonicalExternalSessionBindingStore(
-                    repository=fake_repository,
-                    owner_scope=StorageScope(project_id="project-1"),
-                )
-                ```
-
-        Args:
-            repository: Canonical external-session repository from one bundle.
-            owner_scope: Exact trusted Host ownership scope.
-
-        Returns:
-            None: The provider-backed service projection is ready without I/O.
-
-        Notes:
-            App/client identity, provider selection, and fallback are absent.
-        """
-        validate_storage_owner_scope(owner_scope)
-        self._repository = repository
-        self._owner_scope = owner_scope
-
-    async def get_or_create(
-        self,
-        *,
-        route: IntegrationRoute,
-        external_identity: ExternalIdentity,
-        build_id: str,
-        binding_id: str,
-        ag_session_id: str,
-        now: datetime,
-    ) -> BindingResolution:
-        """Resolve or atomically create one route-scoped external binding.
-
-        Candidate binding and session identities are used only on creation. Existing
-        provider-authoritative identities are resubmitted during last-seen updates,
-        including after a concurrent creator wins.
-
-        Examples:
-            Create a first binding:
-                ```python
-                result = await store.get_or_create(
+                result = await store.provision(
                     route=route,
                     external_identity=identity,
                     build_id="build-1",
@@ -235,13 +117,154 @@ class CanonicalExternalSessionBindingStore:
                 )
                 ```
 
-            Resolve an existing binding:
+            Re-provision an existing conversation safely:
                 ```python
-                existing = await store.get_or_create(
+                existing = await store.provision(
                     route=route,
                     external_identity=identity,
                     build_id="build-1",
-                    binding_id="unused-candidate",
+                    binding_id="unused-binding",
+                    ag_session_id="unused-session",
+                    now=later,
+                )
+                ```
+
+        Args:
+            route: Exact resolved route and session-scope policy.
+            external_identity: Authenticated external conversation identity.
+            build_id: Immutable build identity for the bound AG session.
+            binding_id: Candidate binding identifier used only on creation.
+            ag_session_id: Candidate session identifier used only on creation.
+            now: Authoritative provisioning timestamp.
+            title: Optional title used only when the canonical session is created.
+
+        Returns:
+            IntegrationSessionResolution: Binding plus session and binding ownership.
+
+        Notes:
+            Implementations do not expose a binding-only creation path.
+        """
+        ...
+
+    async def get_binding(
+        self,
+        *,
+        route: IntegrationRoute,
+        external_identity: ExternalIdentity,
+    ) -> ExternalSessionBinding | None:
+        """Read one exact route-scoped binding.
+
+        This read uses the same canonical scope projection as provisioning and does
+        not probe alternate providers or identities.
+
+        Examples:
+            Read an existing binding:
+                ```python
+                binding = await store.get_binding(route=route, external_identity=identity)
+                ```
+
+            Detect an unbound identity:
+                ```python
+                assert await store.get_binding(
+                    route=route,
+                    external_identity=identity,
+                ) is None
+                ```
+
+        Args:
+            route: Exact resolved route and session-scope policy.
+            external_identity: Authenticated external conversation identity.
+
+        Returns:
+            ExternalSessionBinding | None: Persisted binding when present.
+
+        Notes:
+            A binding returned here was created only through compound provisioning.
+        """
+        ...
+
+
+class CanonicalIntegrationSessionStore:
+    """Project Host integration identities onto canonical session persistence."""
+
+    def __init__(
+        self,
+        *,
+        repository: IntegrationSessionRepository,
+        owner_scope: StorageScope,
+    ) -> None:
+        """Bind integration sessions to one provider-authoritative owner.
+
+        The service centralizes route scope, canonical session metadata, and the
+        compound repository transaction. It retains no physical storage path.
+
+        Examples:
+            Bind an opened bundle repository:
+                ```python
+                store = CanonicalIntegrationSessionStore(
+                    repository=bundle.integration_sessions,
+                    owner_scope=owner_scope,
+                )
+                ```
+
+            Bind a deterministic test repository:
+                ```python
+                store = CanonicalIntegrationSessionStore(
+                    repository=fake_repository,
+                    owner_scope=StorageScope(project_id="project-1"),
+                )
+                ```
+
+        Args:
+            repository: Canonical compound session repository from one bundle.
+            owner_scope: Exact trusted Host ownership scope.
+
+        Returns:
+            None.
+
+        Notes:
+            App identity, provider selection, and fallback are absent.
+        """
+        validate_storage_owner_scope(owner_scope)
+        self._repository = repository
+        self._owner_scope = owner_scope
+
+    async def provision(
+        self,
+        *,
+        route: IntegrationRoute,
+        external_identity: ExternalIdentity,
+        build_id: str,
+        binding_id: str,
+        ag_session_id: str,
+        now: datetime,
+        title: str | None = None,
+    ) -> IntegrationSessionResolution:
+        """Provision one canonical session and route-scoped binding atomically.
+
+        Existing provider-authoritative identities win over candidate identifiers.
+        Concurrent creators converge through the same compound repository operation.
+
+        Examples:
+            Create a first integration session:
+                ```python
+                result = await store.provision(
+                    route=route,
+                    external_identity=identity,
+                    build_id="build-1",
+                    binding_id="binding-1",
+                    ag_session_id="session-1",
+                    now=now,
+                )
+                ```
+
+            Repair a previously orphaned binding:
+                ```python
+                repaired = await store.provision(
+                    route=route,
+                    external_identity=identity,
+                    build_id="build-1",
+                    binding_id="unused-binding",
                     ag_session_id="unused-session",
                     now=later,
                 )
@@ -252,37 +275,48 @@ class CanonicalExternalSessionBindingStore:
             external_identity: Authenticated external conversation identity.
             build_id: Host build that must remain pinned.
             binding_id: Candidate binding identity used only on creation.
-            ag_session_id: Candidate AG session identity used only on creation.
-            now: Authoritative acceptance timestamp.
+            ag_session_id: Candidate session identity used only on creation.
+            now: Authoritative provisioning timestamp.
+            title: Optional title used only for a newly created session.
 
         Returns:
-            BindingResolution: Frozen Host binding and creation ownership.
+            IntegrationSessionResolution: Frozen binding and creation ownership.
 
         Notes:
-            Concurrent resolution retries only the same canonical repository record;
-            it never selects another provider or creates a replacement binding.
+            Success guarantees that the returned binding's session exists before
+            downstream ingress, artifacts, or capability registration can run.
         """
         scope = _binding_scope(self._owner_scope, route, external_identity)
-        existing = await self._repository.get(scope, route.route_id)
+        existing = await self._repository.get_binding(scope, route.route_id)
         if existing is not None and existing.build_id != build_id:
             _raise_build_mismatch(existing.build_id, build_id)
+        resolved_binding_id = existing.binding_id if existing is not None else binding_id
+        resolved_session_id = existing.ag_session_id if existing is not None else ag_session_id
         request = _canonical_binding_request(
             scope=scope,
             route=route,
             build_id=build_id,
-            binding_id=existing.binding_id if existing is not None else binding_id,
-            ag_session_id=existing.ag_session_id if existing is not None else ag_session_id,
+            binding_id=resolved_binding_id,
+            ag_session_id=resolved_session_id,
             now=max(existing.last_seen_at, now) if existing is not None else now,
         )
+        session = _canonical_session(
+            owner_scope=self._owner_scope,
+            route=route,
+            external_identity=external_identity,
+            session_id=resolved_session_id,
+            now=now,
+            title=title,
+        )
         try:
-            result = await self._repository.get_or_create(request)
+            result = await self._repository.provision(request, session)
         except StorageIntegrityError:
-            winner = await self._repository.get(scope, route.route_id)
+            winner = await self._repository.get_binding(scope, route.route_id)
             if winner is None:
                 raise
             if winner.build_id != build_id:
                 _raise_build_mismatch(winner.build_id, build_id)
-            result = await self._repository.get_or_create(
+            result = await self._repository.provision(
                 _canonical_binding_request(
                     scope=scope,
                     route=route,
@@ -290,33 +324,46 @@ class CanonicalExternalSessionBindingStore:
                     binding_id=winner.binding_id,
                     ag_session_id=winner.ag_session_id,
                     now=max(winner.last_seen_at, now),
-                )
+                ),
+                _canonical_session(
+                    owner_scope=self._owner_scope,
+                    route=route,
+                    external_identity=external_identity,
+                    session_id=winner.ag_session_id,
+                    now=now,
+                    title=title,
+                ),
             )
-        return BindingResolution(
-            binding=_host_binding(result.record, external_identity),
-            created=result.created,
+        return IntegrationSessionResolution(
+            binding=_host_binding(result.binding, external_identity),
+            session=result.session,
+            session_created=result.session_created,
+            binding_created=result.binding_created,
         )
 
-    async def get(
+    async def get_binding(
         self,
         *,
         route: IntegrationRoute,
         external_identity: ExternalIdentity,
     ) -> ExternalSessionBinding | None:
-        """Read one exact route-scoped binding from the canonical repository.
+        """Read one exact route-scoped binding from canonical persistence.
 
-        The same route-authored opaque key used during creation is recomputed from
-        the authenticated identity before the exact provider lookup.
+        The authenticated identity is projected to the route's exact opaque scope
+        before the repository lookup.
 
         Examples:
             Read an existing binding:
                 ```python
-                binding = await store.get(route=route, external_identity=identity)
+                binding = await store.get_binding(route=route, external_identity=identity)
                 ```
 
             Detect an unbound identity:
                 ```python
-                assert await store.get(route=route, external_identity=new_identity) is None
+                assert await store.get_binding(
+                    route=route,
+                    external_identity=new_identity,
+                ) is None
                 ```
 
         Args:
@@ -330,7 +377,7 @@ class CanonicalExternalSessionBindingStore:
             A miss is final and does not probe another identity or provider.
         """
         scope = _binding_scope(self._owner_scope, route, external_identity)
-        record = await self._repository.get(scope, route.route_id)
+        record = await self._repository.get_binding(scope, route.route_id)
         return _host_binding(record, external_identity) if record is not None else None
 
 
@@ -360,6 +407,44 @@ def _binding_scope(
     return merge_storage_scope(
         owner_scope,
         scope_key=_scope_key(route=route, external_identity=external_identity),
+    )
+
+
+def _canonical_session(
+    *,
+    owner_scope: StorageScope,
+    route: IntegrationRoute,
+    external_identity: ExternalIdentity,
+    session_id: str,
+    now: datetime,
+    title: str | None,
+) -> SessionRecord:
+    include_user = route.session_policy.scope in {
+        "conversation_user",
+        "conversation_thread_user",
+    }
+    dimensions = {"session_id": session_id}
+    if owner_scope.org_id is None:
+        dimensions["org_id"] = external_identity.tenant_id
+    if include_user and owner_scope.user_id is None:
+        dimensions["user_id"] = external_identity.user_id
+    scope = merge_storage_scope(owner_scope, **dimensions)
+    external_reference = (
+        f"agent-endpoint:{route.endpoint_id}"
+        if route.endpoint_id is not None
+        else f"integration:{route.route_id}"
+    )
+    return SessionRecord(
+        session_id=session_id,
+        kind=SessionKind.CHAT,
+        scope=scope,
+        revision=1,
+        created_at=now,
+        updated_at=now,
+        title=title,
+        source=route.integration_kind.value,
+        external_reference=external_reference,
+        metadata={},
     )
 
 

@@ -35,8 +35,8 @@ from .control_repositories import (
 from .database import LocalCheckpoint, LocalDatabaseRole, LocalSQLiteDatabase
 from .event_store import LocalEventStore
 from .integration_repositories import (
-    LocalExternalSessionBindingRepository,
     LocalIngressIdempotencyRepository,
+    LocalIntegrationSessionRepository,
 )
 from .manifest import (
     LOCAL_PROVIDER_NAME,
@@ -107,7 +107,7 @@ class LocalStorageBundle:
     triggers: LocalTriggerRepository
     observations: LocalObservationRepository
     ingress_idempotency: LocalIngressIdempotencyRepository
-    external_session_bindings: LocalExternalSessionBindingRepository
+    integration_sessions: LocalIntegrationSessionRepository
     inbound_events: LocalInboundEventRepository
     semantic_events: LocalSemanticEventRepository
     runtime_output: LocalRuntimeOutputSink
@@ -458,7 +458,7 @@ class LocalStorageProvider:
                 triggers=LocalTriggerRepository(database=control),
                 observations=LocalObservationRepository(database=control),
                 ingress_idempotency=LocalIngressIdempotencyRepository(database=control),
-                external_session_bindings=LocalExternalSessionBindingRepository(database=control),
+                integration_sessions=LocalIntegrationSessionRepository(database=control),
                 inbound_events=LocalInboundEventRepository(database=events_database),
                 semantic_events=LocalSemanticEventRepository(database=events_database),
                 runtime_output=runtime_output,

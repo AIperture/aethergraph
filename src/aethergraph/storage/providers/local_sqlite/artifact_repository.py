@@ -32,6 +32,7 @@ from ...contracts import (
     StorageOpenMode,
     StorageReadOnlyError,
     StorageScope,
+    storage_scope_covers,
 )
 from .control_repositories import (
     _record_run_artifact_in_transaction,
@@ -1282,7 +1283,7 @@ def _record_artifact_occurrence(
         "SELECT owner_scope_identity FROM local_artifacts WHERE artifact_id = ?",
         (occurrence.artifact_id,),
     ).fetchone()
-    if artifact is None or not _scope_authorizes(_scope(str(artifact[0])), occurrence.scope):
+    if artifact is None or not storage_scope_covers(_scope(str(artifact[0])), occurrence.scope):
         raise StorageNotFoundError(occurrence.artifact_id)
     connection.execute(
         f"INSERT INTO local_artifact_occurrences("
@@ -1524,10 +1525,6 @@ def _scope(identity: str) -> StorageScope:
         return StorageScope(**payload)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise StorageIntegrityError("Persisted artifact scope is malformed") from exc
-
-
-def _scope_authorizes(owner: StorageScope, operation: StorageScope) -> bool:
-    return all(getattr(operation, name) == value for name, value in owner.as_filter().items())
 
 
 def _artifact_tags(labels: Mapping[str, object]) -> tuple[str, ...]:

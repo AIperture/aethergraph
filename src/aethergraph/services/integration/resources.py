@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Literal
 
 from aethergraph.contracts.integration import (
@@ -14,12 +15,15 @@ from aethergraph.contracts.integration import (
 from aethergraph.services.channel.resources import (
     ArtifactIngressScope,
     InputResource,
-    ResourceEnricher,
     ResourceSet,
     ResourceStager,
+    hydrate_public_artifact,
 )
+from aethergraph.storage.contracts import StorageNotFoundError, StorageScope
 
 from .context import VerifiedIntegrationContext
+
+_LOG = logging.getLogger("aethergraph.integration.resources")
 
 
 class ResourceIngressError(RuntimeError):
@@ -37,7 +41,12 @@ class ResourceIngressError(RuntimeError):
             "integration.attachment_bytes_missing",
             "integration.attachment_size_mismatch",
             "integration.attachment_duplicate",
+            "integration.artifact_service_unavailable",
+            "integration.artifact_lookup_failed",
             "integration.artifact_not_found",
+            "integration.artifact_invalid",
+            "integration.attachment_scope_invalid",
+            "integration.attachment_storage_scope_rejected",
         ],
         message: str,
     ) -> None:
@@ -110,7 +119,7 @@ class ResourceIngress:
             ```
 
         Args:
-            container: AG Host container owning artifact storage and indexing.
+            container: AG Host container owning canonical artifact storage and lookup.
             policy: Optional bounded attachment policy.
 
         Returns:
@@ -128,6 +137,7 @@ class ResourceIngress:
         verified: VerifiedIntegrationContext,
         route: IntegrationRoute,
         binding: ExternalSessionBinding,
+        session_scope: StorageScope,
         envelope: IngressEnvelope,
     ) -> tuple[InputResource, ...]:
         """Validate and materialize all attachments from one ingress envelope.
@@ -160,6 +170,7 @@ class ResourceIngress:
             verified: Authenticated transport context containing protected bytes.
             route: Exact resolved route and capability requirements.
             binding: Durable external-to-AG session binding.
+            session_scope: Canonical scope from the persisted bound session.
             envelope: Closed canonical ingress envelope.
 
         Returns:
@@ -168,6 +179,20 @@ class ResourceIngress:
         Notes:
             Every declared provider attachment must have one exact verified byte payload.
         """
+        if session_scope.session_id != binding.ag_session_id:
+            _LOG.error(
+                "Integration attachment binding does not match the canonical session scope",
+                extra={
+                    "integration_error_code": "integration.attachment_scope_invalid",
+                    "route_id": route.route_id,
+                    "bound_session_id": binding.ag_session_id,
+                    "session_scope": session_scope.as_filter(),
+                },
+            )
+            raise ResourceIngressError(
+                code="integration.attachment_scope_invalid",
+                message="The bound session and attachment storage scope do not match.",
+            )
         attachments = envelope.attachments
         if not attachments:
             if verified.attachments:
@@ -213,10 +238,10 @@ class ResourceIngress:
                         code="integration.attachment_total_exceeded",
                         message="Ingress attachment total exceeds the configured limit.",
                     )
-                resources.add(
-                    await ResourceStager(
+                try:
+                    resource = await ResourceStager(
                         container=self.container,
-                        identity=verified.request_identity,
+                        storage_scope=session_scope,
                     ).stage_bytes(
                         data,
                         name=attachment.filename,
@@ -237,18 +262,49 @@ class ResourceIngress:
                             "attachment_id": attachment.attachment_id,
                         },
                     )
-                )
+                except StorageNotFoundError as exc:
+                    _LOG.exception(
+                        "Integration attachment storage rejected the canonical child scope",
+                        extra={
+                            "integration_error_code": (
+                                "integration.attachment_storage_scope_rejected"
+                            ),
+                            "route_id": route.route_id,
+                            "attachment_id": attachment.attachment_id,
+                            "bound_session_id": binding.ag_session_id,
+                            "session_scope": session_scope.as_filter(),
+                            "storage_error_type": type(exc).__name__,
+                        },
+                    )
+                    raise ResourceIngressError(
+                        code="integration.attachment_storage_scope_rejected",
+                        message="Attachment storage rejected the canonical session scope.",
+                    ) from exc
+                if not resource.artifact_id:
+                    _LOG.error(
+                        "Integration attachment staging returned no canonical artifact identity",
+                        extra={
+                            "integration_error_code": "integration.artifact_invalid",
+                            "route_id": route.route_id,
+                            "attachment_id": attachment.attachment_id,
+                            "bound_session_id": binding.ag_session_id,
+                        },
+                    )
+                    raise ResourceIngressError(
+                        code="integration.artifact_invalid",
+                        message=(
+                            f"Staged attachment {attachment.attachment_id!r} has no canonical "
+                            "artifact identity."
+                        ),
+                    )
+                resources.add(resource)
             else:
                 resources.add(
-                    InputResource(
-                        kind="artifact",
+                    await self._materialize_artifact_reference(
+                        attachment=attachment,
                         source=verified.integration_kind.value,
-                        status="materialized",
-                        id=attachment.attachment_id,
-                        name=attachment.filename,
-                        mime=attachment.content_type,
-                        size=attachment.size_bytes,
-                        artifact_id=attachment.source_id,
+                        route=route,
+                        binding=binding,
                     )
                 )
         if verified_bytes:
@@ -256,9 +312,7 @@ class ResourceIngress:
                 code="integration.attachment_bytes_missing",
                 message="Verified attachment bytes contain undeclared attachment identities.",
             )
-        enriched = await ResourceEnricher(container=self.container).enrich(resources)
-        await self._require_artifacts(enriched)
-        return tuple(enriched.resources)
+        return tuple(resources.dedupe().resources)
 
     def _validate_declared(self, attachments: tuple[IngressAttachment, ...]) -> None:
         if len(attachments) > self.policy.max_count:
@@ -304,16 +358,89 @@ class ResourceIngress:
             out[item.attachment_id] = item.data
         return out
 
-    async def _require_artifacts(self, resources: ResourceSet) -> None:
-        get_artifact = getattr(getattr(self.container, "artifact_index", None), "get", None)
+    async def _materialize_artifact_reference(
+        self,
+        *,
+        attachment: IngressAttachment,
+        source: str,
+        route: IntegrationRoute,
+        binding: ExternalSessionBinding,
+    ) -> InputResource:
+        artifact_service = getattr(self.container, "artifact_service", None)
+        get_artifact = getattr(artifact_service, "get_by_id", None)
         if not callable(get_artifact):
+            _LOG.error(
+                "Canonical artifact service is unavailable during integration ingress",
+                extra={
+                    "integration_error_code": "integration.artifact_service_unavailable",
+                    "route_id": route.route_id,
+                    "attachment_id": attachment.attachment_id,
+                    "artifact_id": attachment.source_id,
+                    "bound_session_id": binding.ag_session_id,
+                },
+            )
+            raise ResourceIngressError(
+                code="integration.artifact_service_unavailable",
+                message="Canonical artifact lookup is unavailable for integration ingress.",
+            )
+        try:
+            artifact = await get_artifact(attachment.source_id)
+        except Exception as exc:
+            _LOG.exception(
+                "Canonical artifact lookup failed during integration ingress",
+                extra={
+                    "integration_error_code": "integration.artifact_lookup_failed",
+                    "route_id": route.route_id,
+                    "attachment_id": attachment.attachment_id,
+                    "artifact_id": attachment.source_id,
+                    "bound_session_id": binding.ag_session_id,
+                    "artifact_error_type": type(exc).__name__,
+                },
+            )
+            raise ResourceIngressError(
+                code="integration.artifact_lookup_failed",
+                message=f"Canonical lookup failed for artifact {attachment.source_id!r}.",
+            ) from exc
+        if artifact is None:
+            _LOG.error(
+                "Integration artifact reference was not found in canonical storage",
+                extra={
+                    "integration_error_code": "integration.artifact_not_found",
+                    "route_id": route.route_id,
+                    "attachment_id": attachment.attachment_id,
+                    "artifact_id": attachment.source_id,
+                    "bound_session_id": binding.ag_session_id,
+                },
+            )
             raise ResourceIngressError(
                 code="integration.artifact_not_found",
-                message="ResourceIngress requires an artifact index.",
+                message=f"Artifact {attachment.source_id!r} does not exist.",
             )
-        for resource in resources:
-            if not resource.artifact_id or await get_artifact(resource.artifact_id) is None:
-                raise ResourceIngressError(
-                    code="integration.artifact_not_found",
-                    message=f"Artifact {resource.artifact_id!r} does not exist.",
-                )
+        resource = InputResource(
+            kind="artifact",
+            source=source,
+            status="materialized",
+            id=attachment.attachment_id,
+            name=attachment.filename,
+            mime=attachment.content_type,
+            size=attachment.size_bytes,
+            artifact_id=attachment.source_id,
+        )
+        try:
+            return hydrate_public_artifact(resource, artifact)
+        except (TypeError, ValueError) as exc:
+            _LOG.exception(
+                "Canonical artifact lookup returned an invalid public artifact",
+                extra={
+                    "integration_error_code": "integration.artifact_invalid",
+                    "route_id": route.route_id,
+                    "attachment_id": attachment.attachment_id,
+                    "artifact_id": attachment.source_id,
+                    "bound_session_id": binding.ag_session_id,
+                    "artifact_error_type": type(exc).__name__,
+                },
+            )
+            raise ResourceIngressError(
+                code="integration.artifact_invalid",
+                message=f"Artifact {attachment.source_id!r} has invalid canonical metadata.",
+            ) from exc

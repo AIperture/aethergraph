@@ -8,6 +8,7 @@ import pytest
 from aethergraph.core.runtime.run_types import RunOrigin, RunRecord, RunStatus
 from aethergraph.runtime import (
     EmbeddedRuntime,
+    RuntimeArtifactScope,
     RuntimeIdentity,
     RuntimeOpenRequest,
     RuntimeRunRequest,
@@ -162,6 +163,62 @@ async def test_submit_maps_public_contract_without_exposing_run_record():
     assert record.run_id == "run-1"
     assert record.status == "pending"
     assert record.metadata == {"accepted": True}
+
+
+@pytest.mark.asyncio
+async def test_session_artifact_staging_uses_persisted_session_scope(
+    monkeypatch,
+) -> None:
+    canonical_scope = SimpleNamespace(
+        as_filter=lambda: {
+            "tenant_id": "tenant-1",
+            "project_id": "project-1",
+            "session_id": "session-1",
+        }
+    )
+    observed = {}
+
+    class _Sessions:
+        async def storage_scope(self, session_id):
+            assert session_id == "session-1"
+            return canonical_scope
+
+    class _Stager:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+        async def stage_bytes(self, data, **kwargs):
+            observed.update(data=data, stage=kwargs)
+            return SimpleNamespace(
+                artifact_id="artifact-1",
+                size=len(data),
+                uri="artifact://artifact-1",
+            )
+
+    monkeypatch.setattr(
+        "aethergraph.runtime.embedded.ResourceStager",
+        _Stager,
+    )
+    runtime = EmbeddedRuntime(_container(session_store=_Sessions()))
+
+    artifact = await runtime.stage_artifact(
+        identity=RuntimeIdentity(user_id="studio-ai:thread-1", org_id="tenant-1"),
+        data=b"current buffer",
+        name="weather.py",
+        mime="text/x-python",
+        file_id="buffer-1",
+        scope=RuntimeArtifactScope(
+            source="agstudio",
+            session_id="session-1",
+            graph_id="integration",
+            node_id="resource_ingress",
+            tool_name="integration.resource_ingress",
+        ),
+    )
+
+    assert observed["identity"] is None
+    assert observed["storage_scope"] is canonical_scope
+    assert artifact.artifact_id == "artifact-1"
 
 
 def test_runtime_exposes_immutable_profile_and_capture_values():

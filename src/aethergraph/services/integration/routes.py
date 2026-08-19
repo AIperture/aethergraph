@@ -166,6 +166,51 @@ class ManifestRouteResolver:
             message="No integration route accepts the authenticated ingress identity.",
         )
 
+    def require(self, route_id: str) -> IntegrationRoute:
+        """Return one enabled route by its exact manifest identity.
+
+        Direct Host APIs use this lookup when authentication and route matching were
+        already completed by their own closed boundary.
+
+        Examples:
+            Resolve a Studio route:
+                ```python
+                route = resolver.require("studio-ai")
+                ```
+
+            Handle a disabled route:
+                ```python
+                try:
+                    route = resolver.require("disabled-route")
+                except IntegrationRouteError as exc:
+                    assert exc.code == "integration.route_disabled"
+                ```
+
+        Args:
+            route_id: Exact route identifier from the immutable Host manifest.
+
+        Returns:
+            IntegrationRoute: The one enabled route with the requested identity.
+
+        Notes:
+            This lookup does not perform identity matching or choose another route.
+        """
+        route = next(
+            (item for item in self.manifest.integration_routes if item.route_id == route_id),
+            None,
+        )
+        if route is None:
+            raise IntegrationRouteError(
+                code="integration.route_not_found",
+                message=f"Integration route {route_id!r} does not exist.",
+            )
+        if not route.enabled:
+            raise IntegrationRouteError(
+                code="integration.route_disabled",
+                message=f"Integration route {route_id!r} is disabled.",
+            )
+        return route
+
     @staticmethod
     def _matches(route: IntegrationRoute, envelope: IngressEnvelope) -> bool:
         policy = route.match_policy

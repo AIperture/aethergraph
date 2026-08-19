@@ -214,8 +214,9 @@ def _envelope(
 
 
 class _ResourceIngress:
-    async def materialize(self, *, verified, route, binding, envelope):
+    async def materialize(self, *, verified, route, binding, session_scope, envelope):
         assert verified.integration_kind is route.integration_kind
+        assert session_scope.session_id == binding.ag_session_id
         return tuple(
             InputResource(
                 kind="artifact",
@@ -301,7 +302,7 @@ class _Harness:
             manifest=manifest,
             route_resolver=ManifestRouteResolver(manifest),
             idempotency_store=persistence.idempotency,
-            binding_store=persistence.bindings,
+            session_store=persistence.sessions,
             resource_ingress=_ResourceIngress(),
             interaction_resolver=InteractionResolver(continuations),
             inbound_events=persistence.inbound_events,

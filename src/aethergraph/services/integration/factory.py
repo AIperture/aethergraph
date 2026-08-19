@@ -102,7 +102,7 @@ def install_integration_ingress(
         manifest=manifest,
         route_resolver=ManifestRouteResolver(manifest),
         idempotency_store=persistence.idempotency,
-        binding_store=persistence.bindings,
+        session_store=persistence.sessions,
         resource_ingress=ResourceIngress(container=container, policy=resource_policy),
         interaction_resolver=InteractionResolver(container.cont_store),
         inbound_events=persistence.inbound_events,

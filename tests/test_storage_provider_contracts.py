@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,6 +18,8 @@ from aethergraph.storage.contracts import (
     StorageScope,
     StorageScopeError,
     UnknownStorageProviderError,
+    storage_scope_covers,
+    storage_scope_matches_filter,
 )
 from aethergraph.storage.provider_registry import StorageProviderRegistry
 
@@ -65,6 +67,27 @@ def test_storage_scope_fails_closed_for_missing_unknown_or_blank_dimensions() ->
         StorageScope().require("app_id")
     with pytest.raises(StorageScopeError, match="non-empty"):
         StorageScope(run_id="  ")
+
+
+def test_storage_scope_relations_distinguish_filters_from_child_provenance() -> None:
+    session = StorageScope(project_id="project-1", session_id="session-1")
+    child = StorageScope(
+        project_id="project-1",
+        session_id="session-1",
+        graph_id="integration",
+        node_id="resource_ingress",
+    )
+
+    assert storage_scope_matches_filter(child, session)
+    assert not storage_scope_matches_filter(session, child)
+    assert storage_scope_covers(session, child)
+    assert not storage_scope_covers(child, session)
+    assert not storage_scope_matches_filter(session, StorageScope())
+    assert not storage_scope_covers(StorageScope(), child)
+    assert not storage_scope_covers(
+        session,
+        replace(child, session_id="session-2"),
+    )
 
 
 def test_capability_require_reports_all_missing_without_fallback() -> None:

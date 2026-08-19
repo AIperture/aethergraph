@@ -1,4 +1,4 @@
-"""Transactional local ingress idempotency and external-session bindings."""
+"""Transactional local ingress idempotency and integration sessions."""
 
 from __future__ import annotations
 
@@ -11,11 +11,12 @@ from typing import Any
 from ...contracts import (
     ExternalSessionBindingRecord,
     ExternalSessionBindingRequest,
-    ExternalSessionBindingResult,
     IngressClaimRecord,
     IngressClaimRequest,
     IngressClaimResult,
     IngressClaimStatus,
+    IntegrationSessionProvisioningResult,
+    SessionRecord,
     StorageConfigurationError,
     StorageConflictError,
     StorageIntegrityError,
@@ -24,6 +25,7 @@ from ...contracts import (
     StorageReadOnlyError,
     StorageScope,
 )
+from .control_repositories import _insert_session, _install as _install_control, _session
 from .database import LocalDatabaseRole, LocalSQLiteDatabase
 
 _COMPONENT_VERSION = 1
@@ -319,49 +321,56 @@ class LocalIngressIdempotencyRepository:
             raise StorageReadOnlyError("Local ingress idempotency repository is read-only")
 
 
-class LocalExternalSessionBindingRepository:
-    """Canonical local external-session bindings with immutable build pinning."""
+class LocalIntegrationSessionRepository:
+    """Canonical local session and external-binding compound repository."""
 
     def __init__(self, *, database: LocalSQLiteDatabase) -> None:
+        _install_control(database)
         _install(database)
         self._database = database
         self._mode = database.mode
 
-    async def get_or_create(
+    async def provision(
         self,
         request: ExternalSessionBindingRequest,
-    ) -> ExternalSessionBindingResult:
-        """Resolve or create one exact route and external-scope binding.
+        session: SessionRecord,
+    ) -> IntegrationSessionProvisioningResult:
+        """Provision one canonical session and external binding atomically.
 
-        Creation and monotonic last-seen advancement are serialized in one immediate
-        transaction. Existing build, session, binding, and scope identity is pinned.
+        The control transaction validates or creates both records. An orphan binding
+        is repaired only with its exact authoritative session identity.
 
         Examples:
-            Resolve a conversation:
+            Provision a conversation:
                 ```python
-                result = await repository.get_or_create(request)
+                result = await repository.provision(request, session)
                 ```
 
-            Detect creation ownership:
+            Detect an idempotent replay:
                 ```python
-                if (await repository.get_or_create(request)).created:
-                    await create_session(request.ag_session_id)
+                result = await repository.provision(request, session)
+                assert not result.binding_created
                 ```
 
         Args:
-            request: Candidate route, build, AG session, external scope, and timestamp.
+            request: Candidate binding identity, external scope, and timestamp.
+            session: Candidate canonical session for the requested AG session ID.
 
         Returns:
-            ExternalSessionBindingResult: Authoritative binding and creation ownership.
+            IntegrationSessionProvisioningResult: Authoritative records and creation flags.
 
         Notes:
-            Existing identity mismatch or a regressed clock raises
-            `StorageIntegrityError`; no replacement binding is created.
+            Any immutable conflict rolls back the entire transaction. No alternate
+            route, session, binding, or provider is selected.
         """
         self._require_writable()
+        if session.session_id != request.ag_session_id:
+            raise StorageIntegrityError("Integration session identity conflicts")
+        if session.revision != 1 or session.artifact_count or session.last_artifact_at:
+            raise StorageIntegrityError("Initial integration session state is invalid")
         identity = _scope_identity(request.scope)
 
-        def commit(connection: sqlite3.Connection) -> ExternalSessionBindingResult:
+        def commit(connection: sqlite3.Connection) -> IntegrationSessionProvisioningResult:
             row = connection.execute(
                 """
                 SELECT * FROM local_external_session_bindings
@@ -375,8 +384,14 @@ class LocalExternalSessionBindingRepository:
                     raise StorageIntegrityError("External session binding identity conflicts")
                 if request.now < current.last_seen_at:
                     raise StorageIntegrityError("External session last_seen_at moved backward")
+                stored_session, session_created = _ensure_session(connection, session)
                 if request.now == current.last_seen_at:
-                    return ExternalSessionBindingResult(record=current, created=False)
+                    return IntegrationSessionProvisioningResult(
+                        session=stored_session,
+                        binding=current,
+                        session_created=session_created,
+                        binding_created=False,
+                    )
                 updated = ExternalSessionBindingRecord(
                     binding_id=current.binding_id,
                     route_id=current.route_id,
@@ -406,7 +421,12 @@ class LocalExternalSessionBindingRepository:
                     raise StorageConflictError(
                         "External session binding changed during last-seen update"
                     )
-                return ExternalSessionBindingResult(record=updated, created=False)
+                return IntegrationSessionProvisioningResult(
+                    session=stored_session,
+                    binding=updated,
+                    session_created=session_created,
+                    binding_created=False,
+                )
             collision = connection.execute(
                 "SELECT * FROM local_external_session_bindings WHERE binding_id = ?",
                 (request.binding_id,),
@@ -423,12 +443,18 @@ class LocalExternalSessionBindingRepository:
                 created_at=request.now,
                 last_seen_at=request.now,
             )
+            stored_session, session_created = _ensure_session(connection, session)
             _insert_binding(connection, record)
-            return ExternalSessionBindingResult(record=record, created=True)
+            return IntegrationSessionProvisioningResult(
+                session=stored_session,
+                binding=record,
+                session_created=session_created,
+                binding_created=True,
+            )
 
         return await self._database.transaction(commit)
 
-    async def get(
+    async def get_binding(
         self,
         scope: StorageScope,
         route_id: str,
@@ -441,12 +467,12 @@ class LocalExternalSessionBindingRepository:
         Examples:
             Read a binding:
                 ```python
-                binding = await repository.get(external_scope, "route-1")
+                binding = await repository.get_binding(external_scope, "route-1")
                 ```
 
             Detect an unbound scope:
                 ```python
-                assert await repository.get(new_scope, "route-1") is None
+                assert await repository.get_binding(new_scope, "route-1") is None
                 ```
 
         Args:
@@ -473,7 +499,34 @@ class LocalExternalSessionBindingRepository:
 
     def _require_writable(self) -> None:
         if self._mode is StorageOpenMode.READ_ONLY:
-            raise StorageReadOnlyError("Local external session repository is read-only")
+            raise StorageReadOnlyError("Local integration session repository is read-only")
+
+
+def _ensure_session(
+    connection: sqlite3.Connection,
+    candidate: SessionRecord,
+) -> tuple[SessionRecord, bool]:
+    row = connection.execute(
+        "SELECT * FROM local_sessions WHERE session_id = ?",
+        (candidate.session_id,),
+    ).fetchone()
+    if row is None:
+        _insert_session(connection, candidate)
+        return candidate, True
+    current = _session(row)
+    if not _session_identity_matches(current, candidate):
+        raise StorageIntegrityError("Canonical integration session identity conflicts")
+    return current, False
+
+
+def _session_identity_matches(current: SessionRecord, candidate: SessionRecord) -> bool:
+    return (
+        current.session_id == candidate.session_id
+        and current.kind == candidate.kind
+        and current.scope == candidate.scope
+        and current.source == candidate.source
+        and current.external_reference == candidate.external_reference
+    )
 
 
 def _install(database: LocalSQLiteDatabase) -> None:

@@ -33,6 +33,7 @@ from ...contracts import (
     StorageOpenMode,
     StorageReadOnlyError,
     StorageScope,
+    storage_scope_matches_filter,
 )
 from .database import LocalDatabaseRole, LocalSQLiteDatabase
 
@@ -256,7 +257,7 @@ class LocalContinuationRepository:
         if not rows:
             return None
         record = await self._hydrate(rows[0])
-        return record if _scope_authorizes(record.scope, scope) else None
+        return record if storage_scope_matches_filter(record.scope, scope) else None
 
     async def resolve_token(self, token: str) -> ContinuationRecord | None:
         """Resolve a raw bearer token through the protected exact index.
@@ -367,7 +368,7 @@ class LocalContinuationRepository:
             if row is None:
                 raise StorageNotFoundError(continuation_id)
             current = _continuation(row, _correlators(connection, continuation_id))
-            if not _scope_authorizes(current.scope, scope):
+            if not storage_scope_matches_filter(current.scope, scope):
                 raise StorageNotFoundError(continuation_id)
             if correlator in current.correlators:
                 return current
@@ -524,7 +525,7 @@ class LocalContinuationLeaseRepository:
             continuation = _continuation(
                 continuation_row, _correlators(connection, request.continuation_id)
             )
-            if not _scope_authorizes(continuation.scope, request.scope):
+            if not storage_scope_matches_filter(continuation.scope, request.scope):
                 raise StorageNotFoundError(request.continuation_id)
             if (
                 continuation.status is not ContinuationStatus.WAITING
@@ -620,7 +621,7 @@ class LocalContinuationLeaseRepository:
         if not rows:
             return None
         record = _lease(rows[0])
-        return record if _scope_authorizes(record.scope, scope) else None
+        return record if storage_scope_matches_filter(record.scope, scope) else None
 
     async def compare_and_set(
         self, record: ContinuationLeaseRecord, expected_revision: int
@@ -1001,11 +1002,6 @@ def _scope_filters(scope: StorageScope, *, alias: str) -> tuple[list[str], list[
     if not clauses:
         raise StorageConfigurationError("Continuation queries require populated scope")
     return clauses, values
-
-
-def _scope_authorizes(owner: StorageScope, operation: StorageScope) -> bool:
-    filters = operation.as_filter()
-    return bool(filters) and all(getattr(owner, name) == value for name, value in filters.items())
 
 
 def _next_revision(revision: int, expected_revision: int) -> None:

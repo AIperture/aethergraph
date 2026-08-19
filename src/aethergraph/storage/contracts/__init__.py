@@ -47,14 +47,14 @@ from .errors import (
 )
 from .integration import (
     ExternalSessionBindingRecord,
-    ExternalSessionBindingRepository,
     ExternalSessionBindingRequest,
-    ExternalSessionBindingResult,
     IngressClaimRecord,
     IngressClaimRequest,
     IngressClaimResult,
     IngressClaimStatus,
     IngressIdempotencyRepository,
+    IntegrationSessionProvisioningResult,
+    IntegrationSessionRepository,
 )
 from .observations import (
     LLMCallAttempt,
@@ -118,7 +118,7 @@ from .records import (
     SearchResult,
     StateRecord,
 )
-from .scope import StorageScope
+from .scope import StorageScope, storage_scope_covers, storage_scope_matches_filter
 from .stores import (
     ArtifactMetricOrder,
     ArtifactOccurrenceQuery,
@@ -202,9 +202,9 @@ __all__ = [
     "EventStore",
     "FrozenJson",
     "ExternalSessionBindingRecord",
-    "ExternalSessionBindingRepository",
     "ExternalSessionBindingRequest",
-    "ExternalSessionBindingResult",
+    "IntegrationSessionProvisioningResult",
+    "IntegrationSessionRepository",
     "IngressClaimRecord",
     "IngressClaimRequest",
     "IngressClaimResult",
@@ -300,6 +300,8 @@ __all__ = [
     "StorageReadOnlyError",
     "StorageScope",
     "StorageScopeError",
+    "storage_scope_covers",
+    "storage_scope_matches_filter",
     "StorageTimeoutError",
     "StorageSecretResolver",
     "UnknownStorageProviderError",

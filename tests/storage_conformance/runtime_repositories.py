@@ -583,22 +583,45 @@ class InMemoryIngressIdempotencyRepository:
         return record
 
 
-class InMemoryExternalSessionBindingRepository:
-    def __init__(self) -> None:
+class InMemoryIntegrationSessionRepository:
+    def __init__(self, sessions: InMemorySessionRepository) -> None:
+        self._sessions = sessions
         self._records: dict[str, storage.ExternalSessionBindingRecord] = {}
 
-    async def get(self, scope, route_id):
+    async def get_binding(self, scope, route_id):
         record = self._records.get(route_id)
         return record if record is not None and _scope_matches(record.scope, scope) else None
 
-    async def get_or_create(self, request):
+    async def provision(self, request, session):
         current = self._records.get(request.route_id)
+        if current is not None and (
+            current.binding_id != request.binding_id
+            or current.build_id != request.build_id
+            or current.ag_session_id != request.ag_session_id
+            or current.scope != request.scope
+        ):
+            raise storage.StorageIntegrityError("external session binding conflicts")
+        stored_session = self._sessions._records.get(request.ag_session_id)
+        if stored_session is not None and (
+            stored_session.kind != session.kind
+            or stored_session.scope != session.scope
+            or stored_session.source != session.source
+            or stored_session.external_reference != session.external_reference
+        ):
+            raise storage.StorageIntegrityError("external integration session conflicts")
+        session_created = stored_session is None
+        if session_created:
+            self._sessions._records[session.session_id] = session
+            stored_session = session
         if current is not None:
-            if current.ag_session_id != request.ag_session_id:
-                raise storage.StorageIntegrityError("external session binding conflicts")
             updated = replace(current, last_seen_at=request.now, revision=current.revision + 1)
             self._records[request.route_id] = updated
-            return storage.ExternalSessionBindingResult(record=updated, created=False)
+            return storage.IntegrationSessionProvisioningResult(
+                session=stored_session,
+                binding=updated,
+                session_created=session_created,
+                binding_created=False,
+            )
         record = storage.ExternalSessionBindingRecord(
             binding_id=request.binding_id,
             route_id=request.route_id,
@@ -610,7 +633,12 @@ class InMemoryExternalSessionBindingRepository:
             last_seen_at=request.now,
         )
         self._records[request.route_id] = record
-        return storage.ExternalSessionBindingResult(record=record, created=True)
+        return storage.IntegrationSessionProvisioningResult(
+            session=stored_session,
+            binding=record,
+            session_created=session_created,
+            binding_created=True,
+        )
 
 
 class InMemoryInboundEventRepository:

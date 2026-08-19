@@ -8,6 +8,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
+from .control import SessionRecord
 from .records import FrozenJson, _freeze_mapping, _nonempty, _utc
 from .scope import StorageScope
 
@@ -208,15 +209,20 @@ def _validate_binding_identity(
 
 
 @dataclass(frozen=True, slots=True)
-class ExternalSessionBindingResult:
-    """Atomic binding resolution and creation ownership result."""
+class IntegrationSessionProvisioningResult:
+    """Atomic canonical-session and external-binding provisioning result."""
 
-    record: ExternalSessionBindingRecord
-    created: bool
+    session: SessionRecord
+    binding: ExternalSessionBindingRecord
+    session_created: bool
+    binding_created: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.created, bool):
-            raise TypeError("created must be a boolean")
+        if self.session.session_id != self.binding.ag_session_id:
+            raise ValueError("provisioned session and binding identities must match")
+        for name in ("session_created", "binding_created"):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f"{name} must be a boolean")
 
 
 class IngressIdempotencyRepository(Protocol):
@@ -325,43 +331,44 @@ class IngressIdempotencyRepository(Protocol):
         ...
 
 
-class ExternalSessionBindingRepository(Protocol):
-    """Atomic route/external-scope to build-pinned AG session bindings."""
+class IntegrationSessionRepository(Protocol):
+    """Atomic canonical-session and external-binding persistence boundary."""
 
-    async def get_or_create(
+    async def provision(
         self,
         request: ExternalSessionBindingRequest,
-    ) -> ExternalSessionBindingResult:
-        """Resolve or create one exact route and external-scope binding.
+        session: SessionRecord,
+    ) -> IntegrationSessionProvisioningResult:
+        """Provision one compatible canonical session and external binding.
 
-        The `(route_id, scope.scope_key)` uniqueness decision and monotonic last-seen
-        update occur in one transaction across competing processes.
+        The provider creates or validates both records in one transaction and repairs
+        an existing orphan binding at its authoritative session identity.
 
         Examples:
-            Resolve one conversation:
+            Provision one conversation:
                 ```python
-                result = await bindings.get_or_create(request)
+                result = await sessions.provision(request, session)
                 ```
 
-            Create the AG session once:
+            Detect an idempotent replay:
                 ```python
-                if result.created:
-                    await create_session(result.record.ag_session_id)
+                assert not (result.session_created or result.binding_created)
                 ```
 
         Args:
             request: Candidate identities, canonical external scope, and timestamp.
+            session: Candidate canonical session using the requested AG session ID.
 
         Returns:
-            ExternalSessionBindingResult: Authoritative binding and creation ownership.
+            IntegrationSessionProvisioningResult: Authoritative records and creation flags.
 
         Notes:
-            Existing bindings are immutable across build/session identity. Mismatch
-            raises `StorageIntegrityError`; no replacement session is created.
+            Immutable conflicts raise `StorageIntegrityError`; competing candidates
+            roll back without leaving orphan sessions.
         """
         ...
 
-    async def get(
+    async def get_binding(
         self,
         scope: StorageScope,
         route_id: str,
@@ -374,12 +381,12 @@ class ExternalSessionBindingRepository(Protocol):
         Examples:
             Read a conversation binding:
                 ```python
-                binding = await bindings.get(external_scope, "route-1")
+                binding = await sessions.get_binding(external_scope, "route-1")
                 ```
 
             Detect an unbound conversation:
                 ```python
-                assert await bindings.get(new_scope, "route-1") is None
+                assert await sessions.get_binding(new_scope, "route-1") is None
                 ```
 
         Args:
