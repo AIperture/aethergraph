@@ -6,18 +6,18 @@ from datetime import UTC, datetime
 
 from aethergraph.services.control.canonical_stores import CanonicalSessionStore
 from aethergraph.services.integration import (
-    CanonicalExternalSessionBindingStore,
     CanonicalInboundEventStore,
     CanonicalIngressIdempotencyStore,
     CanonicalIntegrationPersistence,
+    CanonicalIntegrationSessionStore,
     CanonicalSemanticEventStore,
 )
 from aethergraph.storage.contracts import StorageScope
 from tests.storage_conformance.runtime_repositories import (
     InMemoryDeliveryCursorAllocator,
-    InMemoryExternalSessionBindingRepository,
     InMemoryInboundEventRepository,
     InMemoryIngressIdempotencyRepository,
+    InMemoryIntegrationSessionRepository,
     InMemorySemanticEventRepository,
     InMemorySessionRepository,
 )
@@ -45,14 +45,15 @@ def make_semantic_event_store() -> ClosableCanonicalSemanticEventStore:
 
 def make_integration_persistence() -> CanonicalIntegrationPersistence:
     owner = StorageScope(project_id="test-project")
+    sessions = InMemorySessionRepository()
     return CanonicalIntegrationPersistence(
         idempotency=CanonicalIngressIdempotencyStore(
             repository=InMemoryIngressIdempotencyRepository(),
             owner_scope=owner,
             clock=lambda: datetime.now(UTC),
         ),
-        bindings=CanonicalExternalSessionBindingStore(
-            repository=InMemoryExternalSessionBindingRepository(),
+        sessions=CanonicalIntegrationSessionStore(
+            repository=InMemoryIntegrationSessionRepository(sessions),
             owner_scope=owner,
         ),
         inbound_events=CanonicalInboundEventStore(

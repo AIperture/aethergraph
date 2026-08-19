@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Literal
 from uuid import uuid4
 
 from aethergraph.contracts.integration import (
     ArtifactAvailablePayload,
+    ExternalIdentity,
     HostManifest,
     IngressEnvelope,
     IngressReceipt,
@@ -27,7 +29,11 @@ from .interactions import (
 )
 from .resources import ResourceIngress, ResourceIngressError
 from .routes import IntegrationRouteError, ManifestRouteResolver
-from .session_bindings import ExternalSessionBindingStore, SessionBindingError
+from .session_bindings import (
+    IntegrationSessionResolution,
+    IntegrationSessionStore,
+    SessionBindingError,
+)
 
 
 class IngressCoordinatorError(RuntimeError):
@@ -83,7 +89,7 @@ class IntegrationIngressCoordinator:
         manifest: HostManifest,
         route_resolver: ManifestRouteResolver,
         idempotency_store: IngressIdempotencyStore,
-        binding_store: ExternalSessionBindingStore,
+        session_store: IntegrationSessionStore,
         resource_ingress: ResourceIngress,
         interaction_resolver: InteractionResolver,
         inbound_events: InboundEventStore,
@@ -104,7 +110,7 @@ class IntegrationIngressCoordinator:
                 manifest=manifest,
                 route_resolver=ManifestRouteResolver(manifest),
                 idempotency_store=idempotency_store,
-                binding_store=binding_store,
+                session_store=session_store,
                 resource_ingress=resource_ingress,
                 interaction_resolver=interaction_resolver,
                 inbound_events=inbound_events,
@@ -124,7 +130,7 @@ class IntegrationIngressCoordinator:
             manifest: Immutable Host manifest and deployment authority.
             route_resolver: Exact immutable-manifest route resolver.
             idempotency_store: Durable ingress claim and receipt store.
-            binding_store: Durable external-session binding store.
+            session_store: Atomic canonical integration-session provisioner.
             resource_ingress: Shared attachment validation/materialization service.
             interaction_resolver: Exact open-interaction resolver.
             inbound_events: Focused durable ingress writer.
@@ -141,7 +147,7 @@ class IntegrationIngressCoordinator:
         self.manifest = manifest
         self.route_resolver = route_resolver
         self.idempotency_store = idempotency_store
-        self.binding_store = binding_store
+        self.session_store = session_store
         self.resource_ingress = resource_ingress
         self.interaction_resolver = interaction_resolver
         self.inbound_events = inbound_events
@@ -149,6 +155,71 @@ class IntegrationIngressCoordinator:
         self.semantic_events = semantic_emitter.store
         self.resume_router = resume_router
         self.root_dispatcher = root_dispatcher
+
+    async def provision_session(
+        self,
+        *,
+        route_id: str,
+        external_identity: ExternalIdentity,
+        binding_id: str,
+        ag_session_id: str,
+        now: datetime,
+        title: str | None = None,
+    ) -> IntegrationSessionResolution:
+        """Provision one canonical session through the manifest-owned route.
+
+        Host adapters that need a session before submitting ingress use this same
+        boundary as normal coordinator acceptance. The route, build, scope, session,
+        and external binding therefore have one source of truth.
+
+        Examples:
+            Provision a Studio thread:
+                ```python
+                result = await coordinator.provision_session(
+                    route_id="studio-ai",
+                    external_identity=identity,
+                    binding_id="binding-1",
+                    ag_session_id="session-1",
+                    now=now,
+                    title="New chat",
+                )
+                ```
+
+            Repair an existing binding whose session was never created:
+                ```python
+                repaired = await coordinator.provision_session(
+                    route_id="studio-ai",
+                    external_identity=identity,
+                    binding_id="unused-binding",
+                    ag_session_id="unused-session",
+                    now=later,
+                )
+                ```
+
+        Args:
+            route_id: Exact enabled route in the immutable Host manifest.
+            external_identity: Authenticated external conversation identity.
+            binding_id: Candidate binding identifier used only on first creation.
+            ag_session_id: Candidate session identifier used only on first creation.
+            now: Authoritative UTC provisioning timestamp.
+            title: Optional title used only when creating the canonical session.
+
+        Returns:
+            IntegrationSessionResolution: Canonical binding and creation ownership.
+
+        Notes:
+            This is the only public pre-ingress session creation boundary.
+        """
+        route = self.route_resolver.require(route_id)
+        return await self.session_store.provision(
+            route=route,
+            external_identity=external_identity,
+            build_id=self.manifest.build_id,
+            binding_id=binding_id,
+            ag_session_id=ag_session_id,
+            now=now,
+            title=title,
+        )
 
     async def accept(
         self,
@@ -210,7 +281,7 @@ class IntegrationIngressCoordinator:
         binding = None
         try:
             route = self.route_resolver.resolve(verified=verified, envelope=envelope)
-            binding_resolution = await self.binding_store.get_or_create(
+            binding_resolution = await self.session_store.provision(
                 route=route,
                 external_identity=envelope.external_identity,
                 build_id=self.manifest.build_id,

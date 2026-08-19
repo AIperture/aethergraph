@@ -9,14 +9,16 @@ import pytest
 
 from aethergraph.storage.contracts import (
     ExternalSessionBindingRecord,
-    ExternalSessionBindingRepository,
     ExternalSessionBindingRequest,
-    ExternalSessionBindingResult,
     IngressClaimRecord,
     IngressClaimRequest,
     IngressClaimResult,
     IngressClaimStatus,
     IngressIdempotencyRepository,
+    IntegrationSessionProvisioningResult,
+    IntegrationSessionRepository,
+    SessionKind,
+    SessionRecord,
     StorageBundle,
     StorageScope,
 )
@@ -118,7 +120,21 @@ def test_external_bindings_require_opaque_scope_and_exclude_host_dtos() -> None:
         metadata={"integration_kind": "slack"},
     )
 
-    assert ExternalSessionBindingResult(record=record, created=True).created
+    session = SessionRecord(
+        session_id="session-1",
+        kind=SessionKind.CHAT,
+        scope=StorageScope(project_id="project-1", session_id="session-1"),
+        revision=1,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    result = IntegrationSessionProvisioningResult(
+        session=session,
+        binding=record,
+        session_created=True,
+        binding_created=True,
+    )
+    assert result.session_created and result.binding_created
     assert record.metadata["integration_kind"] == "slack"
     assert "external_identity" not in {item.name for item in fields(record)}
     assert "route" not in {item.name for item in fields(request)}
@@ -131,10 +147,10 @@ def test_external_bindings_require_opaque_scope_and_exclude_host_dtos() -> None:
 def test_integration_bundle_fields_and_protocol_docstrings_are_exact() -> None:
     hints = get_type_hints(StorageBundle)
     assert hints["ingress_idempotency"] is IngressIdempotencyRepository
-    assert hints["external_session_bindings"] is ExternalSessionBindingRepository
+    assert hints["integration_sessions"] is IntegrationSessionRepository
 
     required = ("Examples:", "Args:", "Returns:", "Notes:")
-    for protocol in (IngressIdempotencyRepository, ExternalSessionBindingRepository):
+    for protocol in (IngressIdempotencyRepository, IntegrationSessionRepository):
         for name, member in inspect.getmembers(protocol, inspect.isfunction):
             if name.startswith("_"):
                 continue

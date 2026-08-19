@@ -276,9 +276,9 @@ class EmbeddedRuntime:
             integration = runtime.install_integration(manifest)
             ```
 
-            Reuse the returned capability for session binding:
+            Reuse the returned capability for session provisioning:
             ```python
-            session_id = await integration.bind_session(...)
+            session_id = await integration.provision_session(...)
             ```
 
         Args:
@@ -1314,7 +1314,7 @@ class RuntimeIntegration:
                 root_admission_callback=root_admission_callback,
             )
 
-    async def bind_session(
+    async def provision_session(
         self,
         *,
         route_id: str,
@@ -1322,13 +1322,17 @@ class RuntimeIntegration:
         binding_id: str,
         session_id: str,
         now: datetime,
+        title: str | None = None,
     ) -> str:
-        """Resolve or create one exact route-scoped integration session.
+        """Provision one exact route-scoped canonical integration session.
+
+        The installed coordinator creates or verifies the canonical session and its
+        external binding as one operation before returning the durable session ID.
 
         Examples:
-            Bind a Studio thread:
+            Provision a Studio thread:
             ```python
-            session_id = await integration.bind_session(
+            session_id = await integration.provision_session(
                 route_id="studio.general", external_identity=identity,
                 binding_id="binding-1", session_id="session-1", now=now,
             )
@@ -1336,40 +1340,31 @@ class RuntimeIntegration:
 
             Resolve the same identity idempotently:
             ```python
-            assert await integration.bind_session(**same_scope) == session_id
+            assert await integration.provision_session(**same_scope) == session_id
             ```
 
         Args:
             route_id: Exact installed manifest route identity.
             external_identity: Canonical external conversation identity.
-            binding_id: Candidate durable binding identity.
-            session_id: Candidate durable AG session identity.
-            now: Authoritative binding timestamp.
+            binding_id: Candidate durable binding identity used only on creation.
+            session_id: Candidate durable AG session identity used only on creation.
+            now: Authoritative provisioning timestamp.
+            title: Optional title used only when the canonical session is created.
 
         Returns:
             str: Persisted AG session identity.
 
         Notes:
-            Route resolution never falls back to another profile.
+            Route resolution never falls back to another route or provider.
         """
         await self._runtime._ensure_ready()
-        route = next(
-            (
-                item
-                for item in self._coordinator.manifest.integration_routes
-                if item.route_id == route_id
-            ),
-            None,
-        )
-        if route is None:
-            raise RuntimeError(f"Integration route is not installed: {route_id}")
-        resolution = await self._coordinator.binding_store.get_or_create(
-            route=route,
+        resolution = await self._coordinator.provision_session(
+            route_id=route_id,
             external_identity=external_identity,
-            build_id=self._coordinator.manifest.build_id,
             binding_id=binding_id,
             ag_session_id=session_id,
             now=now,
+            title=title,
         )
         return resolution.binding.ag_session_id
 

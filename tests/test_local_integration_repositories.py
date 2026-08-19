@@ -12,6 +12,8 @@ from aethergraph.storage.contracts import (
     ExternalSessionBindingRequest,
     IngressClaimRequest,
     IngressClaimStatus,
+    SessionKind,
+    SessionRecord,
     StorageConflictError,
     StorageIntegrityError,
     StorageOpenMode,
@@ -20,8 +22,9 @@ from aethergraph.storage.contracts import (
 )
 from aethergraph.storage.providers.local_sqlite import (
     LocalDatabaseRole,
-    LocalExternalSessionBindingRepository,
     LocalIngressIdempotencyRepository,
+    LocalIntegrationSessionRepository,
+    LocalSessionRepository,
     LocalSQLiteDatabase,
 )
 
@@ -83,6 +86,25 @@ def _binding(
         ag_session_id=ag_session_id,
         scope=scope,
         now=now,
+    )
+
+
+def _session(session_id: str = "session-1") -> SessionRecord:
+    return SessionRecord(
+        session_id=session_id,
+        kind=SessionKind.CHAT,
+        scope=StorageScope(
+            tenant_id="tenant-1",
+            project_id="project-1",
+            org_id="org-1",
+            user_id="user-1",
+            session_id=session_id,
+        ),
+        revision=1,
+        created_at=NOW,
+        updated_at=NOW,
+        source="slack",
+        external_reference="integration:route-1",
     )
 
 
@@ -179,42 +201,46 @@ async def test_concurrent_ingress_claim_has_exactly_one_owner(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_external_binding_create_replay_and_monotonic_last_seen(tmp_path: Path) -> None:
+async def test_integration_session_create_replay_and_monotonic_last_seen(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    repository = LocalExternalSessionBindingRepository(database=database)
+    repository = LocalIntegrationSessionRepository(database=database)
     request = _binding()
 
-    created = await repository.get_or_create(request)
-    assert created.created and created.record.revision == 1
-    replay = await repository.get_or_create(request)
-    assert not replay.created and replay.record == created.record
-    assert await repository.get(EXTERNAL_SCOPE, request.route_id) == created.record
+    created = await repository.provision(request, _session())
+    assert created.binding_created and created.session_created
+    assert created.binding.revision == 1
+    replay = await repository.provision(request, _session())
+    assert not replay.binding_created and not replay.session_created
+    assert replay.binding == created.binding
+    assert await repository.get_binding(EXTERNAL_SCOPE, request.route_id) == created.binding
     assert (
-        await repository.get(replace(EXTERNAL_SCOPE, project_id="other"), request.route_id) is None
+        await repository.get_binding(replace(EXTERNAL_SCOPE, project_id="other"), request.route_id)
+        is None
     )
     with pytest.raises(ValueError, match="scope_key"):
-        await repository.get(HOST_SCOPE, request.route_id)
+        await repository.get_binding(HOST_SCOPE, request.route_id)
 
-    later = await repository.get_or_create(replace(request, now=NOW + timedelta(seconds=1)))
-    assert not later.created
-    assert later.record.revision == 2
-    assert later.record.created_at == NOW
-    assert later.record.last_seen_at == NOW + timedelta(seconds=1)
+    later = await repository.provision(replace(request, now=NOW + timedelta(seconds=1)), _session())
+    assert not later.binding_created
+    assert later.binding.revision == 2
+    assert later.binding.created_at == NOW
+    assert later.binding.last_seen_at == NOW + timedelta(seconds=1)
     with pytest.raises(StorageIntegrityError, match="moved backward"):
-        await repository.get_or_create(request)
+        await repository.provision(request, _session())
     await database.close()
 
 
 @pytest.mark.asyncio
-async def test_external_binding_identity_is_pinned_and_creation_is_atomic(
+async def test_integration_session_identity_is_pinned_and_creation_is_atomic(
     tmp_path: Path,
 ) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
-    repository = LocalExternalSessionBindingRepository(database=database)
+    repository = LocalIntegrationSessionRepository(database=database)
     request = _binding()
-    results = await asyncio.gather(*(repository.get_or_create(request) for _ in range(20)))
-    assert sum(result.created for result in results) == 1
-    assert all(result.record == results[0].record for result in results)
+    results = await asyncio.gather(*(repository.provision(request, _session()) for _ in range(20)))
+    assert sum(result.binding_created for result in results) == 1
+    assert sum(result.session_created for result in results) == 1
+    assert all(result.binding.binding_id == results[0].binding.binding_id for result in results)
 
     for conflicting in (
         replace(request, binding_id="binding-other"),
@@ -222,11 +248,46 @@ async def test_external_binding_identity_is_pinned_and_creation_is_atomic(
         replace(request, ag_session_id="session-other"),
     ):
         with pytest.raises(StorageIntegrityError, match="identity conflicts"):
-            await repository.get_or_create(conflicting)
+            await repository.provision(conflicting, _session(conflicting.ag_session_id))
     with pytest.raises(StorageIntegrityError, match="binding identity"):
-        await repository.get_or_create(
-            _binding(binding_id=request.binding_id, route_id="route-other")
+        conflicting = _binding(binding_id=request.binding_id, route_id="route-other")
+        await repository.provision(
+            conflicting,
+            replace(_session(), external_reference="integration:route-other"),
         )
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_provision_repairs_orphan_binding_before_artifact_accounting(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    integrations = LocalIntegrationSessionRepository(database=database)
+    sessions = LocalSessionRepository(database=database)
+    request = _binding()
+    initial = await integrations.provision(request, _session())
+    assert initial.binding_created and initial.session_created
+    await database.transaction(
+        lambda connection: connection.execute(
+            "DELETE FROM local_sessions WHERE session_id = ?",
+            (request.ag_session_id,),
+        )
+    )
+
+    repaired = await integrations.provision(
+        replace(request, now=NOW + timedelta(seconds=1)),
+        _session(),
+    )
+    assert repaired.session_created
+    assert not repaired.binding_created
+    counted = await sessions.record_artifact(
+        _session().scope,
+        request.ag_session_id,
+        "occurrence-1",
+        NOW + timedelta(seconds=2),
+    )
+    assert counted.artifact_count == 1
     await database.close()
 
 
@@ -234,16 +295,16 @@ async def test_external_binding_identity_is_pinned_and_creation_is_atomic(
 async def test_integration_repositories_read_only_and_typed_corruption(tmp_path: Path) -> None:
     writer_database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     ingress_writer = LocalIngressIdempotencyRepository(database=writer_database)
-    binding_writer = LocalExternalSessionBindingRepository(database=writer_database)
+    binding_writer = LocalIntegrationSessionRepository(database=writer_database)
     request = _claim()
     binding = _binding()
     await ingress_writer.claim(request)
-    await binding_writer.get_or_create(binding)
+    await binding_writer.provision(binding, _session())
     await writer_database.close()
 
     database = _database(tmp_path, StorageOpenMode.READ_ONLY)
     ingress = LocalIngressIdempotencyRepository(database=database)
-    bindings = LocalExternalSessionBindingRepository(database=database)
+    bindings = LocalIntegrationSessionRepository(database=database)
     assert (
         await ingress.get(
             HOST_SCOPE,
@@ -253,16 +314,17 @@ async def test_integration_repositories_read_only_and_typed_corruption(tmp_path:
         )
         is not None
     )
-    assert await bindings.get(EXTERNAL_SCOPE, binding.route_id) is not None
+    assert await bindings.get_binding(EXTERNAL_SCOPE, binding.route_id) is not None
     with pytest.raises(StorageReadOnlyError):
         await ingress.claim(_claim("new", external_event_id="new"))
     with pytest.raises(StorageReadOnlyError):
-        await bindings.get_or_create(_binding(route_id="new", binding_id="new"))
+        new_binding = _binding(route_id="new", binding_id="new", ag_session_id="new")
+        await bindings.provision(new_binding, _session("new"))
     await database.close()
 
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     ingress = LocalIngressIdempotencyRepository(database=database)
-    bindings = LocalExternalSessionBindingRepository(database=database)
+    bindings = LocalIntegrationSessionRepository(database=database)
     await database.transaction(
         lambda connection: connection.execute("UPDATE local_ingress_claims SET receipt_json = '[]'")
     )
@@ -279,7 +341,7 @@ async def test_integration_repositories_read_only_and_typed_corruption(tmp_path:
         )
     )
     with pytest.raises(StorageIntegrityError, match="malformed"):
-        await bindings.get(EXTERNAL_SCOPE, binding.route_id)
+        await bindings.get_binding(EXTERNAL_SCOPE, binding.route_id)
     await database.close()
 
 
@@ -287,7 +349,7 @@ async def test_integration_repositories_read_only_and_typed_corruption(tmp_path:
 async def test_integration_schema_has_clean_identity_and_indexed_lookup(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     LocalIngressIdempotencyRepository(database=database)
-    LocalExternalSessionBindingRepository(database=database)
+    LocalIntegrationSessionRepository(database=database)
     tables = (
         "local_ingress_claims",
         "local_external_session_bindings",
@@ -317,7 +379,7 @@ async def test_integration_schema_has_clean_identity_and_indexed_lookup(tmp_path
 def test_local_integration_public_docstrings_follow_repository_format() -> None:
     for repository in (
         LocalIngressIdempotencyRepository,
-        LocalExternalSessionBindingRepository,
+        LocalIntegrationSessionRepository,
     ):
         for name, method in inspect.getmembers(repository, inspect.isfunction):
             if name.startswith("_"):

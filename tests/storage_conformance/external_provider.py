@@ -28,9 +28,9 @@ from storage_conformance.runtime_repositories import (
     InMemoryContinuationRepository,
     InMemoryDeliveryCursorAllocator,
     InMemoryDocumentStore,
-    InMemoryExternalSessionBindingRepository,
     InMemoryInboundEventRepository,
     InMemoryIngressIdempotencyRepository,
+    InMemoryIntegrationSessionRepository,
     InMemoryKeyValueStore,
     InMemoryObservationRepository,
     InMemoryRunRepository,
@@ -104,7 +104,7 @@ class DeterministicExternalBundle:
         self.triggers = InMemoryTriggerRepository()
         self.observations = InMemoryObservationRepository(clock)
         self.ingress_idempotency = InMemoryIngressIdempotencyRepository()
-        self.external_session_bindings = InMemoryExternalSessionBindingRepository()
+        self.integration_sessions = InMemoryIntegrationSessionRepository(self.sessions)
         self.inbound_events = InMemoryInboundEventRepository()
         delivery_cursors = InMemoryDeliveryCursorAllocator()
         self.semantic_events = InMemorySemanticEventRepository(delivery_cursors)

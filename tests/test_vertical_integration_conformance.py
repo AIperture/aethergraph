@@ -301,7 +301,7 @@ class _Harness:
             manifest=manifest,
             route_resolver=ManifestRouteResolver(manifest),
             idempotency_store=persistence.idempotency,
-            binding_store=persistence.bindings,
+            session_store=persistence.sessions,
             resource_ingress=_ResourceIngress(),
             interaction_resolver=InteractionResolver(continuations),
             inbound_events=persistence.inbound_events,

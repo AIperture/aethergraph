@@ -275,7 +275,7 @@ def _verified(
 
 
 async def _binding(container, *, route, external_identity: ExternalIdentity):
-    binding = await container.integration_ingress.binding_store.get(
+    binding = await container.integration_ingress.session_store.get_binding(
         route=route,
         external_identity=external_identity,
     )
@@ -349,33 +349,15 @@ async def create_endpoint_session(
         verified=verified,
         envelope=probe,
     )
-    existing_binding = await container.integration_ingress.binding_store.get(
-        route=resolved,
+    provisioning = await container.integration_ingress.provision_session(
+        route_id=resolved.route_id,
         external_identity=external,
-    )
-    if existing_binding is not None and existing_binding.ag_session_id != session_id:
-        raise HTTPException(
-            status_code=409,
-            detail="Endpoint session binding conflicts with the canonical session identity.",
-        )
-    await container.session_store.create(
-        session_id=session_id,
-        kind=SessionKind.chat,
-        user_id=user_id,
-        org_id=tenant_id,
-        title=body.title,
-        source=("ag_ui" if route.integration_kind is IntegrationKind.AG_UI else "agent_endpoint"),
-        external_ref=f"agent-endpoint:{endpoint_id}",
-    )
-    binding = await container.integration_ingress.binding_store.get_or_create(
-        route=resolved,
-        external_identity=external,
-        build_id=container.host_manifest.build_id,
         binding_id=f"binding-{digest[:32]}",
         ag_session_id=session_id,
         now=probe.received_at,
+        title=body.title,
     )
-    if binding.binding.ag_session_id != session_id:
+    if provisioning.binding.ag_session_id != session_id:
         raise HTTPException(
             status_code=409,
             detail="Endpoint session binding conflicts with the canonical session identity.",

@@ -12,8 +12,8 @@ from .canonical_events import CanonicalInboundEventStore, CanonicalSemanticEvent
 from .event_contracts import InboundEventStore, SemanticEventStore
 from .idempotency import CanonicalIngressIdempotencyStore, IngressIdempotencyStore
 from .session_bindings import (
-    CanonicalExternalSessionBindingStore,
-    ExternalSessionBindingStore,
+    CanonicalIntegrationSessionStore,
+    IntegrationSessionStore,
 )
 
 
@@ -22,7 +22,7 @@ class CanonicalIntegrationPersistence:
     """Focused Host integration stores bound to one coherent provider bundle."""
 
     idempotency: IngressIdempotencyStore
-    bindings: ExternalSessionBindingStore
+    sessions: IntegrationSessionStore
     inbound_events: InboundEventStore
     semantic_events: SemanticEventStore
 
@@ -76,8 +76,8 @@ def bind_canonical_integration_persistence(
             owner_scope=owner_scope,
             clock=clock,
         ),
-        bindings=CanonicalExternalSessionBindingStore(
-            repository=bundle.external_session_bindings,
+        sessions=CanonicalIntegrationSessionStore(
+            repository=bundle.integration_sessions,
             owner_scope=owner_scope,
         ),
         inbound_events=CanonicalInboundEventStore(

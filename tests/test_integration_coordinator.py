@@ -25,8 +25,8 @@ from aethergraph.services.channel.resources import InputResource
 from aethergraph.services.continuations.continuation import ContinuationDraft, Correlator
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.integration import (
-    BindingResolution,
     IntegrationIngressCoordinator,
+    IntegrationSessionResolution,
     InteractionResolutionError,
     InteractionResolver,
     ManifestRouteResolver,
@@ -140,9 +140,13 @@ def _binding() -> ExternalSessionBinding:
     )
 
 
-class _BindingStore:
-    async def get_or_create(self, **kwargs) -> BindingResolution:
-        return BindingResolution(binding=_binding(), created=False)
+class _SessionStore:
+    async def provision(self, **kwargs) -> IntegrationSessionResolution:
+        return IntegrationSessionResolution(
+            binding=_binding(),
+            session_created=False,
+            binding_created=False,
+        )
 
 
 class _RootDispatcher:
@@ -220,7 +224,7 @@ def _coordinator(
         manifest=manifest,
         route_resolver=ManifestRouteResolver(manifest),
         idempotency_store=persistence.idempotency,
-        binding_store=_BindingStore(),
+        session_store=_SessionStore(),
         resource_ingress=ResourceIngress(container=SimpleNamespace()),
         interaction_resolver=InteractionResolver(continuation_store),
         inbound_events=persistence.inbound_events,
