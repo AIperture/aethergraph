@@ -191,36 +191,3 @@ class AsyncArtifactStore(Protocol):
     async def save_json(self, payload: dict, suggested_uri: str | None = None) -> Artifact: ...
     @property
     def base_uri(self) -> str: ...
-
-
-class AsyncArtifactIndex(Protocol):
-    async def upsert(self, a: Artifact) -> None: ...
-    async def list_for_run(self, run_id: str) -> list[Artifact]: ...
-    async def list_occurrences_for_run(
-        self,
-        run_id: str,
-        *,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> list[Artifact]: ...
-    async def list_occurrences_for_session(
-        self,
-        session_id: str,
-        *,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> list[Artifact]: ...
-    async def search(
-        self,
-        *,
-        kind: str | None = None,
-        labels: dict | None = None,
-        metric: str | None = None,
-        mode: str | None = None,
-        limit: int | None = None,
-    ) -> list[Artifact]: ...
-    async def best(
-        self, *, kind: str, metric: str, mode: str, filters: dict | None = None
-    ) -> Artifact | None: ...
-    async def pin(self, artifact_id: str, pinned: bool = True) -> None: ...
-    async def record_occurrence(self, a: Artifact, extra_labels: dict | None = None) -> None: ...

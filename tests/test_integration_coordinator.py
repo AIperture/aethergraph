@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from aethergraph.config.config import AppSettings
 from aethergraph.contracts.integration import (
     SEMANTIC_EVENT_PROTOCOL_VERSION,
     ExternalIdentity,
@@ -22,7 +23,9 @@ from aethergraph.contracts.integration import (
     OriginAddress,
     SemanticEventKind,
 )
+from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.services.channel.resources import InputResource
+from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.continuations.continuation import ContinuationDraft, Correlator
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.integration import (
@@ -544,17 +547,17 @@ async def test_coordinator_persists_disabled_route_rejection(tmp_path) -> None:
 async def test_resource_ingress_validates_existing_artifact_reference(
     monkeypatch,
 ) -> None:
-    artifact = SimpleNamespace(
+    artifact = Artifact(
         artifact_id="artifact-1",
-        name="report.pdf",
+        kind="upload",
         mime="application/pdf",
         bytes=100,
         uri="artifact://artifact-1",
         labels={"filename": "report.pdf"},
     )
 
-    class _ArtifactIndex:
-        async def get(self, artifact_id):
+    class _ArtifactService:
+        async def get_by_id(self, artifact_id):
             return artifact if artifact_id == "artifact-1" else None
 
     class _UnexpectedStager:
@@ -566,7 +569,7 @@ async def test_resource_ingress_validates_existing_artifact_reference(
         _UnexpectedStager,
     )
     ingress = ResourceIngress(
-        container=SimpleNamespace(artifact_index=_ArtifactIndex()),
+        container=SimpleNamespace(artifact_service=_ArtifactService()),
         policy=ResourceIngressPolicy(allowed_content_types=("application/pdf",)),
     )
     envelope = _envelope(
@@ -601,18 +604,6 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
 ) -> None:
     payload = b"exact current buffer\n"
     staged: list[bytes] = []
-    artifact = SimpleNamespace(
-        artifact_id="artifact-buffer",
-        name="weather.py",
-        mime="text/x-python",
-        bytes=len(payload),
-        uri="artifact://artifact-buffer",
-        labels={"attachment_id": "buffer-1"},
-    )
-
-    class _ArtifactIndex:
-        async def get(self, artifact_id):
-            return artifact if artifact_id == "artifact-buffer" else None
 
     class _Stager:
         def __init__(self, **_kwargs) -> None:
@@ -635,7 +626,7 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
         "aethergraph.services.integration.resources.ResourceStager",
         _Stager,
     )
-    ingress = ResourceIngress(container=SimpleNamespace(artifact_index=_ArtifactIndex()))
+    ingress = ResourceIngress(container=SimpleNamespace())
     envelope = _envelope(
         text=None,
         attachments=(
@@ -666,6 +657,140 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
 
     assert staged == [payload]
     assert resources[0].artifact_id == "artifact-buffer"
+
+
+@pytest.mark.asyncio
+async def test_resource_ingress_materializes_provider_bytes_with_canonical_container(
+    tmp_path,
+) -> None:
+    payload = b"exact current buffer\n"
+    base_logger = logging.getLogger("aethergraph")
+    previous_logging = (
+        list(base_logger.handlers),
+        base_logger.level,
+        base_logger.propagate,
+        base_logger.disabled,
+    )
+    container = build_default_container(
+        root=str(tmp_path),
+        cfg=AppSettings(workspace=str(tmp_path)),
+        channel_adapters={},
+        owner_scope=StorageScope(project_id="project-1"),
+    )
+    await container.start_storage()
+    try:
+        await container.session_store.create(
+            session_id="session-1",
+            kind=SessionKind.CHAT,
+            source="integration-test",
+        )
+        session_scope = await container.session_store.storage_scope("session-1")
+        assert session_scope is not None
+        ingress = ResourceIngress(container=container)
+        resources = await ingress.materialize(
+            verified=VerifiedIntegrationContext(
+                integration_id="slack-main",
+                integration_kind=IntegrationKind.SLACK,
+                external_tenant_id="team-T1",
+                attachments=(VerifiedAttachment("buffer-1", payload),),
+            ),
+            route=_route(),
+            binding=_binding(),
+            session_scope=session_scope,
+            envelope=_envelope(
+                text=None,
+                attachments=(
+                    IngressAttachment(
+                        attachment_id="buffer-1",
+                        source_kind="provider_file",
+                        source_id="buffer-1",
+                        filename="weather.py",
+                        content_type="text/x-python",
+                        size_bytes=len(payload),
+                    ),
+                ),
+            ),
+        )
+
+        assert len(resources) == 1
+        artifact_id = resources[0].artifact_id
+        assert artifact_id is not None
+        assert await container.artifact_service.get_by_id(artifact_id) is not None
+        referenced = await ingress.materialize(
+            verified=_verified(),
+            route=_route(),
+            binding=_binding(),
+            session_scope=session_scope,
+            envelope=_envelope(
+                event_id="event-existing-artifact",
+                text=None,
+                attachments=(
+                    IngressAttachment(
+                        attachment_id="existing-buffer",
+                        source_kind="artifact",
+                        source_id=artifact_id,
+                        filename="weather.py",
+                        content_type="text/x-python",
+                        size_bytes=len(payload),
+                    ),
+                ),
+            ),
+        )
+        assert referenced[0].artifact_id == artifact_id
+    finally:
+        await container.close_storage()
+        handlers, level, propagate, disabled = previous_logging
+        base_logger.handlers[:] = handlers
+        base_logger.setLevel(level)
+        base_logger.propagate = propagate
+        base_logger.disabled = disabled
+
+
+@pytest.mark.asyncio
+async def test_resource_ingress_reports_unavailable_canonical_artifact_service(
+    caplog,
+) -> None:
+    ingress = ResourceIngress(container=SimpleNamespace())
+    envelope = _envelope(
+        text=None,
+        attachments=(
+            IngressAttachment(
+                attachment_id="attachment-1",
+                source_kind="artifact",
+                source_id="artifact-1",
+                filename="report.pdf",
+                content_type="application/pdf",
+                size_bytes=100,
+            ),
+        ),
+    )
+
+    logger = logging.getLogger("aethergraph.integration.resources")
+    logger.addHandler(caplog.handler)
+    try:
+        with (
+            caplog.at_level(logging.ERROR, logger=logger.name),
+            pytest.raises(ResourceIngressError) as exc_info,
+        ):
+            await ingress.materialize(
+                verified=_verified(),
+                route=_route(),
+                binding=_binding(),
+                session_scope=_session().scope,
+                envelope=envelope,
+            )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    assert exc_info.value.code == "integration.artifact_service_unavailable"
+    record = next(
+        record
+        for record in caplog.records
+        if record.integration_error_code == "integration.artifact_service_unavailable"
+    )
+    assert record.route_id == "route-slack"
+    assert record.attachment_id == "attachment-1"
+    assert record.artifact_id == "artifact-1"
 
 
 @pytest.mark.asyncio
@@ -707,17 +832,22 @@ async def test_resource_ingress_surfaces_storage_scope_rejection(
         attachments=(VerifiedAttachment("buffer-1", payload),),
     )
 
-    with (
-        caplog.at_level(logging.ERROR, logger="aethergraph.integration.resources"),
-        pytest.raises(ResourceIngressError) as exc_info,
-    ):
-        await ingress.materialize(
-            verified=verified,
-            route=_route(),
-            binding=_binding(),
-            session_scope=_session().scope,
-            envelope=envelope,
-        )
+    logger = logging.getLogger("aethergraph.integration.resources")
+    logger.addHandler(caplog.handler)
+    try:
+        with (
+            caplog.at_level(logging.ERROR, logger=logger.name),
+            pytest.raises(ResourceIngressError) as exc_info,
+        ):
+            await ingress.materialize(
+                verified=verified,
+                route=_route(),
+                binding=_binding(),
+                session_scope=_session().scope,
+                envelope=envelope,
+            )
+    finally:
+        logger.removeHandler(caplog.handler)
 
     assert exc_info.value.code == "integration.attachment_storage_scope_rejected"
     record = next(

@@ -155,7 +155,7 @@ class InputResource:
         return {k: v for k, v in out.items() if v is not None}
 
 
-def _hydrate_public_artifact(resource: InputResource, artifact: Artifact) -> InputResource:
+def hydrate_public_artifact(resource: InputResource, artifact: Artifact) -> InputResource:
     if not isinstance(artifact, Artifact):
         raise TypeError("artifact must be the frozen public Artifact DTO")
     if resource.artifact_id is not None and resource.artifact_id != artifact.artifact_id:
@@ -437,7 +437,7 @@ class InputResourceNormalizer:
             source=source,
             status="materialized",
         )
-        return _hydrate_public_artifact(resource, artifact)
+        return hydrate_public_artifact(resource, artifact)
 
     def _extract_local_paths(
         self,
@@ -479,38 +479,6 @@ def _path_from_file_uri(uri: str) -> str:
     if re.match(r"^/[A-Za-z]:/", path):
         path = path[1:]
     return path
-
-
-class ResourceEnricher:
-    def __init__(self, *, container: Any) -> None:
-        self.container = container
-
-    async def enrich(self, resources: ResourceSet | list[InputResource]) -> ResourceSet:
-        resource_set = resources if isinstance(resources, ResourceSet) else ResourceSet(resources)
-        artifacts = getattr(self.container, "artifact_service", None)
-        get_artifact = getattr(artifacts, "get_by_id", None) if artifacts is not None else None
-
-        for resource in resource_set.resources:
-            if resource.kind != "artifact" or not resource.artifact_id:
-                continue
-            resource.url = resource.url or f"/api/v1/artifacts/{resource.artifact_id}/content"
-            if get_artifact is None:
-                continue
-            try:
-                artifact = await get_artifact(resource.artifact_id)
-            except Exception as exc:
-                resource.diagnostics.append(f"artifact enrichment failed: {exc}")
-                continue
-            if artifact is None:
-                continue
-            if not isinstance(artifact, Artifact):
-                resource.diagnostics.append("artifact enrichment returned an invalid public DTO")
-                continue
-            if artifact.artifact_id != resource.artifact_id:
-                resource.diagnostics.append("artifact enrichment returned a different identity")
-                continue
-            _hydrate_public_artifact(resource, artifact)
-        return resource_set.dedupe()
 
 
 @dataclass(frozen=True)
@@ -589,7 +557,7 @@ class ResourceStager:
             labels=eff_labels,
             meta=dict(meta or {}),
         )
-        return _hydrate_public_artifact(resource, artifact)
+        return hydrate_public_artifact(resource, artifact)
 
     def _facade(self, scope: ArtifactIngressScope) -> CanonicalPublicArtifactFacade:
         if self.storage_scope is not None:
