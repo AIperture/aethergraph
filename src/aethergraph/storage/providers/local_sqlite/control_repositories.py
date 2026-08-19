@@ -26,6 +26,8 @@ from ...contracts import (
     StorageOpenMode,
     StorageReadOnlyError,
     StorageScope,
+    storage_scope_covers,
+    storage_scope_matches_filter,
 )
 from .database import LocalDatabaseRole, LocalSQLiteDatabase
 
@@ -236,7 +238,7 @@ class LocalRunRepository:
         if not rows:
             return None
         record = _run(rows[0])
-        return record if _scope_authorizes(record.scope, scope) else None
+        return record if storage_scope_matches_filter(record.scope, scope) else None
 
     async def compare_and_set(
         self,
@@ -568,7 +570,9 @@ class LocalRunResultRepository:
         if not rows:
             return None
         run_scope = _run_scope(rows[0])
-        return _result(rows[0], run_scope) if _scope_authorizes(run_scope, scope) else None
+        return (
+            _result(rows[0], run_scope) if storage_scope_matches_filter(run_scope, scope) else None
+        )
 
     async def delete(
         self,
@@ -615,7 +619,7 @@ class LocalRunResultRepository:
             if run_row is None:
                 return False
             run = _run(run_row)
-            if not _scope_authorizes(run.scope, scope):
+            if not storage_scope_matches_filter(run.scope, scope):
                 return False
             result_row = connection.execute(
                 "SELECT revision FROM local_run_results WHERE run_id = ?", (run_id,)
@@ -728,7 +732,7 @@ class LocalSessionRepository:
         if not rows:
             return None
         record = _session(rows[0])
-        return record if _scope_authorizes(record.scope, scope) else None
+        return record if storage_scope_matches_filter(record.scope, scope) else None
 
     async def compare_and_set(
         self,
@@ -832,7 +836,7 @@ class LocalSessionRepository:
             if row is None:
                 return False
             current = _session(row)
-            if not _scope_authorizes(current.scope, scope):
+            if not storage_scope_matches_filter(current.scope, scope):
                 return False
             if current.revision != expected_revision:
                 raise StorageConflictError(
@@ -998,7 +1002,7 @@ def _record_run_artifact_in_transaction(
     if row is None:
         raise StorageNotFoundError(run_id)
     current = _run(row)
-    if not _scope_authorizes(current.scope, scope):
+    if not storage_scope_covers(current.scope, scope):
         raise StorageNotFoundError(run_id)
     receipt = connection.execute(
         """
@@ -1041,7 +1045,7 @@ def _record_session_artifact_in_transaction(
     if row is None:
         raise StorageNotFoundError(session_id)
     current = _session(row)
-    if not _scope_authorizes(current.scope, scope):
+    if not storage_scope_covers(current.scope, scope):
         raise StorageNotFoundError(session_id)
     receipt = connection.execute(
         """
@@ -1392,11 +1396,6 @@ def _scope_filters(
     if not clauses:
         raise StorageConfigurationError("Control repository queries require populated scope")
     return clauses, values
-
-
-def _scope_authorizes(owner: StorageScope, operation: StorageScope) -> bool:
-    filters = operation.as_filter()
-    return bool(filters) and all(getattr(owner, name) == value for name, value in filters.items())
 
 
 def _next_revision(revision: int, expected_revision: int) -> None:

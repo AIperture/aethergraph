@@ -142,11 +142,15 @@ async def test_run_artifact_receipts_are_atomic_idempotent_and_concurrent(
     runs = LocalRunRepository(database=database)
     initial = _run("run-1")
     await runs.create(initial)
+    artifact_scope = replace(
+        initial.scope,
+        node_id="resource_ingress",
+    )
 
     updates = await asyncio.gather(
         *(
             runs.record_artifact(
-                initial.scope,
+                artifact_scope,
                 initial.run_id,
                 f"content-{index}",
                 f"occurrence-{index}",
@@ -383,7 +387,11 @@ async def test_session_cas_query_and_artifact_receipts(tmp_path: Path) -> None:
     assert await sessions.compare_and_set(renamed, 1) == renamed
 
     counted = await sessions.record_artifact(
-        renamed.scope,
+        replace(
+            renamed.scope,
+            graph_id="integration",
+            node_id="resource_ingress",
+        ),
         renamed.session_id,
         "occurrence-1",
         NOW + timedelta(minutes=2),

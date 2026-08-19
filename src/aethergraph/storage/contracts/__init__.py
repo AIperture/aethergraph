@@ -118,7 +118,7 @@ from .records import (
     SearchResult,
     StateRecord,
 )
-from .scope import StorageScope
+from .scope import StorageScope, storage_scope_covers, storage_scope_matches_filter
 from .stores import (
     ArtifactMetricOrder,
     ArtifactOccurrenceQuery,
@@ -300,6 +300,8 @@ __all__ = [
     "StorageReadOnlyError",
     "StorageScope",
     "StorageScopeError",
+    "storage_scope_covers",
+    "storage_scope_matches_filter",
     "StorageTimeoutError",
     "StorageSecretResolver",
     "UnknownStorageProviderError",

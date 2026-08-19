@@ -31,6 +31,7 @@ from ...contracts import (
     TriggerKind,
     TriggerQuery,
     TriggerRecord,
+    storage_scope_matches_filter,
 )
 from .database import LocalDatabaseRole, LocalSQLiteDatabase
 
@@ -238,7 +239,7 @@ class LocalTriggerRepository:
         if not rows:
             return None
         record = _trigger(rows[0])
-        return record if _scope_authorizes(record.scope, scope) else None
+        return record if storage_scope_matches_filter(record.scope, scope) else None
 
     async def compare_and_set(self, record: TriggerRecord, expected_revision: int) -> TriggerRecord:
         """Atomically replace mutable trigger definition state.
@@ -333,7 +334,7 @@ class LocalTriggerRepository:
             if row is None:
                 return False
             current = _trigger(row)
-            if not _scope_authorizes(current.scope, scope):
+            if not storage_scope_matches_filter(current.scope, scope):
                 return False
             if current.revision != expected_revision:
                 raise StorageConflictError("Trigger revision is stale")
@@ -596,7 +597,7 @@ class LocalTriggerRepository:
         if not rows:
             return None
         record = _claim(rows[0])
-        return record if _scope_authorizes(record.scope, scope) else None
+        return record if storage_scope_matches_filter(record.scope, scope) else None
 
     async def compare_and_set_claim(
         self, record: TriggerClaimRecord, expected_revision: int
@@ -996,11 +997,6 @@ def _scope_filters(scope: StorageScope, *, alias: str) -> tuple[list[str], list[
     if not clauses:
         raise StorageConfigurationError("Trigger operations require populated scope")
     return clauses, values
-
-
-def _scope_authorizes(owner: StorageScope, operation: StorageScope) -> bool:
-    filters = operation.as_filter()
-    return bool(filters) and all(getattr(owner, name) == value for name, value in filters.items())
 
 
 def _next_revision(revision: int, expected_revision: int) -> None:

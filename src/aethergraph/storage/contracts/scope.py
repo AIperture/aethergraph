@@ -98,3 +98,94 @@ class StorageScope:
             for item in fields(self)
             if (value := getattr(self, item.name)) is not None
         }
+
+
+def storage_scope_matches_filter(
+    record_scope: StorageScope,
+    filter_scope: StorageScope,
+) -> bool:
+    """Return whether one persisted scope matches a populated caller filter.
+
+    The filter may contain fewer dimensions than the persisted record. Every
+    populated filter dimension must match exactly, and an empty filter fails closed.
+
+    Examples:
+        Match a project filter against a session record:
+            ```python
+            record = StorageScope(project_id="project-1", session_id="session-1")
+            assert storage_scope_matches_filter(
+                record,
+                StorageScope(project_id="project-1"),
+            )
+            ```
+
+        Reject an empty filter:
+            ```python
+            assert not storage_scope_matches_filter(
+                StorageScope(project_id="project-1"),
+                StorageScope(),
+            )
+            ```
+
+    Args:
+        record_scope: Complete persisted scope being authorized.
+        filter_scope: Caller-supplied populated scope constraints.
+
+    Returns:
+        bool: `True` only when every populated filter dimension matches the record.
+
+    Notes:
+        This relation is for record lookup and mutation authorization. Use
+        `storage_scope_covers` for parent-to-child execution scope validation.
+    """
+    filters = filter_scope.as_filter()
+    return bool(filters) and all(
+        getattr(record_scope, name) == value for name, value in filters.items()
+    )
+
+
+def storage_scope_covers(
+    parent_scope: StorageScope,
+    child_scope: StorageScope,
+) -> bool:
+    """Return whether a populated parent scope covers a narrower child scope.
+
+    The child may add execution provenance such as run, graph, or node dimensions.
+    Every populated parent dimension must remain present and equal in the child.
+
+    Examples:
+        Cover node provenance from a session scope:
+            ```python
+            parent = StorageScope(project_id="project-1", session_id="session-1")
+            child = StorageScope(
+                project_id="project-1",
+                session_id="session-1",
+                graph_id="graph-1",
+                node_id="node-1",
+            )
+            assert storage_scope_covers(parent, child)
+            ```
+
+        Reject a child from another session:
+            ```python
+            assert not storage_scope_covers(
+                StorageScope(project_id="project-1", session_id="session-1"),
+                StorageScope(project_id="project-1", session_id="session-2"),
+            )
+            ```
+
+    Args:
+        parent_scope: Populated owner, run, or session scope establishing authority.
+        child_scope: Narrower operation or occurrence scope carrying provenance.
+
+    Returns:
+        bool: `True` only when every populated parent dimension matches the child.
+
+    Notes:
+        Empty parent scopes fail closed. This relation does not authorize record
+        filters; use `storage_scope_matches_filter` for that operation.
+    """
+    parent = parent_scope.as_filter()
+    return bool(parent) and all(
+        getattr(child_scope, name) == value for name, value in parent.items()
+    )

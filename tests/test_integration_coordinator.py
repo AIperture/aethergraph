@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -38,7 +39,12 @@ from aethergraph.services.integration import (
     VerifiedIntegrationContext,
     install_integration_ingress,
 )
-from aethergraph.storage.contracts import SessionKind, SessionRecord, StorageScope
+from aethergraph.storage.contracts import (
+    SessionKind,
+    SessionRecord,
+    StorageNotFoundError,
+    StorageScope,
+)
 from tests._canonical_storage_fakes import (
     make_integration_persistence,
     make_semantic_event_store,
@@ -660,6 +666,67 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
 
     assert staged == [payload]
     assert resources[0].artifact_id == "artifact-buffer"
+
+
+@pytest.mark.asyncio
+async def test_resource_ingress_surfaces_storage_scope_rejection(
+    caplog,
+    monkeypatch,
+) -> None:
+    payload = b"exact current buffer\n"
+
+    class _RejectingStager:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def stage_bytes(self, _data, **_kwargs):
+            raise StorageNotFoundError("session-1")
+
+    monkeypatch.setattr(
+        "aethergraph.services.integration.resources.ResourceStager",
+        _RejectingStager,
+    )
+    ingress = ResourceIngress(container=SimpleNamespace())
+    envelope = _envelope(
+        text=None,
+        attachments=(
+            IngressAttachment(
+                attachment_id="buffer-1",
+                source_kind="provider_file",
+                source_id="buffer-1",
+                filename="weather.py",
+                content_type="text/x-python",
+                size_bytes=len(payload),
+            ),
+        ),
+    )
+    verified = VerifiedIntegrationContext(
+        integration_id="slack-main",
+        integration_kind=IntegrationKind.SLACK,
+        external_tenant_id="team-T1",
+        attachments=(VerifiedAttachment("buffer-1", payload),),
+    )
+
+    with (
+        caplog.at_level(logging.ERROR, logger="aethergraph.integration.resources"),
+        pytest.raises(ResourceIngressError) as exc_info,
+    ):
+        await ingress.materialize(
+            verified=verified,
+            route=_route(),
+            binding=_binding(),
+            session_scope=_session().scope,
+            envelope=envelope,
+        )
+
+    assert exc_info.value.code == "integration.attachment_storage_scope_rejected"
+    record = next(
+        record for record in caplog.records if record.name == "aethergraph.integration.resources"
+    )
+    assert record.integration_error_code == "integration.attachment_storage_scope_rejected"
+    assert record.route_id == "route-slack"
+    assert record.attachment_id == "buffer-1"
+    assert record.storage_error_type == "StorageNotFoundError"
 
 
 @pytest.mark.asyncio

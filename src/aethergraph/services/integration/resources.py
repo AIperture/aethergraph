@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Literal
 
 from aethergraph.contracts.integration import (
@@ -22,6 +23,8 @@ from aethergraph.storage.contracts import StorageNotFoundError, StorageScope
 
 from .context import VerifiedIntegrationContext
 
+_LOG = logging.getLogger("aethergraph.integration.resources")
+
 
 class ResourceIngressError(RuntimeError):
     """Structured failure raised when inbound attachments violate route policy."""
@@ -40,6 +43,7 @@ class ResourceIngressError(RuntimeError):
             "integration.attachment_duplicate",
             "integration.artifact_not_found",
             "integration.attachment_scope_invalid",
+            "integration.attachment_storage_scope_rejected",
         ],
         message: str,
     ) -> None:
@@ -173,6 +177,15 @@ class ResourceIngress:
             Every declared provider attachment must have one exact verified byte payload.
         """
         if session_scope.session_id != binding.ag_session_id:
+            _LOG.error(
+                "Integration attachment binding does not match the canonical session scope",
+                extra={
+                    "integration_error_code": "integration.attachment_scope_invalid",
+                    "route_id": route.route_id,
+                    "bound_session_id": binding.ag_session_id,
+                    "session_scope": session_scope.as_filter(),
+                },
+            )
             raise ResourceIngressError(
                 code="integration.attachment_scope_invalid",
                 message="The bound session and attachment storage scope do not match.",
@@ -247,8 +260,21 @@ class ResourceIngress:
                         },
                     )
                 except StorageNotFoundError as exc:
+                    _LOG.exception(
+                        "Integration attachment storage rejected the canonical child scope",
+                        extra={
+                            "integration_error_code": (
+                                "integration.attachment_storage_scope_rejected"
+                            ),
+                            "route_id": route.route_id,
+                            "attachment_id": attachment.attachment_id,
+                            "bound_session_id": binding.ag_session_id,
+                            "session_scope": session_scope.as_filter(),
+                            "storage_error_type": type(exc).__name__,
+                        },
+                    )
                     raise ResourceIngressError(
-                        code="integration.attachment_scope_invalid",
+                        code="integration.attachment_storage_scope_rejected",
                         message="Attachment storage rejected the canonical session scope.",
                     ) from exc
                 resources.add(resource)
