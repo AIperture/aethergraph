@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
+import logging
 import math
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -178,11 +179,14 @@ class CanonicalMemoryFacadeFactory:
         logical_scope_id: str,
         provenance_scope: StorageScope | None = None,
         deprecated_app_id: str | None = None,
+        projection_logger: logging.Logger | logging.LoggerAdapter | None = None,
     ) -> CanonicalPublicMemoryFacade:
         """Bind stable public Memory behavior to one canonical execution scope.
 
-        The low-level facade and public DTO projection share the exact same bundle
-        stores. Logical bucket and deprecated App labels remain response metadata.
+        Intro:
+            The low-level facade and public DTO projection share the exact same bundle
+            stores. Logical bucket and deprecated App labels remain response metadata,
+            while the optional logger receives context-scoped projection degradation.
 
         Examples:
             Bind session Memory for `NodeContext`:
@@ -206,18 +210,30 @@ class CanonicalMemoryFacadeFactory:
                 )
                 ```
 
+            Bind node-scoped projection warnings:
+                ```python
+                memory = factory.for_public_execution(
+                    StorageScope(session_id="session-1"),
+                    logical_scope_id="session:session-1",
+                    projection_logger=context.logger(),
+                )
+                ```
+
         Args:
             execution_scope: Partial canonical dimensions selected by runtime scope policy.
             logical_scope_id: Stable public memory-bucket label, never provider scope.
             provenance_scope: Optional full execution provenance for public Event DTOs.
             deprecated_app_id: Optional explicitly deprecated response metadata.
+            projection_logger: Optional context-scoped logger for failed derived
+                search projections.
 
         Returns:
             CanonicalPublicMemoryFacade: Stable public projection over one canonical facade.
 
         Notes:
             This method performs no provider lifecycle operation and deprecated App
-            metadata never affects the scope passed to provider stores.
+            metadata never affects the scope passed to provider stores. The logger is
+            observational only and never selects a backend or changes commit authority.
         """
         provenance_input = provenance_scope or execution_scope
         resolved_provenance = merge_storage_scope(
@@ -236,4 +252,5 @@ class CanonicalMemoryFacadeFactory:
             default_signal_threshold=self._default_signal_threshold,
             clock=self._clock,
             event_id_factory=self._event_id_factory,
+            projection_logger=projection_logger,
         )

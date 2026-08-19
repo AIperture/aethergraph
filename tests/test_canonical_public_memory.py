@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import inspect
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,6 @@ from aethergraph.services.agent_state import CanonicalAgentStateFacade
 from aethergraph.services.memory import (
     CanonicalMemoryFacadeFactory,
     CanonicalPublicMemoryFacade,
-    MemoryProjectionError,
 )
 from aethergraph.services.memory.canonical_facade import CanonicalMemoryFacade
 from aethergraph.services.memory.canonical_prompt import CanonicalPromptMemoryMixin
@@ -106,6 +106,7 @@ def _open_bundle(root: Path, clock: _Clock):
 @pytest.mark.asyncio
 async def test_public_commit_receipt_preserves_authority_and_sanitizes_projection_failure(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     clock = _Clock()
     bundle = _open_bundle(tmp_path, clock)
@@ -119,8 +120,10 @@ async def test_public_commit_receipt_preserves_authority_and_sanitizes_projectio
         ),
         logical_scope_id="run:run-1",
         clock=clock.now,
+        projection_logger=logging.getLogger("tests.memory.projection"),
     )
     try:
+        caplog.set_level(logging.WARNING, logger="tests.memory.projection")
         receipt = await memory.append_event_commit(
             event_id="engine-output-1",
             kind="agent_engine.assistant_output",
@@ -133,12 +136,25 @@ async def test_public_commit_receipt_preserves_authority_and_sanitizes_projectio
         assert receipt.projection_status == "failed"
         assert receipt.projection_diagnostic == "RuntimeError: search projection failed"
         assert "secret-value" not in receipt.projection_diagnostic
-        with pytest.raises(MemoryProjectionError):
-            await memory.append_event(
-                event_id="engine-output-2",
-                kind="agent_engine.assistant_output",
-                data={"output_id": "output-2"},
-            )
+        appended = await memory.append_event(
+            event_id="engine-output-2",
+            kind="agent_engine.assistant_output",
+            data={"output_id": "output-2"},
+        )
+
+        assert appended.event_id == "engine-output-2"
+        warnings = [
+            record
+            for record in caplog.records
+            if getattr(record, "event_type", "") == "memory_projection_failed"
+        ]
+        assert [getattr(record, "memory_event_id", "") for record in warnings] == [
+            "engine-output-1",
+            "engine-output-2",
+        ]
+        assert all(getattr(record, "authoritative", False) for record in warnings)
+        assert all(getattr(record, "projection_status", "") == "failed" for record in warnings)
+        assert all("secret-value" not in record.getMessage() for record in warnings)
     finally:
         await bundle.close()
 

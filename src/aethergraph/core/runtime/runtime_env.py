@@ -192,6 +192,11 @@ class RuntimeEnv:
             logical_scope_id=mem_scope.memory_scope_id(),
             provenance_scope=memory_provenance_scope,
             deprecated_app_id=self.app_id,
+            projection_logger=self.logger_factory.for_node_ctx(
+                run_id=self.run_id,
+                node_id=node.node_id,
+                graph_id=self.graph_id,
+            ),
         )
 
         artifact_facade = self.container.artifact_factory.for_public_execution(
