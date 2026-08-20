@@ -448,6 +448,10 @@ class _ArtifactRepository:
             self.occurrences.append(occurrence)
         return occurrence
 
+    async def commit_execution_occurrence(self, occurrence: ArtifactOccurrence):
+        created = not any(row.occurrence_id == occurrence.occurrence_id for row in self.occurrences)
+        return await self.record_occurrence(occurrence), created
+
     async def get_occurrences_many(
         self,
         owner_scope: StorageScope,

@@ -1136,6 +1136,46 @@ class ArtifactRepository(Protocol):
         """
         ...
 
+    async def commit_execution_occurrence(
+        self,
+        occurrence: ArtifactOccurrence,
+    ) -> tuple[ArtifactOccurrence, bool]:
+        """Atomically commit an occurrence and its run/session accounting.
+
+        The referenced artifact must already exist and cover the occurrence scope.
+        Run and session counters are advanced in the same provider transaction only
+        when their corresponding dimensions are present.
+
+        Examples:
+            Adopt an ingress artifact into a run:
+                ```python
+                stored, created = await repository.commit_execution_occurrence(
+                    occurrence
+                )
+                ```
+
+            Retry the exact admission occurrence:
+                ```python
+                stored, created = await repository.commit_execution_occurrence(
+                    occurrence
+                )
+                assert created is False
+                ```
+
+        Args:
+            occurrence: Complete canonical occurrence with stable identity and time.
+
+        Returns:
+            tuple[ArtifactOccurrence, bool]: Authoritative occurrence and whether it
+            was newly created.
+
+        Notes:
+            Referenced run and session records must already exist. Missing ownership
+            or control records raise `StorageNotFoundError`; conflicting retries raise
+            `StorageIntegrityError`. No content bytes or metadata are copied.
+        """
+        ...
+
     async def get_occurrences_many(
         self,
         owner_scope: StorageScope,

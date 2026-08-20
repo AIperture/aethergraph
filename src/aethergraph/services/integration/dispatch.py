@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import hashlib
+import logging
 from typing import Protocol
 
 from aethergraph.api.v1.deps import RequestIdentity
@@ -15,9 +17,12 @@ from aethergraph.contracts.integration import (
 )
 from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
 from aethergraph.services.channel.resources import InputResource
+from aethergraph.storage.contracts import StorageScope
 
 from .context import VerifiedIntegrationContext
 from .delivery import SemanticTurnMonitor
+
+_LOG = logging.getLogger("aethergraph.integration.dispatch")
 
 
 class RootTurnDispatcher(Protocol):
@@ -195,6 +200,56 @@ class AGRootTurnDispatcher:
         user_meta = dict(envelope.transport_metadata)
         if envelope.structured_input is not None:
             user_meta["structured_input"] = envelope.structured_input
+
+        async def admit(record) -> None:
+            artifacts = self.container.artifact_factory.for_execution(
+                StorageScope(
+                    session_id=binding.ag_session_id,
+                    run_id=record.run_id,
+                    graph_id=graph_id,
+                    agent_id=route.entry_agent_id,
+                ),
+                tool_name="integration.resource_admission",
+            )
+            try:
+                for resource in resources:
+                    if not resource.artifact_id:
+                        raise ValueError(
+                            f"Input resource {resource.id or resource.name!r} has no artifact_id"
+                        )
+                    attachment_identity = resource.id or resource.artifact_id
+                    digest = hashlib.sha256(
+                        "\x00".join(
+                            (record.run_id, attachment_identity, resource.artifact_id)
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    await artifacts.attach_existing(
+                        resource.artifact_id,
+                        occurrence_id=f"occurrence-input-{digest}",
+                        occurred_at=record.started_at,
+                        labels={
+                            "attachment_id": attachment_identity,
+                            "integration_id": envelope.integration_id,
+                            "route_id": route.route_id,
+                        },
+                    )
+            except Exception:
+                _LOG.exception(
+                    "Root turn attachment adoption failed before execution",
+                    extra={
+                        "run_id": record.run_id,
+                        "session_id": binding.ag_session_id,
+                        "graph_id": graph_id,
+                        "agent_id": route.entry_agent_id,
+                        "integration_id": envelope.integration_id,
+                        "route_id": route.route_id,
+                        "artifact_ids": tuple(resource.artifact_id for resource in resources),
+                    },
+                )
+                raise
+            if admission_callback is not None:
+                await admission_callback(record.run_id)
+
         record = await self.container.run_manager.submit_run(
             graph_id=graph_id,
             inputs={
@@ -214,11 +269,7 @@ class AGRootTurnDispatcher:
             app_id=agent_meta.get("app_id"),
             tags=[f"agent:{route.entry_agent_id}", f"route:{route.route_id}"],
             run_config={"origin_binding": origin_binding.model_dump(mode="json")},
-            admission_callback=(
-                None
-                if admission_callback is None
-                else lambda record: admission_callback(record.run_id)
-            ),
+            admission_callback=(admit if resources or admission_callback is not None else None),
         )
         self.turn_monitor.observe(
             run_id=record.run_id,

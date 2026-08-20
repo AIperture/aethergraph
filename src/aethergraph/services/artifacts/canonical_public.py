@@ -18,6 +18,7 @@ from aethergraph.storage.contracts import (
     Page,
     PageRequest,
     SearchMode,
+    StorageScope,
 )
 
 from .canonical_facade import (
@@ -602,7 +603,12 @@ class CanonicalPublicArtifactFacade:
         )
         return self._project(receipt)
 
-    async def get_by_id(self, artifact_id: str) -> Artifact | None:
+    async def get_by_id(
+        self,
+        artifact_id: str,
+        *,
+        occurrence_scope: StorageScope | None = None,
+    ) -> Artifact | None:
         """Read one authorized public Artifact by stable identity.
 
         The canonical occurrence query applies exact owner and execution scope before
@@ -619,8 +625,18 @@ class CanonicalPublicArtifactFacade:
                 assert await artifacts.get_by_id("missing") is None
                 ```
 
+            Authorize through a root-run attachment occurrence:
+                ```python
+                artifact = await artifacts.get_by_id(
+                    "artifact-1",
+                    occurrence_scope=StorageScope(run_id="run-1"),
+                )
+                ```
+
         Args:
             artifact_id: Exact stable canonical Artifact identity.
+            occurrence_scope: Optional canonical occurrence filter. When omitted,
+                the facade's exact execution scope is required.
 
         Returns:
             Artifact | None: Newest authorized public occurrence or `None` when absent.
@@ -630,10 +646,16 @@ class CanonicalPublicArtifactFacade:
         """
         return await self.canonical.get_public(
             artifact_id,
+            scope=occurrence_scope,
             deprecated_app_id=self._deprecated_app_id,
         )
 
-    async def load_bytes_by_id(self, artifact_id: str) -> bytes:
+    async def load_bytes_by_id(
+        self,
+        artifact_id: str,
+        *,
+        occurrence_scope: StorageScope | None = None,
+    ) -> bytes:
         """Load exact owner-authorized Artifact bytes by identity.
 
         Public occurrence authorization is checked before canonical content streaming.
@@ -652,8 +674,18 @@ class CanonicalPublicArtifactFacade:
                     pass
                 ```
 
+            Load a run-adopted input from a downstream node:
+                ```python
+                payload = await artifacts.load_bytes_by_id(
+                    "artifact-1",
+                    occurrence_scope=StorageScope(run_id="run-1"),
+                )
+                ```
+
         Args:
             artifact_id: Exact stable canonical Artifact identity.
+            occurrence_scope: Optional canonical occurrence filter. When omitted,
+                the facade's exact execution scope is required.
 
         Returns:
             bytes: Complete immutable Artifact content.
@@ -661,7 +693,13 @@ class CanonicalPublicArtifactFacade:
         Notes:
             This bounded convenience method performs no filesystem or remote-URI fallback.
         """
-        if await self.get_by_id(artifact_id) is None:
+        if (
+            await self.get_by_id(
+                artifact_id,
+                occurrence_scope=occurrence_scope,
+            )
+            is None
+        ):
             raise FileNotFoundError(f"Artifact {artifact_id} not found")
         return await self.canonical.load_bytes(artifact_id)
 
