@@ -523,6 +523,36 @@ async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
 
 
 @pytest.mark.asyncio
+async def test_new_turn_outcome_emission_requires_explicit_reply_disposition() -> None:
+    event_log = make_semantic_event_store()
+    emitter = SemanticEventEmitter(
+        deployment_id="deployment-1",
+        store=event_log,
+        semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_VERSION,
+    )
+    try:
+        with pytest.raises(
+            SemanticDeliveryError,
+            match="explicit reply_disposition",
+        ):
+            await emitter.emit_semantic(
+                session_id="session-1",
+                turn_id="run-historical-shape",
+                producer="aethergraph.engine",
+                kind=SemanticEventKind.TURN_OUTCOME,
+                payload=TurnOutcomePayload(
+                    outcome="completed",
+                    code="completed",
+                    summary="Missing current delivery contract.",
+                    resumable=False,
+                    engine_turn_id="engine-turn-1",
+                ),
+            )
+    finally:
+        await event_log.close()
+
+
+@pytest.mark.asyncio
 async def test_turn_monitor_does_not_invent_outcome_for_infrastructure_failure(
     tmp_path,
 ) -> None:

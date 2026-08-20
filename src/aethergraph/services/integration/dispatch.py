@@ -15,7 +15,12 @@ from aethergraph.contracts.integration import (
     IntegrationRoute,
     OriginBinding,
 )
-from aethergraph.core.runtime.run_types import RunImportance, RunOrigin, RunVisibility
+from aethergraph.core.runtime.run_types import (
+    RunAdmissionError,
+    RunImportance,
+    RunOrigin,
+    RunVisibility,
+)
 from aethergraph.services.channel.resources import InputResource
 from aethergraph.storage.contracts import StorageScope
 
@@ -202,20 +207,64 @@ class AGRootTurnDispatcher:
             user_meta["structured_input"] = envelope.structured_input
 
         async def admit(record) -> None:
-            artifacts = self.container.artifact_factory.for_execution(
-                StorageScope(
-                    session_id=binding.ag_session_id,
+            expected_dimensions = {
+                "session_id": binding.ag_session_id,
+                "graph_id": graph_id,
+                "agent_id": route.entry_agent_id,
+            }
+            actual_dimensions = {
+                "session_id": record.session_id,
+                "graph_id": record.graph_id,
+                "agent_id": record.agent_id,
+            }
+            mismatched_dimensions = {
+                name: {"expected": expected, "actual": actual_dimensions[name]}
+                for name, expected in expected_dimensions.items()
+                if actual_dimensions[name] != expected
+            }
+            if mismatched_dimensions:
+                error = RunAdmissionError(
                     run_id=record.run_id,
-                    graph_id=graph_id,
-                    agent_id=route.entry_agent_id,
-                ),
+                    code="integration.artifact_run_scope_mismatch",
+                    stage="run_attachment_admission",
+                    safe_message=(
+                        "The persisted AG run scope does not match the integration route."
+                    ),
+                    details={"mismatched_dimensions": mismatched_dimensions},
+                )
+                _LOG.error(
+                    "integration.artifact_admission_failed",
+                    extra={
+                        "integration_error_code": error.code,
+                        "error_stage": error.stage,
+                        "run_id": record.run_id,
+                        "integration_id": envelope.integration_id,
+                        "route_id": route.route_id,
+                        **error.details,
+                    },
+                )
+                raise error
+            run_scope = StorageScope(
+                org_id=record.org_id,
+                user_id=record.user_id,
+                session_id=record.session_id,
+                run_id=record.run_id,
+                graph_id=record.graph_id,
+                agent_id=record.agent_id,
+            )
+            artifacts = self.container.artifact_factory.for_execution(
+                run_scope,
                 tool_name="integration.resource_admission",
             )
             try:
                 for resource in resources:
                     if not resource.artifact_id:
-                        raise ValueError(
-                            f"Input resource {resource.id or resource.name!r} has no artifact_id"
+                        raise RunAdmissionError(
+                            run_id=record.run_id,
+                            code="integration.artifact_identity_missing",
+                            stage="run_attachment_admission",
+                            safe_message="An admitted input resource has no artifact identity.",
+                            details={"attachment_id": resource.id or resource.name or "unknown"},
                         )
                     attachment_identity = resource.id or resource.artifact_id
                     digest = hashlib.sha256(
@@ -233,20 +282,32 @@ class AGRootTurnDispatcher:
                             "route_id": route.route_id,
                         },
                     )
-            except Exception:
-                _LOG.exception(
-                    "Root turn attachment adoption failed before execution",
-                    extra={
-                        "run_id": record.run_id,
-                        "session_id": binding.ag_session_id,
-                        "graph_id": graph_id,
-                        "agent_id": route.entry_agent_id,
-                        "integration_id": envelope.integration_id,
-                        "route_id": route.route_id,
+            except RunAdmissionError:
+                raise
+            except Exception as exc:
+                error = RunAdmissionError(
+                    run_id=record.run_id,
+                    code="integration.artifact_run_attachment_rejected",
+                    stage="run_attachment_admission",
+                    safe_message=("Canonical artifact storage rejected a run attachment."),
+                    details={
+                        "storage_error_type": type(exc).__name__,
+                        "run_scope": run_scope.as_filter(),
                         "artifact_ids": tuple(resource.artifact_id for resource in resources),
                     },
                 )
-                raise
+                _LOG.exception(
+                    "integration.artifact_admission_failed",
+                    extra={
+                        "integration_error_code": error.code,
+                        "error_stage": error.stage,
+                        "run_id": record.run_id,
+                        "integration_id": envelope.integration_id,
+                        "route_id": route.route_id,
+                        **error.details,
+                    },
+                )
+                raise error from exc
             if admission_callback is not None:
                 await admission_callback(record.run_id)
 

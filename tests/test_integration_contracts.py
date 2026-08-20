@@ -347,7 +347,7 @@ def test_semantic_event_round_trips_structured_tool_error_and_turn_outcome() -> 
     assert restored_outcome.payload.reply_disposition == "no_message"
 
 
-def test_historical_turn_outcome_defaults_to_message_required() -> None:
+def test_historical_turn_outcome_preserves_unknown_reply_disposition() -> None:
     payload = TurnOutcomePayload.model_validate(
         {
             "outcome": "completed",
@@ -358,7 +358,7 @@ def test_historical_turn_outcome_defaults_to_message_required() -> None:
         }
     )
 
-    assert payload.reply_disposition == "message_required"
+    assert payload.reply_disposition is None
 
 
 def test_semantic_event_fixture_freezes_coordinated_manifest_and_event_sequence() -> None:

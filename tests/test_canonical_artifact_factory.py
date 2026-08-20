@@ -225,7 +225,12 @@ async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Pat
         owner_scope=_owner_scope(),
         clock=clock.now,
     )
-    session_scope = StorageScope(**_owner_scope().as_filter(), session_id="session-1")
+    session_scope = StorageScope(
+        **_owner_scope().as_filter(),
+        org_id="org-1",
+        user_id="user-1",
+        session_id="session-1",
+    )
     run_scope = StorageScope(
         **session_scope.as_filter(),
         run_id="run-1",
@@ -244,6 +249,8 @@ async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Pat
     )
     ingress = factory.for_execution(
         StorageScope(
+            org_id="org-1",
+            user_id="user-1",
             session_id="session-1",
             graph_id="integration",
             node_id="resource_ingress",
@@ -268,6 +275,8 @@ async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Pat
         )
         admission = factory.for_execution(
             StorageScope(
+                org_id="org-1",
+                user_id="user-1",
                 session_id="session-1",
                 run_id="run-1",
                 graph_id="graph-1",

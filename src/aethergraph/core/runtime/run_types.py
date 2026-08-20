@@ -40,6 +40,26 @@ class RunImportance(str, Enum):
     ephemeral = "ephemeral"  # low-importance run, noisy or temporary (may be pruned sooner)
 
 
+class RunAdmissionError(RuntimeError):
+    """Structured failure raised after a run is durable but before execution starts."""
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        code: str,
+        stage: str,
+        safe_message: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(safe_message)
+        self.run_id = run_id
+        self.code = code
+        self.stage = stage
+        self.safe_message = safe_message
+        self.details = dict(details or {})
+
+
 @dataclass
 class RunRecord:
     """

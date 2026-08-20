@@ -102,7 +102,15 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
 
     class _RunManager:
         async def submit_run(self, **kwargs):
-            record = SimpleNamespace(run_id="run-root-1", started_at=_NOW)
+            record = SimpleNamespace(
+                run_id="run-root-1",
+                started_at=_NOW,
+                session_id="session-1",
+                graph_id="graph.support",
+                agent_id="agent.support",
+                org_id="org-1",
+                user_id="user-1",
+            )
             await kwargs["admission_callback"](record)
             events.append(("execution_scheduled", record.run_id))
             return record
@@ -153,6 +161,8 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
     assert scope.session_id == "session-1"
     assert scope.graph_id == "graph.support"
     assert scope.agent_id == "agent.support"
+    assert scope.org_id == "org-1"
+    assert scope.user_id == "user-1"
 
 
 def _manifest(route: IntegrationRoute) -> HostManifest:

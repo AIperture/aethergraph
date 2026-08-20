@@ -676,11 +676,14 @@ class TurnOutcomePayload(IntegrationContract):
     summary: Annotated[str, Field(min_length=1, max_length=4_000)]
     resumable: bool
     engine_turn_id: Identifier
-    reply_disposition: Literal[
-        "message_required",
-        "structured_satisfied",
-        "no_message",
-    ] = "message_required"
+    reply_disposition: (
+        Literal[
+            "message_required",
+            "structured_satisfied",
+            "no_message",
+        ]
+        | None
+    ) = None
 
 
 LegacySemanticPayload: TypeAlias = (
