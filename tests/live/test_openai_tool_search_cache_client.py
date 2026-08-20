@@ -88,7 +88,7 @@ async def test_generic_client_reports_search_and_activation_cache_usage() -> Non
             tool_request=initial_request,
             prompt_cache=PromptCacheRequest((0, 1), family),
             reasoning_effort="low",
-            max_output_tokens=256,
+            max_output_tokens=1_024,
         )
         assert isinstance(initial, ToolCallResponse)
         assert initial.transport_checkpoint is not None
@@ -97,7 +97,7 @@ async def test_generic_client_reports_search_and_activation_cache_usage() -> Non
             tool_request=initial_request,
             prompt_cache=PromptCacheRequest((0, 1), family),
             reasoning_effort="low",
-            max_output_tokens=256,
+            max_output_tokens=1_024,
         )
         assert isinstance(search_replay, ToolCallResponse)
         assert search_replay.transport_checkpoint is not None
@@ -106,7 +106,7 @@ async def test_generic_client_reports_search_and_activation_cache_usage() -> Non
             choice="auto",
             discovery=discovery,
             turn_id="cache-smoke",
-            active_tool_names=tuple(tool.name for tool in tools),
+            active_tool_names=tuple(tool.name for tool in tools[:5]),
             transport_checkpoint=initial.transport_checkpoint,
         )
         _, activation_usage = await client.chat(
@@ -114,14 +114,14 @@ async def test_generic_client_reports_search_and_activation_cache_usage() -> Non
             tool_request=loaded_request,
             prompt_cache=PromptCacheRequest((0, 1), family),
             reasoning_effort="low",
-            max_output_tokens=256,
+            max_output_tokens=1_024,
         )
         _, activation_replay_usage = await client.chat(
             list(scenario.messages),
             tool_request=loaded_request,
             prompt_cache=PromptCacheRequest((0, 1), family),
             reasoning_effort="low",
-            max_output_tokens=256,
+            max_output_tokens=1_024,
         )
     finally:
         await client.aclose()

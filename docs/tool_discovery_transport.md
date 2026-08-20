@@ -74,3 +74,26 @@ request fingerprint, status code, and a bounded provider response before re-rais
 AG transport and observation failures likewise propagate after logging; the
 diagnostic never converts a provider error into zero usage or a passing cache result.
 
+### Sanitized Luna measurement — 2026-08-20
+
+The corrected diagnostic completed against `gpt-5.6-luna`. Each replay pair had an
+identical credential-free request fingerprint. The observed usage was:
+
+| Raw Responses phase | Input | Output | Cache read | Cache write |
+| --- | ---: | ---: | ---: | ---: |
+| Client search | 3,529 | 50 | 0 | 3,526 |
+| Client search replay | 3,529 | 63 | 3,526 | 0 |
+| Client activation | 3,710 | 126 | 0 | 3,707 |
+| Client activation replay | 3,710 | 119 | 3,707 | 0 |
+| Hosted search | 5,571 | 62 | 0 | 5,375 |
+| Hosted search replay | 5,573 | 64 | 5,375 | 0 |
+
+| AG adapter phase | Input | Output | Cache read | Cache write |
+| --- | ---: | ---: | ---: | ---: |
+| Client search | 3,570 | 57 | 0 | 3,567 |
+| Client search replay | 3,570 | 53 | 3,567 | 0 |
+| Client activation | 3,717 | 127 | 0 | 3,714 |
+| Client activation replay | 3,717 | 127 | 3,714 | 0 |
+
+This run observed cache admission on every exact replay. It is evidence about that
+provider run, not a production guarantee or a reason to add a cache-dependent path.

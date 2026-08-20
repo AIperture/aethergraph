@@ -52,10 +52,6 @@ def build_cache_scenario(model: str) -> CacheScenario:
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Workspace-relative path."},
-                    "section": {
-                        "type": "string",
-                        "description": "Optional named document section.",
-                    },
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -148,7 +144,7 @@ def raw_client_search_body(scenario: CacheScenario, *, cache_key: str) -> dict:
         "parallel_tool_calls": False,
         "prompt_cache_key": cache_key,
         "reasoning": {"effort": "low"},
-        "max_output_tokens": 256,
+        "max_output_tokens": 1_024,
     }
 
 
@@ -163,7 +159,7 @@ def raw_hosted_search_body(scenario: CacheScenario, *, cache_key: str) -> dict:
         "parallel_tool_calls": False,
         "prompt_cache_key": cache_key,
         "reasoning": {"effort": "low"},
-        "max_output_tokens": 256,
+        "max_output_tokens": 1_024,
     }
 
 
@@ -185,12 +181,12 @@ def raw_loaded_body(
                 "execution": "client",
                 "call_id": call_id,
                 "status": "completed",
-                "tools": list(scenario.tools),
+                "tools": list(scenario.tools[:5]),
             }
         ],
         "prompt_cache_key": cache_key,
         "reasoning": {"effort": "low"},
-        "max_output_tokens": 256,
+        "max_output_tokens": 1_024,
     }
 
 
