@@ -664,6 +664,7 @@ class SemanticTurnMonitor:
                 summary=raw_outcome.get("summary"),
                 resumable=raw_outcome.get("resumable"),
                 engine_turn_id=raw_outcome.get("engine_turn_id"),
+                reply_disposition=raw_outcome.get("reply_disposition"),
             )
         except Exception as exc:
             raise SemanticDeliveryError(

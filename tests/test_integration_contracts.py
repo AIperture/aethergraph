@@ -338,11 +338,27 @@ def test_semantic_event_round_trips_structured_tool_error_and_turn_outcome() -> 
             summary="The Agent exhausted its step budget.",
             resumable=False,
             engine_turn_id="engine_turn_1",
+            reply_disposition="no_message",
         ),
     )
     restored_outcome = SemanticEvent.model_validate_json(outcome_event.model_dump_json())
     assert type(restored_outcome.payload) is TurnOutcomePayload
     assert restored_outcome.payload.outcome == "budget_exhausted"
+    assert restored_outcome.payload.reply_disposition == "no_message"
+
+
+def test_historical_turn_outcome_defaults_to_message_required() -> None:
+    payload = TurnOutcomePayload.model_validate(
+        {
+            "outcome": "completed",
+            "code": "completed",
+            "summary": "Historical completion.",
+            "resumable": False,
+            "engine_turn_id": "engine-turn-old",
+        }
+    )
+
+    assert payload.reply_disposition == "message_required"
 
 
 def test_semantic_event_fixture_freezes_coordinated_manifest_and_event_sequence() -> None:

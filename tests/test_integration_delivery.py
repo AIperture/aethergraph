@@ -426,6 +426,7 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
                         "summary": "Execution completed.",
                         "resumable": False,
                         "engine_turn_id": "engine-turn-1",
+                        "reply_disposition": "message_required",
                     }
                 },
             )
@@ -446,6 +447,7 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
     assert history[1].event.kind == SemanticEventKind.TURN_OUTCOME
     assert isinstance(history[1].event.payload, TurnOutcomePayload)
     assert history[1].event.payload.outcome == "completed"
+    assert history[1].event.payload.reply_disposition == "message_required"
     assert history[1].event.extensions == {
         "aethergraph.integration_id": "agstudio",
         "aethergraph.route_id": "studio-assistant",
@@ -488,6 +490,7 @@ async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
                         "summary": "The response could not be composed.",
                         "resumable": False,
                         "engine_turn_id": "engine-turn-7",
+                        "reply_disposition": "no_message",
                         "runtime_error": True,
                         "diagnostics": {"phase": "composition"},
                     }
@@ -514,6 +517,7 @@ async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
     assert isinstance(payload, TurnOutcomePayload)
     assert payload.outcome == "failed"
     assert payload.engine_turn_id == "engine-turn-7"
+    assert payload.reply_disposition == "no_message"
     assert "runtime_error" not in payload.model_dump()
     await event_log.close()
 
