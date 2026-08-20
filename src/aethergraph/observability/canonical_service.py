@@ -357,6 +357,7 @@ def _llm_draft(
             {
                 "messages": record.messages,
                 "provider_request_args": record.provider_request_args,
+                "tools": record.tool_definitions,
             },
             policy=policy,
         )
@@ -439,6 +440,9 @@ def _llm_draft(
         captured_response=captured_response,
         trace_payload=captured_trace,
         attempts=tuple(_attempt(attempt) for attempt in record.attempts),
+        tool_surface=record.tool_surface,
+        request_items=record.request_items,
+        response_items=record.response_items,
     )
 
 

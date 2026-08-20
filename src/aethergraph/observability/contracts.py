@@ -147,6 +147,10 @@ class LLMCallRecord(BaseModel):
     retry_count: int = 0
     total_retry_wait_ms: int = 0
     attempts: list[LLMCallAttempt] = Field(default_factory=list)
+    tool_surface: dict[str, Any] | None = None
+    request_items: list[dict[str, Any]] = Field(default_factory=list)
+    response_items: list[dict[str, Any]] = Field(default_factory=list)
+    tools: list[dict[str, Any]] | None = None
 
 
 class LLMCallListResponse(BaseModel):

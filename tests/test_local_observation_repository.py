@@ -515,10 +515,23 @@ async def test_llm_full_capture_is_atomic_idempotent_and_detail_only(tmp_path: P
         captured_response={"text": "ok"},
         trace_payload={"steps": ["request", "response"]},
     )
+    call = replace(
+        call,
+        tool_surface={
+            "schema_version": "aethergraph.llm-tool-surface/v1",
+            "active_count": 1,
+            "tools": [{"ordinal": 0, "name": "read", "active": True}],
+        },
+        request_items=[{"ordinal": 0, "kind": "tool_output", "call_id": "call-a"}],
+        response_items=[{"ordinal": 0, "kind": "tool_call", "tool_name": "read"}],
+    )
 
     record = await repository.append_llm_call(call)
     assert record.llm_call_id == "call-1"
     assert record.attempts == call.attempts
+    assert record.tool_surface == call.tool_surface
+    assert record.request_items == call.request_items
+    assert record.response_items == call.response_items
     assert not hasattr(record, "captured_request")
     assert await repository.append_llm_call(call) == record
     page = await repository.query_llm_calls(LLMCallQuery(scope=SCOPE))

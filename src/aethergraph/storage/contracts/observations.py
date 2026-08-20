@@ -384,6 +384,9 @@ class LLMCallDraft:
     captured_response: FrozenJson = None
     trace_payload: FrozenJson = None
     attempts: tuple[LLMCallAttempt, ...] = ()
+    tool_surface: FrozenJson = None
+    request_items: FrozenJson = None
+    response_items: FrozenJson = None
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -436,6 +439,9 @@ class LLMCallRecord:
     response_preview: FrozenJson = None
     trace_payload_preview: FrozenJson = None
     attempts: tuple[LLMCallAttempt, ...] = ()
+    tool_surface: FrozenJson = None
+    request_items: FrozenJson = None
+    response_items: FrozenJson = None
     schema_version: int = 1
 
     def __post_init__(self) -> None:
@@ -525,6 +531,8 @@ def _freeze_llm_fields(value: LLMCallDraft | LLMCallRecord) -> None:
     )
     object.__setattr__(value, "usage", _freeze_mapping(value.usage, path="usage"))
     for name in ("request_preview", "response_preview"):
+        object.__setattr__(value, name, _freeze_json(getattr(value, name), path=name))
+    for name in ("tool_surface", "request_items", "response_items"):
         object.__setattr__(value, name, _freeze_json(getattr(value, name), path=name))
     if isinstance(value, LLMCallDraft):
         for name in ("captured_request", "captured_response", "trace_payload"):

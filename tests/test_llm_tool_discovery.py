@@ -605,11 +605,15 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert "ledger plan event" in appended_after_search[1]["content"][0]["text"]
     assert "ledger observation" in appended_after_search[2]["content"][0]["text"]
     assert appended_after_search[3]["content"] == "volatile frame: cycle 1"
-    observed = sink.records[-1].request_args["native_tool_calling"]
-    assert observed["active_tool_names"] == ["read_document"]
-    assert observed["active_tool_count"] == 1
-    assert observed["tool_catalog_fingerprint"]
-    assert observed["tool_surface_fingerprint"]
+    observed = sink.records[-1].tool_surface
+    assert observed is not None
+    assert [tool["name"] for tool in observed["tools"] if tool["active"]] == ["read_document"]
+    assert observed["active_count"] == 1
+    assert observed["catalog_fingerprint"]
+    assert observed["surface_fingerprint"]
+    assert "native_tool_calling" not in sink.records[-1].request_args
+    assert "native_tool_calling" not in sink.records[-1].provider_request_args
+    assert sink.records[-1].response_items[0]["tool_name"] == "read_document"
     assert sink.records[-1].request_args["prompt_cache"]["implicit_latest_breakpoint"] is True
 
     fake_http.payload = {
@@ -679,6 +683,11 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert "ledger plan event" in appended_after_result[2]["content"][0]["text"]
     assert "ledger observation" in appended_after_result[3]["content"][0]["text"]
     assert appended_after_result[4]["content"] == "volatile frame: cycle 2"
+    request_item = sink.records[-1].request_items[0]
+    assert request_item["kind"] == "tool_output"
+    assert request_item["call_id"] == "call_1"
+    assert request_item["content_bytes"] == len(b'{"path":"a.md","status":"ok"}')
+    assert len(request_item["content_sha256"]) == 64
 
 
 def test_openai_continuation_rejects_rewritten_stable_prefix() -> None:

@@ -92,6 +92,10 @@ class LLMObservationRecord:
     error_message: str | None = None
     prompt_manifest_id: str | None = None
     attempts: tuple[ProviderTransportAttempt, ...] = ()
+    tool_surface: dict[str, Any] | None = None
+    request_items: list[dict[str, Any]] = field(default_factory=list)
+    response_items: list[dict[str, Any]] = field(default_factory=list)
+    tool_definitions: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def new(
@@ -116,6 +120,9 @@ class LLMObservationRecord:
         trace_payload: dict[str, Any] | None,
         profile_name: str | None = None,
         call_name: str | None = None,
+        tool_surface: dict[str, Any] | None = None,
+        request_items: list[dict[str, Any]] | None = None,
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> LLMObservationRecord:
         return cls(
             llm_call_id=str(uuid.uuid4()),
@@ -139,6 +146,9 @@ class LLMObservationRecord:
             provider_request_args=provider_request_args or {},
             compatibility_notes=compatibility_notes or [],
             trace_payload=trace_payload,
+            tool_surface=tool_surface,
+            request_items=request_items or [],
+            tool_definitions=tool_definitions or [],
         )
 
 

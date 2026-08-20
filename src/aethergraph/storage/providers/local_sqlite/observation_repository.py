@@ -225,6 +225,7 @@ CREATE INDEX ix_local_llm_calls_capture ON local_llm_calls(capture_mode, observa
 _CREATE_LLM_MANIFEST_INDEX = """
 CREATE INDEX ix_local_llm_calls_manifest ON local_llm_calls(prompt_manifest_id)
 """
+_LLM_TYPED_OBSERVATION_KEY = "__aethergraph_typed_observation_v1"
 _CREATE_ATTEMPTS = """
 CREATE TABLE local_llm_attempts (
     llm_call_id TEXT NOT NULL
@@ -554,7 +555,7 @@ class LocalObservationRepository:
                     call.capture_mode.value,
                     call.profile_name,
                     call.call_name,
-                    _json(call.request_options),
+                    _json(_stored_llm_request_options(call)),
                     _json(call.usage),
                     call.latency_ms,
                     call.error_type,
@@ -1536,6 +1537,9 @@ def _llm_record(
     attempts: tuple[LLMCallAttempt, ...],
 ) -> LLMCallRecord:
     try:
+        request_options, typed = _loaded_llm_request_options(
+            _json_object(row["request_options_json"])
+        )
         return LLMCallRecord(
             llm_call_id=str(row["llm_call_id"]),
             observation=observation,
@@ -1545,7 +1549,7 @@ def _llm_record(
             capture_mode=ObservationCaptureMode(str(row["capture_mode"])),
             profile_name=row["profile_name"],
             call_name=row["call_name"],
-            request_options=_json_object(row["request_options_json"]),
+            request_options=request_options,
             usage=_json_object(row["usage_json"]),
             latency_ms=row["latency_ms"],
             error_type=row["error_type"],
@@ -1555,6 +1559,9 @@ def _llm_record(
             response_preview=_json_value(row["response_preview_json"]),
             trace_payload_preview=_json_value(row["trace_payload_preview_json"]),
             attempts=attempts,
+            tool_surface=typed.get("tool_surface"),
+            request_items=typed.get("request_items"),
+            response_items=typed.get("response_items"),
             schema_version=int(row["schema_version"]),
         )
     except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -2462,9 +2469,36 @@ def _llm_digest(call: LLMCallDraft) -> str:
             }
             for attempt in call.attempts
         ],
+        "tool_surface": call.tool_surface,
+        "request_items": call.request_items,
+        "response_items": call.response_items,
         "schema_version": call.schema_version,
     }
     return hashlib.sha256(_json(payload).encode()).hexdigest()
+
+
+def _stored_llm_request_options(call: LLMCallDraft) -> dict[str, Any]:
+    options = dict(call.request_options)
+    if _LLM_TYPED_OBSERVATION_KEY in options:
+        raise StorageIntegrityError("LLM request options use the reserved typed-observation key")
+    options[_LLM_TYPED_OBSERVATION_KEY] = {
+        "tool_surface": call.tool_surface,
+        "request_items": call.request_items,
+        "response_items": call.response_items,
+    }
+    return options
+
+
+def _loaded_llm_request_options(
+    stored: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    options = dict(stored)
+    typed = options.pop(_LLM_TYPED_OBSERVATION_KEY, None)
+    if typed is None:
+        return options, {}
+    if not isinstance(typed, dict):
+        raise StorageIntegrityError("Persisted typed LLM observation is malformed")
+    return options, dict(typed)
 
 
 def _observation_cursor(sequence: int) -> str:

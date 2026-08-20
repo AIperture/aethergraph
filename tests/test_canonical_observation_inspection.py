@@ -177,6 +177,22 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
         raw_text="hello back",
         usage={"input_tokens": 2, "output_tokens": 2},
         latency_ms=10,
+        tool_surface={
+            "schema_version": "aethergraph.llm-tool-surface/v1",
+            "active_count": 1,
+            "tools": [{"ordinal": 0, "name": "read", "active": True}],
+        },
+        request_items=[{"ordinal": 0, "kind": "tool_output", "call_id": "call-a"}],
+        response_items=[{"ordinal": 0, "kind": "tool_call", "tool_name": "read"}],
+        tool_definitions=[
+            {
+                "name": "read",
+                "description": "Read.",
+                "input_schema": {"type": "object"},
+                "exposure": "immediate",
+                "path": None,
+            }
+        ],
     )
     await service.emit(call, capture_mode="manifest")
     reader = CanonicalInspectionReader(service)
@@ -190,11 +206,16 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
     assert len(page.items) == 1
     assert page.items[0].messages is None
     assert page.items[0].raw_text is None
+    assert page.items[0].tool_surface is not None
+    assert page.items[0].tool_surface["active_count"] == 1
+    assert page.items[0].response_items[0]["tool_name"] == "read"
     detail = await reader.get_llm_call("call-1", required_run_id="run-1")
     assert detail.messages == [{"role": "user", "content": "hello"}]
     assert detail.raw_text == "hello back"
     assert detail.trace_payload == {"step": "done"}
     assert detail.reasoning_effort == "low"
+    assert detail.tools is not None
+    assert detail.tools[0]["name"] == "read"
     summary = await reader.summarize_llm_calls("run-1")
     assert summary.total_calls == 1
     assert summary.total_prompt_tokens == 2

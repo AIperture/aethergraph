@@ -768,6 +768,7 @@ def _llm(
     captured_request = _thaw_json(detail.captured_request) if detail is not None else None
     captured_response = _thaw_json(detail.captured_response) if detail is not None else None
     messages = captured_request.get("messages") if isinstance(captured_request, Mapping) else None
+    tools = captured_request.get("tools") if isinstance(captured_request, Mapping) else None
     raw_text = captured_response.get("text") if isinstance(captured_response, Mapping) else None
     status = record.observation.status.value
     return LLMCallRecord(
@@ -806,6 +807,10 @@ def _llm(
         retry_count=max(0, len(all_attempts) - 1),
         total_retry_wait_ms=sum(attempt.scheduled_delay_ms or 0 for attempt in all_attempts),
         attempts=attempts,
+        tool_surface=_thaw_json(record.tool_surface),
+        request_items=list(_thaw_json(record.request_items) or []),
+        response_items=list(_thaw_json(record.response_items) or []),
+        tools=tools,
     )
 
 

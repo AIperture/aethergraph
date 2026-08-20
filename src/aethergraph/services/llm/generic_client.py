@@ -87,8 +87,10 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
     assistant_output_identity,
-    tool_call_request_fingerprint,
-    tool_call_surface_fingerprint,
+    tool_call_definitions,
+    tool_call_request_item_summaries,
+    tool_call_response_item_summaries,
+    tool_call_surface_summary,
 )
 from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryCapabilities,
@@ -1966,6 +1968,9 @@ class GenericLLMClient(LLMClientProtocol):
         compatibility_notes: list[str] | None,
         trace_payload: dict[str, Any] | None,
         call_name: str | None = None,
+        tool_surface: dict[str, Any] | None = None,
+        request_items: list[dict[str, Any]] | None = None,
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> LLMObservationRecord:
         record = LLMObservationRecord.new(
             call_type=call_type,
@@ -1987,6 +1992,9 @@ class GenericLLMClient(LLMClientProtocol):
             trace_payload=trace_payload,
             profile_name=self.profile_name,
             call_name=call_name,
+            tool_surface=tool_surface,
+            request_items=request_items,
+            tool_definitions=tool_definitions,
         )
         begin_llm_call_correlation(record.llm_call_id)
         return record
@@ -2258,7 +2266,6 @@ class GenericLLMClient(LLMClientProtocol):
                 "prompt_cache",
                 "profile policy requires explicit stable-prefix boundaries",
             )
-        discovery_capability: ToolDiscoveryModeCapability | None = None
         if tool_request is not None:
             if not isinstance(tool_request, ToolCallRequest):
                 raise TypeError("tool_request must be a ToolCallRequest")
@@ -2270,7 +2277,7 @@ class GenericLLMClient(LLMClientProtocol):
                 raise ValueError("Native Tool calling cannot be combined with structured output")
             if kw.get("tools") is not None or kw.get("tool_choice") is not None:
                 raise ValueError("tool_request cannot be combined with legacy tools/tool_choice")
-            discovery_capability = self._validate_tool_discovery_binding(
+            self._validate_tool_discovery_binding(
                 model=model,
                 request=tool_request,
             )
@@ -2380,6 +2387,9 @@ class GenericLLMClient(LLMClientProtocol):
                     compatibility_notes=compatibility_notes,
                     trace_payload=trace_payload,
                     call_name=call_name,
+                    tool_surface=tool_call_surface_summary(tool_request),
+                    request_items=list(tool_call_request_item_summaries(tool_request)),
+                    tool_definitions=tool_call_definitions(tool_request),
                 )
                 observation_record.error_type = type(exc).__name__
                 observation_record.error_message = str(exc)
@@ -2440,31 +2450,6 @@ class GenericLLMClient(LLMClientProtocol):
         provider_request_args["endpoint_id"] = self.endpoint_id or "legacy_compat"
         request_args["effective_endpoint_id"] = effective_endpoint_id
         provider_request_args["effective_endpoint_id"] = effective_endpoint_id
-        if tool_request is not None:
-            tool_request_summary = {
-                "choice": tool_request.choice,
-                "max_calls": tool_request.max_calls,
-                "tool_names": [tool.name for tool in tool_request.tools],
-                "tool_count": len(tool_request.tools),
-                "active_tool_names": list(tool_request.active_tool_names),
-                "active_tool_count": len(tool_request.active_tool_names),
-                "tool_catalog_fingerprint": tool_call_request_fingerprint(tool_request)[:16],
-                "tool_surface_fingerprint": tool_call_surface_fingerprint(tool_request)[:16],
-            }
-            if tool_request.discovery is not None and discovery_capability is not None:
-                tool_request_summary["discovery"] = {
-                    "mode": tool_request.discovery.mode,
-                    "max_results": tool_request.discovery.max_results,
-                    "endpoint_family": self._resolve_chat_adapter(
-                        has_tool_request=True
-                    ).protocol_family,
-                    "replay_requirement": discovery_capability.replay_requirement,
-                    "result_limit_behavior": discovery_capability.result_limit_behavior,
-                    "capability_max_results": discovery_capability.max_results,
-                    "protocol_version": discovery_capability.protocol_version,
-                }
-            request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
-            provider_request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
         if prepared_structured_output is not None:
             request_args["structured_output_validation_owner"] = canonical_validation_owner
             provider_request_args = _merge_request_fields(
@@ -2523,6 +2508,9 @@ class GenericLLMClient(LLMClientProtocol):
             compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             call_name=call_name,
+            tool_surface=tool_call_surface_summary(tool_request),
+            request_items=list(tool_call_request_item_summaries(tool_request)),
+            tool_definitions=tool_call_definitions(tool_request),
         )
         tags = ["llm", "chat"]
         if call_name:
@@ -2649,6 +2637,7 @@ class GenericLLMClient(LLMClientProtocol):
                     },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
+            observation_record.response_items = list(tool_call_response_item_summaries(response))
             if prepared_structured_output is not None:
                 if canonical_validation_owner == "caller":
                     request_args["structured_output_validation_outcome"] = "delegated"
