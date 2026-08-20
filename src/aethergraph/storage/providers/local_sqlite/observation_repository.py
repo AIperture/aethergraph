@@ -16,6 +16,7 @@ from ...contracts import (
     LLMCallAttempt,
     LLMCallDetail,
     LLMCallDraft,
+    LLMCallLifecycleStatus,
     LLMCallQuery,
     LLMCallRecord,
     ObservationCaptureMode,
@@ -48,7 +49,7 @@ from ...contracts import (
 )
 from .database import LocalDatabaseRole, LocalSQLiteDatabase
 
-_COMPONENT_VERSION = 1
+_COMPONENT_VERSION = 2
 _SCOPE_COLUMNS = (
     "tenant_id",
     "project_id",
@@ -192,6 +193,9 @@ CREATE TABLE local_llm_calls (
     provider TEXT NOT NULL,
     model TEXT NOT NULL,
     capture_mode TEXT NOT NULL,
+    lifecycle_status TEXT NOT NULL CHECK (
+        lifecycle_status IN ('in_progress', 'completed', 'failed', 'cancelled')
+    ),
     profile_name TEXT,
     call_name TEXT,
     request_options_json TEXT NOT NULL,
@@ -225,6 +229,11 @@ CREATE INDEX ix_local_llm_calls_capture ON local_llm_calls(capture_mode, observa
 _CREATE_LLM_MANIFEST_INDEX = """
 CREATE INDEX ix_local_llm_calls_manifest ON local_llm_calls(prompt_manifest_id)
 """
+_MIGRATE_OBSERVATIONS_V1_TO_V2 = (
+    "ALTER TABLE local_llm_calls ADD COLUMN lifecycle_status TEXT NOT NULL "
+    "DEFAULT 'completed' CHECK (lifecycle_status IN "
+    "('in_progress', 'completed', 'failed', 'cancelled'))",
+)
 _LLM_TYPED_OBSERVATION_KEY = "__aethergraph_typed_observation_v1"
 _CREATE_ATTEMPTS = """
 CREATE TABLE local_llm_attempts (
@@ -465,8 +474,8 @@ class LocalObservationRepository:
 
         return await self._database.read_transaction(read)
 
-    async def append_llm_call(self, call: LLMCallDraft) -> LLMCallRecord:
-        """Atomically append LLM metadata, attempts, observation, and captures.
+    async def begin_llm_call(self, call: LLMCallDraft) -> LLMCallRecord:
+        """Atomically persist an in-progress LLM request and its captures.
 
         Prepared capture content is content-addressed and deduplicated. The method
         returns a metadata-only record suitable for list and inspection summaries.
@@ -474,12 +483,12 @@ class LocalObservationRepository:
         Examples:
             Store one call:
                 ```python
-                record = await repository.append_llm_call(call)
+                record = await repository.begin_llm_call(call)
                 ```
 
             Retry exact identity:
                 ```python
-                assert await repository.append_llm_call(call) == record
+                assert await repository.begin_llm_call(call) == record
                 ```
 
         Args:
@@ -492,6 +501,8 @@ class LocalObservationRepository:
             Conflicting LLM or observation identity rolls back every dependent row.
         """
         self._require_writable()
+        if call.lifecycle_status is not LLMCallLifecycleStatus.IN_PROGRESS:
+            raise StorageIntegrityError("LLM begin draft must be in_progress")
         digest = _llm_digest(call)
 
         def commit(connection: sqlite3.Connection) -> LLMCallRecord:
@@ -539,12 +550,12 @@ class LocalObservationRepository:
                 """
                 INSERT INTO local_llm_calls(
                     llm_call_id, observation_id, call_type, provider, model,
-                    capture_mode, profile_name, call_name, request_options_json,
+                    capture_mode, lifecycle_status, profile_name, call_name, request_options_json,
                     usage_json, latency_ms, error_type, error_message,
                     prompt_manifest_id, request_preview_json, response_preview_json,
                     trace_payload_preview_json, response_fragment_id, schema_version,
                     content_digest
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     call.llm_call_id,
@@ -553,6 +564,7 @@ class LocalObservationRepository:
                     call.provider,
                     call.model,
                     call.capture_mode.value,
+                    call.lifecycle_status.value,
                     call.profile_name,
                     call.call_name,
                     _json(_stored_llm_request_options(call)),
@@ -576,6 +588,111 @@ class LocalObservationRepository:
             ).fetchone()
             if row is None:
                 raise StorageIntegrityError("Committed LLM call could not be read")
+            return _load_llm_record(connection, row)
+
+        return await self._database.transaction(commit)
+
+    async def finish_llm_call(
+        self,
+        llm_call_id: str,
+        outcome: LLMCallDraft,
+    ) -> LLMCallRecord:
+        """Atomically finish one existing LLM call without inserting on absence.
+
+        The terminal outcome updates the original observation and LLM rows in one
+        transaction while preserving their identity and cursor.
+
+        Examples:
+            Finish a successful call:
+                ```python
+                record = await repository.finish_llm_call("call-1", completed)
+                ```
+
+            Finish a cancelled call:
+                ```python
+                record = await repository.finish_llm_call("call-2", cancelled)
+                ```
+
+        Args:
+            llm_call_id: Exact identity previously passed to `begin_llm_call`.
+            outcome: Terminal completed, failed, or cancelled call draft.
+
+        Returns:
+            LLMCallRecord: Authoritative terminal metadata-only call record.
+
+        Notes:
+            Missing starts and conflicting terminal retries raise
+            `StorageIntegrityError`; no insert-on-finish path exists.
+        """
+        self._require_writable()
+        if llm_call_id != outcome.llm_call_id:
+            raise StorageIntegrityError("LLM finish identity does not match outcome")
+        if outcome.lifecycle_status is LLMCallLifecycleStatus.IN_PROGRESS:
+            raise StorageIntegrityError("LLM finish outcome must be terminal")
+        digest = _llm_digest(outcome)
+
+        def commit(connection: sqlite3.Connection) -> LLMCallRecord:
+            existing = connection.execute(
+                "SELECT * FROM local_llm_calls WHERE llm_call_id = ?", (llm_call_id,)
+            ).fetchone()
+            if existing is None:
+                raise StorageIntegrityError(f"LLM call {llm_call_id!r} was not begun")
+            current_status = LLMCallLifecycleStatus(str(existing["lifecycle_status"]))
+            if current_status is not LLMCallLifecycleStatus.IN_PROGRESS:
+                if str(existing["content_digest"]) != digest:
+                    raise StorageIntegrityError(f"LLM call identity {llm_call_id!r} conflicts")
+                return _load_llm_record(connection, existing)
+            _validate_llm_finish_identity(existing, outcome)
+            response_fragment = _store_fragment(
+                connection,
+                content_kind="llm_response",
+                value=outcome.captured_response,
+                created_at=outcome.observation.occurred_at,
+            )
+            observation_digest = _observation_digest(outcome.observation)
+            connection.execute(
+                "UPDATE local_observations SET status = ?, severity = ?, content_digest = ? "
+                "WHERE observation_id = ?",
+                (
+                    outcome.observation.status.value,
+                    outcome.observation.severity.value,
+                    observation_digest,
+                    outcome.observation.observation_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE local_llm_calls SET
+                    lifecycle_status = ?, request_options_json = ?, usage_json = ?,
+                    latency_ms = ?, error_type = ?, error_message = ?,
+                    response_preview_json = ?, response_fragment_id = ?,
+                    schema_version = ?, content_digest = ?
+                WHERE llm_call_id = ?
+                """,
+                (
+                    outcome.lifecycle_status.value,
+                    _json(_stored_llm_request_options(outcome)),
+                    _json(outcome.usage),
+                    outcome.latency_ms,
+                    outcome.error_type,
+                    outcome.error_message,
+                    _json(outcome.response_preview),
+                    response_fragment,
+                    outcome.schema_version,
+                    digest,
+                    llm_call_id,
+                ),
+            )
+            connection.execute(
+                "DELETE FROM local_llm_attempts WHERE llm_call_id = ?", (llm_call_id,)
+            )
+            for attempt in outcome.attempts:
+                _insert_attempt(connection, llm_call_id, attempt)
+            row = connection.execute(
+                "SELECT * FROM local_llm_calls WHERE llm_call_id = ?", (llm_call_id,)
+            ).fetchone()
+            if row is None:
+                raise StorageIntegrityError("Finished LLM call could not be read")
             return _load_llm_record(connection, row)
 
         return await self._database.transaction(commit)
@@ -1104,6 +1221,12 @@ class LocalObservationRepository:
 def _install(database: LocalSQLiteDatabase) -> None:
     if database.role is not LocalDatabaseRole.CONTROL:
         raise StorageConfigurationError("Local observation repository requires control database")
+    database.migrate_component(
+        name="observations",
+        from_version=1,
+        to_version=_COMPONENT_VERSION,
+        statements=_MIGRATE_OBSERVATIONS_V1_TO_V2,
+    )
     database.install_component(
         name="observations",
         version=_COMPONENT_VERSION,
@@ -1547,6 +1670,7 @@ def _llm_record(
             provider=str(row["provider"]),
             model=str(row["model"]),
             capture_mode=ObservationCaptureMode(str(row["capture_mode"])),
+            lifecycle_status=LLMCallLifecycleStatus(str(row["lifecycle_status"])),
             profile_name=row["profile_name"],
             call_name=row["call_name"],
             request_options=request_options,
@@ -2441,6 +2565,7 @@ def _llm_digest(call: LLMCallDraft) -> str:
         "provider": call.provider,
         "model": call.model,
         "capture_mode": call.capture_mode.value,
+        "lifecycle_status": call.lifecycle_status.value,
         "profile_name": call.profile_name,
         "call_name": call.call_name,
         "request_options": call.request_options,
@@ -2475,6 +2600,38 @@ def _llm_digest(call: LLMCallDraft) -> str:
         "schema_version": call.schema_version,
     }
     return hashlib.sha256(_json(payload).encode()).hexdigest()
+
+
+def _validate_llm_finish_identity(row: sqlite3.Row, outcome: LLMCallDraft) -> None:
+    request_options, typed = _loaded_llm_request_options(_json_object(row["request_options_json"]))
+    expected = (
+        str(row["observation_id"]),
+        str(row["call_type"]),
+        str(row["provider"]),
+        str(row["model"]),
+        str(row["capture_mode"]),
+        row["profile_name"],
+        row["call_name"],
+        row["prompt_manifest_id"],
+        _json(request_options),
+        _json(typed.get("tool_surface")),
+        _json(typed.get("request_items")),
+    )
+    actual = (
+        outcome.observation.observation_id,
+        outcome.call_type,
+        outcome.provider,
+        outcome.model,
+        outcome.capture_mode.value,
+        outcome.profile_name,
+        outcome.call_name,
+        outcome.prompt_manifest_id,
+        _json(outcome.request_options),
+        _json(outcome.tool_surface),
+        _json(outcome.request_items),
+    )
+    if expected != actual:
+        raise StorageIntegrityError("LLM finish changed immutable request identity")
 
 
 def _stored_llm_request_options(call: LLMCallDraft) -> dict[str, Any]:

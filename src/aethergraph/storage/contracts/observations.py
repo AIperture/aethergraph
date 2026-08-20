@@ -48,6 +48,15 @@ class ObservationCaptureMode(StrEnum):
     FULL = "full"
 
 
+class LLMCallLifecycleStatus(StrEnum):
+    """Canonical persistence lifecycle for one real provider call."""
+
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ObservationUsageDimension(StrEnum):
     """Canonical logical scope dimension used for bounded usage accounting."""
 
@@ -370,6 +379,7 @@ class LLMCallDraft:
     provider: str
     model: str
     capture_mode: ObservationCaptureMode
+    lifecycle_status: LLMCallLifecycleStatus = LLMCallLifecycleStatus.COMPLETED
     profile_name: str | None = None
     call_name: str | None = None
     request_options: Mapping[str, FrozenJson] = field(default_factory=dict)
@@ -397,6 +407,7 @@ class LLMCallDraft:
             provider=self.provider,
             model=self.model,
             capture_mode=self.capture_mode,
+            lifecycle_status=self.lifecycle_status,
             profile_name=self.profile_name,
             call_name=self.call_name,
             latency_ms=self.latency_ms,
@@ -427,6 +438,7 @@ class LLMCallRecord:
     provider: str
     model: str
     capture_mode: ObservationCaptureMode
+    lifecycle_status: LLMCallLifecycleStatus = LLMCallLifecycleStatus.COMPLETED
     profile_name: str | None = None
     call_name: str | None = None
     request_options: Mapping[str, FrozenJson] = field(default_factory=dict)
@@ -452,6 +464,7 @@ class LLMCallRecord:
             provider=self.provider,
             model=self.model,
             capture_mode=self.capture_mode,
+            lifecycle_status=self.lifecycle_status,
             profile_name=self.profile_name,
             call_name=self.call_name,
             latency_ms=self.latency_ms,
@@ -472,6 +485,7 @@ def _validate_llm_call(
     provider: str,
     model: str,
     capture_mode: ObservationCaptureMode,
+    lifecycle_status: LLMCallLifecycleStatus,
     profile_name: str | None,
     call_name: str | None,
     latency_ms: int | None,
@@ -492,6 +506,8 @@ def _validate_llm_call(
         raise ValueError("LLM calls require an observation in category 'llm'")
     if not isinstance(capture_mode, ObservationCaptureMode):
         raise TypeError("capture_mode must be an ObservationCaptureMode")
+    if not isinstance(lifecycle_status, LLMCallLifecycleStatus):
+        raise TypeError("lifecycle_status must be an LLMCallLifecycleStatus")
     for name, value in (
         ("profile_name", profile_name),
         ("call_name", call_name),
@@ -510,6 +526,14 @@ def _validate_llm_call(
         raise ValueError("error observations require LLM error details")
     if error_type is not None and observation.status is not ObservationStatus.ERROR:
         raise ValueError("LLM error details require error observation status")
+    expected_status = {
+        LLMCallLifecycleStatus.IN_PROGRESS: ObservationStatus.PENDING,
+        LLMCallLifecycleStatus.COMPLETED: ObservationStatus.OK,
+        LLMCallLifecycleStatus.FAILED: ObservationStatus.ERROR,
+        LLMCallLifecycleStatus.CANCELLED: ObservationStatus.ERROR,
+    }[lifecycle_status]
+    if observation.status is not expected_status:
+        raise ValueError("LLM lifecycle status does not match observation status")
     if latency_ms is not None and (isinstance(latency_ms, bool) or latency_ms < 0):
         raise ValueError("latency_ms must be non-negative when supplied")
     if not isinstance(attempts, tuple):
@@ -1087,8 +1111,8 @@ class ObservationRepository(Protocol):
         """
         ...
 
-    async def append_llm_call(self, call: LLMCallDraft) -> LLMCallRecord:
-        """Atomically append LLM metadata, attempts, observation, and retained content.
+    async def begin_llm_call(self, call: LLMCallDraft) -> LLMCallRecord:
+        """Atomically persist one prepared in-progress LLM call.
 
         AG applies capture/redaction policy before this call. The provider persists the
         prepared draft as one authority and returns a metadata-only list record.
@@ -1096,12 +1120,12 @@ class ObservationRepository(Protocol):
         Examples:
             Store a metadata-only call:
                 ```python
-                record = await observations.append_llm_call(call)
+                record = await observations.begin_llm_call(call)
                 ```
 
-            Retry the same call identity:
+            Retry the same begin identity:
                 ```python
-                assert await observations.append_llm_call(call) == record
+                assert await observations.begin_llm_call(call) == record
                 ```
 
         Args:
@@ -1111,8 +1135,42 @@ class ObservationRepository(Protocol):
             LLMCallRecord: Committed metadata-only LLM record.
 
         Notes:
-            Conflicting identity raises `StorageIntegrityError`; fragment deduplication
-            and every dependent row commit transactionally.
+            The draft lifecycle must be `in_progress`. Conflicting identity raises
+            `StorageIntegrityError`; request capture commits transactionally.
+        """
+        ...
+
+    async def finish_llm_call(
+        self,
+        llm_call_id: str,
+        outcome: LLMCallDraft,
+    ) -> LLMCallRecord:
+        """Atomically finish one previously begun LLM call.
+
+        The outcome carries the terminal response, usage, attempts, and exact
+        `completed`, `failed`, or `cancelled` lifecycle. Missing begins and
+        conflicting terminal retries raise `StorageIntegrityError`.
+
+        Examples:
+            Finish a completed call:
+                ```python
+                record = await observations.finish_llm_call("call-1", completed)
+                ```
+
+            Finish a cancelled call:
+                ```python
+                record = await observations.finish_llm_call("call-2", cancelled)
+                ```
+
+        Args:
+            llm_call_id: Exact identity previously passed to `begin_llm_call`.
+            outcome: Terminal canonical LLM call draft.
+
+        Returns:
+            LLMCallRecord: Authoritative terminal metadata-only record.
+
+        Notes:
+            Finish never inserts a missing call and terminal conflicts fail closed.
         """
         ...
 

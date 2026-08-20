@@ -11,7 +11,13 @@ PromptViewMode = Literal["off", "compact", "truncated", "full"]
 
 
 class LLMObservationSink(Protocol):
-    async def emit(self, record: LLMObservationRecord, *, capture_mode: CaptureMode) -> None: ...
+    async def begin_llm_call(
+        self, record: LLMObservationRecord, *, capture_mode: CaptureMode
+    ) -> None: ...
+
+    async def finish_llm_call(
+        self, record: LLMObservationRecord, *, capture_mode: CaptureMode
+    ) -> None: ...
 
 
 def _usage_summary(usage: dict[str, Any]) -> tuple[int, int, int]:
@@ -137,7 +143,14 @@ class ConsoleLLMObservationSink:
         self.truncation_chars = truncation_chars
         self._lock = asyncio.Lock()
 
-    async def emit(self, record: LLMObservationRecord, *, capture_mode: CaptureMode) -> None:
+    async def begin_llm_call(
+        self, record: LLMObservationRecord, *, capture_mode: CaptureMode
+    ) -> None:
+        return None
+
+    async def finish_llm_call(
+        self, record: LLMObservationRecord, *, capture_mode: CaptureMode
+    ) -> None:
         rendered = render_console_observation(
             record,
             prompt_view=self.prompt_view,

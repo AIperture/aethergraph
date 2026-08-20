@@ -16,6 +16,7 @@ from aethergraph.observability.canonical_service import ProviderObservationServi
 from aethergraph.observability.policy import ObservationPolicy
 from aethergraph.storage.contracts import (
     LLMCallDraft,
+    LLMCallLifecycleStatus,
     ObservationCaptureMode,
     ObservationDraft,
     ObservationQuery,
@@ -91,18 +92,27 @@ async def test_provider_retention_applies_age_expiry_error_and_pin_rules(tmp_pat
         run_id="run-full",
         category="llm",
     )
-    await repository.append_llm_call(
-        LLMCallDraft(
-            llm_call_id="call-full",
-            observation=replace(full_observation, retention_class="forensic"),
-            call_type="chat",
-            provider="openai",
-            model="model",
-            capture_mode=ObservationCaptureMode.FULL,
-            prompt_manifest_id="manifest-full",
-            captured_request={"messages": []},
-        )
+    completed_call = LLMCallDraft(
+        llm_call_id="call-full",
+        observation=replace(full_observation, retention_class="forensic"),
+        call_type="chat",
+        provider="openai",
+        model="model",
+        capture_mode=ObservationCaptureMode.FULL,
+        prompt_manifest_id="manifest-full",
+        captured_request={"messages": []},
     )
+    started_call = replace(
+        completed_call,
+        observation=replace(
+            completed_call.observation,
+            status=ObservationStatus.PENDING,
+            severity=ObservationSeverity.INFO,
+        ),
+        lifecycle_status=LLMCallLifecycleStatus.IN_PROGRESS,
+    )
+    await repository.begin_llm_call(started_call)
+    await repository.finish_llm_call("call-full", completed_call)
     await repository.append_many(
         (
             _draft(

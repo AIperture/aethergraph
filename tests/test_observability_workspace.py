@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 import inspect
 from pathlib import Path
@@ -15,6 +16,7 @@ from aethergraph.observability import (
 from aethergraph.services.memory.canonical_factory import CanonicalMemoryFacadeFactory
 from aethergraph.storage.contracts import (
     LLMCallDraft,
+    LLMCallLifecycleStatus,
     ObservationCaptureMode,
     ObservationDraft,
     ObservationScopeManagementRecord,
@@ -127,39 +129,45 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
             ),
         )
     )
-    await bundle.observations.append_llm_call(
-        LLMCallDraft(
-            llm_call_id="call-1",
-            observation=ObservationDraft(
-                observation_id="llm-1",
-                category="llm",
-                name="chat",
-                summary="openai/gpt-test chat",
-                occurred_at=NOW,
-                scope=run_scope,
-                status=ObservationStatus.OK,
-                severity=ObservationSeverity.INFO,
-                producer="aethergraph.llm",
-                trace_id="trace-1",
-                attributes={
-                    "prompt_roles": ("user",),
-                    "prompt_chars": 42,
-                    "prompt_bytes": 42,
-                    "assembled_request_hash": "request-hash",
-                },
-            ),
-            call_type="chat",
-            provider="openai",
-            model="gpt-test",
-            capture_mode=ObservationCaptureMode.MANIFEST,
-            prompt_manifest_id="manifest-1",
-            captured_request={
-                "messages": [{"role": "user", "content": "hello"}],
-                "provider_request_args": {"temperature": 0},
+    completed_call = LLMCallDraft(
+        llm_call_id="call-1",
+        observation=ObservationDraft(
+            observation_id="llm-1",
+            category="llm",
+            name="chat",
+            summary="openai/gpt-test chat",
+            occurred_at=NOW,
+            scope=run_scope,
+            status=ObservationStatus.OK,
+            severity=ObservationSeverity.INFO,
+            producer="aethergraph.llm",
+            trace_id="trace-1",
+            attributes={
+                "prompt_roles": ("user",),
+                "prompt_chars": 42,
+                "prompt_bytes": 42,
+                "assembled_request_hash": "request-hash",
             },
-            captured_response={"text": "hi"},
-        )
+        ),
+        call_type="chat",
+        provider="openai",
+        model="gpt-test",
+        capture_mode=ObservationCaptureMode.MANIFEST,
+        prompt_manifest_id="manifest-1",
+        captured_request={
+            "messages": [{"role": "user", "content": "hello"}],
+            "provider_request_args": {"temperature": 0},
+        },
+        captured_response={"text": "hi"},
     )
+    started_call = replace(
+        completed_call,
+        observation=replace(completed_call.observation, status=ObservationStatus.PENDING),
+        lifecycle_status=LLMCallLifecycleStatus.IN_PROGRESS,
+        captured_response=None,
+    )
+    await bundle.observations.begin_llm_call(started_call)
+    await bundle.observations.finish_llm_call("call-1", completed_call)
     await bundle.observations.compare_and_set_scope_management(
         ObservationScopeManagementRecord(
             scope_key="trace:trace-hidden",

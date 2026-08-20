@@ -15,6 +15,7 @@ from storage_conformance.suite import (
 from aethergraph.storage.contracts import (
     LLMCallAttempt,
     LLMCallDraft,
+    LLMCallLifecycleStatus,
     LLMCallQuery,
     ObservationCaptureMode,
     ObservationDraft,
@@ -138,6 +139,11 @@ def _llm_call(
         provider=provider,
         model=model,
         capture_mode=capture_mode,
+        lifecycle_status=(
+            LLMCallLifecycleStatus.FAILED
+            if error_type is not None
+            else LLMCallLifecycleStatus.COMPLETED
+        ),
         profile_name="default",
         call_name="answer",
         request_options={"temperature": 0},
@@ -163,6 +169,56 @@ def _llm_call(
             ),
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_component_migration_is_explicit_atomic_and_idempotent(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    database.install_component(
+        name="migration-test",
+        version=1,
+        statements=("CREATE TABLE migration_test(id TEXT PRIMARY KEY)",),
+    )
+    assert database.migrate_component(
+        name="migration-test",
+        from_version=1,
+        to_version=2,
+        statements=("ALTER TABLE migration_test ADD COLUMN status TEXT",),
+    )
+    assert database.migrate_component(
+        name="migration-test",
+        from_version=1,
+        to_version=2,
+        statements=("SELECT 1",),
+    )
+    columns = await database.fetch_all("PRAGMA table_info(migration_test)")
+    assert [str(row["name"]) for row in columns] == ["id", "status"]
+    await database.close()
+
+
+async def _store_llm_call(
+    repository: LocalObservationRepository,
+    call: LLMCallDraft,
+):
+    started = replace(
+        call,
+        observation=replace(
+            call.observation,
+            status=ObservationStatus.PENDING,
+            severity=ObservationSeverity.INFO,
+        ),
+        lifecycle_status=LLMCallLifecycleStatus.IN_PROGRESS,
+        usage={},
+        latency_ms=None,
+        error_type=None,
+        error_message=None,
+        response_preview=None,
+        captured_response=None,
+        attempts=(),
+        response_items=None,
+    )
+    await repository.begin_llm_call(started)
+    return await repository.finish_llm_call(call.llm_call_id, call)
 
 
 @pytest.mark.asyncio
@@ -247,38 +303,42 @@ async def test_provider_side_llm_summary_preserves_token_and_model_semantics(
 ) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     repository = LocalObservationRepository(database=database)
-    await repository.append_llm_call(
+    await _store_llm_call(
+        repository,
         _llm_call(
             "outside",
             occurred_at=NOW - timedelta(seconds=1),
             model="outside",
             usage={"total_tokens": 1000},
-        )
+        ),
     )
-    await repository.append_llm_call(
+    await _store_llm_call(
+        repository,
         _llm_call(
             "alias",
             occurred_at=NOW,
             model="model-z",
             usage={"input_tokens": 5, "output_tokens": 3},
-        )
+        ),
     )
-    await repository.append_llm_call(
+    await _store_llm_call(
+        repository,
         _llm_call(
             "direct",
             occurred_at=NOW + timedelta(seconds=1),
             model="model-a",
             usage={"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 20},
             error_type="ProviderError",
-        )
+        ),
     )
-    await repository.append_llm_call(
+    await _store_llm_call(
+        repository,
         _llm_call(
             "newest",
             occurred_at=NOW + timedelta(seconds=2),
             model="model-z",
             usage={"input_tokens": 2, "output_tokens": 1, "total_tokens": 0},
-        )
+        ),
     )
 
     query = ObservationLLMSummaryQuery(
@@ -361,16 +421,18 @@ async def test_local_observation_summaries_pass_shared_provider_conformance(
             ),
         )
     )
-    await repository.append_llm_call(
+    await _store_llm_call(
+        repository,
         _llm_call(
             "conformance-a",
             scope=scope,
             occurred_at=CONFORMANCE_NOW,
             model="model-a",
             usage={"input_tokens": 2, "output_tokens": 1},
-        )
+        ),
     )
-    await repository.append_llm_call(
+    await _store_llm_call(
+        repository,
         _llm_call(
             "conformance-b",
             scope=scope,
@@ -378,7 +440,7 @@ async def test_local_observation_summaries_pass_shared_provider_conformance(
             model="model-b",
             usage={"prompt_tokens": 3, "completion_tokens": 2},
             error_type="ProviderError",
-        )
+        ),
     )
 
     await check_observation_summary_conformance(repository)
@@ -526,14 +588,14 @@ async def test_llm_full_capture_is_atomic_idempotent_and_detail_only(tmp_path: P
         response_items=[{"ordinal": 0, "kind": "tool_call", "tool_name": "read"}],
     )
 
-    record = await repository.append_llm_call(call)
+    record = await _store_llm_call(repository, call)
     assert record.llm_call_id == "call-1"
     assert record.attempts == call.attempts
     assert record.tool_surface == call.tool_surface
     assert record.request_items == call.request_items
     assert record.response_items == call.response_items
     assert not hasattr(record, "captured_request")
-    assert await repository.append_llm_call(call) == record
+    assert await repository.finish_llm_call(call.llm_call_id, call) == record
     page = await repository.query_llm_calls(LLMCallQuery(scope=SCOPE))
     assert page.items == (record,)
     assert not hasattr(page.items[0], "captured_response")
@@ -545,13 +607,43 @@ async def test_llm_full_capture_is_atomic_idempotent_and_detail_only(tmp_path: P
     assert await repository.get_llm_call(StorageScope(run_id="other"), "call-1") is None
 
     with pytest.raises(StorageIntegrityError, match="conflicts"):
-        await repository.append_llm_call(replace(call, model="different"))
+        await repository.finish_llm_call(call.llm_call_id, replace(call, model="different"))
     await repository.append_many((_observation("preexisting", category="llm"),))
     with pytest.raises(StorageIntegrityError, match="not created atomically"):
-        await repository.append_llm_call(
-            _llm_call("call-2", observation_id="preexisting", captured_response="no")
+        await _store_llm_call(
+            repository, _llm_call("call-2", observation_id="preexisting", captured_response="no")
         )
     assert await repository.get_llm_call(SCOPE, "call-2") is None
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_llm_begin_remains_truthfully_in_progress_without_finish(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    repository = LocalObservationRepository(database=database)
+    terminal = _llm_call("interrupted", captured_request={"messages": ["prepared"]})
+    started = replace(
+        terminal,
+        observation=replace(
+            terminal.observation,
+            status=ObservationStatus.PENDING,
+            severity=ObservationSeverity.INFO,
+        ),
+        lifecycle_status=LLMCallLifecycleStatus.IN_PROGRESS,
+        usage={},
+        latency_ms=None,
+        response_preview=None,
+        captured_response=None,
+        attempts=(),
+    )
+
+    record = await repository.begin_llm_call(started)
+    assert record.lifecycle_status is LLMCallLifecycleStatus.IN_PROGRESS
+    assert record.observation.status is ObservationStatus.PENDING
+    detail = await repository.get_llm_call(SCOPE, "interrupted")
+    assert detail is not None
+    assert detail.captured_request == {"messages": ("prepared",)}
+    assert detail.captured_response is None
     await database.close()
 
 
@@ -564,7 +656,7 @@ async def test_off_and_metadata_capture_never_retain_or_hydrate_content(tmp_path
         _llm_call("metadata", capture_mode=ObservationCaptureMode.METADATA),
     )
     for call in calls:
-        await repository.append_llm_call(call)
+        await _store_llm_call(repository, call)
         detail = await repository.get_llm_call(SCOPE, call.llm_call_id)
         assert detail is not None
         assert detail.captured_request is None
@@ -595,8 +687,8 @@ async def test_capture_fragments_deduplicate_and_purge_preserves_shared_content(
         trace_id="trace-2",
         **content,
     )
-    await repository.append_llm_call(first)
-    await repository.append_llm_call(second)
+    await _store_llm_call(repository, first)
+    await _store_llm_call(repository, second)
     stats = await repository.storage_stats(SCOPE)
     assert stats.manifests == 2
     assert stats.fragments == 3
@@ -680,8 +772,8 @@ async def test_purge_filters_capture_retention_and_severity_in_provider(tmp_path
     repository = LocalObservationRepository(database=database)
     full = _llm_call("full", capture_mode=ObservationCaptureMode.FULL)
     metadata = _llm_call("metadata", capture_mode=ObservationCaptureMode.METADATA)
-    await repository.append_llm_call(full)
-    await repository.append_llm_call(metadata)
+    await _store_llm_call(repository, full)
+    await _store_llm_call(repository, metadata)
     await repository.append_many(
         (
             _observation(
@@ -727,17 +819,18 @@ async def test_scope_usage_and_management_queries_are_bounded_and_cursor_bound(
         "captured_request": {"messages": ["shared"]},
         "captured_response": {"text": "shared"},
     }
-    await repository.append_llm_call(
-        _llm_call("usage-1", trace_id="trace-1", scope=SCOPE, **shared)
+    await _store_llm_call(
+        repository, _llm_call("usage-1", trace_id="trace-1", scope=SCOPE, **shared)
     )
-    await repository.append_llm_call(
+    await _store_llm_call(
+        repository,
         _llm_call(
             "usage-2",
             trace_id="trace-2",
             scope=second_scope,
             occurred_at=NOW + timedelta(seconds=1),
             **shared,
-        )
+        ),
     )
     pinned = ObservationScopeManagementRecord(
         scope_key="trace:trace-1",
@@ -841,7 +934,7 @@ async def test_read_only_observation_repository_allows_reads_and_dry_run_only(
     writer_database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     writer = LocalObservationRepository(database=writer_database)
     call = _llm_call("call-1", captured_request={"input": "x"})
-    await writer.append_llm_call(call)
+    await _store_llm_call(writer, call)
     await writer_database.close()
 
     database = _database(tmp_path, StorageOpenMode.READ_ONLY)
@@ -872,7 +965,7 @@ async def test_read_only_observation_repository_allows_reads_and_dry_run_only(
     with pytest.raises(StorageReadOnlyError):
         await repository.append_many((_observation("new"),))
     with pytest.raises(StorageReadOnlyError):
-        await repository.append_llm_call(_llm_call("new"))
+        await _store_llm_call(repository, _llm_call("new"))
     with pytest.raises(StorageReadOnlyError):
         await repository.purge(ObservationPurgeRequest(scope=SCOPE, dry_run=False))
     with pytest.raises(StorageReadOnlyError):
@@ -1004,7 +1097,7 @@ async def test_persisted_observation_and_capture_corruption_raise_typed_error(
         await repository.get(SCOPE, "obs-corrupt")
 
     call = _llm_call("call-corrupt", captured_response={"secret": "value"})
-    await repository.append_llm_call(call)
+    await _store_llm_call(repository, call)
     await database.transaction(
         lambda connection: connection.execute(
             "UPDATE local_observation_fragments SET body_json = '{' "

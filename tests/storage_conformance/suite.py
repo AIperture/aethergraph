@@ -23,6 +23,7 @@ from aethergraph.storage.contracts import (
     EventQuery,
     EventStore,
     LLMCallDraft,
+    LLMCallLifecycleStatus,
     ObservationCaptureMode,
     ObservationDraft,
     ObservationLLMSummaryQuery,
@@ -85,30 +86,46 @@ async def seed_observation_summary_conformance(
             "ProviderError",
         ),
     ):
-        await observations.append_llm_call(
-            LLMCallDraft(
-                llm_call_id=call_id,
-                observation=ObservationDraft(
-                    observation_id=f"conformance-llm-{call_id}",
-                    category="llm",
-                    name="chat",
-                    summary="LLM call",
-                    occurred_at=NOW,
-                    scope=scope,
-                    trace_id=f"llm-{call_id}",
-                    status=(
-                        ObservationStatus.ERROR if error_type is not None else ObservationStatus.OK
-                    ),
+        completed = LLMCallDraft(
+            llm_call_id=call_id,
+            observation=ObservationDraft(
+                observation_id=f"conformance-llm-{call_id}",
+                category="llm",
+                name="chat",
+                summary="LLM call",
+                occurred_at=NOW,
+                scope=scope,
+                trace_id=f"llm-{call_id}",
+                status=(
+                    ObservationStatus.ERROR if error_type is not None else ObservationStatus.OK
                 ),
-                call_type="chat",
-                provider="external-test",
-                model=model,
-                capture_mode=ObservationCaptureMode.OFF,
-                usage=usage,
-                error_type=error_type,
-                error_message="failed" if error_type is not None else None,
-            )
+            ),
+            call_type="chat",
+            provider="external-test",
+            model=model,
+            capture_mode=ObservationCaptureMode.OFF,
+            lifecycle_status=(
+                LLMCallLifecycleStatus.FAILED
+                if error_type is not None
+                else LLMCallLifecycleStatus.COMPLETED
+            ),
+            usage=usage,
+            error_type=error_type,
+            error_message="failed" if error_type is not None else None,
         )
+        started = replace(
+            completed,
+            observation=replace(
+                completed.observation,
+                status=ObservationStatus.PENDING,
+            ),
+            lifecycle_status=LLMCallLifecycleStatus.IN_PROGRESS,
+            usage={},
+            error_type=None,
+            error_message=None,
+        )
+        await observations.begin_llm_call(started)
+        await observations.finish_llm_call(call_id, completed)
 
 
 def event(event_id: str, scope: StorageScope, *, topic: str = "memory") -> EventDraft:

@@ -194,7 +194,13 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
             }
         ],
     )
-    await service.emit(call, capture_mode="manifest")
+    call.raw_text = None
+    call.response_items = []
+    await service.begin_llm_call(call, capture_mode="manifest")
+    call.raw_text = "hello back"
+    call.response_items = [{"ordinal": 0, "kind": "tool_call", "tool_name": "read"}]
+    call.lifecycle_status = "completed"
+    await service.finish_llm_call(call, capture_mode="manifest")
     reader = CanonicalInspectionReader(service)
 
     page = await reader.list_llm_calls(

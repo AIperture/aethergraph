@@ -124,6 +124,7 @@ class LLMCallRecord(BaseModel):
     call_id: str
     created_at: str
     call_type: str
+    lifecycle_status: str
     provider: str
     model: str
     profile_name: str | None = None

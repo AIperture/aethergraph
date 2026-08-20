@@ -258,7 +258,24 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             ),
         )
         for call in calls:
-            await service.emit(call, capture_mode="manifest")
+            raw_text = call.raw_text
+            usage = call.usage
+            latency_ms = call.latency_ms
+            error_type = call.error_type
+            error_message = call.error_message
+            call.raw_text = None
+            call.usage = {}
+            call.latency_ms = None
+            call.error_type = None
+            call.error_message = None
+            await service.begin_llm_call(call, capture_mode="manifest")
+            call.raw_text = raw_text
+            call.usage = usage
+            call.latency_ms = latency_ms
+            call.error_type = error_type
+            call.error_message = error_message
+            call.lifecycle_status = "failed" if error_type else "completed"
+            await service.finish_llm_call(call, capture_mode="manifest")
 
         token = current_meter_context.set(DIMENSIONS)
         try:

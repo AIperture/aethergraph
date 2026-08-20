@@ -784,6 +784,7 @@ def _llm(
         call_id=record.llm_call_id,
         created_at=record.observation.occurred_at.isoformat(),
         call_type=record.call_type,
+        lifecycle_status=record.lifecycle_status.value,
         provider=record.provider,
         model=record.model,
         profile_name=record.profile_name,

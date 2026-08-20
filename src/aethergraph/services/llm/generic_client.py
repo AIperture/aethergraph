@@ -1999,17 +1999,52 @@ class GenericLLMClient(LLMClientProtocol):
         begin_llm_call_correlation(record.llm_call_id)
         return record
 
-    async def _emit_observation(self, record: LLMObservationRecord) -> None:
+    async def _begin_observation(self, record: LLMObservationRecord) -> None:
         if self.observation_sink is None:
             return
         try:
-            await self.observation_sink.emit(
+            await self.observation_sink.begin_llm_call(
                 record,
                 capture_mode=self.observation_capture_mode,
             )
         except Exception as exc:
-            logger = logging.getLogger("aethergraph.services.llm.generic_client")
-            logger.warning(f"llm_observability_failed: {exc}")
+            self._log_observation_failure("begin", record, exc)
+
+    async def _finish_observation(
+        self,
+        record: LLMObservationRecord,
+        *,
+        lifecycle_status: str,
+    ) -> None:
+        record.lifecycle_status = lifecycle_status
+        if self.observation_sink is None:
+            return
+        try:
+            await self.observation_sink.finish_llm_call(
+                record,
+                capture_mode=self.observation_capture_mode,
+            )
+        except Exception as exc:
+            self._log_observation_failure("finish", record, exc)
+
+    def _log_observation_failure(
+        self,
+        operation: str,
+        record: LLMObservationRecord,
+        exc: Exception,
+    ) -> None:
+        logging.getLogger("aethergraph.services.llm.generic_client").exception(
+            "llm_observability_persistence_failed",
+            extra={
+                "event": "aethergraph.llm.observation_persistence_failed",
+                "operation": operation,
+                "llm_call_id": record.llm_call_id,
+                "provider": record.provider,
+                "model": record.model,
+                "lifecycle_status": record.lifecycle_status,
+                "error_type": type(exc).__name__,
+            },
+        )
 
     async def _ensure_client(self):
         self._client, self._bound_loop, retired = _ensure_loop_http_client(
@@ -2391,9 +2426,13 @@ class GenericLLMClient(LLMClientProtocol):
                     request_items=list(tool_call_request_item_summaries(tool_request)),
                     tool_definitions=tool_call_definitions(tool_request),
                 )
+                await self._begin_observation(observation_record)
                 observation_record.error_type = type(exc).__name__
                 observation_record.error_message = str(exc)
-                await self._emit_observation(observation_record)
+                await self._finish_observation(
+                    observation_record,
+                    lifecycle_status="failed",
+                )
                 raise
             schema_name = prepared_structured_output.provider_schema_name
             strict_schema = prepared_structured_output.provider_strict
@@ -2533,6 +2572,7 @@ class GenericLLMClient(LLMClientProtocol):
             tags=tags,
             metadata=self._current_dimensions(),
         )
+        await self._begin_observation(observation_record)
 
         start = time.perf_counter()
         normalized_usage: dict[str, int] = {}
@@ -2647,7 +2687,10 @@ class GenericLLMClient(LLMClientProtocol):
                     request_args["structured_output_response_state"] = "completed"
 
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="completed",
+            )
             await span.finish(
                 response={
                     "text": observation_record.raw_text,
@@ -2662,6 +2705,20 @@ class GenericLLMClient(LLMClientProtocol):
                 },
             )
             return response
+        except asyncio.CancelledError as exc:
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.error_type = type(exc).__name__
+            observation_record.error_message = "LLM call cancelled"
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="cancelled",
+            )
+            await span.fail(
+                exc,
+                metadata=self._current_dimensions(),
+                metrics={"latency_ms": observation_record.latency_ms or 0},
+            )
+            raise
         except Exception as exc:
             if isinstance(exc, LLMProviderRequestError):
                 observation_record.attempts = exc.attempts
@@ -2670,7 +2727,10 @@ class GenericLLMClient(LLMClientProtocol):
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="failed",
+            )
             await span.fail(
                 exc,
                 metadata=self._current_dimensions(),
@@ -3258,6 +3318,7 @@ class GenericLLMClient(LLMClientProtocol):
             tags=tags,
             metadata=self._current_dimensions(),
         )
+        await self._begin_observation(observation_record)
         start = time.perf_counter()
 
         # Resolve thinking config: omitted -> profile default, explicit value -> per-call override.
@@ -3315,7 +3376,10 @@ class GenericLLMClient(LLMClientProtocol):
                 latency_ms=latency_ms,
                 reservation=quota_reservation,
             )
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="completed",
+            )
             await span.finish(
                 response={
                     "text": text,
@@ -3330,13 +3394,30 @@ class GenericLLMClient(LLMClientProtocol):
                 },
             )
             return text, usage
+        except asyncio.CancelledError as exc:
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.error_type = type(exc).__name__
+            observation_record.error_message = "LLM stream cancelled"
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="cancelled",
+            )
+            await span.fail(
+                exc,
+                metadata=self._current_dimensions(),
+                metrics={"latency_ms": observation_record.latency_ms or 0},
+            )
+            raise
         except Exception as exc:
             if isinstance(exc, LLMProviderRequestError):
                 observation_record.attempts = exc.attempts
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="failed",
+            )
             await span.fail(
                 exc,
                 metadata=self._current_dimensions(),

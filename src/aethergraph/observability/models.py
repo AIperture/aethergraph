@@ -96,6 +96,7 @@ class LLMObservationRecord:
     request_items: list[dict[str, Any]] = field(default_factory=list)
     response_items: list[dict[str, Any]] = field(default_factory=list)
     tool_definitions: list[dict[str, Any]] = field(default_factory=list)
+    lifecycle_status: str = "in_progress"
 
     @classmethod
     def new(
