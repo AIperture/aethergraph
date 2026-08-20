@@ -154,6 +154,10 @@ AETHERGRAPH_LLM__DEFAULT__API_KEY=replace-me
 Graph code then calls `context.llm("default")`. Embedding and image-generation
 profiles use their own configuration sections and do not fall back to chat.
 
+For provider-neutral Tool discovery modes, LLM-call ledger semantics, and the
+opt-in cache diagnostic, see
+[`docs/tool_discovery_transport.md`](docs/tool_discovery_transport.md).
+
 ## Develop the framework
 
 ```bash
