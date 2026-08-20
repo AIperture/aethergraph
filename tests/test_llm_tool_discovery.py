@@ -29,6 +29,7 @@ from aethergraph.services.llm.adapters.openai_responses import (
     _openai_appended_prompt_input,
     _openai_checkpoint,
     _openai_prompt_prefix_digest,
+    _openai_tool_call_response,
 )
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.tool_calling import (
@@ -691,6 +692,113 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert request_item["call_id"] == "call_1"
     assert request_item["content_bytes"] == len(b'{"path":"a.md","status":"ok"}')
     assert len(request_item["content_sha256"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_openai_native_hosted_uses_current_server_search_contract() -> None:
+    client = GenericLLMClient(
+        "openai",
+        "gpt-5.6",
+        api_key="test",
+        base_url="https://api.openai.test/v1",
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "resp_hosted_1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "tool_search_call",
+                    "execution": "server",
+                    "call_id": None,
+                    "status": "completed",
+                    "arguments": {"paths": ["tp_studio_ddocs"]},
+                },
+                {
+                    "type": "tool_search_output",
+                    "execution": "server",
+                    "call_id": None,
+                    "status": "completed",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "tp_studio_ddocs",
+                            "description": "Document operations.",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "read_document",
+                                    "description": "Read one document.",
+                                    "defer_loading": True,
+                                    "parameters": {"type": "object"},
+                                }
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_read_1",
+                    "name": "read_document",
+                    "namespace": "tp_studio_ddocs",
+                    "arguments": '{"path":"a.md"}',
+                },
+            ],
+            "usage": {"input_tokens": 20, "output_tokens": 5},
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    request = ToolCallRequest(
+        tools=(
+            ToolDefinition(
+                "read_document",
+                "Read one document.",
+                {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+                exposure="deferred",
+                path=ToolPath("studio.docs", "Document operations."),
+            ),
+        ),
+        discovery=ToolDiscoveryRequest("native_hosted", max_results=5),
+        turn_id="turn_1",
+    )
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=request,
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.discovery_events[0].source == "provider_hosted"
+    assert response.discovery_events[0].tool_refs == ("read_document",)
+    assert response.calls[0].name == "read_document"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
+    assert "execution" not in fake_http.last_json["tools"][-1]
+
+
+def test_openai_tool_search_rejects_unknown_execution_value() -> None:
+    with pytest.raises(LLMToolCallResponseError) as raised:
+        _openai_tool_call_response(
+            {
+                "id": "resp_unknown_execution",
+                "output": [
+                    {
+                        "type": "tool_search_call",
+                        "execution": "hosted",
+                        "status": "completed",
+                    }
+                ],
+            },
+            tool_request=_discovery_request("native_hosted"),
+            model="gpt-5.6",
+        )
+
+    assert raised.value.code == "discovery_execution_unsupported"
 
 
 def test_openai_continuation_rejects_rewritten_stable_prefix() -> None:
