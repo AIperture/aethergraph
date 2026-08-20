@@ -26,6 +26,7 @@ AssistantOutputType = Literal["text", "refusal"]
 ASSISTANT_OUTPUT_NORMALIZATION_VERSION = "assistant_output/v1"
 _MODEL_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION = "tool_request/v1"
+TOOL_SURFACE_SUMMARY_VERSION = "aethergraph.llm-tool-surface/v2"
 
 
 class LLMToolCallError(LLMError):
@@ -548,14 +549,14 @@ def tool_call_surface_summary(
 
     if request is None:
         return None
-    active = set(request.active_tool_names)
+    activated_deferred = set(request.active_tool_names)
     discovery_mode = request.discovery.mode if request.discovery is not None else "disabled"
     tools = [
         {
             "ordinal": ordinal,
             "name": tool.name,
             "exposure": tool.exposure,
-            "active": tool.name in active,
+            "callable": (tool.exposure == "immediate" or tool.name in activated_deferred),
             "input_schema_digest": hashlib.sha256(
                 json.dumps(
                     tool.input_schema,
@@ -567,14 +568,23 @@ def tool_call_surface_summary(
         }
         for ordinal, tool in enumerate(request.tools)
     ]
+    immediate_count = sum(tool.exposure == "immediate" for tool in request.tools)
+    activated_deferred_count = sum(
+        tool.exposure == "deferred" and tool.name in activated_deferred for tool in request.tools
+    )
+    searchable_count = sum(
+        tool.exposure == "deferred" and tool.name not in activated_deferred
+        for tool in request.tools
+    )
     return {
-        "schema_version": "aethergraph.llm-tool-surface/v1",
+        "schema_version": TOOL_SURFACE_SUMMARY_VERSION,
         "discovery_mode": discovery_mode,
         "catalog_fingerprint": tool_call_request_fingerprint(request),
         "surface_fingerprint": tool_call_surface_fingerprint(request),
-        "searchable_count": sum(tool.exposure == "deferred" for tool in request.tools),
-        "active_count": len(active),
-        "immediate_count": sum(tool.exposure == "immediate" for tool in request.tools),
+        "callable_count": immediate_count + activated_deferred_count,
+        "immediate_count": immediate_count,
+        "activated_deferred_count": activated_deferred_count,
+        "searchable_count": searchable_count,
         "tools": tools,
     }
 
@@ -1077,6 +1087,7 @@ __all__ = [
     "LLMToolCallError",
     "LLMToolCallResponseError",
     "LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION",
+    "TOOL_SURFACE_SUMMARY_VERSION",
     "ModelResponse",
     "ModelResponseItem",
     "ModelToolCall",

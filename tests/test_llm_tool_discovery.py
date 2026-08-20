@@ -611,8 +611,13 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert appended_after_search[3]["content"] == "volatile frame: cycle 1"
     observed = sink.records[-1].tool_surface
     assert observed is not None
-    assert [tool["name"] for tool in observed["tools"] if tool["active"]] == ["read_document"]
-    assert observed["active_count"] == 1
+    assert [tool["name"] for tool in observed["tools"] if tool["callable"]] == [
+        "finish",
+        "read_document",
+    ]
+    assert observed["callable_count"] == 2
+    assert observed["activated_deferred_count"] == 1
+    assert observed["searchable_count"] == 0
     assert observed["catalog_fingerprint"]
     assert observed["surface_fingerprint"]
     assert "native_tool_calling" not in sink.records[-1].request_args

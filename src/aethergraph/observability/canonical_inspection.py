@@ -808,11 +808,71 @@ def _llm(
         retry_count=max(0, len(all_attempts) - 1),
         total_retry_wait_ms=sum(attempt.scheduled_delay_ms or 0 for attempt in all_attempts),
         attempts=attempts,
-        tool_surface=_thaw_json(record.tool_surface),
+        tool_surface=_tool_surface(record.tool_surface),
         request_items=list(_thaw_json(record.request_items) or []),
         response_items=list(_thaw_json(record.response_items) or []),
         tools=tools,
     )
+
+
+def _tool_surface(value: Any) -> dict[str, Any] | None:
+    """Return the canonical v2 Tool availability projection for inspection."""
+
+    if value is None:
+        return None
+    surface = _thaw_json(value)
+    if not isinstance(surface, Mapping):
+        raise ValueError("Persisted LLM Tool surface must be an object")
+    version = str(surface.get("schema_version") or "")
+    if version not in {
+        "aethergraph.llm-tool-surface/v1",
+        "aethergraph.llm-tool-surface/v2",
+    }:
+        raise ValueError(f"Unsupported persisted LLM Tool surface: {version or '<missing>'}")
+
+    raw_tools = surface.get("tools")
+    if not isinstance(raw_tools, list):
+        raise ValueError("Persisted LLM Tool surface requires a tools list")
+    tools: list[dict[str, Any]] = []
+    for raw in raw_tools:
+        if not isinstance(raw, Mapping):
+            raise ValueError("Persisted LLM Tool surface entries must be objects")
+        exposure = str(raw.get("exposure") or "")
+        if exposure not in {"immediate", "deferred"}:
+            raise ValueError(f"Unsupported persisted Tool exposure: {exposure or '<missing>'}")
+        callable_now = (
+            bool(raw.get("callable"))
+            if version.endswith("/v2")
+            else exposure == "immediate" or bool(raw.get("active"))
+        )
+        tools.append(
+            {
+                "ordinal": int(raw.get("ordinal") or 0),
+                "name": str(raw.get("name") or ""),
+                "exposure": exposure,
+                "callable": callable_now,
+                "input_schema_digest": str(raw.get("input_schema_digest") or ""),
+            }
+        )
+
+    immediate_count = sum(tool["exposure"] == "immediate" for tool in tools)
+    activated_deferred_count = sum(
+        tool["exposure"] == "deferred" and tool["callable"] for tool in tools
+    )
+    searchable_count = sum(
+        tool["exposure"] == "deferred" and not tool["callable"] for tool in tools
+    )
+    return {
+        "schema_version": "aethergraph.llm-tool-surface/v2",
+        "discovery_mode": str(surface.get("discovery_mode") or "disabled"),
+        "catalog_fingerprint": str(surface.get("catalog_fingerprint") or ""),
+        "surface_fingerprint": str(surface.get("surface_fingerprint") or ""),
+        "callable_count": immediate_count + activated_deferred_count,
+        "immediate_count": immediate_count,
+        "activated_deferred_count": activated_deferred_count,
+        "searchable_count": searchable_count,
+        "tools": tools,
+    }
 
 
 def _log(
