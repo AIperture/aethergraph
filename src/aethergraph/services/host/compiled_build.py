@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+import json
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -71,7 +72,7 @@ class CompiledFile(_ArtifactContract):
 class CompiledBuildManifest(_ArtifactContract):
     """Runtime-consumed projection of an Engine compiled-build manifest."""
 
-    schema_version: Literal["aethergraph.compiled-system-manifest/v12"]
+    schema_version: Literal["aethergraph.compiled-system-manifest/v13"]
     build_id: str = Field(pattern=r"^[0-9a-f]{24}$")
     package_name: str
     entrypoint_module: str
@@ -82,6 +83,7 @@ class CompiledBuildManifest(_ArtifactContract):
     semantic_event_protocol_version: Literal["aethergraph.semantic-event/v2"]
     logical_output_requirements: tuple[Literal["origin"], ...]
     catalog_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    resolved_definition_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     resolved_definition_path: Literal["resolved-system.json"]
     files: tuple[CompiledFile, ...]
     manifest_self_hash_excluded: Literal[True]
@@ -203,10 +205,10 @@ def inspect_compiled_build(build_root: str | Path) -> CompiledBuildInspection:
             manifest_path.read_text(encoding="utf-8")
         )
         resolved_path = root.joinpath(*PurePosixPath(manifest.resolved_definition_path).parts)
-        resolved = ResolvedBuildIdentity.model_validate_json(
-            resolved_path.read_text(encoding="utf-8")
-        )
-    except (OSError, UnicodeDecodeError, ValidationError) as exc:
+        resolved_content = resolved_path.read_text(encoding="utf-8")
+        resolved_payload = json.loads(resolved_content)
+        resolved = ResolvedBuildIdentity.model_validate(resolved_payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
         raise CompiledBuildError(f"Invalid compiled build: {root}") from exc
     if manifest.build_id != root.name:
         raise CompiledBuildError("Build directory name does not match manifest build ID.")
@@ -229,6 +231,16 @@ def inspect_compiled_build(build_root: str | Path) -> CompiledBuildInspection:
         raise CompiledBuildError(
             "Resolved definition and manifest differ: " + ", ".join(mismatched)
         )
+    resolved_digest = sha256(
+        json.dumps(
+            resolved_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if resolved_digest != manifest.resolved_definition_digest:
+        raise CompiledBuildError("Resolved definition digest does not match the build manifest.")
     expected_paths = {item.path for item in manifest.files} | {"manifest.json"}
     actual_paths = {
         path.relative_to(root).as_posix()

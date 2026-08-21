@@ -45,17 +45,25 @@ def _write_build(parent: Path) -> Path:
             }
         )
     manifest = {
-        "schema_version": "aethergraph.compiled-system-manifest/v12",
+        "schema_version": "aethergraph.compiled-system-manifest/v13",
         "build_id": build_id,
         "package_name": "demo_compiled",
         "entrypoint_module": "demo_compiled.entry",
         "entrypoint_symbol": "demo_entry",
         "source_digest": "a" * 64,
         "engine_version": "0.1.0a1",
-        "compiler_version": "29",
+        "compiler_version": "30",
         "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
         "logical_output_requirements": ["origin"],
         "catalog_digest": "b" * 64,
+        "resolved_definition_digest": sha256(
+            json.dumps(
+                resolved,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
         "resolved_definition_path": "resolved-system.json",
         "files": sorted(indexed, key=lambda item: item["path"]),
         "manifest_self_hash_excluded": True,
@@ -78,6 +86,26 @@ def test_inspect_compiled_build_rejects_tampered_file(tmp_path) -> None:
     (root / "src" / "demo_compiled" / "entry.py").write_text("VALUE = 2\n", encoding="utf-8")
 
     with pytest.raises(CompiledBuildError, match="integrity"):
+        inspect_compiled_build(root)
+
+
+def test_inspect_compiled_build_rejects_resolved_definition_digest_mismatch(
+    tmp_path,
+) -> None:
+    root = _write_build(tmp_path)
+    resolved_path = root / "resolved-system.json"
+    resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+    resolved["ignored"] = "changed-with-a-reindexed-file"
+    resolved_path.write_text(json.dumps(resolved), encoding="utf-8")
+    content = resolved_path.read_bytes()
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    indexed = next(item for item in manifest["files"] if item["path"] == "resolved-system.json")
+    indexed["size"] = len(content)
+    indexed["sha256"] = sha256(content).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(CompiledBuildError, match="definition digest"):
         inspect_compiled_build(root)
 
 
