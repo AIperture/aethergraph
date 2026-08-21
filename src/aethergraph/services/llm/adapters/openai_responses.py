@@ -170,7 +170,6 @@ def _openai_request_tools(
         result.append(
             {
                 "type": "tool_search",
-                "execution": "hosted",
                 "description": render_tool_search_description(request),
             }
         )
@@ -178,7 +177,7 @@ def _openai_request_tools(
 
 
 def _openai_hosted_tool_refs(item: dict[str, Any]) -> tuple[str, ...]:
-    """Decode the exact flat callable names selected by hosted Tool search."""
+    """Decode callable names selected by one hosted Tool-search output."""
 
     raw_results = item.get("tools")
     if raw_results is None:
@@ -186,11 +185,17 @@ def _openai_hosted_tool_refs(item: dict[str, Any]) -> tuple[str, ...]:
     if not isinstance(raw_results, list):
         return ()
     names: list[str] = []
-    for value in raw_results:
+    pending = list(raw_results)
+    while pending:
+        value = pending.pop(0)
         if isinstance(value, str):
             name = value.strip()
         elif isinstance(value, dict):
             name = str(value.get("name") or value.get("tool_name") or "").strip()
+            nested = value.get("tools")
+            if isinstance(nested, list):
+                pending[0:0] = nested
+                name = ""
         else:
             name = ""
         if name and name not in names:
@@ -493,13 +498,32 @@ def _openai_tool_call_response(
     search_call_ids: list[str] = []
     function_call_ids: list[str] = []
     response_id = str(data.get("id") or "").strip()
-    for output_index, item in enumerate(list(data.get("output") or [])):
+    output_items = list(data.get("output") or [])
+    hosted_outputs = [
+        value
+        for value in output_items
+        if isinstance(value, dict)
+        and value.get("type") == "tool_search_output"
+        and value.get("execution") == "server"
+    ]
+    hosted_output_index = 0
+    for output_index, item in enumerate(output_items):
         if not isinstance(item, dict):
             continue
         if item.get("type") == "tool_search_call":
             discovery = tool_request.discovery
             execution = str(item.get("execution") or "")
-            expected_mode = "native_client" if execution == "client" else "native_hosted"
+            if execution == "client":
+                expected_mode = "native_client"
+            elif execution == "server":
+                expected_mode = "native_hosted"
+            else:
+                raise LLMToolCallResponseError(
+                    code="discovery_execution_unsupported",
+                    message=(
+                        "OpenAI returned Tool search with unsupported execution " f"{execution!r}."
+                    ),
+                )
             if discovery is None or discovery.mode != expected_mode:
                 raise LLMToolCallResponseError(
                     code="discovery_mode_mismatch",
@@ -520,7 +544,15 @@ def _openai_tool_call_response(
                 else {}
             )
             query = str(arguments.get("goal") or arguments.get("query") or "").strip()
-            tool_refs = _openai_hosted_tool_refs(item) if expected_mode == "native_hosted" else ()
+            tool_refs: tuple[str, ...] = ()
+            if expected_mode == "native_hosted":
+                if hosted_output_index >= len(hosted_outputs):
+                    raise LLMToolCallResponseError(
+                        code="discovery_output_missing",
+                        message="OpenAI hosted Tool search omitted its search output.",
+                    )
+                tool_refs = _openai_hosted_tool_refs(hosted_outputs[hosted_output_index])
+                hosted_output_index += 1
             items.append(
                 ToolDiscoveryEvent(
                     event_id=str(
@@ -540,6 +572,8 @@ def _openai_tool_call_response(
             )
             if expected_mode == "native_client":
                 search_call_ids.append(call_id)
+            continue
+        if item.get("type") == "tool_search_output":
             continue
         if item.get("type") == "function_call":
             arguments = _openai_tool_arguments(

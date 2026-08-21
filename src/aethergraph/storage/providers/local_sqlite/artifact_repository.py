@@ -798,6 +798,73 @@ class LocalArtifactRepository:
 
         return await self._database.transaction(commit)
 
+    async def commit_execution_occurrence(
+        self,
+        occurrence: ArtifactOccurrence,
+    ) -> tuple[ArtifactOccurrence, bool]:
+        """Commit an occurrence and execution accounting in one transaction.
+
+        The occurrence is authoritative for artifact use. When it names a run or
+        session, the matching control record is updated atomically with the occurrence.
+
+        Examples:
+            Commit a run attachment:
+                ```python
+                stored, created = await repository.commit_execution_occurrence(
+                    occurrence
+                )
+                ```
+
+            Retry after an admission acknowledgement is lost:
+                ```python
+                stored, created = await repository.commit_execution_occurrence(
+                    occurrence
+                )
+                assert created is False
+                ```
+
+        Args:
+            occurrence: Complete execution occurrence with stable identity and time.
+
+        Returns:
+            tuple[ArtifactOccurrence, bool]: Stored occurrence and creation flag.
+
+        Notes:
+            Run/session counters and recent-artifact projections share the artifact
+            repository transaction. Missing control records fail the entire commit.
+        """
+        self._require_writable()
+
+        def commit(connection: sqlite3.Connection) -> tuple[ArtifactOccurrence, bool]:
+            created = (
+                connection.execute(
+                    "SELECT 1 FROM local_artifact_occurrences WHERE occurrence_id = ?",
+                    (occurrence.occurrence_id,),
+                ).fetchone()
+                is None
+            )
+            stored = _record_artifact_occurrence(connection, occurrence)
+            if occurrence.scope.run_id is not None:
+                _record_run_artifact_in_transaction(
+                    connection,
+                    scope=occurrence.scope,
+                    run_id=occurrence.scope.run_id,
+                    artifact_id=occurrence.artifact_id,
+                    occurrence_id=occurrence.occurrence_id,
+                    occurred_at=occurrence.occurred_at,
+                )
+            if occurrence.scope.session_id is not None:
+                _record_session_artifact_in_transaction(
+                    connection,
+                    scope=occurrence.scope,
+                    session_id=occurrence.scope.session_id,
+                    occurrence_id=occurrence.occurrence_id,
+                    occurred_at=occurrence.occurred_at,
+                )
+            return stored, created
+
+        return await self._database.transaction(commit)
+
     async def list_occurrences(
         self,
         scope: StorageScope,

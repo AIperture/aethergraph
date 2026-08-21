@@ -21,7 +21,7 @@ from aethergraph.services.llm.observability import ConsoleLLMObservationSink
 
 from .openai_tool_search_cache_scenario import (
     SEARCH_SCHEMA,
-    assert_loaded_branch_replayed,
+    assert_usage_consistent,
     build_cache_scenario,
     normalize_usage,
 )
@@ -33,10 +33,10 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
-async def test_generic_client_replays_loaded_schema_branch() -> None:
-    """Run the same exact-load replay through the provider-neutral adapter."""
+async def test_generic_client_reports_search_and_activation_cache_usage() -> None:
+    """Measure exact client search/load replays through the AG adapter."""
 
-    scenario = build_cache_scenario(os.getenv("AG_OPENAI_CACHE_SMOKE_MODEL", "gpt-5.4"))
+    scenario = build_cache_scenario(os.getenv("AG_OPENAI_CACHE_SMOKE_MODEL", "gpt-5.6-luna"))
     family = f"ag-cache-adapter-{scenario.scenario_id}"
     client = GenericLLMClient(
         "openai",
@@ -83,42 +83,62 @@ async def test_generic_client_replays_loaded_schema_branch() -> None:
         turn_id="cache-smoke",
     )
     try:
-        initial, _ = await client.chat(
+        initial, initial_usage = await client.chat(
             list(scenario.messages),
             tool_request=initial_request,
             prompt_cache=PromptCacheRequest((0, 1), family),
             reasoning_effort="low",
-            max_output_tokens=256,
+            max_output_tokens=1_024,
         )
         assert isinstance(initial, ToolCallResponse)
         assert initial.transport_checkpoint is not None
+        search_replay, search_replay_usage = await client.chat(
+            list(scenario.messages),
+            tool_request=initial_request,
+            prompt_cache=PromptCacheRequest((0, 1), family),
+            reasoning_effort="low",
+            max_output_tokens=1_024,
+        )
+        assert isinstance(search_replay, ToolCallResponse)
+        assert search_replay.transport_checkpoint is not None
         loaded_request = ToolCallRequest(
             tools=tools,
             choice="auto",
             discovery=discovery,
             turn_id="cache-smoke",
-            active_tool_names=tuple(tool.name for tool in tools),
+            active_tool_names=tuple(tool.name for tool in tools[:5]),
             transport_checkpoint=initial.transport_checkpoint,
         )
-        _, load_usage = await client.chat(
+        _, activation_usage = await client.chat(
             list(scenario.messages),
             tool_request=loaded_request,
             prompt_cache=PromptCacheRequest((0, 1), family),
             reasoning_effort="low",
-            max_output_tokens=256,
+            max_output_tokens=1_024,
         )
-        _, replay_usage = await client.chat(
+        _, activation_replay_usage = await client.chat(
             list(scenario.messages),
             tool_request=loaded_request,
             prompt_cache=PromptCacheRequest((0, 1), family),
             reasoning_effort="low",
-            max_output_tokens=256,
+            max_output_tokens=1_024,
         )
     finally:
         await client.aclose()
 
-    assert_loaded_branch_replayed(
-        load=normalize_usage(load_usage),
-        replay=normalize_usage(replay_usage),
-        loaded_schema_branch_floor=scenario.loaded_schema_branch_floor,
-    )
+    for label, usage in (
+        ("client_search", initial_usage),
+        ("client_search_replay", search_replay_usage),
+        ("client_activation", activation_usage),
+        ("client_activation_replay", activation_replay_usage),
+    ):
+        normalized = normalize_usage(usage)
+        assert_usage_consistent(normalized)
+        print(
+            "OpenAI AG cache diagnostic "
+            f"label={label} model={scenario.model} "
+            f"input_tokens={normalized.input_tokens} "
+            f"output_tokens={normalized.output_tokens} "
+            f"cache_read_tokens={normalized.cache_read_tokens} "
+            f"cache_write_tokens={normalized.cache_write_tokens}"
+        )

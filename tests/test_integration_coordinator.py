@@ -42,6 +42,8 @@ from aethergraph.services.integration import (
     VerifiedIntegrationContext,
     install_integration_ingress,
 )
+import aethergraph.services.integration.dispatch as dispatch_module
+from aethergraph.services.integration.dispatch import AGRootTurnDispatcher
 from aethergraph.storage.contracts import (
     SessionKind,
     SessionRecord,
@@ -75,6 +77,92 @@ def _route(*, enabled: bool = True, attachments: bool = True) -> IntegrationRout
             cancellation=True,
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_root_dispatch_adopts_resources_before_external_admission(monkeypatch) -> None:
+    events: list[tuple[str, object]] = []
+
+    class _Registry:
+        def get_meta(self, **_kwargs):
+            return {
+                "backing": {"type": "graphfn", "name": "graph.support"},
+                "run_visibility": "inline",
+                "run_importance": "ephemeral",
+            }
+
+    class _Artifacts:
+        async def attach_existing(self, artifact_id, **kwargs):
+            events.append(("attached", (artifact_id, kwargs)))
+
+    class _ArtifactFactory:
+        def for_execution(self, scope, **_kwargs):
+            events.append(("scope", scope))
+            return _Artifacts()
+
+    class _RunManager:
+        async def submit_run(self, **kwargs):
+            record = SimpleNamespace(
+                run_id="run-root-1",
+                started_at=_NOW,
+                session_id="session-1",
+                graph_id="graph.support",
+                agent_id="agent.support",
+                org_id="org-1",
+                user_id="user-1",
+            )
+            await kwargs["admission_callback"](record)
+            events.append(("execution_scheduled", record.run_id))
+            return record
+
+    class _Monitor:
+        def observe(self, **kwargs):
+            events.append(("observed", kwargs["run_id"]))
+
+    monkeypatch.setattr(dispatch_module, "scoped_registry", lambda _identity: _Registry())
+    dispatcher = AGRootTurnDispatcher(
+        SimpleNamespace(
+            run_manager=_RunManager(),
+            artifact_factory=_ArtifactFactory(),
+        ),
+        turn_monitor=_Monitor(),
+    )
+
+    async def persist_admission(run_id: str) -> None:
+        events.append(("external_admission", run_id))
+
+    run_id = await dispatcher.start(
+        verified=_verified(),
+        route=_route(),
+        binding=_binding(),
+        envelope=_envelope(),
+        resources=(
+            InputResource(
+                kind="file",
+                source="slack",
+                id="target_buffer",
+                artifact_id="artifact-input",
+            ),
+        ),
+        admission_callback=persist_admission,
+    )
+
+    assert run_id == "run-root-1"
+    assert [event[0] for event in events] == [
+        "scope",
+        "attached",
+        "external_admission",
+        "execution_scheduled",
+        "observed",
+    ]
+    scope = events[0][1]
+    assert isinstance(scope, StorageScope)
+    assert scope.run_id == "run-root-1"
+    assert scope.session_id == "session-1"
+    assert scope.graph_id == "graph.support"
+    assert scope.agent_id == "agent.support"
+    assert scope.org_id == "org-1"
+    assert scope.user_id == "user-1"
 
 
 def _manifest(route: IntegrationRoute) -> HostManifest:

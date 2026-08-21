@@ -12,7 +12,11 @@ from aethergraph.services.artifacts import (
 )
 from aethergraph.storage.contracts import (
     PageRequest,
+    RunRecord,
+    RunStatus,
     SearchMode,
+    SessionKind,
+    SessionRecord,
     StorageOpenMode,
     StorageOpenRequest,
     StorageProviderSelection,
@@ -208,6 +212,111 @@ async def test_public_factory_projects_runtime_write_read_and_search_core(tmp_pa
             await artifacts.load_text("artifact://artifact-1?version=2")
         with pytest.raises(FileNotFoundError, match="missing"):
             await artifacts.load_bytes_by_id("missing")
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
+async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Path) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    factory = CanonicalArtifactFacadeFactory(
+        bundle=bundle,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+    )
+    session_scope = StorageScope(
+        **_owner_scope().as_filter(),
+        org_id="org-1",
+        user_id="user-1",
+        session_id="session-1",
+    )
+    run_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-1",
+        graph_id="graph-1",
+        agent_id="agent-1",
+    )
+    await bundle.sessions.create(
+        SessionRecord(
+            session_id="session-1",
+            kind=SessionKind.CHAT,
+            scope=session_scope,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    ingress = factory.for_execution(
+        StorageScope(
+            org_id="org-1",
+            user_id="user-1",
+            session_id="session-1",
+            graph_id="integration",
+            node_id="resource_ingress",
+        )
+    )
+    try:
+        staged = await ingress.save_text(
+            "attached prompt",
+            artifact_id="artifact-input",
+            occurrence_id="occurrence-ingress",
+        )
+        await bundle.runs.create(
+            RunRecord(
+                run_id="run-1",
+                graph_id="graph-1",
+                kind="graphfn",
+                status=RunStatus.RUNNING,
+                scope=run_scope,
+                revision=1,
+                started_at=NOW,
+            )
+        )
+        admission = factory.for_execution(
+            StorageScope(
+                org_id="org-1",
+                user_id="user-1",
+                session_id="session-1",
+                run_id="run-1",
+                graph_id="graph-1",
+                agent_id="agent-1",
+            )
+        )
+
+        adopted = await admission.attach_existing(
+            staged.record.artifact_id,
+            occurrence_id="occurrence-input-1",
+            occurred_at=NOW,
+            labels={"attachment_id": "target_buffer"},
+        )
+        retried = await admission.attach_existing(
+            staged.record.artifact_id,
+            occurrence_id="occurrence-input-1",
+            occurred_at=NOW,
+            labels={"attachment_id": "target_buffer"},
+        )
+        downstream = factory.for_public_execution(
+            StorageScope(
+                session_id="session-1",
+                run_id="run-1",
+                graph_id="graph-1",
+                node_id="agent-node",
+                agent_id="agent-1",
+            )
+        )
+
+        assert retried == adopted
+        assert adopted.action.value == "attached"
+        assert (
+            await downstream.load_bytes_by_id(
+                staged.record.artifact_id,
+                occurrence_scope=StorageScope(run_id="run-1"),
+            )
+            == b"attached prompt"
+        )
+        run = await bundle.runs.get(run_scope, "run-1")
+        assert run is not None and run.artifact_count == 1
     finally:
         await bundle.close()
 

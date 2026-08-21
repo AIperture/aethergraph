@@ -1253,6 +1253,65 @@ class CanonicalArtifactFacade:
         )
         return page.items[0] if page.items else None
 
+    async def attach_existing(
+        self,
+        artifact_id: str,
+        *,
+        occurrence_id: str,
+        occurred_at: datetime,
+        labels: Mapping[str, Any] | None = None,
+    ) -> ArtifactOccurrence:
+        """Attach existing canonical content to this execution scope.
+
+        The method records one `attached` occurrence without copying immutable bytes.
+        Run/session accounting is committed atomically by the canonical repository.
+
+        Examples:
+            Adopt an ingress artifact into a root run:
+                ```python
+                occurrence = await facade.attach_existing(
+                    "artifact-1",
+                    occurrence_id="occurrence-input-1",
+                    occurred_at=run.started_at,
+                )
+                ```
+
+            Include transport-safe provenance:
+                ```python
+                occurrence = await facade.attach_existing(
+                    "artifact-1",
+                    occurrence_id="occurrence-input-1",
+                    occurred_at=run.started_at,
+                    labels={"attachment_id": "upload-1"},
+                )
+                ```
+
+        Args:
+            artifact_id: Existing canonical artifact identity owned by this facade.
+            occurrence_id: Stable idempotency identity for the execution occurrence.
+            occurred_at: Stable UTC admission time, normally the run start time.
+            labels: Optional immutable occurrence provenance without content bytes.
+
+        Returns:
+            ArtifactOccurrence: Authoritative attached occurrence.
+
+        Notes:
+            Missing content, run, or session authority raises `StorageNotFoundError`.
+            The operation performs no blob copy, search projection, or fallback lookup.
+        """
+        occurrence = ArtifactOccurrence(
+            occurrence_id=occurrence_id,
+            artifact_id=artifact_id,
+            scope=self.execution_scope,
+            action=ArtifactAction.ATTACHED,
+            occurred_at=occurred_at,
+            tool_name=self.tool_name,
+            tool_version=self.tool_version,
+            labels=_canonical_artifact_labels("labels", labels),
+        )
+        stored, _ = await self._artifacts.commit_execution_occurrence(occurrence)
+        return stored
+
     async def get_many(
         self,
         artifact_ids: Sequence[str],

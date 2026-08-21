@@ -119,7 +119,10 @@ class _ObservationSink:
     def __init__(self) -> None:
         self.records = []
 
-    async def emit(self, record, *, capture_mode) -> None:
+    async def begin_llm_call(self, record, *, capture_mode) -> None:
+        assert record.lifecycle_status == "in_progress"
+
+    async def finish_llm_call(self, record, *, capture_mode) -> None:
         self.records.append(record)
 
 

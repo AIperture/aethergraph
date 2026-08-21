@@ -173,8 +173,27 @@ async def test_canonical_llm_projection_is_atomic_idempotent_and_capture_bounded
         ),
     )
 
-    await service.emit(call, capture_mode="manifest")
-    await service.emit(call, capture_mode="manifest")
+    call.raw_text = None
+    call.usage = {}
+    call.latency_ms = None
+    call.attempts = ()
+    await service.begin_llm_call(call, capture_mode="manifest")
+    call.raw_text = "hello back"
+    call.usage = {"input_tokens": 3, "output_tokens": 2}
+    call.latency_ms = 25
+    call.attempts = (
+        ProviderTransportAttempt(
+            attempt_number=1,
+            elapsed_s=0.025,
+            outcome="success",
+            retryable=False,
+            status_code=200,
+            rate_limits=(ProviderRateLimitSnapshot(resource="requests", remaining=99),),
+        ),
+    )
+    call.lifecycle_status = "completed"
+    await service.finish_llm_call(call, capture_mode="manifest")
+    await service.finish_llm_call(call, capture_mode="manifest")
     detail = await repository.get_llm_call(OWNER, "call-1")
 
     assert detail is not None
@@ -190,7 +209,7 @@ async def test_canonical_llm_projection_is_atomic_idempotent_and_capture_bounded
     assert detail.record.attempts[0].elapsed_ms == 25
     assert call.prompt_manifest_id == detail.record.prompt_manifest_id
     with pytest.raises(ValueError, match="does not match"):
-        await service.emit(call, capture_mode="full")
+        await service.finish_llm_call(call, capture_mode="full")
     await database.close()
 
 

@@ -80,7 +80,7 @@ async def test_console_sink_compact_view_renders_prompt_and_output(capsys) -> No
     sink = ConsoleLLMObservationSink(prompt_view="compact", width=60, truncation_chars=80)
     record = _record(prompt="Explain attention.", output="Attention weights relevant inputs.")
 
-    await sink.emit(record, capture_mode="full")
+    await sink.finish_llm_call(record, capture_mode="full")
 
     out = capsys.readouterr().out
     assert "LLM CALL  [-] openai/gpt-test  profile=default" in out
@@ -260,9 +260,52 @@ async def test_projected_discovery_model_calls_all_reach_the_inspect_reader(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_llm_call_is_persisted_and_reraised(tmp_path: Path) -> None:
+    database = LocalSQLiteDatabase.open(
+        workspace_root=tmp_path,
+        role=LocalDatabaseRole.CONTROL,
+        mode=StorageOpenMode.READ_WRITE,
+    )
+    sink = ProviderObservationService(
+        repository=LocalObservationRepository(database=database),
+        owner_scope=StorageScope(project_id="project-cancel"),
+        policy=ObservationPolicy(capture_mode="metadata"),
+    )
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=sink,
+        observation_capture_mode="metadata",
+    )
+    transport_started = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def blocked_dispatch(messages, **kwargs):
+        transport_started.set()
+        await never_finishes.wait()
+        raise AssertionError("unreachable")
+
+    client._chat_dispatch = blocked_dispatch  # type: ignore[method-assign]
+    task = asyncio.create_task(client.chat([{"role": "user", "content": "cancel"}]))
+    await transport_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    page = await CanonicalInspectionReader(sink).list_llm_calls()
+    assert len(page.items) == 1
+    assert page.items[0].lifecycle_status == "cancelled"
+    assert page.items[0].error_type == "CancelledError"
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_observation_sink_failure_cannot_change_a_successful_llm_result() -> None:
     class FailingSink:
-        async def emit(self, record, *, capture_mode: str) -> None:
+        async def begin_llm_call(self, record, *, capture_mode: str) -> None:
+            raise RuntimeError("observation store unavailable")
+
+        async def finish_llm_call(self, record, *, capture_mode: str) -> None:
             raise RuntimeError("observation store unavailable")
 
     client = GenericLLMClient(
@@ -295,8 +338,13 @@ async def test_metering_is_independent_of_capture_mode(mode: str) -> None:
     metering = FakeMetering()
 
     class CaptureSink:
-        async def emit(self, record, *, capture_mode: str) -> None:
+        async def begin_llm_call(self, record, *, capture_mode: str) -> None:
             assert capture_mode == mode
+            assert record.lifecycle_status == "in_progress"
+
+        async def finish_llm_call(self, record, *, capture_mode: str) -> None:
+            assert capture_mode == mode
+            assert record.lifecycle_status == "completed"
 
     client = GenericLLMClient(
         provider="openai",

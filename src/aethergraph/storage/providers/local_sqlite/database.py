@@ -255,6 +255,91 @@ class LocalSQLiteDatabase:
         except sqlite3.Error as exc:
             raise _classify_sqlite_error(exc, self.role) from exc
 
+    def migrate_component(
+        self,
+        *,
+        name: str,
+        from_version: int,
+        to_version: int,
+        statements: Sequence[str],
+    ) -> bool:
+        """Apply one explicit provider-owned component migration transaction.
+
+        The method changes an installed exact source version to one exact target
+        version atomically. It does not infer, skip, or chain unknown migrations.
+
+        Examples:
+            Migrate an installed component:
+                ```python
+                database.migrate_component(
+                    name="observations",
+                    from_version=1,
+                    to_version=2,
+                    statements=("ALTER TABLE calls ADD COLUMN status TEXT",),
+                )
+                ```
+
+            Detect a not-yet-installed component:
+                ```python
+                installed = database.migrate_component(
+                    name="new_component",
+                    from_version=1,
+                    to_version=2,
+                    statements=(),
+                )
+                assert installed is False
+                ```
+
+        Args:
+            name: Exact provider-private component identifier.
+            from_version: Only supported installed source version.
+            to_version: Exact target version, greater than the source.
+            statements: Ordered SQL migration statements.
+
+        Returns:
+            bool: `False` when absent; otherwise `True` after target validation or migration.
+
+        Notes:
+            Read-only handles report required migrations as `StorageFormatError`.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("component name must be non-empty")
+        if from_version < 1 or to_version <= from_version:
+            raise ValueError("component migration versions are invalid")
+        row = self._connection.execute(
+            "SELECT version FROM ag_storage_components WHERE name = ?", (name,)
+        ).fetchone()
+        if row is None:
+            return False
+        current = int(row[0])
+        if current == to_version:
+            return True
+        if current != from_version:
+            raise StorageFormatError(
+                f"Local schema component {name!r} cannot migrate from version {current}"
+            )
+        if self.mode is StorageOpenMode.READ_ONLY:
+            raise StorageFormatError(
+                f"Read-only local schema component {name!r} requires migration "
+                f"from {from_version} to {to_version}"
+            )
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                for statement in statements:
+                    self._connection.execute(statement)
+                self._connection.execute(
+                    "UPDATE ag_storage_components SET version = ? WHERE name = ? AND version = ?",
+                    (to_version, name, from_version),
+                )
+            except BaseException:
+                self._connection.rollback()
+                raise
+            self._connection.commit()
+        except sqlite3.Error as exc:
+            raise _classify_sqlite_error(exc, self.role) from exc
+        return True
+
     async def fetch_all(
         self,
         sql: str,

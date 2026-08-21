@@ -20,6 +20,7 @@ from aethergraph.core.runtime.run_cancellation import (
     get_run_cancellation_registry,
 )
 from aethergraph.core.runtime.run_types import (
+    RunAdmissionError,
     RunImportance,
     RunOrigin,
     RunRecord,
@@ -1010,37 +1011,62 @@ class RunManager:
                 try:
                     await admission_callback(record)
                 except Exception as exc:
+                    admission_error = (
+                        exc
+                        if isinstance(exc, RunAdmissionError)
+                        else RunAdmissionError(
+                            run_id=record.run_id,
+                            code="run_admission_failed",
+                            stage="run_admission",
+                            safe_message="Run admission callback failed.",
+                            details={"cause_type": type(exc).__name__},
+                        )
+                    )
+                    error_detail = traceback.format_exc()
+                    error_meta = {
+                        "error_kind": "admission",
+                        "error_code": admission_error.code,
+                        "error_stage": admission_error.stage,
+                        "error_message": admission_error.safe_message,
+                        "error_detail": error_detail,
+                        "error_is_traceback": True,
+                        "error_info": {
+                            "message": admission_error.safe_message,
+                            "detail": error_detail,
+                            "kind": "admission",
+                            "stage": admission_error.stage,
+                            "code": admission_error.code,
+                            "hints": [],
+                            "is_traceback": True,
+                            "context": admission_error.details,
+                        },
+                    }
                     record.status = RunStatus.failed
                     record.finished_at = _utcnow()
-                    record.error = "Run admission callback failed"
-                    record.meta.update(
-                        {
-                            "error_kind": "admission",
-                            "error_code": "run_admission_failed",
-                            "error_stage": "run_admission",
-                            "error_message": record.error,
-                            "error_detail": None,
-                            "error_is_traceback": False,
-                        }
-                    )
+                    record.error = admission_error.safe_message
+                    record.meta.update(error_meta)
                     if self._store is not None:
                         await self._store.update_status(
                             record.run_id,
                             RunStatus.failed,
                             finished_at=record.finished_at,
                             error=record.error,
-                            meta_update={
-                                "error_kind": "admission",
-                                "error_code": "run_admission_failed",
-                                "error_stage": "run_admission",
-                                "error_message": record.error,
-                                "error_detail": None,
-                                "error_is_traceback": False,
-                            },
+                            meta_update=error_meta,
                         )
                     await self._resolve_run_future(record.run_id, (record, None))
                     await self._get_cancellation_registry().pop(record.run_id)
-                    raise RuntimeError("Run admission callback failed") from exc
+                    _log.exception(
+                        "run_admission_failed",
+                        extra={
+                            "run_id": record.run_id,
+                            "error_code": admission_error.code,
+                            "error_stage": admission_error.stage,
+                            "admission_error_details": admission_error.details,
+                        },
+                    )
+                    if admission_error is exc:
+                        raise
+                    raise admission_error from exc
 
             async def _bg():
                 try:
@@ -1326,9 +1352,11 @@ class RunManager:
                 RunStatus.cancellation_requested,
                 finished_at=None,
                 error=None,
-                meta_update={k: v for k, v in handle.metadata().items() if v is not None}
-                if handle is not None
-                else None,
+                meta_update=(
+                    {k: v for k, v in handle.metadata().items() if v is not None}
+                    if handle is not None
+                    else None
+                ),
             )
 
         has_adapter = handle.adapter_kind not in {None, "none"}

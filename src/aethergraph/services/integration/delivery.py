@@ -181,6 +181,7 @@ class SemanticEventEmitter:
                     summary="Execution completed.",
                     resumable=False,
                     engine_turn_id="turn-1",
+                    reply_disposition="message_required",
                 ),
             )
             ```
@@ -198,6 +199,7 @@ class SemanticEventEmitter:
                     summary="Waiting for user input.",
                     resumable=True,
                     engine_turn_id="turn-2",
+                    reply_disposition="no_message",
                 ),
             )
             ```
@@ -221,6 +223,13 @@ class SemanticEventEmitter:
         normalized_session_id = self._required(session_id, "session_id")
         normalized_turn_id = self._required(turn_id, "turn_id")
         normalized_producer = self._required(producer, "producer")
+        if (
+            kind == SemanticEventKind.TURN_OUTCOME
+            and getattr(payload, "reply_disposition", None) is None
+        ):
+            raise SemanticDeliveryError(
+                "New turn.outcome emissions require an explicit reply_disposition."
+            )
         key = (normalized_session_id, normalized_turn_id)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -658,12 +667,19 @@ class SemanticTurnMonitor:
         try:
             if not isinstance(raw_outcome, dict):
                 raise TypeError("agent_outcome must be an object")
+            if raw_outcome.get("reply_disposition") not in {
+                "message_required",
+                "structured_satisfied",
+                "no_message",
+            }:
+                raise ValueError("agent_outcome requires an explicit reply_disposition")
             payload = TurnOutcomePayload(
                 outcome=raw_outcome.get("outcome"),
                 code=raw_outcome.get("code"),
                 summary=raw_outcome.get("summary"),
                 resumable=raw_outcome.get("resumable"),
                 engine_turn_id=raw_outcome.get("engine_turn_id"),
+                reply_disposition=raw_outcome["reply_disposition"],
             )
         except Exception as exc:
             raise SemanticDeliveryError(

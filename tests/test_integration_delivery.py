@@ -426,6 +426,7 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
                         "summary": "Execution completed.",
                         "resumable": False,
                         "engine_turn_id": "engine-turn-1",
+                        "reply_disposition": "message_required",
                     }
                 },
             )
@@ -446,6 +447,7 @@ async def test_turn_monitor_appends_terminal_event_after_channel_history(tmp_pat
     assert history[1].event.kind == SemanticEventKind.TURN_OUTCOME
     assert isinstance(history[1].event.payload, TurnOutcomePayload)
     assert history[1].event.payload.outcome == "completed"
+    assert history[1].event.payload.reply_disposition == "message_required"
     assert history[1].event.extensions == {
         "aethergraph.integration_id": "agstudio",
         "aethergraph.route_id": "studio-assistant",
@@ -488,6 +490,7 @@ async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
                         "summary": "The response could not be composed.",
                         "resumable": False,
                         "engine_turn_id": "engine-turn-7",
+                        "reply_disposition": "no_message",
                         "runtime_error": True,
                         "diagnostics": {"phase": "composition"},
                     }
@@ -514,8 +517,39 @@ async def test_turn_monitor_uses_engine_outcome_after_infrastructure_success(
     assert isinstance(payload, TurnOutcomePayload)
     assert payload.outcome == "failed"
     assert payload.engine_turn_id == "engine-turn-7"
+    assert payload.reply_disposition == "no_message"
     assert "runtime_error" not in payload.model_dump()
     await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_new_turn_outcome_emission_requires_explicit_reply_disposition() -> None:
+    event_log = make_semantic_event_store()
+    emitter = SemanticEventEmitter(
+        deployment_id="deployment-1",
+        store=event_log,
+        semantic_event_protocol_version=SEMANTIC_EVENT_PROTOCOL_VERSION,
+    )
+    try:
+        with pytest.raises(
+            SemanticDeliveryError,
+            match="explicit reply_disposition",
+        ):
+            await emitter.emit_semantic(
+                session_id="session-1",
+                turn_id="run-historical-shape",
+                producer="aethergraph.engine",
+                kind=SemanticEventKind.TURN_OUTCOME,
+                payload=TurnOutcomePayload(
+                    outcome="completed",
+                    code="completed",
+                    summary="Missing current delivery contract.",
+                    resumable=False,
+                    engine_turn_id="engine-turn-1",
+                ),
+            )
+    finally:
+        await event_log.close()
 
 
 @pytest.mark.asyncio

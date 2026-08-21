@@ -16,6 +16,7 @@ from aethergraph.services.llm.correlation import complete_llm_call_correlation
 from aethergraph.storage.contracts import (
     LLMCallAttempt,
     LLMCallDraft,
+    LLMCallLifecycleStatus,
     ObservationCaptureMode,
     ObservationDraft,
     ObservationRepository,
@@ -91,8 +92,37 @@ class CanonicalObservationService(Protocol):
         """
         ...
 
-    async def emit(self, record: LLMObservationRecord, *, capture_mode: str) -> None:
-        """Append one completed AG LLM call through canonical observation storage.
+    async def begin_llm_call(self, record: LLMObservationRecord, *, capture_mode: str) -> None:
+        """Persist one prepared request before quota or provider transport.
+
+        The configured capture policy bounds request evidence before the canonical
+        repository creates one in-progress identity.
+
+        Examples:
+            Begin manifest capture:
+                ```python
+                await service.begin_llm_call(record, capture_mode="manifest")
+                ```
+
+            Begin metadata capture:
+                ```python
+                await service.begin_llm_call(record, capture_mode="metadata")
+                ```
+
+        Args:
+            record: Prepared provider-neutral LLM observation.
+            capture_mode: Exact configured capture mode.
+
+        Returns:
+            None: The in-progress call is committed.
+
+        Notes:
+            No provider request is issued by this persistence method.
+        """
+        ...
+
+    async def finish_llm_call(self, record: LLMObservationRecord, *, capture_mode: str) -> None:
+        """Persist one terminal outcome for a previously begun provider call.
 
         Capture/redaction policy is applied before the provider receives one prepared
         atomic LLM draft and its observation metadata.
@@ -100,12 +130,12 @@ class CanonicalObservationService(Protocol):
         Examples:
             Store a completed call:
                 ```python
-                await service.emit(call, capture_mode="manifest")
+                await service.finish_llm_call(call, capture_mode="manifest")
                 ```
 
             Store metadata-only evidence:
                 ```python
-                await metadata_service.emit(call, capture_mode="metadata")
+                await metadata_service.finish_llm_call(call, capture_mode="metadata")
                 ```
 
         Args:
@@ -116,8 +146,7 @@ class CanonicalObservationService(Protocol):
             None: The canonical call is committed and correlation is completed.
 
         Notes:
-            This final-record projection intentionally does not introduce the deferred
-            Tool-observability LLM lifecycle contract.
+            A matching begin is mandatory; there is no insert-on-finish path.
         """
         ...
 
@@ -214,8 +243,47 @@ class ProviderObservationService:
         (stored,) = await self.repository.append_many((draft,))
         return stored.observation_id
 
-    async def emit(self, record: LLMObservationRecord, *, capture_mode: str) -> None:
-        """Append one completed AG LLM call through canonical observation storage.
+    async def begin_llm_call(self, record: LLMObservationRecord, *, capture_mode: str) -> None:
+        """Persist one in-progress AG LLM call before execution starts.
+
+        Capture policy is applied to the prepared request before the provider-owned
+        repository creates the sole durable call identity.
+
+        Examples:
+            Begin a manifest call:
+                ```python
+                await service.begin_llm_call(record, capture_mode="manifest")
+                ```
+
+            Begin a metadata-only call:
+                ```python
+                await service.begin_llm_call(record, capture_mode="metadata")
+                ```
+
+        Args:
+            record: Prepared provider-neutral LLM observation.
+            capture_mode: Exact configured capture mode for mismatch detection.
+
+        Returns:
+            None: The in-progress call and request evidence are committed.
+
+        Notes:
+            This method never performs provider transport or terminal persistence.
+        """
+        self._validate_capture_mode(capture_mode)
+        record.lifecycle_status = LLMCallLifecycleStatus.IN_PROGRESS.value
+        draft = _llm_draft(
+            record,
+            owner_scope=self.owner_scope,
+            policy=self.policy,
+            prompt_store=self._prompt_store,
+            lifecycle_status=LLMCallLifecycleStatus.IN_PROGRESS,
+        )
+        stored = await self.repository.begin_llm_call(draft)
+        record.prompt_manifest_id = stored.prompt_manifest_id
+
+    async def finish_llm_call(self, record: LLMObservationRecord, *, capture_mode: str) -> None:
+        """Persist one completed, failed, or cancelled AG LLM call outcome.
 
         The service prepares bounded sanitized content and delegates one atomic call
         append to the selected provider.
@@ -223,12 +291,12 @@ class ProviderObservationService:
         Examples:
             Store a successful call:
                 ```python
-                await service.emit(call, capture_mode="manifest")
+                await service.finish_llm_call(call, capture_mode="manifest")
                 ```
 
             Store a failed metadata call:
                 ```python
-                await metadata_service.emit(failed_call, capture_mode="metadata")
+                await metadata_service.finish_llm_call(failed_call, capture_mode="metadata")
                 ```
 
         Args:
@@ -239,22 +307,29 @@ class ProviderObservationService:
             None: Persistence and correlation completion have finished.
 
         Notes:
-            No `emit` alias exists on the repository and no dual write is attempted.
+            No `emit` alias or insert-on-finish path exists and no dual write is attempted.
         """
-        if capture_mode != self.policy.capture_mode:
-            raise ValueError("LLM client capture mode does not match observation policy")
+        self._validate_capture_mode(capture_mode)
+        lifecycle_status = LLMCallLifecycleStatus(record.lifecycle_status)
+        if lifecycle_status is LLMCallLifecycleStatus.IN_PROGRESS:
+            raise ValueError("terminal LLM observation cannot remain in_progress")
         draft = _llm_draft(
             record,
             owner_scope=self.owner_scope,
             policy=self.policy,
             prompt_store=self._prompt_store,
+            lifecycle_status=lifecycle_status,
         )
-        stored = await self.repository.append_llm_call(draft)
+        stored = await self.repository.finish_llm_call(record.llm_call_id, draft)
         record.prompt_manifest_id = stored.prompt_manifest_id
         complete_llm_call_correlation(
             record.llm_call_id,
             prompt_manifest_id=stored.prompt_manifest_id,
         )
+
+    def _validate_capture_mode(self, capture_mode: str) -> None:
+        if capture_mode != self.policy.capture_mode:
+            raise ValueError("LLM client capture mode does not match observation policy")
 
 
 def bind_canonical_observation_service(
@@ -342,6 +417,7 @@ def _llm_draft(
     owner_scope: StorageScope,
     policy: ObservationPolicy,
     prompt_store: PromptStore,
+    lifecycle_status: LLMCallLifecycleStatus,
 ) -> LLMCallDraft:
     prepared = prompt_store.prepare(record)
     mode = ObservationCaptureMode(policy.capture_mode)
@@ -357,6 +433,7 @@ def _llm_draft(
             {
                 "messages": record.messages,
                 "provider_request_args": record.provider_request_args,
+                "tools": record.tool_definitions,
             },
             policy=policy,
         )
@@ -365,7 +442,12 @@ def _llm_draft(
             policy=policy,
         )
         captured_trace = _bounded_capture(record.trace_payload, policy=policy)
-    status = ObservationStatus.ERROR if record.error_type else ObservationStatus.OK
+    status = {
+        LLMCallLifecycleStatus.IN_PROGRESS: ObservationStatus.PENDING,
+        LLMCallLifecycleStatus.COMPLETED: ObservationStatus.OK,
+        LLMCallLifecycleStatus.FAILED: ObservationStatus.ERROR,
+        LLMCallLifecycleStatus.CANCELLED: ObservationStatus.ERROR,
+    }[lifecycle_status]
     observation = ObservationDraft(
         observation_id=f"llm:{record.llm_call_id}",
         category="llm",
@@ -374,7 +456,11 @@ def _llm_draft(
         occurred_at=occurred_at,
         scope=_storage_scope(record.scope, owner_scope=owner_scope),
         status=status,
-        severity=(ObservationSeverity.ERROR if record.error_type else ObservationSeverity.INFO),
+        severity=(
+            ObservationSeverity.ERROR
+            if lifecycle_status in {LLMCallLifecycleStatus.FAILED, LLMCallLifecycleStatus.CANCELLED}
+            else ObservationSeverity.INFO
+        ),
         producer="aethergraph.llm",
         trace_id=record.scope.trace_id,
         turn_id=record.scope.turn_id,
@@ -404,6 +490,7 @@ def _llm_draft(
         provider=record.provider,
         model=record.model,
         capture_mode=mode,
+        lifecycle_status=lifecycle_status,
         profile_name=record.profile_name,
         call_name=record.call_name,
         request_options={
@@ -439,6 +526,9 @@ def _llm_draft(
         captured_response=captured_response,
         trace_payload=captured_trace,
         attempts=tuple(_attempt(attempt) for attempt in record.attempts),
+        tool_surface=record.tool_surface,
+        request_items=record.request_items,
+        response_items=record.response_items,
     )
 
 

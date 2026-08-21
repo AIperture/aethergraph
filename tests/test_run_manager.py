@@ -6,7 +6,7 @@ from aethergraph.contracts.errors.errors import GraphBuildError, GraphHasPending
 from aethergraph.contracts.services.state_stores import GraphSnapshot
 from aethergraph.core.runtime.run_cancellation import RunCancellationRegistry
 from aethergraph.core.runtime.run_manager import RunManager
-from aethergraph.core.runtime.run_types import RunOrigin, RunStatus
+from aethergraph.core.runtime.run_types import RunAdmissionError, RunOrigin, RunStatus
 from aethergraph.services.registry.unified_registry import UnifiedRegistry
 from aethergraph.services.runner.facade import RunFacade
 from aethergraph.storage.contracts.scope import StorageScope
@@ -711,7 +711,7 @@ async def test_submit_run_admission_failure_never_executes(monkeypatch, dummy_me
         fake_run_or_resume_async,
     )
 
-    with pytest.raises(RuntimeError, match="Run admission callback failed"):
+    with pytest.raises(RunAdmissionError, match="Run admission callback failed") as exc_info:
         await manager.submit_run(
             graph_id="my-graph",
             inputs={"x": 1},
@@ -720,8 +720,12 @@ async def test_submit_run_admission_failure_never_executes(monkeypatch, dummy_me
         )
 
     record = await manager.wait_run("run-admission-rejected")
+    assert exc_info.value.run_id == "run-admission-rejected"
     assert record.status == RunStatus.failed
     assert record.meta["error_code"] == "run_admission_failed"
+    assert record.meta["error_stage"] == "run_admission"
+    assert record.meta["error_info"]["context"] == {"cause_type": "RuntimeError"}
+    assert "lease store unavailable" in record.meta["error_detail"]
     assert executed is False
 
 

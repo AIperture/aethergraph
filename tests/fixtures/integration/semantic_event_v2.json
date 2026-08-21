@@ -143,7 +143,8 @@
         "code": "step_budget_exhausted",
         "summary": "The Agent exhausted its step budget.",
         "resumable": false,
-        "engine_turn_id": "engine_turn_fixture"
+        "engine_turn_id": "engine_turn_fixture",
+        "reply_disposition": "no_message"
       },
       "extensions": {}
     }

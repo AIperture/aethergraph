@@ -26,6 +26,7 @@ AssistantOutputType = Literal["text", "refusal"]
 ASSISTANT_OUTPUT_NORMALIZATION_VERSION = "assistant_output/v1"
 _MODEL_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION = "tool_request/v1"
+TOOL_SURFACE_SUMMARY_VERSION = "aethergraph.llm-tool-surface/v2"
 
 
 class LLMToolCallError(LLMError):
@@ -541,6 +542,143 @@ def tool_call_surface_fingerprint(request: ToolCallRequest | None) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def tool_call_surface_summary(
+    request: ToolCallRequest | None,
+) -> dict[str, Any] | None:
+    """Project the exact provider-neutral Tool surface for one LLM call."""
+
+    if request is None:
+        return None
+    activated_deferred = set(request.active_tool_names)
+    discovery_mode = request.discovery.mode if request.discovery is not None else "disabled"
+    tools = [
+        {
+            "ordinal": ordinal,
+            "name": tool.name,
+            "exposure": tool.exposure,
+            "callable": (tool.exposure == "immediate" or tool.name in activated_deferred),
+            "input_schema_digest": hashlib.sha256(
+                json.dumps(
+                    tool.input_schema,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+        for ordinal, tool in enumerate(request.tools)
+    ]
+    immediate_count = sum(tool.exposure == "immediate" for tool in request.tools)
+    activated_deferred_count = sum(
+        tool.exposure == "deferred" and tool.name in activated_deferred for tool in request.tools
+    )
+    searchable_count = sum(
+        tool.exposure == "deferred" and tool.name not in activated_deferred
+        for tool in request.tools
+    )
+    return {
+        "schema_version": TOOL_SURFACE_SUMMARY_VERSION,
+        "discovery_mode": discovery_mode,
+        "catalog_fingerprint": tool_call_request_fingerprint(request),
+        "surface_fingerprint": tool_call_surface_fingerprint(request),
+        "callable_count": immediate_count + activated_deferred_count,
+        "immediate_count": immediate_count,
+        "activated_deferred_count": activated_deferred_count,
+        "searchable_count": searchable_count,
+        "tools": tools,
+    }
+
+
+def tool_call_request_item_summaries(
+    request: ToolCallRequest | None,
+) -> tuple[dict[str, Any], ...]:
+    """Project ordered continuation outputs supplied with one model request."""
+
+    if request is None:
+        return ()
+    return tuple(
+        {
+            "ordinal": ordinal,
+            "kind": "tool_output",
+            "call_id": item.call_id,
+            "content_bytes": len(item.output.encode("utf-8")),
+            "content_sha256": hashlib.sha256(item.output.encode("utf-8")).hexdigest(),
+        }
+        for ordinal, item in enumerate(request.tool_outputs)
+    )
+
+
+def tool_call_response_item_summaries(
+    response: ToolCallResponse | ModelResponse,
+) -> tuple[dict[str, Any], ...]:
+    """Project one ordered bounded response-item summary without provider payloads."""
+
+    summaries: list[dict[str, Any]] = []
+    for ordinal, item in enumerate(response.items):
+        if isinstance(item, AssistantOutput):
+            summaries.append(
+                {
+                    "ordinal": ordinal,
+                    "kind": "assistant_output",
+                    "output_id": item.output_id,
+                    "content_type": item.content_type,
+                    "text_bytes": len(item.text.encode("utf-8")),
+                }
+            )
+        elif isinstance(item, ToolCall):
+            arguments = json.dumps(
+                item.arguments,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            summaries.append(
+                {
+                    "ordinal": ordinal,
+                    "kind": "tool_call",
+                    "call_id": item.call_id,
+                    "tool_name": item.name,
+                    "arguments_bytes": len(arguments),
+                    "arguments_sha256": hashlib.sha256(arguments).hexdigest(),
+                }
+            )
+        elif isinstance(item, ToolDiscoveryEvent):
+            summaries.append(
+                {
+                    "ordinal": ordinal,
+                    "kind": "tool_discovery",
+                    "discovery_event_id": item.event_id,
+                    "discovery_mode": item.mode,
+                    "discovery_source": item.source,
+                    "discovery_status": item.status,
+                    "selected_tool_refs": list(item.tool_refs),
+                    "provider_reference_ids": list(item.provider_reference_ids),
+                }
+            )
+    return tuple(summaries)
+
+
+def tool_call_definitions(request: ToolCallRequest | None) -> list[dict[str, Any]]:
+    """Return policy-capturable canonical Tool definitions for request detail."""
+
+    if request is None:
+        return []
+    return [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": copy.deepcopy(tool.input_schema),
+            "exposure": tool.exposure,
+            "path": (
+                None
+                if tool.path is None
+                else {"path": tool.path.path, "description": tool.path.description}
+            ),
+        }
+        for tool in request.tools
+    ]
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """Represent one provider-framed native Tool call."""
@@ -949,6 +1087,7 @@ __all__ = [
     "LLMToolCallError",
     "LLMToolCallResponseError",
     "LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION",
+    "TOOL_SURFACE_SUMMARY_VERSION",
     "ModelResponse",
     "ModelResponseItem",
     "ModelToolCall",
@@ -961,5 +1100,9 @@ __all__ = [
     "ToolChoice",
     "ToolDefinition",
     "tool_call_request_fingerprint",
+    "tool_call_definitions",
+    "tool_call_request_item_summaries",
+    "tool_call_response_item_summaries",
     "tool_call_surface_fingerprint",
+    "tool_call_surface_summary",
 ]

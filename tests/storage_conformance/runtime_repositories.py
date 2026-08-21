@@ -870,7 +870,9 @@ class InMemoryObservationRepository:
         )
         return _page(sorted(rows, key=lambda item: item.cursor), query.page)
 
-    async def append_llm_call(self, call):
+    async def begin_llm_call(self, call):
+        if call.lifecycle_status is not storage.LLMCallLifecycleStatus.IN_PROGRESS:
+            raise storage.StorageIntegrityError("external LLM begin must be in_progress")
         observations = await self.append_many((call.observation,))
         observation = observations[0]
         values = {
@@ -891,6 +893,46 @@ class InMemoryObservationRepository:
         if current is not None and current != detail:
             raise storage.StorageIntegrityError("external LLM call identity conflicts")
         self._llm_calls[call.llm_call_id] = detail
+        return record
+
+    async def finish_llm_call(self, llm_call_id, outcome):
+        if llm_call_id != outcome.llm_call_id:
+            raise storage.StorageIntegrityError("external LLM finish identity conflicts")
+        current = self._llm_calls.get(llm_call_id)
+        if current is None:
+            raise storage.StorageIntegrityError("external LLM call was not begun")
+        if current.record.lifecycle_status is not storage.LLMCallLifecycleStatus.IN_PROGRESS:
+            values = {
+                item.name: getattr(outcome, item.name)
+                for item in fields(storage.LLMCallRecord)
+                if hasattr(outcome, item.name)
+            }
+            values["observation"] = current.record.observation
+            values["trace_payload_preview"] = outcome.trace_payload
+            candidate = storage.LLMCallRecord(**values)
+            if candidate != current.record:
+                raise storage.StorageIntegrityError("external LLM terminal identity conflicts")
+            return current.record
+        observation = _promote(
+            outcome.observation,
+            storage.ObservationRecord,
+            cursor=current.record.observation.cursor,
+        )
+        values = {
+            item.name: getattr(outcome, item.name)
+            for item in fields(storage.LLMCallRecord)
+            if hasattr(outcome, item.name)
+        }
+        values["observation"] = observation
+        values["trace_payload_preview"] = outcome.trace_payload
+        record = storage.LLMCallRecord(**values)
+        self._records[observation.observation_id] = observation
+        self._llm_calls[llm_call_id] = storage.LLMCallDetail(
+            record=record,
+            captured_request=current.captured_request,
+            captured_response=outcome.captured_response,
+            trace_payload=outcome.trace_payload,
+        )
         return record
 
     async def get_llm_call(self, scope, llm_call_id):

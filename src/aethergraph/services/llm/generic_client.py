@@ -87,8 +87,10 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
     assistant_output_identity,
-    tool_call_request_fingerprint,
-    tool_call_surface_fingerprint,
+    tool_call_definitions,
+    tool_call_request_item_summaries,
+    tool_call_response_item_summaries,
+    tool_call_surface_summary,
 )
 from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryCapabilities,
@@ -1966,6 +1968,9 @@ class GenericLLMClient(LLMClientProtocol):
         compatibility_notes: list[str] | None,
         trace_payload: dict[str, Any] | None,
         call_name: str | None = None,
+        tool_surface: dict[str, Any] | None = None,
+        request_items: list[dict[str, Any]] | None = None,
+        tool_definitions: list[dict[str, Any]] | None = None,
     ) -> LLMObservationRecord:
         record = LLMObservationRecord.new(
             call_type=call_type,
@@ -1987,21 +1992,59 @@ class GenericLLMClient(LLMClientProtocol):
             trace_payload=trace_payload,
             profile_name=self.profile_name,
             call_name=call_name,
+            tool_surface=tool_surface,
+            request_items=request_items,
+            tool_definitions=tool_definitions,
         )
         begin_llm_call_correlation(record.llm_call_id)
         return record
 
-    async def _emit_observation(self, record: LLMObservationRecord) -> None:
+    async def _begin_observation(self, record: LLMObservationRecord) -> None:
         if self.observation_sink is None:
             return
         try:
-            await self.observation_sink.emit(
+            await self.observation_sink.begin_llm_call(
                 record,
                 capture_mode=self.observation_capture_mode,
             )
         except Exception as exc:
-            logger = logging.getLogger("aethergraph.services.llm.generic_client")
-            logger.warning(f"llm_observability_failed: {exc}")
+            self._log_observation_failure("begin", record, exc)
+
+    async def _finish_observation(
+        self,
+        record: LLMObservationRecord,
+        *,
+        lifecycle_status: str,
+    ) -> None:
+        record.lifecycle_status = lifecycle_status
+        if self.observation_sink is None:
+            return
+        try:
+            await self.observation_sink.finish_llm_call(
+                record,
+                capture_mode=self.observation_capture_mode,
+            )
+        except Exception as exc:
+            self._log_observation_failure("finish", record, exc)
+
+    def _log_observation_failure(
+        self,
+        operation: str,
+        record: LLMObservationRecord,
+        exc: Exception,
+    ) -> None:
+        logging.getLogger("aethergraph.services.llm.generic_client").exception(
+            "llm_observability_persistence_failed",
+            extra={
+                "event": "aethergraph.llm.observation_persistence_failed",
+                "operation": operation,
+                "llm_call_id": record.llm_call_id,
+                "provider": record.provider,
+                "model": record.model,
+                "lifecycle_status": record.lifecycle_status,
+                "error_type": type(exc).__name__,
+            },
+        )
 
     async def _ensure_client(self):
         self._client, self._bound_loop, retired = _ensure_loop_http_client(
@@ -2258,7 +2301,6 @@ class GenericLLMClient(LLMClientProtocol):
                 "prompt_cache",
                 "profile policy requires explicit stable-prefix boundaries",
             )
-        discovery_capability: ToolDiscoveryModeCapability | None = None
         if tool_request is not None:
             if not isinstance(tool_request, ToolCallRequest):
                 raise TypeError("tool_request must be a ToolCallRequest")
@@ -2270,7 +2312,7 @@ class GenericLLMClient(LLMClientProtocol):
                 raise ValueError("Native Tool calling cannot be combined with structured output")
             if kw.get("tools") is not None or kw.get("tool_choice") is not None:
                 raise ValueError("tool_request cannot be combined with legacy tools/tool_choice")
-            discovery_capability = self._validate_tool_discovery_binding(
+            self._validate_tool_discovery_binding(
                 model=model,
                 request=tool_request,
             )
@@ -2380,10 +2422,17 @@ class GenericLLMClient(LLMClientProtocol):
                     compatibility_notes=compatibility_notes,
                     trace_payload=trace_payload,
                     call_name=call_name,
+                    tool_surface=tool_call_surface_summary(tool_request),
+                    request_items=list(tool_call_request_item_summaries(tool_request)),
+                    tool_definitions=tool_call_definitions(tool_request),
                 )
+                await self._begin_observation(observation_record)
                 observation_record.error_type = type(exc).__name__
                 observation_record.error_message = str(exc)
-                await self._emit_observation(observation_record)
+                await self._finish_observation(
+                    observation_record,
+                    lifecycle_status="failed",
+                )
                 raise
             schema_name = prepared_structured_output.provider_schema_name
             strict_schema = prepared_structured_output.provider_strict
@@ -2440,31 +2489,6 @@ class GenericLLMClient(LLMClientProtocol):
         provider_request_args["endpoint_id"] = self.endpoint_id or "legacy_compat"
         request_args["effective_endpoint_id"] = effective_endpoint_id
         provider_request_args["effective_endpoint_id"] = effective_endpoint_id
-        if tool_request is not None:
-            tool_request_summary = {
-                "choice": tool_request.choice,
-                "max_calls": tool_request.max_calls,
-                "tool_names": [tool.name for tool in tool_request.tools],
-                "tool_count": len(tool_request.tools),
-                "active_tool_names": list(tool_request.active_tool_names),
-                "active_tool_count": len(tool_request.active_tool_names),
-                "tool_catalog_fingerprint": tool_call_request_fingerprint(tool_request)[:16],
-                "tool_surface_fingerprint": tool_call_surface_fingerprint(tool_request)[:16],
-            }
-            if tool_request.discovery is not None and discovery_capability is not None:
-                tool_request_summary["discovery"] = {
-                    "mode": tool_request.discovery.mode,
-                    "max_results": tool_request.discovery.max_results,
-                    "endpoint_family": self._resolve_chat_adapter(
-                        has_tool_request=True
-                    ).protocol_family,
-                    "replay_requirement": discovery_capability.replay_requirement,
-                    "result_limit_behavior": discovery_capability.result_limit_behavior,
-                    "capability_max_results": discovery_capability.max_results,
-                    "protocol_version": discovery_capability.protocol_version,
-                }
-            request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
-            provider_request_args["native_tool_calling"] = copy.deepcopy(tool_request_summary)
         if prepared_structured_output is not None:
             request_args["structured_output_validation_owner"] = canonical_validation_owner
             provider_request_args = _merge_request_fields(
@@ -2523,6 +2547,9 @@ class GenericLLMClient(LLMClientProtocol):
             compatibility_notes=compatibility_notes,
             trace_payload=trace_payload,
             call_name=call_name,
+            tool_surface=tool_call_surface_summary(tool_request),
+            request_items=list(tool_call_request_item_summaries(tool_request)),
+            tool_definitions=tool_call_definitions(tool_request),
         )
         tags = ["llm", "chat"]
         if call_name:
@@ -2545,6 +2572,7 @@ class GenericLLMClient(LLMClientProtocol):
             tags=tags,
             metadata=self._current_dimensions(),
         )
+        await self._begin_observation(observation_record)
 
         start = time.perf_counter()
         normalized_usage: dict[str, int] = {}
@@ -2649,6 +2677,7 @@ class GenericLLMClient(LLMClientProtocol):
                     },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
+            observation_record.response_items = list(tool_call_response_item_summaries(response))
             if prepared_structured_output is not None:
                 if canonical_validation_owner == "caller":
                     request_args["structured_output_validation_outcome"] = "delegated"
@@ -2658,7 +2687,10 @@ class GenericLLMClient(LLMClientProtocol):
                     request_args["structured_output_response_state"] = "completed"
 
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="completed",
+            )
             await span.finish(
                 response={
                     "text": observation_record.raw_text,
@@ -2673,6 +2705,20 @@ class GenericLLMClient(LLMClientProtocol):
                 },
             )
             return response
+        except asyncio.CancelledError as exc:
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.error_type = type(exc).__name__
+            observation_record.error_message = "LLM call cancelled"
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="cancelled",
+            )
+            await span.fail(
+                exc,
+                metadata=self._current_dimensions(),
+                metrics={"latency_ms": observation_record.latency_ms or 0},
+            )
+            raise
         except Exception as exc:
             if isinstance(exc, LLMProviderRequestError):
                 observation_record.attempts = exc.attempts
@@ -2681,7 +2727,10 @@ class GenericLLMClient(LLMClientProtocol):
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="failed",
+            )
             await span.fail(
                 exc,
                 metadata=self._current_dimensions(),
@@ -3269,6 +3318,7 @@ class GenericLLMClient(LLMClientProtocol):
             tags=tags,
             metadata=self._current_dimensions(),
         )
+        await self._begin_observation(observation_record)
         start = time.perf_counter()
 
         # Resolve thinking config: omitted -> profile default, explicit value -> per-call override.
@@ -3326,7 +3376,10 @@ class GenericLLMClient(LLMClientProtocol):
                 latency_ms=latency_ms,
                 reservation=quota_reservation,
             )
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="completed",
+            )
             await span.finish(
                 response={
                     "text": text,
@@ -3341,13 +3394,30 @@ class GenericLLMClient(LLMClientProtocol):
                 },
             )
             return text, usage
+        except asyncio.CancelledError as exc:
+            observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
+            observation_record.error_type = type(exc).__name__
+            observation_record.error_message = "LLM stream cancelled"
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="cancelled",
+            )
+            await span.fail(
+                exc,
+                metadata=self._current_dimensions(),
+                metrics={"latency_ms": observation_record.latency_ms or 0},
+            )
+            raise
         except Exception as exc:
             if isinstance(exc, LLMProviderRequestError):
                 observation_record.attempts = exc.attempts
             observation_record.latency_ms = int((time.perf_counter() - start) * 1000)
             observation_record.error_type = type(exc).__name__
             observation_record.error_message = str(exc)
-            await self._emit_observation(observation_record)
+            await self._finish_observation(
+                observation_record,
+                lifecycle_status="failed",
+            )
             await span.fail(
                 exc,
                 metadata=self._current_dimensions(),
