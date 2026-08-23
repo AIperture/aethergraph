@@ -416,8 +416,8 @@ class AzureChatAdapter:
                 ]
         if checkpoint_payload is None or checkpoint_payload["state"] != "pending_search":
             body["tools"] = _openai_request_tools(tool_request)
-            body["tool_choice"] = tool_request.choice
-            body["parallel_tool_calls"] = tool_request.max_calls > 1
+        body["tool_choice"] = tool_request.choice
+        body["parallel_tool_calls"] = tool_request.max_calls > 1
 
         request_timeout = kw.get("request_timeout_s") or kw.get("timeout")
         normalized_base = str(host.base_url).rstrip("/")
