@@ -20,7 +20,11 @@ from aethergraph.contracts.integration import (
 )
 from aethergraph.core.runtime.run_types import SessionKind
 from aethergraph.services.host.endpoint_credentials import EndpointCredentialRegistry
-from aethergraph.services.integration import IntegrationSessionResolution, ManifestRouteResolver
+from aethergraph.services.integration import (
+    IntegrationSessionResolution,
+    ManifestRouteResolver,
+    ResourceIngressPolicy,
+)
 from aethergraph.storage.contracts import (
     SessionKind as StorageSessionKind,
     SessionRecord,
@@ -138,6 +142,7 @@ class _Sessions:
 class _Ingress:
     def __init__(self, manifest, canonical_sessions) -> None:
         self.route_resolver = ManifestRouteResolver(manifest)
+        self.resource_ingress = SimpleNamespace(policy=ResourceIngressPolicy())
         self.session_store = _Sessions()
         self.canonical_sessions = canonical_sessions
         self.calls = []
@@ -273,6 +278,86 @@ async def test_endpoint_session_and_ingress_use_manifest_route() -> None:
     assert stored.external_ref == "agent-endpoint:support"
     binding = container.integration_ingress.session_store.by_conversation[session_id]
     assert binding.ag_session_id == session_id
+
+
+@pytest.mark.anyio
+async def test_endpoint_multipart_upload_reaches_canonical_ingress() -> None:
+    app, container = _app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
+        created = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-upload"},
+        )
+        accepted = await client.post(
+            "/api/v1/agent-endpoints/support/ingress",
+            data={
+                "session_id": created.json()["session_id"],
+                "idempotency_key": "turn-upload-1",
+            },
+            files={"files": ("brief.txt", b"exact contents", "text/plain")},
+        )
+
+    assert accepted.status_code == 200
+    call = container.integration_ingress.calls[0]
+    declared = call["envelope"].attachments
+    verified = call["verified"].attachments
+    assert len(declared) == len(verified) == 1
+    assert declared[0].attachment_id == verified[0].attachment_id
+    assert declared[0].attachment_id.startswith("upload-")
+    assert declared[0].filename == "brief.txt"
+    assert declared[0].content_type == "text/plain"
+    assert declared[0].size_bytes == 14
+    assert verified[0].data == b"exact contents"
+
+
+@pytest.mark.anyio
+async def test_endpoint_artifact_context_requires_only_canonical_identity() -> None:
+    app, container = _app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
+        created = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-context"},
+        )
+        accepted = await client.post(
+            "/api/v1/agent-endpoints/support/ingress",
+            files={
+                "session_id": (None, created.json()["session_id"]),
+                "idempotency_key": (None, "turn-context-1"),
+                "attachments_json": (None, '[{"artifact_id":"artifact-1"}]'),
+            },
+        )
+
+    assert accepted.status_code == 200
+    attachment = container.integration_ingress.calls[0]["envelope"].attachments[0]
+    assert attachment.source_kind == "artifact"
+    assert attachment.source_id == "artifact-1"
+
+
+@pytest.mark.anyio
+async def test_endpoint_rejects_unexpected_multipart_upload_field() -> None:
+    app, _ = _app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        await _authenticate(client, app)
+        created = await client.post(
+            "/api/v1/agent-endpoints/support/sessions",
+            json={"idempotency_key": "browser-invalid-upload"},
+        )
+        response = await client.post(
+            "/api/v1/agent-endpoints/support/ingress",
+            data={
+                "session_id": created.json()["session_id"],
+                "idempotency_key": "turn-invalid-upload-1",
+            },
+            files={"file": ("brief.txt", b"contents", "text/plain")},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "endpoint.ingress_body_invalid"
 
 
 @pytest.mark.anyio

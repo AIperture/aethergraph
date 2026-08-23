@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
 from typing import Literal
@@ -95,6 +96,75 @@ class ResourceIngressPolicy:
     allowed_content_types: tuple[str, ...] = ()
 
 
+async def read_bounded_attachment_bytes(
+    reader: Callable[[int], Awaitable[bytes]],
+    *,
+    max_bytes: int,
+    attachment_id: str,
+    overflow_code: Literal[
+        "integration.attachment_too_large",
+        "integration.attachment_total_exceeded",
+    ] = "integration.attachment_too_large",
+) -> bytes:
+    """Read authenticated attachment bytes without crossing a hard limit.
+
+    The helper consumes a provider- or framework-owned asynchronous byte reader in
+    bounded chunks and raises the canonical resource error before retaining more than
+    `max_bytes` in memory.
+
+    Examples:
+        Read a framework upload:
+        ```python
+        data = await read_bounded_attachment_bytes(
+            upload.read,
+            max_bytes=25 * 1024 * 1024,
+            attachment_id="upload-1",
+        )
+        ```
+
+        Enforce the remaining request budget:
+        ```python
+        data = await read_bounded_attachment_bytes(
+            response.content.read,
+            max_bytes=remaining,
+            attachment_id="provider-file-1",
+            overflow_code="integration.attachment_total_exceeded",
+        )
+        ```
+
+    Args:
+        reader: Asynchronous callable accepting the maximum bytes for one read.
+        max_bytes: Maximum complete payload size permitted for this read.
+        attachment_id: Stable attachment identity used in safe diagnostics.
+        overflow_code: Canonical size-policy code raised when the limit is exceeded.
+
+    Returns:
+        bytes: Complete attachment bytes when the stream ends within the limit.
+
+    Notes:
+        The caller remains responsible for authenticating the byte source and applying
+        count, MIME, and aggregate policy checks not represented by `max_bytes`.
+    """
+    if max_bytes < 0:
+        raise ValueError("max_bytes must be non-negative")
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await reader(min(64 * 1024, max_bytes - total + 1))
+        if not chunk:
+            return b"".join(chunks)
+        value = bytes(chunk)
+        total += len(value)
+        if total > max_bytes:
+            message = (
+                "Ingress attachment total exceeds the configured limit."
+                if overflow_code == "integration.attachment_total_exceeded"
+                else f"Attachment {attachment_id!r} exceeds the file limit."
+            )
+            raise ResourceIngressError(code=overflow_code, message=message)
+        chunks.append(value)
+
+
 class ResourceIngress:
     """Validate and materialize provider-neutral attachments exactly once."""
 
@@ -152,6 +222,7 @@ class ResourceIngress:
                 verified=verified,
                 route=route,
                 binding=binding,
+                session_scope=session_scope,
                 envelope=envelope,
             )
             ```
@@ -162,6 +233,7 @@ class ResourceIngress:
                 verified=verified,
                 route=route,
                 binding=binding,
+                session_scope=session_scope,
                 envelope=text_envelope,
             ) == ()
             ```
@@ -211,8 +283,8 @@ class ResourceIngress:
         resources = ResourceSet()
         actual_total = 0
         for attachment in attachments:
-            self._validate_attachment(attachment)
             if attachment.source_kind == "provider_file":
+                self._validate_attachment(attachment)
                 data = verified_bytes.pop(attachment.attachment_id, None)
                 if data is None:
                     raise ResourceIngressError(
@@ -231,12 +303,6 @@ class ResourceIngress:
                     raise ResourceIngressError(
                         code="integration.attachment_too_large",
                         message=f"Attachment {attachment.attachment_id!r} exceeds the file limit.",
-                    )
-                actual_total += len(data)
-                if actual_total > self.policy.max_total_bytes:
-                    raise ResourceIngressError(
-                        code="integration.attachment_total_exceeded",
-                        message="Ingress attachment total exceeds the configured limit.",
                     )
                 try:
                     resource = await ResourceStager(
@@ -297,16 +363,21 @@ class ResourceIngress:
                             "artifact identity."
                         ),
                     )
-                resources.add(resource)
             else:
-                resources.add(
-                    await self._materialize_artifact_reference(
-                        attachment=attachment,
-                        source=verified.integration_kind.value,
-                        route=route,
-                        binding=binding,
-                    )
+                resource = await self._materialize_artifact_reference(
+                    attachment=attachment,
+                    source=verified.integration_kind.value,
+                    route=route,
+                    binding=binding,
+                    session_scope=session_scope,
                 )
+            actual_total += resource.size or 0
+            if actual_total > self.policy.max_total_bytes:
+                raise ResourceIngressError(
+                    code="integration.attachment_total_exceeded",
+                    message="Ingress attachment total exceeds the configured limit.",
+                )
+            resources.add(resource)
         if verified_bytes:
             raise ResourceIngressError(
                 code="integration.attachment_bytes_missing",
@@ -326,7 +397,11 @@ class ResourceIngress:
                 code="integration.attachment_duplicate",
                 message="Ingress attachment identifiers must be unique.",
             )
-        declared_total = sum(attachment.size_bytes or 0 for attachment in attachments)
+        declared_total = sum(
+            attachment.size_bytes or 0
+            for attachment in attachments
+            if attachment.source_kind == "provider_file"
+        )
         if declared_total > self.policy.max_total_bytes:
             raise ResourceIngressError(
                 code="integration.attachment_total_exceeded",
@@ -365,6 +440,7 @@ class ResourceIngress:
         source: str,
         route: IntegrationRoute,
         binding: ExternalSessionBinding,
+        session_scope: StorageScope,
     ) -> InputResource:
         artifact_service = getattr(self.container, "artifact_service", None)
         get_artifact = getattr(artifact_service, "get_by_id", None)
@@ -384,7 +460,16 @@ class ResourceIngress:
                 message="Canonical artifact lookup is unavailable for integration ingress.",
             )
         try:
-            artifact = await get_artifact(attachment.source_id)
+            owner_scope = StorageScope(
+                tenant_id=session_scope.tenant_id,
+                project_id=session_scope.project_id,
+                org_id=session_scope.org_id,
+                user_id=session_scope.user_id,
+            )
+            artifact = await get_artifact(
+                attachment.source_id,
+                occurrence_scope=(owner_scope if owner_scope.as_filter() else None),
+            )
         except Exception as exc:
             _LOG.exception(
                 "Canonical artifact lookup failed during integration ingress",
@@ -421,13 +506,15 @@ class ResourceIngress:
             source=source,
             status="materialized",
             id=attachment.attachment_id,
-            name=attachment.filename,
-            mime=attachment.content_type,
-            size=attachment.size_bytes,
             artifact_id=attachment.source_id,
         )
         try:
-            return hydrate_public_artifact(resource, artifact)
+            hydrated = hydrate_public_artifact(resource, artifact)
+            self._validate_materialized_artifact(
+                hydrated,
+                attachment_id=attachment.attachment_id,
+            )
+            return hydrated
         except (TypeError, ValueError) as exc:
             _LOG.exception(
                 "Canonical artifact lookup returned an invalid public artifact",
@@ -444,3 +531,21 @@ class ResourceIngress:
                 code="integration.artifact_invalid",
                 message=f"Artifact {attachment.source_id!r} has invalid canonical metadata.",
             ) from exc
+
+    def _validate_materialized_artifact(
+        self,
+        resource: InputResource,
+        *,
+        attachment_id: str,
+    ) -> None:
+        if resource.size is not None and resource.size > self.policy.max_file_bytes:
+            raise ResourceIngressError(
+                code="integration.attachment_too_large",
+                message=f"Attachment {attachment_id!r} exceeds the file limit.",
+            )
+        allowed = self.policy.allowed_content_types
+        if allowed and resource.mime not in allowed:
+            raise ResourceIngressError(
+                code="integration.attachment_type_rejected",
+                message=f"Content type {resource.mime!r} is not allowed.",
+            )

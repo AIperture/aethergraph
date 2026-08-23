@@ -632,6 +632,7 @@ async def test_coordinator_persists_disabled_route_rejection(tmp_path) -> None:
 
     assert receipt.accepted is False
     assert receipt.rejection_code == "integration.route_disabled"
+    assert receipt.rejection_message
     assert duplicate.duplicate is True
     assert root.calls == []
     await event_log.close()
@@ -651,7 +652,11 @@ async def test_resource_ingress_validates_existing_artifact_reference(
     )
 
     class _ArtifactService:
-        async def get_by_id(self, artifact_id):
+        async def get_by_id(self, artifact_id, *, occurrence_scope=None):
+            assert occurrence_scope == StorageScope(
+                tenant_id="team-T1",
+                project_id="project-1",
+            )
             return artifact if artifact_id == "artifact-1" else None
 
     class _UnexpectedStager:
@@ -673,9 +678,9 @@ async def test_resource_ingress_validates_existing_artifact_reference(
                 attachment_id="attachment-1",
                 source_kind="artifact",
                 source_id="artifact-1",
-                filename="report.pdf",
-                content_type="application/pdf",
-                size_bytes=100,
+                filename="stale-client-name.bin",
+                content_type="application/octet-stream",
+                size_bytes=1,
             ),
         ),
     )
@@ -690,6 +695,9 @@ async def test_resource_ingress_validates_existing_artifact_reference(
 
     assert len(resources) == 1
     assert resources[0].artifact_id == "artifact-1"
+    assert resources[0].name == "report.pdf"
+    assert resources[0].mime == "application/pdf"
+    assert resources[0].size == 100
 
 
 @pytest.mark.asyncio

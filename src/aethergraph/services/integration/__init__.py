@@ -42,7 +42,12 @@ from .manager import (
     IntegrationManagerError,
     IntegrationTransport,
 )
-from .resources import ResourceIngress, ResourceIngressError, ResourceIngressPolicy
+from .resources import (
+    ResourceIngress,
+    ResourceIngressError,
+    ResourceIngressPolicy,
+    read_bounded_attachment_bytes,
+)
 from .routes import IntegrationRouteError, ManifestRouteResolver
 from .session_bindings import (
     CanonicalIntegrationSessionStore,
@@ -82,6 +87,7 @@ __all__ = [
     "ResourceIngress",
     "ResourceIngressError",
     "ResourceIngressPolicy",
+    "read_bounded_attachment_bytes",
     "RootTurnDispatcher",
     "SessionBindingError",
     "SemanticEventStore",

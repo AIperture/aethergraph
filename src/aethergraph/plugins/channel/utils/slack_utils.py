@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import json
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 
@@ -18,18 +18,45 @@ from aethergraph.contracts.integration import (
     OriginAddress,
 )
 from aethergraph.services.integration import (
+    ResourceIngressError,
+    ResourceIngressPolicy,
     VerifiedAttachment,
     VerifiedIntegrationContext,
+    read_bounded_attachment_bytes,
+)
+
+from .ingress_utils import (
+    _attachment_read_budget,
+    _notify_provider_rejection,
+    _notify_rejected_receipt,
+    _provider_delivery_adapter,
+    _resource_policy,
 )
 
 
-async def _download_slack_file(url: str, token: str) -> bytes:
+async def _download_slack_file(
+    url: str,
+    token: str,
+    *,
+    max_bytes: int,
+    attachment_id: str,
+    overflow_code: Literal[
+        "integration.attachment_too_large",
+        "integration.attachment_total_exceeded",
+    ],
+) -> bytes:
+    timeout = aiohttp.ClientTimeout(total=40, connect=5, sock_read=35)
     async with (
-        aiohttp.ClientSession() as session,
+        aiohttp.ClientSession(timeout=timeout) as session,
         session.get(url, headers={"Authorization": f"Bearer {token}"}) as response,
     ):
         response.raise_for_status()
-        return await response.read()
+        return await read_bounded_attachment_bytes(
+            response.content.read,
+            max_bytes=max_bytes,
+            attachment_id=attachment_id,
+            overflow_code=overflow_code,
+        )
 
 
 def _channel_key(team_id: str, channel_id: str, thread_ts: str | None) -> str:
@@ -78,12 +105,18 @@ async def _collect_files(
     files: list[dict[str, Any]],
     *,
     bot_token: str,
+    policy: ResourceIngressPolicy,
 ) -> tuple[tuple[IngressAttachment, ...], tuple[VerifiedAttachment, ...]]:
     declared: list[IngressAttachment] = []
     verified: list[VerifiedAttachment] = []
-    for item in files:
-        if item.get("mode") == "tombstone":
-            continue
+    candidates = [item for item in files if item.get("mode") != "tombstone"]
+    if len(candidates) > policy.max_count:
+        raise ResourceIngressError(
+            code="integration.attachment_count_exceeded",
+            message=f"Ingress contains more than {policy.max_count} attachments.",
+        )
+    actual_total = 0
+    for item in candidates:
         file_id = _required(item.get("id"), "file.id")
         filename = str(item.get("name") or item.get("title") or "file")
         content_type = str(item.get("mimetype") or "application/octet-stream")
@@ -94,7 +127,21 @@ async def _collect_files(
         if not bot_token:
             raise ValueError("Slack file ingress requires an authenticated bot token.")
         attachment_id = f"slack-file-{file_id}"
-        data = await _download_slack_file(url, bot_token)
+        declared_size = int(item["size"]) if item.get("size") is not None else None
+        max_bytes, overflow_code = _attachment_read_budget(
+            policy,
+            current_total=actual_total,
+            declared_size=declared_size,
+            attachment_id=attachment_id,
+        )
+        data = await _download_slack_file(
+            url,
+            bot_token,
+            max_bytes=max_bytes,
+            attachment_id=attachment_id,
+            overflow_code=overflow_code,
+        )
+        actual_total += len(data)
         declared.append(
             IngressAttachment(
                 attachment_id=attachment_id,
@@ -125,7 +172,26 @@ async def _accept_message(
     thread_ts = str(event.get("thread_ts") or event.get("ts") or event.get("event_ts") or "")
     if not thread_ts:
         raise ValueError("Malformed Slack ingress: missing event timestamp.")
-    attachments, verified_attachments = await _collect_files(files, bot_token=bot_token)
+    channel_key = _channel_key(team_id, channel_id, thread_ts)
+    try:
+        attachments, verified_attachments = (
+            await _collect_files(
+                files,
+                bot_token=bot_token,
+                policy=_resource_policy(container),
+            )
+            if files
+            else ((), ())
+        )
+    except ResourceIngressError as exc:
+        await _notify_provider_rejection(
+            container,
+            prefix="slack",
+            channel_key=channel_key,
+            code=exc.code,
+            message=str(exc),
+        )
+        return
     text = str(event.get("text") or "")
     envelope = IngressEnvelope(
         integration_id=integration_id,
@@ -146,11 +212,11 @@ async def _accept_message(
             "event_ts": str(event.get("event_ts") or event.get("ts") or ""),
         },
         origin_address=OriginAddress(
-            channel_key=_channel_key(team_id, channel_id, thread_ts),
+            channel_key=channel_key,
             capability_profile_id="slack-v1",
         ),
     )
-    await container.integration_ingress.accept(
+    receipt = await container.integration_ingress.accept(
         verified=_verified_context(
             integration_id=integration_id,
             team_id=team_id,
@@ -158,6 +224,12 @@ async def _accept_message(
             attachments=verified_attachments,
         ),
         envelope=envelope,
+    )
+    await _notify_rejected_receipt(
+        container,
+        prefix="slack",
+        channel_key=channel_key,
+        receipt=receipt,
     )
 
 
@@ -207,7 +279,11 @@ async def handle_slack_events_common(container, settings, payload: dict) -> dict
 
     if event_type == "file_shared":
         file_id = _required((event.get("file") or {}).get("id"), "event.file.id")
-        info = await container.slack.client.files_info(file=file_id)
+        delivery = _provider_delivery_adapter(container, "slack")
+        client = getattr(delivery, "client", None)
+        if client is None:
+            raise RuntimeError("Slack delivery client is unavailable for file lookup.")
+        info = await client.files_info(file=file_id)
         file_record = info.get("file") or {}
         file_record["id"] = file_id
         synthetic = dict(event)
@@ -320,12 +396,18 @@ async def handle_slack_interactive_common(
             capability_profile_id="slack-v1",
         ),
     )
-    await container.integration_ingress.accept(
+    receipt = await container.integration_ingress.accept(
         verified=_verified_context(
             integration_id=integration_id,
             team_id=team_id,
             user_id=user_id,
         ),
         envelope=envelope,
+    )
+    await _notify_rejected_receipt(
+        container,
+        prefix="slack",
+        channel_key=envelope.origin_address.channel_key,
+        receipt=receipt,
     )
     return {}

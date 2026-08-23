@@ -7,11 +7,12 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from ipaddress import ip_address
 import json
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, Never
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from aethergraph.contracts.integration import (
     ExternalIdentity,
@@ -23,7 +24,13 @@ from aethergraph.contracts.integration import (
 )
 from aethergraph.core.runtime.run_types import SessionKind
 from aethergraph.services.host.endpoint_credentials import ENDPOINT_COOKIE_NAME
-from aethergraph.services.integration import VerifiedAttachment, VerifiedIntegrationContext
+from aethergraph.services.integration import (
+    ResourceIngressError,
+    ResourceIngressPolicy,
+    VerifiedAttachment,
+    VerifiedIntegrationContext,
+    read_bounded_attachment_bytes,
+)
 from aethergraph.storage.contracts import StorageScope
 
 from .deps import RequestIdentity, artifact_belongs_to_identity, get_identity
@@ -63,8 +70,8 @@ class EndpointChoice(_ClosedModel):
 
 class EndpointArtifactInput(_ClosedModel):
     artifact_id: str = Field(min_length=1, max_length=255)
-    filename: str = Field(min_length=1, max_length=512)
-    content_type: str = Field(min_length=1, max_length=255)
+    filename: str | None = Field(default=None, min_length=1, max_length=512)
+    content_type: str | None = Field(default=None, min_length=1, max_length=255)
     size_bytes: int | None = Field(default=None, ge=0)
 
 
@@ -632,7 +639,9 @@ async def delete_endpoint_session(
     return Response(status_code=204)
 
 
-async def _parse_ingress(request: Request) -> tuple[EndpointIngressBody, tuple[UploadFile, ...]]:
+async def _parse_ingress(
+    request: Request,
+) -> tuple[EndpointIngressBody, tuple[StarletteUploadFile, ...]]:
     content_type = (request.headers.get("content-type") or "").lower()
     if "multipart/form-data" not in content_type:
         return EndpointIngressBody.model_validate(await request.json()), ()
@@ -654,8 +663,36 @@ async def _parse_ingress(request: Request) -> tuple[EndpointIngressBody, tuple[U
             "structured_input": structured,
         }
     )
-    uploads = tuple(value for _, value in form.multi_items() if isinstance(value, UploadFile))
-    return body, uploads
+    uploads: list[StarletteUploadFile] = []
+    for field_name, value in form.multi_items():
+        if not isinstance(value, StarletteUploadFile):
+            continue
+        if field_name != "files":
+            raise ValueError(f"Unexpected endpoint upload field: {field_name!r}.")
+        uploads.append(value)
+    return body, tuple(uploads)
+
+
+def _resource_policy(container) -> ResourceIngressPolicy:
+    resource_ingress = getattr(container.integration_ingress, "resource_ingress", None)
+    policy = getattr(resource_ingress, "policy", None)
+    if not isinstance(policy, ResourceIngressPolicy):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "endpoint.attachment_policy_unavailable",
+                "message": "Endpoint attachment policy is unavailable.",
+            },
+        )
+    return policy
+
+
+def _raise_attachment_http_error(error: ResourceIngressError) -> Never:
+    status_code = 415 if error.code == "integration.attachment_type_rejected" else 413
+    raise HTTPException(
+        status_code=status_code,
+        detail={"code": error.code, "message": str(error)},
+    ) from error
 
 
 @router.post("/{endpoint_id}/ingress")
@@ -700,7 +737,13 @@ async def endpoint_ingress(
     try:
         body, uploads = await _parse_ingress(request)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid endpoint ingress body.") from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "endpoint.ingress_body_invalid",
+                "message": "Invalid endpoint ingress body.",
+            },
+        ) from exc
     external = _external_identity(identity=identity, session_id=body.session_id)
     await _binding(container, route=route, external_identity=external)
     declared = [
@@ -708,22 +751,51 @@ async def endpoint_ingress(
             attachment_id=item.artifact_id,
             source_kind="artifact",
             source_id=item.artifact_id,
-            filename=item.filename,
-            content_type=item.content_type,
+            filename=item.filename or item.artifact_id,
+            content_type=item.content_type or "application/octet-stream",
             size_bytes=item.size_bytes,
         )
         for item in body.attachments
     ]
+    policy = _resource_policy(container)
+    if len(declared) + len(uploads) > policy.max_count:
+        _raise_attachment_http_error(
+            ResourceIngressError(
+                code="integration.attachment_count_exceeded",
+                message=f"Ingress contains more than {policy.max_count} attachments.",
+            )
+        )
     verified_files: list[VerifiedAttachment] = []
+    uploaded_total = 0
     for index, upload in enumerate(uploads):
-        data = await upload.read()
-        attachment_id = f"upload-{index}"
+        digest = sha256(f"{body.idempotency_key}\0{index}".encode()).hexdigest()[:24]
+        attachment_id = f"upload-{digest}"
+        remaining = policy.max_total_bytes - uploaded_total
+        read_limit = min(policy.max_file_bytes, max(0, remaining))
+        overflow_code: Literal[
+            "integration.attachment_too_large",
+            "integration.attachment_total_exceeded",
+        ] = (
+            "integration.attachment_total_exceeded"
+            if read_limit < policy.max_file_bytes
+            else "integration.attachment_too_large"
+        )
+        try:
+            data = await read_bounded_attachment_bytes(
+                upload.read,
+                max_bytes=read_limit,
+                attachment_id=attachment_id,
+                overflow_code=overflow_code,
+            )
+        except ResourceIngressError as exc:
+            _raise_attachment_http_error(exc)
+        uploaded_total += len(data)
         declared.append(
             IngressAttachment(
                 attachment_id=attachment_id,
                 source_kind="provider_file",
                 source_id=attachment_id,
-                filename=upload.filename or f"upload-{index}",
+                filename=upload.filename or attachment_id,
                 content_type=upload.content_type or "application/octet-stream",
                 size_bytes=len(data),
             )

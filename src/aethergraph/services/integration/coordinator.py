@@ -320,6 +320,7 @@ class IntegrationIngressCoordinator:
                 route_id=route.route_id if route is not None else None,
                 session_id=binding.ag_session_id if binding is not None else None,
                 rejection_code=exc.code,
+                rejection_message=str(exc),
             )
             await self.idempotency_store.complete(
                 deployment_id=self.manifest.deployment_id,
@@ -392,6 +393,7 @@ class IntegrationIngressCoordinator:
                 route_id=route.route_id,
                 session_id=binding.ag_session_id,
                 rejection_code="integration.dispatch_failed",
+                rejection_message="The agent could not start this turn.",
                 event_cursor=inbound.cursor,
             )
             await self.idempotency_store.complete(
