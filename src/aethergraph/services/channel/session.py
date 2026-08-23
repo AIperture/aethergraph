@@ -75,11 +75,11 @@ def _artifact_to_chat_file(
         elif lower.endswith(".gif"):
             mime = "image/gif"
 
-    size = (
-        getattr(artifact, "bytes", None)
-        or getattr(artifact, "size", None)
-        or getattr(artifact, "size_bytes", None)
-    )
+    size = getattr(artifact, "bytes", None)
+    if size is None:
+        size = getattr(artifact, "size", None)
+    if size is None:
+        size = getattr(artifact, "size_bytes", None)
 
     return {
         "artifact_id": artifact.artifact_id,

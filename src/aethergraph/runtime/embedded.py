@@ -1041,6 +1041,37 @@ class EmbeddedRuntime:
         await self._ensure_ready()
         return await self._container.artifact_service.load_text(uri)
 
+    async def load_artifact_bytes(self, uri: str) -> bytes:
+        """Load immutable artifact bytes from one authorized runtime URI.
+
+        The method delegates to the canonical artifact service after runtime
+        readiness validation. The embedding Host must authorize the artifact
+        metadata and scope before requesting its content.
+
+        Examples:
+            Load an authorized image:
+            ```python
+            content = await runtime.load_artifact_bytes("artifact://image-1")
+            ```
+
+            Load an authorized generated report:
+            ```python
+            content = await runtime.load_artifact_bytes(artifact.uri)
+            ```
+
+        Args:
+            uri: Exact artifact-store URI from an authorized metadata record.
+
+        Returns:
+            bytes: Exact immutable artifact payload.
+
+        Notes:
+            This method performs no Host authorization and never accepts an
+            artifact ID in place of its canonical URI.
+        """
+        await self._ensure_ready()
+        return await self._container.artifact_service.load_bytes(uri)
+
     async def append_external_resource_change(
         self,
         *,

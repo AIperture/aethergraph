@@ -551,7 +551,7 @@ class InteractionRequestedPayload(IntegrationContract):
     """Semantic payload requesting an exact external interaction."""
 
     interaction_id: Identifier
-    request_kind: Literal["approval", "choice", "text", "files"]
+    request_kind: Literal["approval", "choice", "text", "files", "text_or_files"]
     prompt: BoundedText
     options: tuple[InteractionOption, ...] = ()
     allow_multiple: bool = False
