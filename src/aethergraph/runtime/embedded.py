@@ -1330,6 +1330,7 @@ class RuntimeIntegration:
         *,
         route_id: str,
         external_identity: ExternalIdentity,
+        identity: RuntimeIdentity,
         binding_id: str,
         session_id: str,
         now: datetime,
@@ -1357,6 +1358,7 @@ class RuntimeIntegration:
         Args:
             route_id: Exact installed manifest route identity.
             external_identity: Canonical external conversation identity.
+            identity: Trusted runtime org and user ownership.
             binding_id: Candidate durable binding identity used only on creation.
             session_id: Candidate durable AG session identity used only on creation.
             now: Authoritative provisioning timestamp.
@@ -1372,6 +1374,7 @@ class RuntimeIntegration:
         resolution = await self._coordinator.provision_session(
             route_id=route_id,
             external_identity=external_identity,
+            request_scope=StorageScope(org_id=identity.org_id, user_id=identity.user_id),
             binding_id=binding_id,
             ag_session_id=session_id,
             now=now,

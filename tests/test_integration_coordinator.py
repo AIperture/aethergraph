@@ -135,6 +135,11 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
         verified=_verified(),
         route=_route(),
         binding=_binding(),
+        session_scope=StorageScope(
+            project_id="project-1",
+            org_id="org-1",
+            session_id="session-1",
+        ),
         envelope=_envelope(),
         resources=(
             InputResource(
@@ -161,6 +166,7 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
     assert scope.session_id == "session-1"
     assert scope.graph_id == "graph.support"
     assert scope.agent_id == "agent.support"
+    assert scope.project_id == "project-1"
     assert scope.org_id == "org-1"
     assert scope.user_id == "user-1"
 

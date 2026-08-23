@@ -16,6 +16,7 @@ from aethergraph.contracts.integration import (
     InputAcceptedPayload,
     SemanticEventKind,
 )
+from aethergraph.storage.contracts import StorageScope
 
 from .context import VerifiedIntegrationContext
 from .delivery import SemanticEventEmitter
@@ -161,6 +162,7 @@ class IntegrationIngressCoordinator:
         *,
         route_id: str,
         external_identity: ExternalIdentity,
+        request_scope: StorageScope,
         binding_id: str,
         ag_session_id: str,
         now: datetime,
@@ -199,6 +201,7 @@ class IntegrationIngressCoordinator:
         Args:
             route_id: Exact enabled route in the immutable Host manifest.
             external_identity: Authenticated external conversation identity.
+            request_scope: Trusted org and user ownership for the AG execution.
             binding_id: Candidate binding identifier used only on first creation.
             ag_session_id: Candidate session identifier used only on first creation.
             now: Authoritative UTC provisioning timestamp.
@@ -214,6 +217,7 @@ class IntegrationIngressCoordinator:
         return await self.session_store.provision(
             route=route,
             external_identity=external_identity,
+            request_scope=request_scope,
             build_id=self.manifest.build_id,
             binding_id=binding_id,
             ag_session_id=ag_session_id,
@@ -284,6 +288,7 @@ class IntegrationIngressCoordinator:
             binding_resolution = await self.session_store.provision(
                 route=route,
                 external_identity=envelope.external_identity,
+                request_scope=_request_scope(verified),
                 build_id=self.manifest.build_id,
                 binding_id=f"binding-{uuid4().hex}",
                 ag_session_id=f"session-{uuid4().hex}",
@@ -372,6 +377,7 @@ class IntegrationIngressCoordinator:
                     verified=verified,
                     route=route,
                     binding=binding,
+                    session_scope=binding_resolution.session.scope,
                     envelope=envelope,
                     resources=resources,
                     admission_callback=root_admission_callback,
@@ -411,3 +417,12 @@ class IntegrationIngressCoordinator:
             receipt=receipt,
         )
         return receipt
+
+
+def _request_scope(verified: VerifiedIntegrationContext) -> StorageScope:
+    """Project trusted transport authority into canonical execution ownership."""
+    identity = verified.request_identity
+    return StorageScope(
+        org_id=str(getattr(identity, "org_id", None) or "local"),
+        user_id=str(getattr(identity, "user_id", None) or "local"),
+    )

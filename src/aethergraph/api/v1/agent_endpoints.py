@@ -352,6 +352,7 @@ async def create_endpoint_session(
     provisioning = await container.integration_ingress.provision_session(
         route_id=resolved.route_id,
         external_identity=external,
+        request_scope=StorageScope(org_id=tenant_id, user_id=user_id),
         binding_id=f"binding-{digest[:32]}",
         ag_session_id=session_id,
         now=probe.received_at,

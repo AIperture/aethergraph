@@ -39,6 +39,7 @@ class RootTurnDispatcher(Protocol):
         verified: VerifiedIntegrationContext,
         route: IntegrationRoute,
         binding: ExternalSessionBinding,
+        session_scope: StorageScope,
         envelope: IngressEnvelope,
         resources: tuple[InputResource, ...],
         admission_callback: Callable[[str], Awaitable[None]] | None = None,
@@ -72,6 +73,7 @@ class RootTurnDispatcher(Protocol):
             verified: Authenticated integration context.
             route: Exact immutable manifest route selecting the entry agent.
             binding: Durable external-to-AG session binding.
+            session_scope: Exact canonical scope of the provisioned AG session.
             envelope: Closed canonical ingress envelope.
             resources: Materialized inbound resources.
             admission_callback: Optional Host callback that must persist the accepted
@@ -130,6 +132,7 @@ class AGRootTurnDispatcher:
         verified: VerifiedIntegrationContext,
         route: IntegrationRoute,
         binding: ExternalSessionBinding,
+        session_scope: StorageScope,
         envelope: IngressEnvelope,
         resources: tuple[InputResource, ...],
         admission_callback: Callable[[str], Awaitable[None]] | None = None,
@@ -166,6 +169,7 @@ class AGRootTurnDispatcher:
             verified: Authenticated integration context.
             route: Exact manifest route selecting the entry agent.
             binding: Durable external-to-AG session binding.
+            session_scope: Exact canonical scope of the provisioned AG session.
             envelope: Closed canonical ingress envelope.
             resources: Materialized inbound resources.
             admission_callback: Optional Host callback that must persist the accepted
@@ -244,14 +248,48 @@ class AGRootTurnDispatcher:
                     },
                 )
                 raise error
-            run_scope = StorageScope(
-                org_id=record.org_id,
-                user_id=record.user_id,
-                session_id=record.session_id,
-                run_id=record.run_id,
-                graph_id=record.graph_id,
-                agent_id=record.agent_id,
+            run_dimensions = {
+                "session_id": record.session_id,
+                "run_id": record.run_id,
+                "graph_id": record.graph_id,
+                "agent_id": record.agent_id,
+                "org_id": record.org_id,
+                "user_id": record.user_id,
+            }
+            scope_values = session_scope.as_filter()
+            owner_mismatches = {
+                name: {"expected": expected, "actual": run_dimensions[name]}
+                for name, expected in scope_values.items()
+                if name in run_dimensions
+                and run_dimensions[name] is not None
+                and run_dimensions[name] != expected
+            }
+            if owner_mismatches:
+                error = RunAdmissionError(
+                    run_id=record.run_id,
+                    code="integration.artifact_run_scope_mismatch",
+                    stage="run_attachment_admission",
+                    safe_message=(
+                        "The persisted AG run ownership does not match its integration session."
+                    ),
+                    details={"mismatched_dimensions": owner_mismatches},
+                )
+                _LOG.error(
+                    "integration.artifact_admission_failed",
+                    extra={
+                        "integration_error_code": error.code,
+                        "error_stage": error.stage,
+                        "run_id": record.run_id,
+                        "integration_id": envelope.integration_id,
+                        "route_id": route.route_id,
+                        **error.details,
+                    },
+                )
+                raise error
+            scope_values.update(
+                {name: value for name, value in run_dimensions.items() if value is not None}
             )
+            run_scope = StorageScope(**scope_values)
             artifacts = self.container.artifact_factory.for_execution(
                 run_scope,
                 tool_name="integration.resource_admission",

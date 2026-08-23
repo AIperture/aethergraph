@@ -74,7 +74,15 @@ class _Sessions:
         self.by_conversation = {}
 
     async def provision(
-        self, *, route, external_identity, build_id, binding_id, ag_session_id, now
+        self,
+        *,
+        route,
+        external_identity,
+        request_scope,
+        build_id,
+        binding_id,
+        ag_session_id,
+        now,
     ):
         binding = self.by_conversation.get(external_identity.conversation_id)
         if binding is None:
@@ -94,8 +102,8 @@ class _Sessions:
                     session_id=binding.ag_session_id,
                     kind=StorageSessionKind.CHAT,
                     scope=StorageScope(
-                        tenant_id=external_identity.tenant_id,
-                        user_id=external_identity.user_id,
+                        org_id=request_scope.org_id,
+                        user_id=request_scope.user_id,
                         session_id=binding.ag_session_id,
                     ),
                     revision=1,
@@ -111,8 +119,8 @@ class _Sessions:
                 session_id=binding.ag_session_id,
                 kind=StorageSessionKind.CHAT,
                 scope=StorageScope(
-                    tenant_id=external_identity.tenant_id,
-                    user_id=external_identity.user_id,
+                    org_id=request_scope.org_id,
+                    user_id=request_scope.user_id,
                     session_id=binding.ag_session_id,
                 ),
                 revision=1,
@@ -139,6 +147,7 @@ class _Ingress:
         *,
         route_id,
         external_identity,
+        request_scope,
         binding_id,
         ag_session_id,
         now,
@@ -159,6 +168,7 @@ class _Ingress:
         return await self.session_store.provision(
             route=route,
             external_identity=external_identity,
+            request_scope=request_scope,
             build_id="build-1",
             binding_id=binding_id,
             ag_session_id=ag_session_id,
