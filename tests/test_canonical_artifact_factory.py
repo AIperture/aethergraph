@@ -322,6 +322,71 @@ async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_child_agent_can_commit_artifact_to_ingress_owned_run(tmp_path: Path) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    factory = CanonicalArtifactFacadeFactory(
+        bundle=bundle,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+        artifact_id_factory=lambda: "artifact-child-output",
+        occurrence_id_factory=lambda: "occurrence-child-output",
+    )
+    session_scope = StorageScope(
+        **_owner_scope().as_filter(),
+        user_id="user-1",
+        session_id="session-1",
+    )
+    run_scope = StorageScope(
+        **session_scope.as_filter(),
+        run_id="run-1",
+        graph_id="runtime-ingress-graph",
+        agent_id="runtime-ingress",
+    )
+    await bundle.sessions.create(
+        SessionRecord(
+            session_id="session-1",
+            kind=SessionKind.CHAT,
+            scope=session_scope,
+            revision=1,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    await bundle.runs.create(
+        RunRecord(
+            run_id="run-1",
+            graph_id="runtime-ingress-graph",
+            kind="graphfn",
+            status=RunStatus.RUNNING,
+            scope=run_scope,
+            revision=1,
+            started_at=NOW,
+        )
+    )
+    child_agent = factory.for_execution(
+        StorageScope(
+            **session_scope.as_filter(),
+            run_id="run-1",
+            graph_id="runtime-ingress-graph",
+            node_id="conversation-contract-node",
+            agent_id="conversation-contract-agent",
+        )
+    )
+
+    try:
+        committed = await child_agent.save_text("child-agent attachment")
+
+        assert committed.record.artifact_id == "artifact-child-output"
+        run = await bundle.runs.get(run_scope, "run-1")
+        session = await bundle.sessions.get(session_scope, "session-1")
+        assert run is not None and run.artifact_count == 1
+        assert session is not None and session.artifact_count == 1
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_public_factory_projects_directory_content_and_structured_helpers(
     tmp_path: Path,
 ) -> None:

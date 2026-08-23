@@ -1002,7 +1002,7 @@ def _record_run_artifact_in_transaction(
     if row is None:
         raise StorageNotFoundError(run_id)
     current = _run(row)
-    if not storage_scope_covers(current.scope, scope):
+    if not storage_scope_covers(_run_artifact_owner_scope(current.scope), scope):
         raise StorageNotFoundError(run_id)
     receipt = connection.execute(
         """
@@ -1045,7 +1045,7 @@ def _record_session_artifact_in_transaction(
     if row is None:
         raise StorageNotFoundError(session_id)
     current = _session(row)
-    if not storage_scope_covers(current.scope, scope):
+    if not storage_scope_covers(_session_artifact_owner_scope(current.scope), scope):
         raise StorageNotFoundError(session_id)
     receipt = connection.execute(
         """
@@ -1069,6 +1069,32 @@ def _record_session_artifact_in_transaction(
     updated = _session_with_artifact(current, occurred_at)
     _update_session(connection, updated)
     return updated
+
+
+def _run_artifact_owner_scope(scope: StorageScope) -> StorageScope:
+    """Return stable run ownership without producer-agent provenance."""
+    return StorageScope(
+        tenant_id=scope.tenant_id,
+        project_id=scope.project_id,
+        org_id=scope.org_id,
+        user_id=scope.user_id,
+        session_id=scope.session_id,
+        run_id=scope.run_id,
+        graph_id=scope.graph_id,
+        scope_key=scope.scope_key,
+    )
+
+
+def _session_artifact_owner_scope(scope: StorageScope) -> StorageScope:
+    """Return stable session ownership without execution provenance."""
+    return StorageScope(
+        tenant_id=scope.tenant_id,
+        project_id=scope.project_id,
+        org_id=scope.org_id,
+        user_id=scope.user_id,
+        session_id=scope.session_id,
+        scope_key=scope.scope_key,
+    )
 
 
 def _insert_run(connection: sqlite3.Connection, record: RunRecord) -> None:

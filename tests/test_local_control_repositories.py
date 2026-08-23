@@ -221,6 +221,49 @@ async def test_run_artifact_receipts_are_atomic_idempotent_and_concurrent(
 
 
 @pytest.mark.asyncio
+async def test_run_and_session_artifacts_accept_child_agent_provenance(tmp_path: Path) -> None:
+    database = _database(tmp_path, StorageOpenMode.READ_WRITE)
+    runs = LocalRunRepository(database=database)
+    sessions = LocalSessionRepository(database=database)
+    base_run = _run("run-child-agent")
+    run = replace(
+        base_run,
+        scope=replace(base_run.scope, user_id="user-1", agent_id="runtime-ingress"),
+    )
+    base_session = _session("session-1")
+    session = replace(
+        base_session,
+        scope=replace(base_session.scope, agent_id="runtime-ingress"),
+    )
+    await runs.create(run)
+    await sessions.create(session)
+
+    producer_scope = replace(
+        run.scope,
+        agent_id="conversation-contract-agent",
+        node_id="conversation-contract-node",
+    )
+    updated_run = await runs.record_artifact(
+        producer_scope,
+        run.run_id,
+        "artifact-1",
+        "occurrence-1",
+        NOW,
+    )
+    updated_session = await sessions.record_artifact(
+        producer_scope,
+        session.session_id,
+        "occurrence-1",
+        NOW,
+    )
+
+    assert updated_run.artifact_count == 1
+    assert updated_run.recent_artifact_ids == ("artifact-1",)
+    assert updated_session.artifact_count == 1
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_result_and_run_availability_commit_together(tmp_path: Path) -> None:
     database = _database(tmp_path, StorageOpenMode.READ_WRITE)
     runs = LocalRunRepository(database=database)
