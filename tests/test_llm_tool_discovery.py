@@ -596,8 +596,8 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_search_1"
     assert "tools" not in fake_http.last_json
-    assert fake_http.last_json["tool_choice"] == "required"
-    assert fake_http.last_json["parallel_tool_calls"] is False
+    assert "tool_choice" not in fake_http.last_json
+    assert "parallel_tool_calls" not in fake_http.last_json
     assert fake_http.last_json["prompt_cache_key"] == cache_key
     assert "prompt_cache_options" not in fake_http.last_json
     search_output = fake_http.last_json["input"][0]
@@ -679,8 +679,8 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_call_1"
     assert "tools" not in fake_http.last_json
-    assert fake_http.last_json["tool_choice"] == "required"
-    assert fake_http.last_json["parallel_tool_calls"] is False
+    assert "tool_choice" not in fake_http.last_json
+    assert "parallel_tool_calls" not in fake_http.last_json
     assert fake_http.last_json["prompt_cache_key"] == cache_key
     assert "prompt_cache_options" not in fake_http.last_json
     assert fake_http.last_json["input"][0] == {
@@ -1264,8 +1264,8 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert fake_http.last_json is not None
     assert "previous_response_id" not in fake_http.last_json
     assert "tools" not in fake_http.last_json
-    assert fake_http.last_json["tool_choice"] == "required"
-    assert fake_http.last_json["parallel_tool_calls"] is False
+    assert "tool_choice" not in fake_http.last_json
+    assert "parallel_tool_calls" not in fake_http.last_json
     assert fake_http.last_json["input"][0]["type"] == "tool_search_call"
     assert fake_http.last_json["input"][-1]["type"] == "tool_search_output"
     assert fake_http.last_json["input"][-1]["call_id"] == "azure_search_1"

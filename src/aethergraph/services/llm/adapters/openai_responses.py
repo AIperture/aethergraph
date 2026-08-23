@@ -949,8 +949,10 @@ class OpenAIResponsesAdapter:
         if tool_request is not None:
             if checkpoint_payload is None or checkpoint_payload["state"] == "consumed":
                 body["tools"] = _openai_request_tools(tool_request)
-            body["tool_choice"] = tool_request.choice
-            body["parallel_tool_calls"] = tool_request.max_calls > 1
+                # Responses rejects Tool selection controls when this request omits
+                # the corresponding Tool definitions. Keep the fields atomic.
+                body["tool_choice"] = tool_request.choice
+                body["parallel_tool_calls"] = tool_request.max_calls > 1
         elif tools is not None:
             body["tools"] = tools
         if tool_choice is not None:
