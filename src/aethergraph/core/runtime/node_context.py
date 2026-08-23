@@ -52,6 +52,53 @@ class NodeContext:
     app_id: str | None = None  # for app-invoked runs
     chat_tag_provider: Callable[[], list[str]] | None = None
 
+    def for_agent(self, agent_id: str) -> "NodeContext":
+        """
+        Create a context whose canonical services are bound to one Agent.
+
+        Intro:
+            Rebind every canonical service to the authored recipient Agent without
+            mutating the ingress context or changing its run and session identity.
+
+        Examples:
+            Dispatch an in-process Agent with recipient-owned persistence:
+            ```python
+            agent_context = context.for_agent("researcher")
+            await researcher.invoke(turn, session, agent_context)
+            ```
+
+            Keep the original ingress context unchanged:
+            ```python
+            agent_context = context.for_agent("writer")
+            assert context.agent_id != agent_context.agent_id
+            ```
+
+        Args:
+            agent_id: Stable authored Agent instance identifier that owns emitted
+                memory, state, artifacts, and child-run provenance.
+
+        Returns:
+            NodeContext: A new context with all canonical services rebound to the
+                requested Agent while preserving the current run and session.
+
+        Notes:
+            Ordinary contexts are unchanged unless this method is called. Runtime
+            environments install the factory; hand-built contexts must provide an
+            `agent_context_factory` before they can derive an Agent context.
+        """
+        normalized_agent_id = str(agent_id or "").strip()
+        if not normalized_agent_id:
+            raise ValueError("agent_id must be a non-empty string")
+        if self.agent_id == normalized_agent_id:
+            return self
+        factory = self.services.agent_context_factory
+        if factory is None:
+            raise RuntimeError("Agent context factory is not configured")
+        derived = factory(self, agent_id=normalized_agent_id)
+        if not isinstance(derived, NodeContext):
+            raise TypeError("Agent context factory must return NodeContext")
+        return derived
+
     # --- accessors (compatible names) ---
     def runtime(self) -> NodeServices:
         return self.services

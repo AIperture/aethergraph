@@ -109,6 +109,43 @@ def test_node_context_state_forwards_existing_scope_to_canonical_facade() -> Non
     assert facade.kwargs["scope"] is shared
 
 
+def test_node_context_for_agent_uses_factory_without_mutating_ingress_context() -> None:
+    context = _context(embedding=None)
+    context.agent_id = "studio-entry"
+    target_services = NodeServices(
+        channels=SimpleNamespace(),
+        continuation_store=SimpleNamespace(),
+        artifact_store=SimpleNamespace(),
+    )
+    target = NodeContext(
+        run_id=context.run_id,
+        session_id=context.session_id,
+        graph_id=context.graph_id,
+        node_id=context.node_id,
+        services=target_services,
+        agent_id="character",
+    )
+    calls: list[tuple[NodeContext, str]] = []
+
+    def _factory(source: NodeContext, *, agent_id: str) -> NodeContext:
+        calls.append((source, agent_id))
+        return target
+
+    context.services.agent_context_factory = _factory
+
+    assert context.for_agent("character") is target
+    assert calls == [(context, "character")]
+    assert context.agent_id == "studio-entry"
+    assert context.services is not target.services
+
+
+def test_node_context_for_agent_requires_explicit_runtime_binding() -> None:
+    context = _context(embedding=None)
+
+    with pytest.raises(RuntimeError, match="Agent context factory is not configured"):
+        context.for_agent("character")
+
+
 def test_runtime_env_projects_the_container_image_service() -> None:
     service = _ImageService({"default": SimpleNamespace()})
     env = RuntimeEnv(

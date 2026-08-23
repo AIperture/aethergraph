@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
 from typing import Any
 
@@ -22,6 +22,7 @@ from aethergraph.storage.contracts import StorageScope
 
 from ..graph.task_node import TaskNodeRuntime
 from .execution_context import ExecutionContext
+from .node_context import NodeContext
 from .node_services import NodeServices
 
 logger = logging.getLogger(__name__)
@@ -261,6 +262,11 @@ class RuntimeEnv:
                 scope=mem_scope or node_scope,
                 registration_service=getattr(self.container, "registration_service", None),
             ),
+            agent_context_factory=lambda context, *, agent_id: self._make_agent_context(
+                context,
+                node=node,
+                agent_id=agent_id,
+            ),
         )
         return ExecutionContext(
             run_id=self.run_id,
@@ -281,6 +287,22 @@ class RuntimeEnv:
             resume_router=self.resume_router,
             runtime_output_sink=getattr(self.container, "runtime_output_sink", None),
         )
+
+    def _make_agent_context(
+        self,
+        context: NodeContext,
+        *,
+        node: TaskNodeRuntime,
+        agent_id: str,
+    ) -> NodeContext:
+        derived_env = replace(self, agent_id=agent_id)
+        derived_execution = derived_env.make_ctx(
+            node=node,
+            resume_payload=context.resume_payload,
+        )
+        derived = derived_execution.create_node_context(node)
+        derived.chat_tag_provider = context.chat_tag_provider
+        return derived
 
     def _resolve_memory_config(self) -> tuple[str, str | None]:
         """
