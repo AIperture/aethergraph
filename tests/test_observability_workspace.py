@@ -15,6 +15,7 @@ from aethergraph.observability import (
 )
 from aethergraph.services.memory.canonical_factory import CanonicalMemoryFacadeFactory
 from aethergraph.storage.contracts import (
+    ArtifactRecord,
     LLMCallDraft,
     LLMCallLifecycleStatus,
     ObservationCaptureMode,
@@ -71,6 +72,27 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
 ) -> None:
     provider, request = _provider_and_request(tmp_path)
     bundle = provider.open(request)
+    artifact_content = b"historical artifact bytes"
+
+    async def artifact_chunks():
+        yield artifact_content
+
+    stored_blob = await bundle.blobs.put(OWNER, artifact_chunks())
+    await bundle.artifacts.put(
+        ArtifactRecord(
+            artifact_id="artifact-1",
+            content_hash=stored_blob.content_hash,
+            hash_algorithm=stored_blob.hash_algorithm,
+            size_bytes=stored_blob.size_bytes,
+            media_type="application/octet-stream",
+            kind="test",
+            blob_locator=stored_blob.blob_locator,
+            owner_scope=OWNER,
+            created_at=NOW,
+            original_filename="artifact.bin",
+            provider_version=stored_blob.provider_version,
+        )
+    )
     run_scope = StorageScope(
         project_id="project-1",
         session_id="session-1",
@@ -188,6 +210,8 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
     engine_events = await facade.list_engine_events(run_id="run-1")
     suppressed = await facade.list_suppressed_scopes()
     manifest = await facade.hydrate_prompt_manifest("manifest-1")
+    retained_artifact = await facade.read_artifact_bytes("artifact-1")
+    missing_artifact = await facade.read_artifact_bytes("missing")
     await facade.close()
     await facade.close()
 
@@ -215,6 +239,8 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
     assert manifest is not None
     assert manifest["manifest_id"] == "manifest-1"
     assert manifest["provider_request"]["messages"][0]["content"] == "hello"
+    assert retained_artifact == artifact_content
+    assert missing_artifact is None
     assert [part["content_kind"] for part in manifest["parts"]] == [
         "prompt_message",
         "provider_request_config",

@@ -1927,6 +1927,8 @@ class ChannelSession:
         self,
         *,
         prompt: str,
+        accept: list[str] | None = None,
+        multiple: bool = True,
         timeout_s: int = 3600,
         channel: str | None = None,
         memory_log_prompt: bool = False,
@@ -1949,12 +1951,16 @@ class ChannelSession:
             ```python
             result = await context.channel().ask_text_or_files(
                 prompt="Provide evidence",
+                accept=["image/png", "text/plain"],
+                multiple=True,
                 channel="web:chat",
             )
             ```
 
         Args:
             prompt: Prompt text shown to the user.
+            accept: Optional MIME/extension hints for the adapter UI.
+            multiple: Allow multiple uploaded files when `True`.
             timeout_s: Continuation deadline in seconds.
             channel: Optional target channel key.
             memory_log_prompt: Enable memory logging for the prompt.
@@ -1965,13 +1971,19 @@ class ChannelSession:
             FileInteractionResult: Immutable normalized text and uploaded files.
 
         Notes:
-            Prefer `ask_text` + `get_latest_uploads` or `ask_files` when modality is known.
+            Type hints are advisory and adapter-dependent, not server-side validation.
         """
         channel_key = self._resolve_key(channel)
         span = await self._operation_observer.start_span(
             service="channel",
             operation="ask_text_or_files",
-            request={"prompt": prompt, "timeout_s": timeout_s, "channel_key": channel_key},
+            request={
+                "prompt": prompt,
+                "accept": accept or [],
+                "multiple": bool(multiple),
+                "timeout_s": timeout_s,
+                "channel_key": channel_key,
+            },
             tags=["channel", "ask", "text_or_files"],
             metadata=self._inject_context_meta({"channel_key": channel_key}),
         )
@@ -1987,7 +1999,11 @@ class ChannelSession:
 
             payload = await self._ask_core(
                 kind="user_input_or_files",
-                payload={"prompt": prompt},
+                payload={
+                    "prompt": prompt,
+                    "accept": accept or [],
+                    "multiple": bool(multiple),
+                },
                 channel=channel,
                 timeout_s=timeout_s,
             )
