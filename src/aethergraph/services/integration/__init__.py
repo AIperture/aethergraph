@@ -8,7 +8,6 @@ from .canonical_factory import (
 from .context import VerifiedAttachment, VerifiedIntegrationContext
 from .coordinator import (
     IngressCoordinatorError,
-    IngressInputError,
     IntegrationIngressCoordinator,
 )
 from .delivery import (
@@ -32,6 +31,7 @@ from .idempotency import (
     IngressIdempotencyError,
     IngressIdempotencyStore,
 )
+from .input_validation import IngressInputError, validate_accepted_event_input
 from .interactions import (
     InteractionResolutionError,
     InteractionResolver,
@@ -106,4 +106,5 @@ __all__ = [
     "build_interaction_payload",
     "bind_canonical_integration_persistence",
     "install_integration_ingress",
+    "validate_accepted_event_input",
 ]

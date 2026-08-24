@@ -16,7 +16,6 @@ from aethergraph.contracts.integration import (
     InputAcceptedPayload,
     SemanticEventKind,
 )
-from aethergraph.core.schema_validation import first_schema_issue
 from aethergraph.storage.contracts import StorageScope
 
 from .context import VerifiedIntegrationContext
@@ -24,6 +23,7 @@ from .delivery import SemanticEventEmitter
 from .dispatch import RootTurnDispatcher
 from .event_contracts import InboundEventStore
 from .idempotency import IngressIdempotencyStore
+from .input_validation import validate_accepted_event_input
 from .interactions import (
     InteractionResolutionError,
     InteractionResolver,
@@ -78,41 +78,6 @@ class IngressCoordinatorError(RuntimeError):
         Notes:
             The transport may retry the same idempotency identity later.
         """
-        super().__init__(message)
-        self.code = code
-
-
-class IngressInputError(RuntimeError):
-    """Report a stable accepted-event type or payload contract rejection."""
-
-    def __init__(self, *, code: str, message: str) -> None:
-        """Create one event-contract rejection.
-
-        Examples:
-            Reject an unknown type:
-            ```python
-            error = IngressInputError(
-                code="integration.event_type_not_accepted",
-                message="Unknown event type.",
-            )
-            ```
-
-            Return the stable code at an HTTP edge:
-            ```python
-            assert error.code == "integration.event_type_not_accepted"
-            ```
-
-        Args:
-            code: Stable machine-readable rejection code.
-            message: Safe human-readable rejection explanation.
-
-        Returns:
-            None.
-
-        Notes:
-            Rejection occurs before idempotency claim or persistence.
-        """
-
         super().__init__(message)
         self.code = code
 
@@ -487,25 +452,11 @@ class IntegrationIngressCoordinator:
 
         if envelope.input.kind != "event":
             return
-        contract = next(
-            (item for item in self.manifest.accepted_events if item.type == envelope.input.type),
-            None,
+        validate_accepted_event_input(
+            self.manifest.accepted_events,
+            event_type=envelope.input.type,
+            payload=envelope.input.payload,
         )
-        if contract is None:
-            raise IngressInputError(
-                code="integration.event_type_not_accepted",
-                message=(f"Event type {envelope.input.type!r} is not accepted by this System."),
-            )
-        issue = first_schema_issue(
-            envelope.input.payload,
-            contract.payload_schema,
-            path="$.input.payload",
-        )
-        if issue is not None:
-            raise IngressInputError(
-                code="integration.event_payload_invalid",
-                message=f"{issue.path}: {issue.message}",
-            )
 
 
 def _request_scope(verified: VerifiedIntegrationContext) -> StorageScope:
