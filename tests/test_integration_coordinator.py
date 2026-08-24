@@ -135,6 +135,11 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
         verified=_verified(),
         route=_route(),
         binding=_binding(),
+        session_scope=StorageScope(
+            project_id="project-1",
+            org_id="org-1",
+            session_id="session-1",
+        ),
         envelope=_envelope(),
         resources=(
             InputResource(
@@ -161,6 +166,7 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
     assert scope.session_id == "session-1"
     assert scope.graph_id == "graph.support"
     assert scope.agent_id == "agent.support"
+    assert scope.project_id == "project-1"
     assert scope.org_id == "org-1"
     assert scope.user_id == "user-1"
 
@@ -626,6 +632,7 @@ async def test_coordinator_persists_disabled_route_rejection(tmp_path) -> None:
 
     assert receipt.accepted is False
     assert receipt.rejection_code == "integration.route_disabled"
+    assert receipt.rejection_message
     assert duplicate.duplicate is True
     assert root.calls == []
     await event_log.close()
@@ -645,7 +652,11 @@ async def test_resource_ingress_validates_existing_artifact_reference(
     )
 
     class _ArtifactService:
-        async def get_by_id(self, artifact_id):
+        async def get_by_id(self, artifact_id, *, occurrence_scope=None):
+            assert occurrence_scope == StorageScope(
+                tenant_id="team-T1",
+                project_id="project-1",
+            )
             return artifact if artifact_id == "artifact-1" else None
 
     class _UnexpectedStager:
@@ -667,9 +678,9 @@ async def test_resource_ingress_validates_existing_artifact_reference(
                 attachment_id="attachment-1",
                 source_kind="artifact",
                 source_id="artifact-1",
-                filename="report.pdf",
-                content_type="application/pdf",
-                size_bytes=100,
+                filename="stale-client-name.bin",
+                content_type="application/octet-stream",
+                size_bytes=1,
             ),
         ),
     )
@@ -684,6 +695,9 @@ async def test_resource_ingress_validates_existing_artifact_reference(
 
     assert len(resources) == 1
     assert resources[0].artifact_id == "artifact-1"
+    assert resources[0].name == "report.pdf"
+    assert resources[0].mime == "application/pdf"
+    assert resources[0].size == 100
 
 
 @pytest.mark.asyncio

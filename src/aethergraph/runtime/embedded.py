@@ -1041,6 +1041,37 @@ class EmbeddedRuntime:
         await self._ensure_ready()
         return await self._container.artifact_service.load_text(uri)
 
+    async def load_artifact_bytes(self, uri: str) -> bytes:
+        """Load immutable artifact bytes from one authorized runtime URI.
+
+        The method delegates to the canonical artifact service after runtime
+        readiness validation. The embedding Host must authorize the artifact
+        metadata and scope before requesting its content.
+
+        Examples:
+            Load an authorized image:
+            ```python
+            content = await runtime.load_artifact_bytes("artifact://image-1")
+            ```
+
+            Load an authorized generated report:
+            ```python
+            content = await runtime.load_artifact_bytes(artifact.uri)
+            ```
+
+        Args:
+            uri: Exact artifact-store URI from an authorized metadata record.
+
+        Returns:
+            bytes: Exact immutable artifact payload.
+
+        Notes:
+            This method performs no Host authorization and never accepts an
+            artifact ID in place of its canonical URI.
+        """
+        await self._ensure_ready()
+        return await self._container.artifact_service.load_bytes(uri)
+
     async def append_external_resource_change(
         self,
         *,
@@ -1330,6 +1361,7 @@ class RuntimeIntegration:
         *,
         route_id: str,
         external_identity: ExternalIdentity,
+        identity: RuntimeIdentity,
         binding_id: str,
         session_id: str,
         now: datetime,
@@ -1357,6 +1389,7 @@ class RuntimeIntegration:
         Args:
             route_id: Exact installed manifest route identity.
             external_identity: Canonical external conversation identity.
+            identity: Trusted runtime org and user ownership.
             binding_id: Candidate durable binding identity used only on creation.
             session_id: Candidate durable AG session identity used only on creation.
             now: Authoritative provisioning timestamp.
@@ -1372,6 +1405,7 @@ class RuntimeIntegration:
         resolution = await self._coordinator.provision_session(
             route_id=route_id,
             external_identity=external_identity,
+            request_scope=StorageScope(org_id=identity.org_id, user_id=identity.user_id),
             binding_id=binding_id,
             ag_session_id=session_id,
             now=now,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -37,3 +38,4 @@ class NodeServices:
     runner: RunFacade | None = None  # RunFacade for child run orchestration
     triggers: TriggerFacade | None = None  # TriggerFacade for firing triggers from nodes
     registry: RegistryFacade | None = None  # Scope-bound runtime registry facade
+    agent_context_factory: Callable[..., Any] | None = None  # canonical context rebinding

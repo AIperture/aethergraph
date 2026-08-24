@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from aethergraph.contracts.integration import (
     SEMANTIC_EVENT_PROTOCOL_VERSION,
+    ArtifactAvailablePayload,
     InteractionOption,
     InteractionRequestedPayload,
     MessageCompletedPayload,
@@ -315,7 +316,7 @@ class SemanticEventEmitter:
                         ),
                     ),
                 )
-            return (
+            completed = (
                 (
                     SemanticEventKind.MESSAGE_COMPLETED,
                     MessageCompletedPayload(
@@ -324,6 +325,15 @@ class SemanticEventEmitter:
                         artifact_ids=artifact_ids,
                     ),
                 ),
+            )
+            if not artifact_ids:
+                return completed
+            return (
+                (
+                    SemanticEventKind.ARTIFACT_AVAILABLE,
+                    self._artifact_available(event, artifact_ids[0]),
+                ),
+                *completed,
             )
         if event.type in {"session.need_input", "session.need_approval"}:
             meta = event.meta or {}
@@ -340,7 +350,7 @@ class SemanticEventEmitter:
                 "approval": "approval",
                 "choice": "choice",
                 "user_files": "files",
-                "user_input_or_files": "files",
+                "user_input_or_files": "text_or_files",
                 "user_input": "text",
             }.get(kind)
             if request_kind is None:
@@ -462,6 +472,31 @@ class SemanticEventEmitter:
     def _artifact_ids(event: OutEvent) -> tuple[str, ...]:
         value = (event.file or {}).get("artifact_id") or (event.file or {}).get("id")
         return (str(value),) if value else ()
+
+    @classmethod
+    def _artifact_available(
+        cls,
+        event: OutEvent,
+        artifact_id: str,
+    ) -> ArtifactAvailablePayload:
+        value = event.file or {}
+        filename = value.get("filename") or value.get("name") or artifact_id
+        content_type = (
+            value.get("content_type") or value.get("mimetype") or "application/octet-stream"
+        )
+        raw_size = (
+            value.get("size_bytes") if value.get("size_bytes") is not None else value.get("size")
+        )
+        if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+            raise SemanticDeliveryError(
+                "Semantic artifact delivery requires a non-negative integer size."
+            )
+        return ArtifactAvailablePayload(
+            artifact_id=artifact_id,
+            filename=str(filename),
+            content_type=str(content_type),
+            size_bytes=raw_size,
+        )
 
     @staticmethod
     def _json_file(value: dict[str, Any] | None) -> dict[str, Any] | None:

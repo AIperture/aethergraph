@@ -517,6 +517,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     )
     initial_request = ToolCallRequest(
         tools=(immediate, deferred),
+        choice="required",
         discovery=ToolDiscoveryRequest(
             "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
         ),
@@ -542,6 +543,8 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tools"][-1]["execution"] == "client"
+    assert fake_http.last_json["tool_choice"] == "required"
+    assert fake_http.last_json["parallel_tool_calls"] is False
     assert "lexical_queries" in fake_http.last_json["tools"][-1]["description"]
     assert "studio.docs" in fake_http.last_json["tools"][-1]["description"]
     assert "prompt_cache_options" not in fake_http.last_json
@@ -561,6 +564,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     }
     continuation_request = ToolCallRequest(
         tools=(immediate, deferred),
+        choice="required",
         discovery=ToolDiscoveryRequest(
             "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
         ),
@@ -592,6 +596,8 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_search_1"
     assert "tools" not in fake_http.last_json
+    assert "tool_choice" not in fake_http.last_json
+    assert "parallel_tool_calls" not in fake_http.last_json
     assert fake_http.last_json["prompt_cache_key"] == cache_key
     assert "prompt_cache_options" not in fake_http.last_json
     search_output = fake_http.last_json["input"][0]
@@ -639,6 +645,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     }
     result_request = ToolCallRequest(
         tools=(immediate, deferred),
+        choice="required",
         discovery=ToolDiscoveryRequest(
             "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
         ),
@@ -672,6 +679,8 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_call_1"
     assert "tools" not in fake_http.last_json
+    assert "tool_choice" not in fake_http.last_json
+    assert "parallel_tool_calls" not in fake_http.last_json
     assert fake_http.last_json["prompt_cache_key"] == cache_key
     assert "prompt_cache_options" not in fake_http.last_json
     assert fake_http.last_json["input"][0] == {
@@ -1201,6 +1210,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
                 exposure="deferred",
             ),
         ),
+        choice="required",
         discovery=ToolDiscoveryRequest("native_client", search_schema=_CLIENT_SEARCH_SCHEMA),
         turn_id="turn_1",
     )
@@ -1220,6 +1230,8 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert fake_http.last_json is not None
     assert fake_http.last_json["model"] == "gpt-5.5"
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
+    assert fake_http.last_json["tool_choice"] == "required"
+    assert fake_http.last_json["parallel_tool_calls"] is False
 
     fake_http.payload = {
         "id": "resp_azure_call_1",
@@ -1235,6 +1247,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     }
     continuation = ToolCallRequest(
         tools=request.tools,
+        choice="required",
         discovery=request.discovery,
         turn_id="turn_1",
         active_tool_names=("read_document",),
@@ -1250,6 +1263,9 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert called.calls[0].call_id == "azure_read_1"
     assert fake_http.last_json is not None
     assert "previous_response_id" not in fake_http.last_json
+    assert "tools" not in fake_http.last_json
+    assert "tool_choice" not in fake_http.last_json
+    assert "parallel_tool_calls" not in fake_http.last_json
     assert fake_http.last_json["input"][0]["type"] == "tool_search_call"
     assert fake_http.last_json["input"][-1]["type"] == "tool_search_output"
     assert fake_http.last_json["input"][-1]["call_id"] == "azure_search_1"

@@ -93,6 +93,7 @@ class IntegrationSessionStore(Protocol):
         *,
         route: IntegrationRoute,
         external_identity: ExternalIdentity,
+        request_scope: StorageScope,
         build_id: str,
         binding_id: str,
         ag_session_id: str,
@@ -132,6 +133,7 @@ class IntegrationSessionStore(Protocol):
         Args:
             route: Exact resolved route and session-scope policy.
             external_identity: Authenticated external conversation identity.
+            request_scope: Trusted org and user ownership for the AG execution.
             build_id: Immutable build identity for the bound AG session.
             binding_id: Candidate binding identifier used only on creation.
             ag_session_id: Candidate session identifier used only on creation.
@@ -234,6 +236,7 @@ class CanonicalIntegrationSessionStore:
         *,
         route: IntegrationRoute,
         external_identity: ExternalIdentity,
+        request_scope: StorageScope,
         build_id: str,
         binding_id: str,
         ag_session_id: str,
@@ -273,6 +276,7 @@ class CanonicalIntegrationSessionStore:
         Args:
             route: Exact immutable Host route and session policy.
             external_identity: Authenticated external conversation identity.
+            request_scope: Trusted org and user ownership for the AG execution.
             build_id: Host build that must remain pinned.
             binding_id: Candidate binding identity used only on creation.
             ag_session_id: Candidate session identity used only on creation.
@@ -303,7 +307,7 @@ class CanonicalIntegrationSessionStore:
         session = _canonical_session(
             owner_scope=self._owner_scope,
             route=route,
-            external_identity=external_identity,
+            request_scope=request_scope,
             session_id=resolved_session_id,
             now=now,
             title=title,
@@ -328,7 +332,7 @@ class CanonicalIntegrationSessionStore:
                 _canonical_session(
                     owner_scope=self._owner_scope,
                     route=route,
-                    external_identity=external_identity,
+                    request_scope=request_scope,
                     session_id=winner.ag_session_id,
                     now=now,
                     title=title,
@@ -414,7 +418,7 @@ def _canonical_session(
     *,
     owner_scope: StorageScope,
     route: IntegrationRoute,
-    external_identity: ExternalIdentity,
+    request_scope: StorageScope,
     session_id: str,
     now: datetime,
     title: str | None,
@@ -425,9 +429,13 @@ def _canonical_session(
     }
     dimensions = {"session_id": session_id}
     if owner_scope.org_id is None:
-        dimensions["org_id"] = external_identity.tenant_id
+        if request_scope.org_id is None:
+            raise ValueError("Integration request scope requires org_id")
+        dimensions["org_id"] = request_scope.org_id
     if include_user and owner_scope.user_id is None:
-        dimensions["user_id"] = external_identity.user_id
+        if request_scope.user_id is None:
+            raise ValueError("User-scoped integration sessions require user_id")
+        dimensions["user_id"] = request_scope.user_id
     scope = merge_storage_scope(owner_scope, **dimensions)
     external_reference = (
         f"agent-endpoint:{route.endpoint_id}"

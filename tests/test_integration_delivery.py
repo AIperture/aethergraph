@@ -6,6 +6,7 @@ import pytest
 
 from aethergraph.contracts.integration import (
     SEMANTIC_EVENT_PROTOCOL_VERSION,
+    ArtifactAvailablePayload,
     InteractionRequestedPayload,
     MessageCompletedPayload,
     SemanticEvent,
@@ -272,6 +273,87 @@ async def test_semantic_adapter_projects_remote_file_as_structured_output(tmp_pa
             "url": "https://example.test/report.pdf",
         },
     }
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_announces_artifact_before_referencing_message(
+    tmp_path,
+) -> None:
+    event_log = make_semantic_event_store()
+    store = event_log
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+
+    result = await adapter.send(
+        OutEvent(
+            type="agent.message",
+            channel="endpoint:sessions/public-1",
+            text="Rendered image",
+            file={
+                "artifact_id": "artifact-1",
+                "filename": "probe.png",
+                "mimetype": "image/png",
+                "size": 67,
+            },
+            meta=_meta(),
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    assert result == {"event_cursor": 2}
+    assert [item.event.kind for item in history] == [
+        SemanticEventKind.ARTIFACT_AVAILABLE,
+        SemanticEventKind.MESSAGE_COMPLETED,
+    ]
+    available = history[0].event.payload
+    assert isinstance(available, ArtifactAvailablePayload)
+    assert available.artifact_id == "artifact-1"
+    assert available.filename == "probe.png"
+    assert available.content_type == "image/png"
+    assert available.size_bytes == 67
+    message = history[1].event.payload
+    assert isinstance(message, MessageCompletedPayload)
+    assert message.artifact_ids == ("artifact-1",)
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_semantic_adapter_preserves_text_or_files_interaction_kind(
+    tmp_path,
+) -> None:
+    event_log = make_semantic_event_store()
+    store = event_log
+    adapter = SemanticEventChannelAdapter(
+        emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
+    )
+
+    await adapter.send(
+        OutEvent(
+            type="session.need_input",
+            channel="endpoint:sessions/public-1",
+            text="Reply or attach evidence",
+            meta={
+                **_meta(),
+                "interaction_id": "interaction-mixed-1",
+                "interaction_kind": "user_input_or_files",
+                "accept": ["text/plain", "image/png"],
+            },
+        )
+    )
+
+    history = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+    requested = history[0].event.payload
+    assert isinstance(requested, InteractionRequestedPayload)
+    assert requested.request_kind == "text_or_files"
+    assert requested.accepted_content_types == ("text/plain", "image/png")
     await event_log.close()
 
 

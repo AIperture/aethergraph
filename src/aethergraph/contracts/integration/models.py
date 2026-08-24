@@ -435,6 +435,7 @@ class IngressReceipt(IntegrationContract):
     turn_id: Identifier | None = None
     event_cursor: Annotated[int, Field(ge=0)] | None = None
     rejection_code: Identifier | None = None
+    rejection_message: BoundedText | None = None
 
     @model_validator(mode="after")
     def _validate_result(self) -> IngressReceipt:
@@ -447,8 +448,10 @@ class IngressReceipt(IntegrationContract):
             or self.event_cursor is None
         ):
             raise ValueError("accepted receipts require route, session, turn, and cursor")
-        if self.accepted and self.rejection_code is not None:
-            raise ValueError("accepted receipts cannot include rejection_code")
+        if self.accepted and (
+            self.rejection_code is not None or self.rejection_message is not None
+        ):
+            raise ValueError("accepted receipts cannot include rejection details")
         if not self.accepted and self.rejection_code is None:
             raise ValueError("rejected receipts require rejection_code")
         return self
@@ -551,7 +554,7 @@ class InteractionRequestedPayload(IntegrationContract):
     """Semantic payload requesting an exact external interaction."""
 
     interaction_id: Identifier
-    request_kind: Literal["approval", "choice", "text", "files"]
+    request_kind: Literal["approval", "choice", "text", "files", "text_or_files"]
     prompt: BoundedText
     options: tuple[InteractionOption, ...] = ()
     allow_multiple: bool = False

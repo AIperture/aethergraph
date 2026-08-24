@@ -11,15 +11,26 @@ from aethergraph.contracts.services.channel import Button, OutEvent
 from aethergraph.plugins.channel.adapters.slack import SlackChannelAdapter
 from aethergraph.plugins.channel.adapters.telegram import TelegramChannelAdapter
 from aethergraph.plugins.channel.utils import slack_utils, telegram_utils
+from aethergraph.services.integration import ResourceIngressPolicy
 
 
 class _Coordinator:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.resource_ingress = SimpleNamespace(policy=ResourceIngressPolicy())
+        self.receipt = SimpleNamespace(accepted=True)
 
     async def accept(self, *, verified, envelope):
         self.calls.append({"verified": verified, "envelope": envelope})
-        return SimpleNamespace(accepted=True)
+        return self.receipt
+
+
+class _DeliveryAdapter:
+    def __init__(self) -> None:
+        self.events = []
+
+    async def send(self, event) -> None:
+        self.events.append(event)
 
 
 class _Logger:
@@ -219,9 +230,10 @@ async def test_telegram_callback_submits_exact_public_interaction() -> None:
 
 @pytest.mark.asyncio
 async def test_slack_file_bytes_are_verified_but_not_staged_by_edge(monkeypatch) -> None:
-    async def _download(url: str, token: str) -> bytes:
+    async def _download(url: str, token: str, **kwargs) -> bytes:
         assert url == "https://files.slack.test/F1"
         assert token == "xoxb-test"
+        assert kwargs["max_bytes"] == 25 * 1024 * 1024
         return b"contents"
 
     monkeypatch.setattr(slack_utils, "_download_slack_file", _download)
@@ -248,6 +260,159 @@ async def test_slack_file_bytes_are_verified_but_not_staged_by_edge(monkeypatch)
     assert call["envelope"].attachments[0].source_id == "F1"
     assert call["envelope"].attachments[0].size_bytes == 8
     assert call["verified"].attachments[0].data == b"contents"
+
+
+@pytest.mark.asyncio
+async def test_telegram_file_bytes_are_verified_but_not_staged_by_edge(monkeypatch) -> None:
+    async def _path(file_id: str, token: str) -> str:
+        assert file_id == "TG1"
+        assert token == "telegram-token"
+        return "documents/TG1.txt"
+
+    async def _download(file_path: str, token: str, **kwargs) -> bytes:
+        assert file_path == "documents/TG1.txt"
+        assert token == "telegram-token"
+        assert kwargs["max_bytes"] == 25 * 1024 * 1024
+        return b"telegram contents"
+
+    monkeypatch.setattr(telegram_utils, "_tg_get_file_path", _path)
+    monkeypatch.setattr(telegram_utils, "_tg_download_file", _download)
+    container = _Container()
+    payload = _telegram_message_payload()
+    payload["message"].pop("text")
+    payload["message"]["caption"] = "please read"
+    payload["message"]["document"] = {
+        "file_id": "TG1",
+        "file_name": "brief.txt",
+        "mime_type": "text/plain",
+        "file_size": 17,
+    }
+
+    await telegram_utils._process_update(
+        container,
+        payload,
+        token="telegram-token",
+        integration_id="telegram-main",
+    )
+
+    call = container.integration_ingress.calls[0]
+    assert call["envelope"].attachments[0].source_id == "TG1"
+    assert call["envelope"].attachments[0].content_type == "text/plain"
+    assert call["verified"].attachments[0].data == b"telegram contents"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "prefix"),
+    (("slack", "slack"), ("telegram", "tg")),
+)
+async def test_provider_rejections_are_reported_to_the_origin(provider: str, prefix: str) -> None:
+    container = _Container()
+    delivery = _DeliveryAdapter()
+    container.channels.adapters[prefix] = delivery
+    container.integration_ingress.receipt = SimpleNamespace(
+        accepted=False,
+        rejection_code="integration.attachment_type_rejected",
+        rejection_message="That attachment type is not enabled.",
+    )
+
+    if provider == "slack":
+        await slack_utils.handle_slack_events_common(
+            container,
+            _slack_settings(),
+            _slack_message_payload(),
+        )
+    else:
+        await telegram_utils._process_update(
+            container,
+            _telegram_message_payload(),
+            token="",
+            integration_id="telegram-main",
+        )
+
+    assert len(delivery.events) == 1
+    assert "That attachment type is not enabled." in delivery.events[0].text
+    assert "integration.attachment_type_rejected" in delivery.events[0].text
+
+
+@pytest.mark.asyncio
+async def test_slack_oversized_file_is_rejected_before_download(monkeypatch) -> None:
+    async def _unexpected_download(*args, **kwargs) -> bytes:
+        raise AssertionError("oversized provider files must not be downloaded")
+
+    monkeypatch.setattr(slack_utils, "_download_slack_file", _unexpected_download)
+    container = _Container()
+    delivery = _DeliveryAdapter()
+    container.channels.adapters["slack"] = delivery
+    settings = SimpleNamespace(
+        slack=SimpleNamespace(
+            integration_id="slack-main",
+            bot_token=SimpleNamespace(get_secret_value=lambda: "xoxb-test"),
+        )
+    )
+    payload = _slack_message_payload()
+    payload["event"]["files"] = [
+        {
+            "id": "F-large",
+            "name": "large.bin",
+            "mimetype": "application/octet-stream",
+            "size": 25 * 1024 * 1024 + 1,
+            "url_private": "https://files.slack.test/F-large",
+        }
+    ]
+
+    await slack_utils.handle_slack_events_common(container, settings, payload)
+
+    assert container.integration_ingress.calls == []
+    assert "integration.attachment_too_large" in delivery.events[0].text
+
+
+@pytest.mark.asyncio
+async def test_slack_file_shared_uses_the_registered_delivery_client(monkeypatch) -> None:
+    async def _download(*args, **kwargs) -> bytes:
+        return b"shared contents"
+
+    class _SlackClient:
+        async def files_info(self, *, file: str):
+            assert file == "F-shared"
+            return {
+                "file": {
+                    "id": file,
+                    "user": "U1",
+                    "name": "shared.txt",
+                    "mimetype": "text/plain",
+                    "size": 15,
+                    "url_private": "https://files.slack.test/F-shared",
+                }
+            }
+
+    monkeypatch.setattr(slack_utils, "_download_slack_file", _download)
+    container = _Container()
+    delivery = _DeliveryAdapter()
+    delivery.client = _SlackClient()
+    container.channels.adapters["slack"] = SimpleNamespace(downstream=delivery)
+    settings = SimpleNamespace(
+        slack=SimpleNamespace(
+            integration_id="slack-main",
+            bot_token=SimpleNamespace(get_secret_value=lambda: "xoxb-test"),
+        )
+    )
+    payload = {
+        "event_id": "Ev-shared",
+        "team_id": "T1",
+        "event": {
+            "type": "file_shared",
+            "event_ts": "100.5",
+            "channel_id": "C1",
+            "file": {"id": "F-shared"},
+        },
+    }
+
+    await slack_utils.handle_slack_events_common(container, settings, payload)
+
+    assert container.integration_ingress.calls[0]["envelope"].attachments[0].source_id == (
+        "F-shared"
+    )
 
 
 @pytest.mark.asyncio

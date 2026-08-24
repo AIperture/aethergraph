@@ -531,6 +531,52 @@ class _CanonicalObservabilityFacade:
             raise ObservabilityUnavailableError("Prompt manifest correlation is inconsistent")
         return _prompt_manifest_mapping(detail)
 
+    async def read_artifact_bytes(self, artifact_id: str) -> bytes | None:
+        """Read one exact immutable artifact from a manifested workspace.
+
+        Intro:
+            Resolves canonical artifact metadata in the workspace owner scope and
+            streams its opaque blob through the selected read-only provider.
+
+        Examples:
+            Read a retained image:
+                ```python
+                content = await facade.read_artifact_bytes("artifact-image-1")
+                ```
+
+            Detect an absent or foreign artifact:
+                ```python
+                assert await facade.read_artifact_bytes("missing") is None
+                ```
+
+        Args:
+            artifact_id: Exact canonical artifact identity.
+
+        Returns:
+            bytes | None: Immutable content, or `None` when metadata is absent in
+            the authorized workspace scope.
+
+        Notes:
+            Provider-private blob locators never cross this facade. Callers must
+            separately prove that their product surface is authorized to expose the
+            artifact identity.
+        """
+        if not isinstance(artifact_id, str) or not artifact_id.strip():
+            raise ValueError("artifact_id must be a non-empty string")
+        bundle = await self._bundle()
+        record = await bundle.artifacts.get(self._owner_scope, artifact_id)
+        if record is None:
+            return None
+        return b"".join(
+            [
+                chunk
+                async for chunk in bundle.blobs.read(
+                    self._owner_scope,
+                    record.blob_locator,
+                )
+            ]
+        )
+
     async def _inspection(self) -> CanonicalInspectionReader:
         await self._bundle()
         assert self._reader is not None

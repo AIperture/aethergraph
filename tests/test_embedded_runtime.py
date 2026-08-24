@@ -268,6 +268,23 @@ async def test_query_events_merges_exact_run_membership_by_shared_cursor():
 
 
 @pytest.mark.asyncio
+async def test_load_artifact_bytes_uses_canonical_artifact_service() -> None:
+    observed = {}
+
+    class _Artifacts:
+        async def load_bytes(self, uri):
+            observed["uri"] = uri
+            return b"\x89PNG\r\n"
+
+    runtime = EmbeddedRuntime(_container(artifact_service=_Artifacts()))
+
+    content = await runtime.load_artifact_bytes("artifact://image-1")
+
+    assert content == b"\x89PNG\r\n"
+    assert observed == {"uri": "artifact://image-1"}
+
+
+@pytest.mark.asyncio
 async def test_closed_runtime_rejects_new_operations():
     runtime = EmbeddedRuntime(_container())
 

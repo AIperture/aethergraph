@@ -254,6 +254,20 @@ def test_receipt_enforces_terminal_result_shape() -> None:
         event_cursor=1,
     )
     assert accepted.rejection_code is None
+    assert accepted.rejection_message is None
+
+    with pytest.raises(ValidationError, match="accepted receipts cannot include rejection"):
+        IngressReceipt(
+            accepted=True,
+            duplicate=False,
+            action="root_turn_started",
+            deployment_id="deployment_1",
+            route_id="route_ui",
+            session_id="session_1",
+            turn_id="turn_1",
+            event_cursor=1,
+            rejection_message="This must not be present.",
+        )
 
     with pytest.raises(ValidationError, match="rejected receipts require"):
         IngressReceipt(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import aiohttp
 
@@ -17,8 +17,19 @@ from aethergraph.contracts.integration import (
     OriginAddress,
 )
 from aethergraph.services.integration import (
+    ResourceIngressError,
+    ResourceIngressPolicy,
     VerifiedAttachment,
     VerifiedIntegrationContext,
+    read_bounded_attachment_bytes,
+)
+
+from .ingress_utils import (
+    _attachment_read_budget,
+    _notify_provider_rejection,
+    _notify_rejected_receipt,
+    _provider_delivery_adapter,
+    _resource_policy,
 )
 
 _aiohttp_session: aiohttp.ClientSession | None = None
@@ -84,11 +95,26 @@ async def _tg_get_file_path(file_id: str, token: str) -> str:
     return _required(file_path, "getFile.result.file_path")
 
 
-async def _tg_download_file(file_path: str, token: str) -> bytes:
+async def _tg_download_file(
+    file_path: str,
+    token: str,
+    *,
+    max_bytes: int,
+    attachment_id: str,
+    overflow_code: Literal[
+        "integration.attachment_too_large",
+        "integration.attachment_total_exceeded",
+    ],
+) -> bytes:
     url = f"https://api.telegram.org/file/bot{token}/{file_path}"
     async with _http_session().get(url) as response:
         response.raise_for_status()
-        return await response.read()
+        return await read_bounded_attachment_bytes(
+            response.content.read,
+            max_bytes=max_bytes,
+            attachment_id=attachment_id,
+            overflow_code=overflow_code,
+        )
 
 
 def _normalize_mime_by_name(name: str | None, hint: str | None) -> str:
@@ -128,6 +154,7 @@ async def _download_message_files(
     message: dict[str, Any],
     *,
     token: str,
+    policy: ResourceIngressPolicy,
 ) -> tuple[tuple[IngressAttachment, ...], tuple[VerifiedAttachment, ...]]:
     candidates: list[tuple[str, str, str, int | None]] = []
     photos = message.get("photo") or []
@@ -150,10 +177,29 @@ async def _download_message_files(
 
     declared: list[IngressAttachment] = []
     verified: list[VerifiedAttachment] = []
-    for file_id, filename, content_type, _declared_size in candidates:
-        file_path = await _tg_get_file_path(file_id, token)
-        data = await _tg_download_file(file_path, token)
+    if len(candidates) > policy.max_count:
+        raise ResourceIngressError(
+            code="integration.attachment_count_exceeded",
+            message=f"Ingress contains more than {policy.max_count} attachments.",
+        )
+    actual_total = 0
+    for file_id, filename, content_type, declared_size in candidates:
         attachment_id = f"telegram-file-{file_id}"
+        max_bytes, overflow_code = _attachment_read_budget(
+            policy,
+            current_total=actual_total,
+            declared_size=(int(declared_size) if declared_size is not None else None),
+            attachment_id=attachment_id,
+        )
+        file_path = await _tg_get_file_path(file_id, token)
+        data = await _tg_download_file(
+            file_path,
+            token,
+            max_bytes=max_bytes,
+            attachment_id=attachment_id,
+            overflow_code=overflow_code,
+        )
+        actual_total += len(data)
         declared.append(
             IngressAttachment(
                 attachment_id=attachment_id,
@@ -201,7 +247,7 @@ async def _process_update(
         )
         callback_id = _required(callback.get("id"), "callback_query.id")
 
-        adapter = container.channels.adapters.get("tg")
+        adapter = _provider_delivery_adapter(container, "tg")
         if adapter is not None:
             await adapter._api("answerCallbackQuery", callback_query_id=callback_id)
 
@@ -227,12 +273,19 @@ async def _process_update(
                 capability_profile_id="telegram-v1",
             ),
         )
-        await container.integration_ingress.accept(
+        channel_key = _channel_key(chat_id, topic_id)
+        receipt = await container.integration_ingress.accept(
             verified=_verified_context(
                 integration_id=integration_id,
                 user_id=user_id,
             ),
             envelope=envelope,
+        )
+        await _notify_rejected_receipt(
+            container,
+            prefix="tg",
+            channel_key=channel_key,
+            receipt=receipt,
         )
         return
 
@@ -245,7 +298,26 @@ async def _process_update(
     )
     user_id = _required((message.get("from") or {}).get("id"), "message.from.id")
     message_id = _required(message.get("message_id"), "message.message_id")
-    attachments, verified_attachments = await _download_message_files(message, token=token)
+    channel_key = _channel_key(chat_id, topic_id)
+    try:
+        attachments, verified_attachments = (
+            await _download_message_files(
+                message,
+                token=token,
+                policy=_resource_policy(container),
+            )
+            if message.get("photo") or message.get("document")
+            else ((), ())
+        )
+    except ResourceIngressError as exc:
+        await _notify_provider_rejection(
+            container,
+            prefix="tg",
+            channel_key=channel_key,
+            code=exc.code,
+            message=str(exc),
+        )
+        return
     text = str(message.get("text") or message.get("caption") or "")
     envelope = IngressEnvelope(
         integration_id=integration_id,
@@ -265,15 +337,21 @@ async def _process_update(
             "message_id": message_id,
         },
         origin_address=OriginAddress(
-            channel_key=_channel_key(chat_id, topic_id),
+            channel_key=channel_key,
             capability_profile_id="telegram-v1",
         ),
     )
-    await container.integration_ingress.accept(
+    receipt = await container.integration_ingress.accept(
         verified=_verified_context(
             integration_id=integration_id,
             user_id=user_id,
             attachments=verified_attachments,
         ),
         envelope=envelope,
+    )
+    await _notify_rejected_receipt(
+        container,
+        prefix="tg",
+        channel_key=channel_key,
+        receipt=receipt,
     )

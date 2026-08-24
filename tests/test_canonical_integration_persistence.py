@@ -270,6 +270,7 @@ async def test_canonical_session_projection_uses_candidates_only_for_creation(
             store.provision(
                 route=route,
                 external_identity=_identity(user_id=f"user-{index}"),
+                request_scope=StorageScope(org_id="org-1", user_id=f"user-{index}"),
                 build_id="build-1",
                 binding_id=f"binding-{index}",
                 ag_session_id=f"session-{index}",
@@ -286,6 +287,7 @@ async def test_canonical_session_projection_uses_candidates_only_for_creation(
     resolved = await store.provision(
         route=route,
         external_identity=_identity(user_id="another-user"),
+        request_scope=StorageScope(org_id="org-1", user_id="another-user"),
         build_id="build-1",
         binding_id="unused-candidate",
         ag_session_id="unused-session",
@@ -300,6 +302,7 @@ async def test_canonical_session_projection_uses_candidates_only_for_creation(
         await store.provision(
             route=route,
             external_identity=_identity(),
+            request_scope=StorageScope(org_id="org-1", user_id="user-1"),
             build_id="build-2",
             binding_id="replacement",
             ag_session_id="replacement",
@@ -321,6 +324,7 @@ async def test_canonical_session_projection_requires_route_thread(tmp_path: Path
         await store.provision(
             route=_route(),
             external_identity=_identity(thread_id=None),
+            request_scope=StorageScope(org_id="org-1", user_id="user-1"),
             build_id="build-1",
             binding_id="binding-1",
             ag_session_id="session-1",
