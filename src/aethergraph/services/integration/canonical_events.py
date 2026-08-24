@@ -430,6 +430,12 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
             code="integration.semantic_event_corrupt",
             message="Canonical semantic payload is malformed.",
         )
+    projected_payload = _thaw_json(payload)
+    if record.kind is StorageSemanticEventKind.INPUT_ACCEPTED:
+        projected_payload = _project_input_accepted_payload(
+            projected_payload,
+            producer=record.producer,
+        )
     try:
         event = SemanticEvent.model_validate(
             {
@@ -442,7 +448,7 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
                 "producer": record.producer,
                 "timestamp": record.occurred_at,
                 "kind": SemanticEventKind(record.kind.value),
-                "payload": _thaw_json(payload),
+                "payload": projected_payload,
                 "extensions": _thaw_json(extensions),
             }
         )
@@ -452,6 +458,21 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
             message="Canonical semantic event cannot be projected to active v2.",
         ) from exc
     return PersistedSemanticEvent(cursor=record.delivery_cursor, event=event)
+
+
+def _project_input_accepted_payload(payload: Any, *, producer: str) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+    input_fields = {"input_kind", "input_type", "source"}
+    if input_fields.intersection(payload):
+        return payload
+    interaction_id = payload.get("interaction_id")
+    return {
+        **payload,
+        "input_kind": "message",
+        "input_type": "interaction.response" if interaction_id else "user.message",
+        "source": f"legacy:{producer}",
+    }
 
 
 def _thaw_json(value: Any) -> Any:

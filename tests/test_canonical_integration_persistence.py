@@ -39,6 +39,8 @@ from aethergraph.services.integration import (
 )
 from aethergraph.storage.contracts import (
     IngressClaimStatus,
+    SemanticEventDraft,
+    SemanticEventKind as StorageSemanticEventKind,
     StorageOpenMode,
     StorageScope,
 )
@@ -436,6 +438,89 @@ async def test_canonical_semantic_projection_round_trips_and_resumes_by_delivery
         == persisted[2:]
     )
     await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_semantic_projection_upgrades_legacy_input_accepted_payload(
+    tmp_path: Path,
+) -> None:
+    database = _event_database(tmp_path)
+    repository = LocalSemanticEventRepository(database=database)
+    await repository.append(
+        SemanticEventDraft(
+            event_id="legacy-input-accepted",
+            deployment_id="deployment-1",
+            turn_id="turn-1",
+            sequence=0,
+            producer="studio.assistant",
+            occurred_at=_NOW,
+            kind=StorageSemanticEventKind.INPUT_ACCEPTED,
+            scope=StorageScope(**_OWNER.as_filter(), session_id="session-1"),
+            payload={
+                "protocol": "aethergraph.semantic-event/v2",
+                "payload": {
+                    "input_id": "input-1",
+                    "text": "can you see a csv file",
+                    "artifacts": [],
+                    "interaction_id": None,
+                    "option_ids": [],
+                },
+                "extensions": {},
+            },
+        )
+    )
+    store = CanonicalSemanticEventStore(repository=repository, owner_scope=_OWNER)
+
+    restored = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+
+    payload = restored[0].event.payload.model_dump(mode="json")
+    assert payload["input_kind"] == "message"
+    assert payload["input_type"] == "user.message"
+    assert payload["source"] == "legacy:studio.assistant"
+    assert payload["text"] == "can you see a csv file"
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_canonical_semantic_projection_rejects_partially_migrated_input_payload(
+    tmp_path: Path,
+) -> None:
+    database = _event_database(tmp_path)
+    repository = LocalSemanticEventRepository(database=database)
+    await repository.append(
+        SemanticEventDraft(
+            event_id="partial-input-accepted",
+            deployment_id="deployment-1",
+            turn_id="turn-1",
+            sequence=0,
+            producer="studio.assistant",
+            occurred_at=_NOW,
+            kind=StorageSemanticEventKind.INPUT_ACCEPTED,
+            scope=StorageScope(**_OWNER.as_filter(), session_id="session-1"),
+            payload={
+                "protocol": "aethergraph.semantic-event/v2",
+                "payload": {
+                    "input_id": "input-1",
+                    "input_kind": "message",
+                    "text": "incomplete migration",
+                },
+                "extensions": {},
+            },
+        )
+    )
+    store = CanonicalSemanticEventStore(repository=repository, owner_scope=_OWNER)
+
+    with pytest.raises(SemanticEventStoreError) as corrupt:
+        await store.list_session(
+            deployment_id="deployment-1",
+            session_id="session-1",
+        )
+
+    assert corrupt.value.code == "integration.semantic_event_corrupt"
+    await database.close()
 
 
 def test_canonical_integration_factory_maps_exact_bundle_fields_without_io() -> None:
