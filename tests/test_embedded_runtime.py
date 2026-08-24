@@ -166,6 +166,43 @@ async def test_submit_maps_public_contract_without_exposing_run_record():
 
 
 @pytest.mark.asyncio
+async def test_explicit_start_establishes_runtime_readiness_once() -> None:
+    starts = 0
+
+    async def start_storage() -> None:
+        nonlocal starts
+        starts += 1
+
+    runtime = EmbeddedRuntime(_container(start_storage=start_storage))
+
+    await runtime.start()
+    await runtime.start()
+
+    assert starts == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_storage_close_remains_retryable() -> None:
+    closes = 0
+
+    async def close_storage() -> None:
+        nonlocal closes
+        closes += 1
+        if closes == 1:
+            raise RuntimeError("transient close failure")
+
+    runtime = EmbeddedRuntime(_container(close_storage=close_storage))
+
+    with pytest.raises(RuntimeError, match="transient close failure"):
+        await runtime.close()
+    await runtime.close()
+
+    assert closes == 2
+    with pytest.raises(RuntimeError, match="closed"):
+        await runtime.start()
+
+
+@pytest.mark.asyncio
 async def test_session_artifact_staging_uses_persisted_session_scope(
     monkeypatch,
 ) -> None:
