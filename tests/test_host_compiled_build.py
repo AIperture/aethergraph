@@ -4,9 +4,11 @@ import ast
 from hashlib import sha256
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
+from aethergraph.services.host.builder import _load_entrypoint
 from aethergraph.services.host.compiled_build import (
     CompiledBuildError,
     inspect_compiled_build,
@@ -128,3 +130,32 @@ def test_aethergraph_production_has_no_engine_imports() -> None:
                 violations.append(str(path.relative_to(source_root)))
 
     assert violations == []
+
+
+def test_compiled_entrypoint_reports_missing_dependency(tmp_path: Path) -> None:
+    package_name = "missing_dependency_compiled"
+    generated_src = tmp_path / "src"
+    package = generated_src / package_name
+    package.mkdir(parents=True)
+    (package / "entry.py").write_text(
+        "import dependency_that_is_definitely_not_installed\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with pytest.raises(
+            ModuleNotFoundError,
+            match="dependency_that_is_definitely_not_installed",
+        ):
+            _load_entrypoint(
+                container=object(),
+                build_root=tmp_path,
+                package_name=package_name,
+                module_name=f"{package_name}.entry",
+                symbol_name="entry",
+            )
+    finally:
+        sys.path[:] = [value for value in sys.path if value != str(generated_src.resolve())]
+        for name in tuple(sys.modules):
+            if name == package_name or name.startswith(f"{package_name}."):
+                sys.modules.pop(name, None)

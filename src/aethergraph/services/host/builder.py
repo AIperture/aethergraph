@@ -454,8 +454,20 @@ def _load_entrypoint(
     try:
         with use_services(container):
             module = importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        missing = exc.name or "unknown"
+        raise ModuleNotFoundError(
+            "Compiled entrypoint requires missing Python module "
+            f"{missing!r}. Install the project dependencies in the selected runtime."
+        ) from exc
+    except ImportError as exc:
+        detail = " ".join(str(exc).split())[:500] or "no import detail was provided"
+        raise ImportError(f"Compiled entrypoint import failed: {detail}") from exc
     except Exception as exc:
-        raise HostManifestError("Verified compiled entrypoint import failed.") from exc
+        detail = " ".join(str(exc).split())[:500] or "no exception detail was provided"
+        raise HostManifestError(
+            "Verified compiled entrypoint import failed " f"({type(exc).__name__}): {detail}"
+        ) from exc
     module_file = getattr(module, "__file__", None)
     if module_file is None or not Path(module_file).resolve().is_relative_to(generated_src):
         raise HostManifestError("Compiled entrypoint resolved outside the verified build.")
