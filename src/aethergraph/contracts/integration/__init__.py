@@ -1,6 +1,9 @@
 """Public transport-neutral integration contracts."""
 
 from .models import (
+    AcceptedEventContract,
+    AgentInputResource,
+    AgentInputV1,
     ArtifactAvailablePayload,
     ExternalIdentity,
     ExternalSessionBinding,
@@ -47,6 +50,9 @@ from .versions import (
 )
 
 __all__ = [
+    "AcceptedEventContract",
+    "AgentInputResource",
+    "AgentInputV1",
     "ArtifactAvailablePayload",
     "ExternalIdentity",
     "ExternalSessionBinding",

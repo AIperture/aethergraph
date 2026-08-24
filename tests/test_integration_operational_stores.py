@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from aethergraph.contracts.integration import (
+    AgentInputV1,
     ExternalIdentity,
     HostManifest,
     IngressEnvelope,
@@ -105,7 +106,14 @@ def _envelope(
         external_event_id=external_event_id,
         idempotency_key=idempotency_key,
         received_at=_NOW,
-        text=text,
+        input=AgentInputV1(
+            input_id=external_event_id,
+            kind="message",
+            type="user.message",
+            source="urn:test:slack",
+            occurred_at=_NOW,
+            payload={"text": text},
+        ),
         origin_address=OriginAddress(
             channel_key="slack:team/T1:chan/C1:thread/thread-1",
             capability_profile_id="slack-v1",

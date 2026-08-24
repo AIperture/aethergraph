@@ -9,6 +9,8 @@ import pytest
 from aethergraph.config.config import AppSettings
 from aethergraph.contracts.integration import (
     SEMANTIC_EVENT_PROTOCOL_VERSION,
+    AcceptedEventContract,
+    AgentInputV1,
     ExternalIdentity,
     ExternalSessionBinding,
     HostManifest,
@@ -29,6 +31,7 @@ from aethergraph.services.container.default_container import build_default_conta
 from aethergraph.services.continuations.continuation import ContinuationDraft, Correlator
 from aethergraph.services.continuations.stores.inmem_store import InMemoryContinuationStore
 from aethergraph.services.integration import (
+    IngressInputError,
     IntegrationIngressCoordinator,
     IntegrationSessionResolution,
     InteractionResolutionError,
@@ -171,7 +174,12 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
     assert scope.user_id == "user-1"
 
 
-def _manifest(route: IntegrationRoute) -> HostManifest:
+def _manifest(
+    route: IntegrationRoute,
+    *,
+    accepted_events: tuple[AcceptedEventContract, ...] = (),
+) -> HostManifest:
+    compatibility = contract_compatibility().model_copy(update={"accepted_events": accepted_events})
     return HostManifest(
         deployment_id="deployment-1",
         build_id="build-1",
@@ -184,8 +192,9 @@ def _manifest(route: IntegrationRoute) -> HostManifest:
         environment_snapshot_digest=_DIGEST,
         runtime_profile_digest=_DIGEST,
         application_settings_digest=_DIGEST,
-        release_compatibility=contract_compatibility(),
+        release_compatibility=compatibility,
         integration_routes=(route,),
+        accepted_events=accepted_events,
         workspace_identity="workspace-1",
         manifest_digest=_DIGEST,
     )
@@ -207,6 +216,21 @@ def _envelope(
     choice: IngressChoice | None = None,
     attachments: tuple[IngressAttachment, ...] = (),
 ) -> IngressEnvelope:
+    agent_input = AgentInputV1(
+        input_id=event_id,
+        kind="message",
+        type=("interaction.response" if choice is not None else "user.message"),
+        source="urn:test:slack",
+        occurred_at=_NOW,
+        payload=(
+            {
+                "interaction_id": choice.interaction_id,
+                "option_ids": list(choice.option_ids),
+            }
+            if choice is not None
+            else {"text": text or ""}
+        ),
+    )
     return IngressEnvelope(
         integration_id="slack-main",
         route_hint="route-slack",
@@ -214,9 +238,31 @@ def _envelope(
         external_event_id=event_id,
         idempotency_key=event_id,
         received_at=_NOW,
-        text=text,
-        choice=choice,
+        input=agent_input,
         attachments=attachments,
+        origin_address=OriginAddress(
+            channel_key="slack:team/T1:chan/C1:thread/thread-1",
+            capability_profile_id="slack-v1",
+        ),
+    )
+
+
+def _event_envelope(*, event_type: str, payload: dict[str, object]) -> IngressEnvelope:
+    return IngressEnvelope(
+        integration_id="slack-main",
+        route_hint="route-slack",
+        external_identity=_identity(),
+        external_event_id="external-event-1",
+        idempotency_key="external-event-1",
+        received_at=_NOW,
+        input=AgentInputV1(
+            input_id="external-event-1",
+            kind="event",
+            type=event_type,
+            source="urn:test:simulation",
+            occurred_at=_NOW,
+            payload=payload,
+        ),
         origin_address=OriginAddress(
             channel_key="slack:team/T1:chan/C1:thread/thread-1",
             capability_profile_id="slack-v1",
@@ -337,8 +383,9 @@ def _coordinator(
     event_log,
     root_dispatcher,
     resume_router,
+    accepted_events: tuple[AcceptedEventContract, ...] = (),
 ) -> IntegrationIngressCoordinator:
-    manifest = _manifest(route)
+    manifest = _manifest(route, accepted_events=accepted_events)
     persistence = make_integration_persistence()
     return IntegrationIngressCoordinator(
         manifest=manifest,
@@ -470,6 +517,43 @@ async def test_coordinator_starts_one_root_turn_and_replays_receipt(tmp_path) ->
     assert len(semantic) == 1
     assert semantic[0].event.kind is SemanticEventKind.INPUT_ACCEPTED
     assert semantic[0].event.payload.input_id == "event-1"
+    await event_log.close()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_validates_authored_event_type_and_payload(tmp_path) -> None:
+    event_log = make_semantic_event_store()
+    contract = AcceptedEventContract(
+        type="simulation.tick",
+        title="Simulation tick",
+        payload_schema={
+            "type": "object",
+            "properties": {"step": {"type": "integer", "minimum": 0}},
+            "required": ["step"],
+            "additionalProperties": False,
+        },
+        example_payload={"step": 1},
+    )
+    coordinator = _coordinator(
+        tmp_path=tmp_path,
+        route=_route(),
+        continuation_store=InMemoryContinuationStore(secret=b"test-secret"),
+        event_log=event_log,
+        root_dispatcher=_RootDispatcher(),
+        resume_router=_ResumeRouter(),
+        accepted_events=(contract,),
+    )
+
+    coordinator.validate_input(_event_envelope(event_type="simulation.tick", payload={"step": 4}))
+    with pytest.raises(IngressInputError) as invalid_payload:
+        coordinator.validate_input(
+            _event_envelope(event_type="simulation.tick", payload={"step": -1})
+        )
+    with pytest.raises(IngressInputError) as unknown_type:
+        coordinator.validate_input(_event_envelope(event_type="simulation.finished", payload={}))
+
+    assert invalid_payload.value.code == "integration.event_payload_invalid"
+    assert unknown_type.value.code == "integration.event_type_not_accepted"
     await event_log.close()
 
 

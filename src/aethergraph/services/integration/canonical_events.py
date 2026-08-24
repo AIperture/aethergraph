@@ -413,14 +413,9 @@ def _normalized_inbound_payload(
         },
         "external_identity": envelope.external_identity.model_dump(mode="json"),
         "command": {
-            "text": envelope.text,
-            "choice": envelope.choice.model_dump(mode="json") if envelope.choice else None,
-            "structured_input": envelope.structured_input,
+            "input": envelope.input.model_dump(mode="json"),
             "transport_metadata": envelope.transport_metadata,
             "origin_address": envelope.origin_address.model_dump(mode="json"),
-            "attachments": tuple(
-                attachment.model_dump(mode="json") for attachment in envelope.attachments
-            ),
         },
         "resources": resources,
     }

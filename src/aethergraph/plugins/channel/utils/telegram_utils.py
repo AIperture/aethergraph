@@ -9,9 +9,9 @@ import aiohttp
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.integration import (
+    AgentInputV1,
     ExternalIdentity,
     IngressAttachment,
-    IngressChoice,
     IngressEnvelope,
     IntegrationKind,
     OriginAddress,
@@ -251,6 +251,8 @@ async def _process_update(
         if adapter is not None:
             await adapter._api("answerCallbackQuery", callback_query_id=callback_id)
 
+        event_id = f"update-{update_id}"
+        received_at = datetime.now(UTC)
         envelope = IngressEnvelope(
             integration_id=integration_id,
             external_identity=_external_identity(
@@ -258,10 +260,21 @@ async def _process_update(
                 topic_id=topic_id,
                 user_id=user_id,
             ),
-            external_event_id=f"update-{update_id}",
-            idempotency_key=f"update-{update_id}",
-            received_at=datetime.now(UTC),
-            choice=IngressChoice(interaction_id=interaction_id, option_ids=(option_id,)),
+            external_event_id=event_id,
+            idempotency_key=event_id,
+            received_at=received_at,
+            input=AgentInputV1(
+                input_id=event_id,
+                kind="message",
+                type="interaction.response",
+                source="urn:telegram:bot",
+                occurred_at=received_at,
+                subject=chat_id,
+                payload={
+                    "interaction_id": interaction_id,
+                    "option_ids": [option_id],
+                },
+            ),
             transport_metadata={
                 "provider": "telegram",
                 "update_id": update_id,
@@ -319,6 +332,8 @@ async def _process_update(
         )
         return
     text = str(message.get("text") or message.get("caption") or "")
+    event_id = f"update-{update_id}"
+    received_at = datetime.now(UTC)
     envelope = IngressEnvelope(
         integration_id=integration_id,
         external_identity=_external_identity(
@@ -326,10 +341,18 @@ async def _process_update(
             topic_id=topic_id,
             user_id=user_id,
         ),
-        external_event_id=f"update-{update_id}",
-        idempotency_key=f"update-{update_id}",
-        received_at=datetime.now(UTC),
-        text=text if text else None,
+        external_event_id=event_id,
+        idempotency_key=event_id,
+        received_at=received_at,
+        input=AgentInputV1(
+            input_id=event_id,
+            kind="message",
+            type="user.message",
+            source="urn:telegram:bot",
+            occurred_at=received_at,
+            subject=chat_id,
+            payload={"text": text},
+        ),
         attachments=attachments,
         transport_metadata={
             "provider": "telegram",

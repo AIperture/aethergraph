@@ -6,7 +6,11 @@ from .canonical_factory import (
     bind_canonical_integration_persistence,
 )
 from .context import VerifiedAttachment, VerifiedIntegrationContext
-from .coordinator import IngressCoordinatorError, IntegrationIngressCoordinator
+from .coordinator import (
+    IngressCoordinatorError,
+    IngressInputError,
+    IntegrationIngressCoordinator,
+)
 from .delivery import (
     SemanticDeliveryError,
     SemanticEventChannelAdapter,
@@ -69,6 +73,7 @@ __all__ = [
     "IngressCoordinatorError",
     "IngressIdempotencyError",
     "IngressIdempotencyStore",
+    "IngressInputError",
     "InboundEventStore",
     "IntegrationRouteError",
     "IntegrationIngressCoordinator",

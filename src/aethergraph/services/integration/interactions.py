@@ -267,7 +267,7 @@ class InteractionResolver:
 
     @staticmethod
     def _eligible_kinds(envelope: IngressEnvelope) -> set[str]:
-        if envelope.structured_input is not None:
+        if envelope.input.kind == "event":
             return set()
         if envelope.attachments and envelope.text is not None:
             return {"user_input_or_files"}

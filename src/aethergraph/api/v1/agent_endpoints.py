@@ -15,9 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from aethergraph.contracts.integration import (
+    AcceptedEventContract,
+    AgentInputV1,
     ExternalIdentity,
     IngressAttachment,
-    IngressChoice,
     IngressEnvelope,
     IntegrationKind,
     OriginAddress,
@@ -25,6 +26,7 @@ from aethergraph.contracts.integration import (
 from aethergraph.core.runtime.run_types import SessionKind
 from aethergraph.services.host.endpoint_credentials import ENDPOINT_COOKIE_NAME
 from aethergraph.services.integration import (
+    IngressInputError,
     ResourceIngressError,
     ResourceIngressPolicy,
     VerifiedAttachment,
@@ -57,31 +59,19 @@ class EndpointSessionView(_ClosedModel):
 class EndpointDescriptor(_ClosedModel):
     endpoint_id: str
     entry_agent_id: str
+    accepted_input_kinds: tuple[Literal["message", "event"], ...]
+    accepted_events: tuple[AcceptedEventContract, ...]
 
 
 class EndpointSessionUpdate(_ClosedModel):
     title: str | None = Field(default=None, max_length=512)
 
 
-class EndpointChoice(_ClosedModel):
-    interaction_id: str = Field(min_length=1, max_length=255)
-    option_ids: tuple[str, ...]
-
-
-class EndpointArtifactInput(_ClosedModel):
-    artifact_id: str = Field(min_length=1, max_length=255)
-    filename: str | None = Field(default=None, min_length=1, max_length=512)
-    content_type: str | None = Field(default=None, min_length=1, max_length=255)
-    size_bytes: int | None = Field(default=None, ge=0)
-
-
 class EndpointIngressBody(_ClosedModel):
+    schema_version: Literal["aethergraph.endpoint-ingress-request/v2"]
     session_id: str = Field(min_length=1, max_length=255)
     idempotency_key: str = Field(min_length=1, max_length=255)
-    text: str | None = Field(default=None, max_length=1_000_000)
-    choice: EndpointChoice | None = None
-    attachments: tuple[EndpointArtifactInput, ...] = ()
-    structured_input: dict[str, Any] | None = None
+    input: AgentInputV1
 
 
 class EndpointCancelBody(_ClosedModel):
@@ -248,8 +238,14 @@ async def endpoint_descriptor(
         The response contains no release metadata or credential material.
     """
 
-    route = _route(_host(request), endpoint_id)
-    return EndpointDescriptor(endpoint_id=endpoint_id, entry_agent_id=route.entry_agent_id)
+    container = _host(request)
+    route = _route(container, endpoint_id)
+    return EndpointDescriptor(
+        endpoint_id=endpoint_id,
+        entry_agent_id=route.entry_agent_id,
+        accepted_input_kinds=("message", "event"),
+        accepted_events=container.host_manifest.accepted_events,
+    )
 
 
 def _external_identity(
@@ -338,31 +334,14 @@ async def create_endpoint_session(
     ).hexdigest()
     session_id = f"endpoint-session-{digest[:32]}"
     external = _external_identity(identity=identity, session_id=session_id)
-    verified = _verified(route=route, identity=identity)
-    probe = IngressEnvelope(
-        integration_id=route.integration_id,
-        endpoint_id=endpoint_id,
-        external_identity=external,
-        external_event_id=f"session-create-{digest[:24]}",
-        idempotency_key=f"session-create-{digest[:24]}",
-        received_at=datetime.now(UTC),
-        structured_input={"operation": "session.create"},
-        origin_address=OriginAddress(
-            channel_key=f"endpoint:{endpoint_id}:session/{session_id}",
-            capability_profile_id="agent-endpoint-v1",
-        ),
-    )
-    resolved = container.integration_ingress.route_resolver.resolve(
-        verified=verified,
-        envelope=probe,
-    )
+    now = datetime.now(UTC)
     provisioning = await container.integration_ingress.provision_session(
-        route_id=resolved.route_id,
+        route_id=route.route_id,
         external_identity=external,
         request_scope=StorageScope(org_id=tenant_id, user_id=user_id),
         binding_id=f"binding-{digest[:32]}",
         ag_session_id=session_id,
-        now=probe.received_at,
+        now=now,
         title=body.title,
     )
     if provisioning.binding.ag_session_id != session_id:
@@ -646,23 +625,10 @@ async def _parse_ingress(
     if "multipart/form-data" not in content_type:
         return EndpointIngressBody.model_validate(await request.json()), ()
     form = await request.form()
-    choice = json.loads(str(form["choice_json"])) if form.get("choice_json") else None
-    artifacts = json.loads(str(form["attachments_json"])) if form.get("attachments_json") else []
-    structured = (
-        json.loads(str(form["structured_input_json"]))
-        if form.get("structured_input_json")
-        else None
-    )
-    body = EndpointIngressBody.model_validate(
-        {
-            "session_id": form.get("session_id"),
-            "idempotency_key": form.get("idempotency_key"),
-            "text": form.get("text"),
-            "choice": choice,
-            "attachments": artifacts,
-            "structured_input": structured,
-        }
-    )
+    raw_input = form.get("input_json")
+    if raw_input is None:
+        raise ValueError("Multipart ingress requires input_json")
+    body = EndpointIngressBody.model_validate(json.loads(str(raw_input)))
     uploads: list[StarletteUploadFile] = []
     for field_name, value in form.multi_items():
         if not isinstance(value, StarletteUploadFile):
@@ -708,16 +674,27 @@ async def endpoint_ingress(
     the endpoint never stages files or constructs agent payloads.
 
     Examples:
-        Send JSON text:
+        Send a canonical message:
         ```python
         POST /api/v1/agent-endpoints/support/ingress
-        {"session_id": "...", "idempotency_key": "turn-1", "text": "Hello"}
+        {"schema_version": "aethergraph.endpoint-ingress-request/v2",
+         "session_id": "...", "idempotency_key": "turn-1",
+         "input": {"schema_version": "aethergraph.agent-input/v1",
+                   "input_id": "input-1", "kind": "message",
+                   "type": "user.message", "source": "urn:client:example",
+                   "occurred_at": "2026-08-23T12:00:00Z",
+                   "payload": {"text": "Hello"}}}
         ```
 
-        Submit an exact interaction:
+        Submit a declared external event:
         ```python
-        {"session_id": "...", "idempotency_key": "choice-1",
-         "choice": {"interaction_id": "interaction-1", "option_ids": ["ship"]}}
+        {"schema_version": "aethergraph.endpoint-ingress-request/v2",
+         "session_id": "...", "idempotency_key": "event-1",
+         "input": {"schema_version": "aethergraph.agent-input/v1",
+                   "input_id": "event-1", "kind": "event",
+                   "type": "simulation.tick", "source": "urn:sim:local",
+                   "occurred_at": "2026-08-23T12:00:00Z",
+                   "payload": {"step": 4}}}
         ```
 
     Args:
@@ -755,7 +732,7 @@ async def endpoint_ingress(
             content_type=item.content_type or "application/octet-stream",
             size_bytes=item.size_bytes,
         )
-        for item in body.attachments
+        for item in body.input.resources
     ]
     policy = _resource_policy(container)
     if len(declared) + len(uploads) > policy.max_count:
@@ -805,33 +782,30 @@ async def endpoint_ingress(
         integration_id=route.integration_id,
         endpoint_id=endpoint_id,
         external_identity=external,
-        external_event_id=body.idempotency_key,
+        external_event_id=body.input.input_id,
         idempotency_key=body.idempotency_key,
         received_at=datetime.now(UTC),
-        text=body.text,
-        choice=(
-            IngressChoice(
-                interaction_id=body.choice.interaction_id,
-                option_ids=body.choice.option_ids,
-            )
-            if body.choice
-            else None
-        ),
+        input=body.input,
         attachments=tuple(declared),
-        structured_input=body.structured_input,
         origin_address=OriginAddress(
             channel_key=f"endpoint:{endpoint_id}:session/{body.session_id}",
             capability_profile_id="agent-endpoint-v1",
         ),
     )
-    return await container.integration_ingress.accept(
-        verified=_verified(
-            route=route,
-            identity=identity,
-            attachments=tuple(verified_files),
-        ),
-        envelope=envelope,
-    )
+    try:
+        return await container.integration_ingress.accept(
+            verified=_verified(
+                route=route,
+                identity=identity,
+                attachments=tuple(verified_files),
+            ),
+            envelope=envelope,
+        )
+    except IngressInputError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
 
 
 async def _session_binding(request, endpoint_id, session_id, identity):

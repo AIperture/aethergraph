@@ -10,9 +10,9 @@ import aiohttp
 
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.contracts.integration import (
+    AgentInputV1,
     ExternalIdentity,
     IngressAttachment,
-    IngressChoice,
     IngressEnvelope,
     IntegrationKind,
     OriginAddress,
@@ -193,6 +193,7 @@ async def _accept_message(
         )
         return
     text = str(event.get("text") or "")
+    received_at = datetime.now(UTC)
     envelope = IngressEnvelope(
         integration_id=integration_id,
         external_identity=_identity(
@@ -203,8 +204,16 @@ async def _accept_message(
         ),
         external_event_id=event_id,
         idempotency_key=event_id,
-        received_at=datetime.now(UTC),
-        text=text if text else None,
+        received_at=received_at,
+        input=AgentInputV1(
+            input_id=event_id,
+            kind="message",
+            type="user.message",
+            source=f"urn:slack:team:{team_id}",
+            occurred_at=received_at,
+            subject=channel_id,
+            payload={"text": text},
+        ),
         attachments=attachments,
         transport_metadata={
             "provider": "slack",
@@ -374,6 +383,7 @@ async def handle_slack_interactive_common(
     action_id = _required(action.get("action_id"), "action.action_id")
     action_ts = _required(action.get("action_ts"), "action.action_ts")
     event_id = f"action-{action_ts}-{action_id}-{user_id}"
+    received_at = datetime.now(UTC)
     envelope = IngressEnvelope(
         integration_id=integration_id,
         external_identity=_identity(
@@ -384,8 +394,19 @@ async def handle_slack_interactive_common(
         ),
         external_event_id=event_id,
         idempotency_key=event_id,
-        received_at=datetime.now(UTC),
-        choice=IngressChoice(interaction_id=interaction_id, option_ids=(choice,)),
+        received_at=received_at,
+        input=AgentInputV1(
+            input_id=event_id,
+            kind="message",
+            type="interaction.response",
+            source=f"urn:slack:team:{team_id}",
+            occurred_at=received_at,
+            subject=channel_id,
+            payload={
+                "interaction_id": interaction_id,
+                "option_ids": [choice],
+            },
+        ),
         transport_metadata={
             "provider": "slack",
             "action_id": action_id,

@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from aethergraph.contracts.integration import AcceptedEventContract
+
 
 class CompiledBuildError(RuntimeError):
     """Report a closed compiled-build validation or integrity failure."""
@@ -72,7 +74,7 @@ class CompiledFile(_ArtifactContract):
 class CompiledBuildManifest(_ArtifactContract):
     """Runtime-consumed projection of an Engine compiled-build manifest."""
 
-    schema_version: Literal["aethergraph.compiled-system-manifest/v13"]
+    schema_version: Literal["aethergraph.compiled-system-manifest/v14"]
     build_id: str = Field(pattern=r"^[0-9a-f]{24}$")
     package_name: str
     entrypoint_module: str
@@ -82,6 +84,7 @@ class CompiledBuildManifest(_ArtifactContract):
     compiler_version: str
     semantic_event_protocol_version: Literal["aethergraph.semantic-event/v2"]
     logical_output_requirements: tuple[Literal["origin"], ...]
+    accepted_events: tuple[AcceptedEventContract, ...] = ()
     catalog_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     resolved_definition_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     resolved_definition_path: Literal["resolved-system.json"]
@@ -147,9 +150,10 @@ class _ResolvedAgent(_ProjectionContract):
 class ResolvedBuildIdentity(_ProjectionContract):
     """Host-required identity projected from the Engine resolved definition."""
 
-    schema_version: Literal["aethergraph.resolved-system/v10"]
+    schema_version: Literal["aethergraph.resolved-system/v11"]
     semantic_event_protocol_version: Literal["aethergraph.semantic-event/v2"]
     logical_output_requirements: tuple[Literal["origin"], ...]
+    accepted_events: tuple[AcceptedEventContract, ...] = ()
     source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     catalog_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     system_id: str
@@ -225,6 +229,7 @@ def inspect_compiled_build(build_root: str | Path) -> CompiledBuildInspection:
             manifest.logical_output_requirements,
             "logical output requirements",
         ),
+        (resolved.accepted_events, manifest.accepted_events, "accepted event contracts"),
     )
     mismatched = [label for actual, expected, label in identities if actual != expected]
     if mismatched:
