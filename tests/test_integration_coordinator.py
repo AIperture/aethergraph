@@ -544,7 +544,8 @@ async def test_coordinator_validates_authored_event_type_and_payload(tmp_path) -
         accepted_events=(contract,),
     )
 
-    coordinator.validate_input(_event_envelope(event_type="simulation.tick", payload={"step": 4}))
+    accepted_envelope = _event_envelope(event_type="simulation.tick", payload={"step": 4})
+    coordinator.validate_input(accepted_envelope)
     with pytest.raises(IngressInputError) as invalid_payload:
         coordinator.validate_input(
             _event_envelope(event_type="simulation.tick", payload={"step": -1})
@@ -554,6 +555,15 @@ async def test_coordinator_validates_authored_event_type_and_payload(tmp_path) -
 
     assert invalid_payload.value.code == "integration.event_payload_invalid"
     assert unknown_type.value.code == "integration.event_type_not_accepted"
+    receipt = await coordinator.accept(verified=_verified(), envelope=accepted_envelope)
+    semantic = await coordinator.semantic_events.list_session(
+        deployment_id="deployment-1",
+        session_id=receipt.session_id,
+    )
+    assert receipt.action == "root_turn_started"
+    assert semantic[0].event.payload.input_kind == "event"
+    assert semantic[0].event.payload.input_type == "simulation.tick"
+    assert semantic[0].event.payload.input_payload == {"step": 4}
     await event_log.close()
 
 

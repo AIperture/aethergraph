@@ -683,6 +683,7 @@ class InputAcceptedPayload(IntegrationContract):
     input_kind: Literal["message", "event"]
     input_type: Identifier
     source: Annotated[str, Field(min_length=1, max_length=2_048)]
+    input_payload: dict[str, JsonValue] = Field(default_factory=dict)
     text: BoundedText | None = None
     artifacts: tuple[ArtifactAvailablePayload, ...] = ()
     interaction_id: Identifier | None = None

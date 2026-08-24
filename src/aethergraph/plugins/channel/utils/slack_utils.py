@@ -194,6 +194,11 @@ async def _accept_message(
         return
     text = str(event.get("text") or "")
     received_at = datetime.now(UTC)
+    raw_event_ts = event.get("event_ts") or event.get("ts")
+    try:
+        occurred_at = datetime.fromtimestamp(float(raw_event_ts), UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        occurred_at = received_at
     envelope = IngressEnvelope(
         integration_id=integration_id,
         external_identity=_identity(
@@ -210,7 +215,7 @@ async def _accept_message(
             kind="message",
             type="user.message",
             source=f"urn:slack:team:{team_id}",
-            occurred_at=received_at,
+            occurred_at=occurred_at,
             subject=channel_id,
             payload={"text": text},
         ),
@@ -384,6 +389,10 @@ async def handle_slack_interactive_common(
     action_ts = _required(action.get("action_ts"), "action.action_ts")
     event_id = f"action-{action_ts}-{action_id}-{user_id}"
     received_at = datetime.now(UTC)
+    try:
+        occurred_at = datetime.fromtimestamp(float(action_ts), UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        occurred_at = received_at
     envelope = IngressEnvelope(
         integration_id=integration_id,
         external_identity=_identity(
@@ -400,7 +409,7 @@ async def handle_slack_interactive_common(
             kind="message",
             type="interaction.response",
             source=f"urn:slack:team:{team_id}",
-            occurred_at=received_at,
+            occurred_at=occurred_at,
             subject=channel_id,
             payload={
                 "interaction_id": interaction_id,

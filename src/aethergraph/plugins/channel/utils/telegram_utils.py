@@ -334,6 +334,10 @@ async def _process_update(
     text = str(message.get("text") or message.get("caption") or "")
     event_id = f"update-{update_id}"
     received_at = datetime.now(UTC)
+    try:
+        occurred_at = datetime.fromtimestamp(float(message.get("date")), UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        occurred_at = received_at
     envelope = IngressEnvelope(
         integration_id=integration_id,
         external_identity=_external_identity(
@@ -349,7 +353,7 @@ async def _process_update(
             kind="message",
             type="user.message",
             source="urn:telegram:bot",
-            occurred_at=received_at,
+            occurred_at=occurred_at,
             subject=chat_id,
             payload={"text": text},
         ),

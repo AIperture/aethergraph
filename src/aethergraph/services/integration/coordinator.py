@@ -383,6 +383,7 @@ class IntegrationIngressCoordinator:
                 input_kind=envelope.input.kind,
                 input_type=envelope.input.type,
                 source=envelope.input.source,
+                input_payload=envelope.input.payload,
                 text=envelope.text,
                 artifacts=tuple(
                     ArtifactAvailablePayload(
