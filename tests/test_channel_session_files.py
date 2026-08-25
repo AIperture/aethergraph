@@ -120,8 +120,7 @@ async def test_send_file_persists_and_publishes_one_canonical_mimetype() -> None
         file_bytes=b"probe,status\nfile,ok\n",
         filename="conversation-contract-report.csv",
         title="Conversation contract report",
-        mimetype="text/csv",
-        artifact_labels={"contract_probe": "file"},
+        artifact_labels={"mimetype": "text/csv", "contract_probe": "file"},
     )
 
     assert context._artifacts.writer_mime == "text/csv"
