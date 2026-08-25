@@ -28,6 +28,7 @@ from aethergraph.services.channel.choices import (
     prompt_choices_from_prompt,
 )
 from aethergraph.services.continuations.continuation import ContinuationStatus, Correlator
+from aethergraph.utils.mime_types import mime_type_for_filename
 
 
 def _artifact_filename(artifact: Artifact, fallback: str | None = None) -> str:
@@ -61,19 +62,12 @@ def _artifact_to_chat_file(
     # 👇 Renderer hint from labels (e.g. {"renderer": "image"})
     renderer = labels.get("renderer")
 
-    # Make sure we actually set a mimetype if possible
-    mime = artifact.mime
-    if not mime and filename:
-        # crude but fine: infer from extension
-        lower = filename.lower()
-        if lower.endswith(".png"):
-            mime = "image/png"
-        elif lower.endswith(".svg"):
-            mime = "image/svg+xml"
-        elif lower.endswith((".jpg", ".jpeg")):
-            mime = "image/jpeg"
-        elif lower.endswith(".gif"):
-            mime = "image/gif"
+    mime = mime_type_for_filename(
+        str(filename),
+        artifact.mime,
+        labels.get("content_type"),
+        labels.get("mimetype"),
+    )
 
     size = getattr(artifact, "bytes", None)
     if size is None:
@@ -1115,6 +1109,7 @@ class ChannelSession:
                 mimetype=mimetype,
             ),
             title=title or alt,
+            mimetype=_image_mimetype(image_format=image_format, mimetype=mimetype),
             channel=channel,
             artifact_kind="image",
             artifact_labels=labels,
@@ -1133,6 +1128,7 @@ class ChannelSession:
         file_bytes: bytes | None = None,
         filename: str = "file.bin",
         title: str | None = None,
+        mimetype: str | None = None,
         channel: str | None = None,
         # NEW: optional hints for artifact
         artifact_kind: str = "file",
@@ -1166,7 +1162,8 @@ class ChannelSession:
             await context.channel().send_file(
                 file_bytes=b"binarydata...",
                 filename="data.bin",
-                title="Raw Data"
+                title="Raw Data",
+                mimetype="application/octet-stream",
             )
             ```
 
@@ -1175,6 +1172,7 @@ class ChannelSession:
             file_bytes: Optional raw file bytes.
             filename: Display filename for the chat attachment.
             title: Optional message text. Defaults to `filename`.
+            mimetype: Optional exact MIME type. Filename inference is used when omitted.
             channel: Optional target channel key.
             artifact_kind: Artifact kind when writing to artifact store.
             artifact_labels: Optional labels attached to persisted artifacts.
@@ -1203,6 +1201,13 @@ class ChannelSession:
         # Ensure labels always carry filename
         effective_labels: dict[str, Any] = dict(artifact_labels or {})
         effective_labels.setdefault("filename", filename)
+        effective_mimetype = mime_type_for_filename(
+            filename,
+            mimetype,
+            effective_labels.get("content_type"),
+            effective_labels.get("mimetype"),
+        )
+        effective_labels["mimetype"] = effective_mimetype
 
         # Case A: raw bytes → stream to ArtifactStore
         if file_bytes is not None:
@@ -1211,6 +1216,7 @@ class ChannelSession:
                 async with artifacts.writer(
                     kind=artifact_kind,
                     planned_ext=Path(filename).suffix or None,
+                    mime=effective_mimetype,
                     pin=False,
                 ) as w:
                     write_result = w.write(file_bytes)
@@ -1236,6 +1242,7 @@ class ChannelSession:
                     path=url,
                     kind=artifact_kind,
                     labels=effective_labels,
+                    mime=effective_mimetype,
                     name=filename,
                     pin=False,
                 )
@@ -1254,6 +1261,8 @@ class ChannelSession:
             # Fallback: just pass whatever URL we got (may be remote HTTP or None)
             if url:
                 chat_file["url"] = url
+
+            chat_file["mimetype"] = effective_mimetype
 
             # If caller passed renderer in labels, keep honoring it
             if artifact_labels and "renderer" in artifact_labels:
