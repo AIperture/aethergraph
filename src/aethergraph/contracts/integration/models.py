@@ -21,6 +21,7 @@ from pydantic import (
 
 from .versions import (
     EXTERNAL_SESSION_BINDING_SCHEMA_VERSION,
+    HOST_DIAGNOSTIC_SCHEMA_VERSION,
     HOST_MANIFEST_SCHEMA_VERSION,
     INGRESS_ENVELOPE_SCHEMA_VERSION,
     INGRESS_PROTOCOL_VERSION,
@@ -287,6 +288,21 @@ class IntegrationRoute(IntegrationContract):
         if endpoint_kind != (self.endpoint_id is not None):
             raise ValueError("endpoint_id is required only for ag_ui and agent_endpoint routes")
         return self
+
+
+class HostDiagnostic(IntegrationContract):
+    """Expose one exact, bounded Python failure from the AG Host process."""
+
+    schema_version: Literal["aethergraph.host-diagnostic/v2"] = HOST_DIAGNOSTIC_SCHEMA_VERSION
+    kind: Literal["host.failed"] = "host.failed"
+    source: Literal["aethergraph_host"] = "aethergraph_host"
+    code: Identifier
+    stage: Identifier
+    detail: str = Field(min_length=1, max_length=20_000)
+    exception_type: Identifier
+    traceback: str = Field(min_length=1, max_length=200_000)
+    missing_module: str | None = Field(default=None, min_length=1, max_length=500)
+    python_executable: str = Field(min_length=1, max_length=2_000)
 
 
 class HostManifest(IntegrationContract):

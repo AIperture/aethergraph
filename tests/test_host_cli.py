@@ -34,11 +34,21 @@ def test_host_command_classifies_and_reports_missing_dependency(
     capsys,
 ) -> None:
     async def fail_with_missing_dependency(_args) -> int:
-        raise ModuleNotFoundError("Compiled entrypoint requires missing Python module 'rapidfuzz'.")
+        raise ModuleNotFoundError(
+            "Compiled entrypoint requires missing Python module 'rapidfuzz'.",
+            name="rapidfuzz",
+        )
 
     monkeypatch.setattr(host_command, "_run_host", fail_with_missing_dependency)
 
     assert host_command.handle(SimpleNamespace()) == 3
     diagnostic = json.loads(capsys.readouterr().err)
+    assert diagnostic["schema_version"] == "aethergraph.host-diagnostic/v2"
+    assert diagnostic["source"] == "aethergraph_host"
     assert diagnostic["code"] == "host.missing_dependency"
+    assert diagnostic["stage"] == "entrypoint_import"
+    assert diagnostic["exception_type"] == "ModuleNotFoundError"
+    assert diagnostic["missing_module"] == "rapidfuzz"
     assert "rapidfuzz" in diagnostic["detail"]
+    assert "ModuleNotFoundError" in diagnostic["traceback"]
+    assert diagnostic["python_executable"]

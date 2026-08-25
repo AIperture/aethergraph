@@ -146,7 +146,7 @@ def test_compiled_entrypoint_reports_missing_dependency(tmp_path: Path) -> None:
         with pytest.raises(
             ModuleNotFoundError,
             match="dependency_that_is_definitely_not_installed",
-        ):
+        ) as captured:
             _load_entrypoint(
                 container=object(),
                 build_root=tmp_path,
@@ -154,6 +154,7 @@ def test_compiled_entrypoint_reports_missing_dependency(tmp_path: Path) -> None:
                 module_name=f"{package_name}.entry",
                 symbol_name="entry",
             )
+        assert captured.value.name == "dependency_that_is_definitely_not_installed"
     finally:
         sys.path[:] = [value for value in sys.path if value != str(generated_src.resolve())]
         for name in tuple(sys.modules):

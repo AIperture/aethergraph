@@ -458,7 +458,8 @@ def _load_entrypoint(
         missing = exc.name or "unknown"
         raise ModuleNotFoundError(
             "Compiled entrypoint requires missing Python module "
-            f"{missing!r}. Install the project dependencies in the selected runtime."
+            f"{missing!r}. Install the project dependencies in the selected runtime.",
+            name=missing,
         ) from exc
     except ImportError as exc:
         detail = " ".join(str(exc).split())[:500] or "no import detail was provided"

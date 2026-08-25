@@ -12,6 +12,7 @@ SEMANTIC_EVENT_READ_VERSIONS: Final = (
 )
 HOST_MANIFEST_SCHEMA_VERSION: Final = "aethergraph.host-manifest/v4"
 HOST_READY_PROTOCOL_VERSION: Final = "aethergraph.host-ready/v2"
+HOST_DIAGNOSTIC_SCHEMA_VERSION: Final = "aethergraph.host-diagnostic/v2"
 INTEGRATION_ROUTE_SCHEMA_VERSION: Final = "aethergraph.integration-route/v2"
 INGRESS_ENVELOPE_SCHEMA_VERSION: Final = "aethergraph.ingress-envelope/v2"
 INGRESS_RECEIPT_SCHEMA_VERSION: Final = "aethergraph.ingress-receipt/v1"

@@ -7,6 +7,7 @@ from .models import (
     ArtifactAvailablePayload,
     ExternalIdentity,
     ExternalSessionBinding,
+    HostDiagnostic,
     HostManifest,
     IngressAttachment,
     IngressChoice,
@@ -48,6 +49,7 @@ from .semantic_event_codec import (
     decode_semantic_event,
 )
 from .versions import (
+    HOST_DIAGNOSTIC_SCHEMA_VERSION,
     HOST_MANIFEST_SCHEMA_VERSION,
     HOST_READY_PROTOCOL_VERSION,
     INGRESS_PROTOCOL_VERSION,
@@ -67,6 +69,8 @@ __all__ = [
     "DecodedSemanticEvent",
     "ExternalIdentity",
     "ExternalSessionBinding",
+    "HostDiagnostic",
+    "HOST_DIAGNOSTIC_SCHEMA_VERSION",
     "HostManifest",
     "HOST_MANIFEST_SCHEMA_VERSION",
     "HOST_READY_PROTOCOL_VERSION",
