@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from aethergraph.contracts.integration import (
+    SEMANTIC_EVENT_PROTOCOL_VERSION,
     AgentInputV1,
     ExternalIdentity,
     ExternalSessionBinding,
@@ -561,7 +562,7 @@ async def test_canonical_semantic_projection_reads_v2_message_attachments(
     assert isinstance(payload, MessageCompletedPayload)
     assert tuple(item.artifact_id for item in payload.attachments) == ("artifact-1",)
     assert payload.actions == ()
-    assert restored[0].event.schema_version == "aethergraph.semantic-event/v3"
+    assert restored[0].event.schema_version == SEMANTIC_EVENT_PROTOCOL_VERSION
     await database.close()
 
 
