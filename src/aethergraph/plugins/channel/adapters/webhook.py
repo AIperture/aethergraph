@@ -11,10 +11,9 @@ Use cases include:
 
 # aethergraph/channels/webhook.py
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import logging
 from typing import Any
-import warnings
 
 from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
 from aethergraph.plugins.net.http import get_async_client
@@ -49,12 +48,18 @@ class WebhookChannelAdapter(ChannelAdapter):
             raise ValueError(f"Webhook channel key must contain a full URL, got: {url!r}")
         return url
 
-    def _serialize_buttons(self, buttons: dict[str, Button] | None) -> list[dict[str, Any]]:
+    def _serialize_buttons(self, buttons: list[Button] | None) -> list[dict[str, Any]]:
         if not buttons:
             return []
         return [
-            {"key": k, "label": b.label, "value": b.value, "url": b.url, "style": b.style}
-            for k, b in buttons.items()
+            {
+                "key": str(index),
+                "label": button.label,
+                "value": button.value,
+                "url": button.url,
+                "style": button.style,
+            }
+            for index, button in enumerate(buttons)
         ]
 
     def _serialize_file(self, file_info: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -68,7 +73,7 @@ class WebhookChannelAdapter(ChannelAdapter):
         }
 
     def _build_payload(self, event: OutEvent) -> dict[str, Any]:
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         payload: dict[str, Any] = {
             "type": event.type,
             "channel": event.channel,
@@ -77,6 +82,26 @@ class WebhookChannelAdapter(ChannelAdapter):
             "rich": event.rich or {},
             "buttons": self._serialize_buttons(event.buttons),
             "file": self._serialize_file(event.file),
+            "attachments": [
+                self._serialize_file(item)
+                | {
+                    "artifact_id": item.get("artifact_id"),
+                    "presentation": item.get("presentation"),
+                    "title": item.get("title"),
+                    "alt_text": item.get("alt_text"),
+                }
+                for item in (event.attachments or [])
+            ],
+            "actions": [
+                {
+                    "kind": action.kind,
+                    "label": action.label,
+                    "value": action.value,
+                    "href": action.href,
+                    "style": action.style,
+                }
+                for action in (event.actions or [])
+            ],
             "upsert_key": event.upsert_key,
             "timestamp": ts,
         }
@@ -94,11 +119,7 @@ class WebhookChannelAdapter(ChannelAdapter):
             async with get_async_client(self.timeout_seconds, headers) as client:
                 resp = await client.post(url, json=payload)
                 if resp.status_code >= 400:
-                    body = resp.text
-                    logger.debug(
-                        f"[WebhookChannelAdapter] POST {url} -> HTTP {resp.status_code}. "
-                        f"Body: {body[:300]!r}"
-                    )
+                    raise RuntimeError(f"Webhook delivery failed with HTTP {resp.status_code}")
         except Exception as e:
-            # Best-effort; don't bubble failures into graph control flow
-            warnings.warn(f"[WebhookChannelAdapter] Failed to POST to {url}: {e}", stacklevel=2)
+            logger.exception("webhook_delivery_failed", extra={"channel": event.channel})
+            raise RuntimeError(f"Webhook delivery failed for {event.channel!r}") from e

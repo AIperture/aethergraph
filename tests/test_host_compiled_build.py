@@ -23,7 +23,7 @@ def _write_build(parent: Path) -> Path:
     generated.write_text("VALUE = 1\n", encoding="utf-8")
     resolved = {
         "schema_version": "aethergraph.resolved-system/v11",
-        "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
+        "semantic_event_protocol_version": "aethergraph.semantic-event/v3",
         "logical_output_requirements": ["origin"],
         "source_digest": "a" * 64,
         "catalog_digest": "b" * 64,
@@ -55,7 +55,7 @@ def _write_build(parent: Path) -> Path:
         "source_digest": "a" * 64,
         "engine_version": "0.1.0a1",
         "compiler_version": "30",
-        "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
+        "semantic_event_protocol_version": "aethergraph.semantic-event/v3",
         "logical_output_requirements": ["origin"],
         "catalog_digest": "b" * 64,
         "resolved_definition_digest": sha256(

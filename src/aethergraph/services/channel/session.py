@@ -13,6 +13,10 @@ import uuid
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.services.channel import (
     Button,
+    ChannelAction,
+    ChannelAttachment,
+    ChannelDeliveryReceipt,
+    ChannelMessage,
     ChannelRoutingError,
     ChoiceOption,
     ChoiceResult,
@@ -131,6 +135,24 @@ def _image_filename_for_format(
     if p.suffix:
         return base
     return base + _normalize_image_extension(image_format=image_format, mimetype=mimetype)
+
+
+def _delivery_receipt(
+    message_id: str,
+    result: dict[str, Any] | None,
+) -> ChannelDeliveryReceipt:
+    result = result or {}
+    raw_cursors = result.get("event_cursors")
+    if raw_cursors is None and result.get("event_cursor") is not None:
+        raw_cursors = (result["event_cursor"],)
+    raw_provider_ids = result.get("provider_delivery_ids")
+    if raw_provider_ids is None and result.get("delivery_id") is not None:
+        raw_provider_ids = (result["delivery_id"],)
+    return ChannelDeliveryReceipt(
+        message_id=message_id,
+        event_cursors=tuple(raw_cursors or ()),
+        provider_delivery_ids=tuple(str(value) for value in (raw_provider_ids or ())),
+    )
 
 
 class ChannelSession:
@@ -806,31 +828,132 @@ class ChannelSession:
                         exc_info=True,
                     )
 
+        return await self.send_message(
+            ChannelMessage(
+                message_id=upsert_key or f"message-{uuid.uuid4().hex}",
+                text_markdown=text,
+            ),
+            meta=meta,
+            channel=channel,
+            memory_log=memory_log,
+            memory_role=memory_role,
+            memory_tags=memory_tags,
+            memory_data=memory_data,
+            memory_severity=memory_severity,
+            memory_signal=memory_signal,
+        )
+
+    async def send_message(
+        self,
+        message: ChannelMessage,
+        *,
+        meta: dict[str, Any] | None = None,
+        channel: str | None = None,
+        memory_log: bool = False,
+        memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
+        memory_tags: list[str] | None = None,
+        memory_data: dict[str, Any] | None = None,
+        memory_severity: int = 2,
+        memory_signal: float | None = None,
+    ) -> ChannelDeliveryReceipt:
+        """Publish one artifact-hydrated logical message through the active Channel.
+
+        All attachment identities are resolved before the event is published. A failed
+        lookup or image-presentation mismatch therefore cannot leave a partial logical
+        message in semantic history.
+
+        Args:
+            message: Validated transport-neutral logical message.
+            meta: Optional bounded adapter metadata.
+            channel: Optional exact channel override.
+            memory_log: Enable chat-memory logging for this call.
+            memory_role: Role used for the memory record.
+            memory_tags: Optional tags for the memory record.
+            memory_data: Optional structured memory data.
+            memory_severity: Severity value for memory logging.
+            memory_signal: Optional signal value for memory logging.
+
+        Returns:
+            ChannelDeliveryReceipt: Stable logical and physical delivery identities.
+
+        Notes:
+            Provider adapters may fan this event out physically, but the event retains
+            one message identity and ordered components.
+        """
+        if not isinstance(message, ChannelMessage):
+            raise TypeError("send_message requires a ChannelMessage")
+
+        hydrated: list[dict[str, Any]] = []
+        if message.attachments:
+            artifacts = self.ctx.artifacts()
+            for attachment in message.attachments:
+                artifact = await artifacts.get_by_id(attachment.artifact_id)
+                if artifact is None:
+                    raise FileNotFoundError(
+                        f"Artifact {attachment.artifact_id} is unavailable to this run"
+                    )
+                descriptor = _artifact_to_chat_file(artifact)
+                mimetype = str(descriptor.get("mimetype") or "application/octet-stream")
+                if attachment.presentation == "image" and not mimetype.startswith("image/"):
+                    raise ValueError(
+                        f"Artifact {attachment.artifact_id} is not an image ({mimetype})"
+                    )
+                raw_size = descriptor.get("size")
+                if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+                    raise ValueError(
+                        f"Artifact {attachment.artifact_id} lacks a readable content size"
+                    )
+                descriptor.update(
+                    {
+                        "presentation": attachment.presentation,
+                        "title": attachment.title,
+                        "alt_text": attachment.alt_text,
+                    }
+                )
+                hydrated.append(descriptor)
+
+        combined_memory_data = {
+            **(memory_data or {}),
+            "message_id": message.message_id,
+            "attachment_ids": [item.artifact_id for item in message.attachments],
+            "actions": [
+                {
+                    "kind": action.kind,
+                    "label": action.label,
+                }
+                for action in message.actions
+            ],
+        }
         await self._log_chat(
             memory_role,
-            text,
+            message.text_markdown or "[assistant output]",
             tags=memory_tags,
-            data=memory_data,
+            data=combined_memory_data,
             severity=memory_severity,
             signal=memory_signal,
             enabled=memory_log,
             channel=channel,
         )
 
-        event = OutEvent(
-            type="agent.message",
-            channel=self._resolve_key(channel),
-            text=text,
-            upsert_key=upsert_key,
-            meta=self._inject_context_meta(
-                {
-                    **(meta or {}),
-                    "phase_group_id": self._ensure_reply_lifecycle(),
-                }
-            ),
+        result = await self._bus.publish(
+            OutEvent(
+                type="agent.message",
+                channel=self._resolve_key(channel),
+                text=message.text_markdown,
+                attachments=hydrated,
+                actions=list(message.actions),
+                upsert_key=message.message_id,
+                meta=self._inject_context_meta(
+                    {
+                        **(meta or {}),
+                        "message_id": message.message_id,
+                        "phase_group_id": self._ensure_reply_lifecycle(),
+                    }
+                ),
+            )
         )
-        await self._bus.publish(event)
         self._close_reply_lifecycle()
+        return _delivery_receipt(message.message_id, result)
 
     async def send_rich(
         self,
@@ -1142,10 +1265,7 @@ class ChannelSession:
         memory_signal: float | None = None,
     ):
         """
-        Send a file attachment message, optionally persisting it as an artifact.
-
-        Prefer artifact-backed payloads for `file_bytes` or local-path inputs.
-        Fall back to a URL-only payload when artifact persistence is unavailable.
+        Materialize a file as a canonical artifact and send one attachment message.
 
         Examples:
             Send by URL:
@@ -1184,21 +1304,13 @@ class ChannelSession:
             memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None: Complete when the outbound message event is published.
+            ChannelDeliveryReceipt: Durable logical delivery receipt.
 
         Notes:
-            When both `file_bytes` and `url` are provided, bytes are attempted first.
+            When both `file_bytes` and `url` are provided, bytes are authoritative.
+            Persistence and remote-download failures propagate; URL-only delivery is
+            intentionally unsupported.
         """
-        # ------------------------------
-        # 1) Maybe create an Artifact
-        # ------------------------------
-        chat_file: dict[str, Any] = {
-            "name": filename,
-        }
-
-        artifact = None
-
-        # Ensure labels always carry filename
         effective_labels: dict[str, Any] = dict(artifact_labels or {})
         effective_labels.setdefault("filename", filename)
         effective_mimetype = mime_type_for_filename(
@@ -1209,94 +1321,68 @@ class ChannelSession:
         )
         effective_labels["mimetype"] = effective_mimetype
 
-        # Case A: raw bytes → stream to ArtifactStore
+        artifacts = self.ctx.artifacts()
         if file_bytes is not None:
-            try:
-                artifacts = self.ctx.artifacts()
-                async with artifacts.writer(
-                    kind=artifact_kind,
-                    planned_ext=Path(filename).suffix or None,
-                    mime=effective_mimetype,
-                    pin=False,
-                ) as w:
-                    write_result = w.write(file_bytes)
-                    if inspect.isawaitable(write_result):
-                        await write_result
-
-                    add_labels = getattr(w, "add_labels", None)
-                    if callable(add_labels):
-                        add_labels(effective_labels)
-
-                artifact = artifacts.last_artifact
-
-            except Exception:
-                import logging
-
-                logging.getLogger("aethergraph.channel").exception("send_file_artifact_failed")
-
-        # Case B: local path (non-HTTP) → save_file
-        elif url and not url.startswith(("http://", "https://")):
-            try:
-                artifacts = self.ctx.artifacts()
-                artifact = await artifacts.save_file(
-                    path=url,
-                    kind=artifact_kind,
-                    labels=effective_labels,
-                    mime=effective_mimetype,
-                    name=filename,
-                    pin=False,
-                )
-            except Exception:
-                import logging
-
-                logging.getLogger("aethergraph.channel").exception("send_file_save_failed")
-
-        # ------------------------------
-        # 1b) Normalize chat_file from artifact or fallback URL
-        # ------------------------------
-        if artifact is not None:
-            # Use artifact meta → url, mimetype, renderer (from labels), etc.
-            chat_file.update(_artifact_to_chat_file(artifact, fallback_filename=filename))
-        else:
-            # Fallback: just pass whatever URL we got (may be remote HTTP or None)
-            if url:
-                chat_file["url"] = url
-
-            chat_file["mimetype"] = effective_mimetype
-
-            # If caller passed renderer in labels, keep honoring it
-            if artifact_labels and "renderer" in artifact_labels:
-                chat_file["renderer"] = artifact_labels["renderer"]
-
-        # For compatibility with existing payloads that used "filename"
-        chat_file.setdefault("filename", chat_file.get("name"))
-
-        # ------------------------------
-        # 2) Log to memory
-        # ------------------------------
-        memory_tags = [*(memory_tags or []), "file"]
-        await self._log_chat(
-            memory_role,
-            f"File: {filename} (url: {chat_file.get('url') or 'N/A'})",
-            tags=memory_tags,
-            data=memory_data,
-            severity=memory_severity,
-            signal=memory_signal,
-            enabled=memory_log,
-            channel=channel,
-        )
-
-        # ------------------------------
-        # 3) Publish OutEvent
-        # ------------------------------
-        await self._bus.publish(
-            OutEvent(
-                type="agent.message",  # UI treats as normal message with attachment
-                channel=self._resolve_key(channel),
-                text=title or filename,
-                file=chat_file,
-                meta=self._inject_context_meta(None),
+            async with artifacts.writer(
+                kind=artifact_kind,
+                planned_ext=Path(filename).suffix or None,
+                mime=effective_mimetype,
+                pin=False,
+            ) as writer:
+                write_result = writer.write(file_bytes)
+                if inspect.isawaitable(write_result):
+                    await write_result
+                add_labels = getattr(writer, "add_labels", None)
+                if callable(add_labels):
+                    add_labels(effective_labels)
+            artifact = artifacts.last_artifact
+            if artifact is None:
+                raise RuntimeError("Artifact writer completed without a committed artifact")
+        elif url and url.startswith(("http://", "https://")):
+            artifact = await artifacts.save_url(
+                url,
+                kind=artifact_kind,
+                labels=effective_labels,
+                mime=effective_mimetype,
+                name=filename,
+                pin=False,
             )
+        elif url and not url.startswith(("http://", "https://")):
+            artifact = await artifacts.save_file(
+                path=url,
+                kind=artifact_kind,
+                labels=effective_labels,
+                mime=effective_mimetype,
+                name=filename,
+                pin=False,
+            )
+        else:
+            raise ValueError("send_file requires file_bytes, a local path, or an HTTP(S) URL")
+
+        memory_tags = [*(memory_tags or []), "file"]
+        presentation: Literal["file", "image"] = (
+            "image" if effective_labels.get("renderer") == "image" else "file"
+        )
+        return await self.send_message(
+            ChannelMessage(
+                message_id=f"message-{uuid.uuid4().hex}",
+                text_markdown=title or filename,
+                attachments=(
+                    ChannelAttachment(
+                        artifact_id=artifact.artifact_id,
+                        presentation=presentation,
+                        title=title or "",
+                        alt_text=title or filename if presentation == "image" else "",
+                    ),
+                ),
+            ),
+            channel=channel,
+            memory_log=memory_log,
+            memory_role=memory_role,
+            memory_tags=memory_tags,
+            memory_data=memory_data,
+            memory_severity=memory_severity,
+            memory_signal=memory_signal,
         )
 
     async def send_buttons(
@@ -1317,8 +1403,8 @@ class ChannelSession:
         """
         Send a button prompt event and optionally log prompt text to memory.
 
-        Publish `OutEvent(type="link.buttons")` with button definitions and
-        merged metadata for the resolved channel.
+        Publish one `ChannelMessage` carrying non-blocking actions and merged metadata
+        for the resolved channel.
 
         Examples:
             Send a yes/no prompt:
@@ -1358,26 +1444,30 @@ class ChannelSession:
         Notes:
             Button rendering/interaction semantics depend on the active adapter.
         """
-        memory_tags = [*(memory_tags or []), "buttons"]
-        await self._log_chat(
-            memory_role,
-            text,
-            tags=memory_tags,
-            data=memory_data,
-            severity=memory_severity,
-            signal=memory_signal,
-            enabled=memory_log,
-            channel=channel,
-        )
-
-        await self._bus.publish(
-            OutEvent(
-                type="link.buttons",
-                channel=self._resolve_key(channel),
-                text=text,
-                buttons=buttons,
-                meta=self._inject_context_meta(meta),
+        actions = tuple(
+            ChannelAction(
+                kind="external_link" if button.url else "suggested_reply",
+                label=button.label,
+                value="" if button.url else (button.value or button.label),
+                href=button.url or "",
+                style=button.style or "default",
             )
+            for button in buttons
+        )
+        return await self.send_message(
+            ChannelMessage(
+                message_id=f"message-{uuid.uuid4().hex}",
+                text_markdown=text,
+                actions=actions,
+            ),
+            meta=meta,
+            channel=channel,
+            memory_log=memory_log,
+            memory_role=memory_role,
+            memory_tags=[*(memory_tags or []), "buttons"],
+            memory_data=memory_data,
+            memory_severity=memory_severity,
+            memory_signal=memory_signal,
         )
 
     # Small core helper to avoid the wait-before-resume race and DRY the flow.

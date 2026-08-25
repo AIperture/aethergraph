@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from aethergraph.contracts.integration import (
+    SEMANTIC_EVENT_PROTOCOL_VERSION,
     ExternalSessionBinding,
     IngressEnvelope,
     IntegrationRoute,
@@ -185,7 +186,7 @@ class CanonicalSemanticEventStore:
     ) -> None:
         """Bind semantic persistence to one provider-authoritative Host owner.
 
-        The exact active v2 kind, authored sequence, structured payload, extensions,
+        The exact active v3 kind, authored sequence, structured payload, extensions,
         and session scope are normalized before repository access. Bounded history
         reads translate durable integer delivery cursors independently of opaque
         provider pagination cursors.
@@ -431,6 +432,12 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
             message="Canonical semantic payload is malformed.",
         )
     projected_payload = _thaw_json(payload)
+    if protocol == "aethergraph.semantic-event/v2":
+        projected_payload = _project_v2_semantic_payload(
+            kind=record.kind,
+            payload=projected_payload,
+        )
+        protocol = SEMANTIC_EVENT_PROTOCOL_VERSION
     if record.kind is StorageSemanticEventKind.INPUT_ACCEPTED:
         projected_payload = _project_input_accepted_payload(
             projected_payload,
@@ -455,7 +462,7 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
     except (TypeError, ValueError) as exc:
         raise SemanticEventStoreError(
             code="integration.semantic_event_corrupt",
-            message="Canonical semantic event cannot be projected to active v2.",
+            message="Canonical semantic event cannot be projected to active v3.",
         ) from exc
     return PersistedSemanticEvent(cursor=record.delivery_cursor, event=event)
 
@@ -472,6 +479,28 @@ def _project_input_accepted_payload(payload: Any, *, producer: str) -> Any:
         "input_kind": "message",
         "input_type": "interaction.response" if interaction_id else "user.message",
         "source": f"legacy:{producer}",
+    }
+
+
+def _project_v2_semantic_payload(*, kind: StorageSemanticEventKind, payload: Any) -> Any:
+    """Project one persisted semantic-event/v2 payload into the active read model."""
+    if not isinstance(payload, dict):
+        return payload
+    if kind is not StorageSemanticEventKind.MESSAGE_COMPLETED:
+        return payload
+    artifact_ids = payload.pop("artifact_ids", [])
+    return {
+        **payload,
+        "attachments": [
+            {
+                "artifact_id": str(artifact_id),
+                "presentation": "auto",
+                "title": "",
+                "alt_text": "",
+            }
+            for artifact_id in artifact_ids
+        ],
+        "actions": [],
     }
 
 

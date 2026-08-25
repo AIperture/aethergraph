@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 import json
 from typing import Annotated, Any, Literal, TypeAlias
+from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -35,7 +36,7 @@ Identifier = Annotated[str, Field(min_length=1, max_length=255)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 BoundedText = Annotated[str, Field(max_length=1_000_000)]
 MetadataScalar: TypeAlias = str | int | float | bool | None
-SemanticEventProtocolVersion: TypeAlias = Literal["aethergraph.semantic-event/v2"]
+SemanticEventProtocolVersion: TypeAlias = Literal["aethergraph.semantic-event/v3"]
 
 
 class IntegrationContract(BaseModel):
@@ -332,7 +333,7 @@ class HostManifest(IntegrationContract):
                 ```python
                 payload = manifest.model_dump(mode="json")
                 payload["semantic_event_protocol_version"] = (
-                    "aethergraph.semantic-event/v2"
+                    "aethergraph.semantic-event/v1"
                 )
                 try:
                     HostManifest.model_validate(payload)
@@ -703,12 +704,62 @@ class MessageDeltaPayload(IntegrationContract):
     delta: BoundedText
 
 
+class LegacyMessageCompletedPayload(IntegrationContract):
+    """Read-only v1/v2 completed message retained for historical projection."""
+
+    message_id: Identifier
+    text: BoundedText
+    artifact_ids: tuple[Identifier, ...] = ()
+
+
+class MessageAttachmentRef(IntegrationContract):
+    """Ordered artifact presentation reference in one completed message."""
+
+    artifact_id: Identifier
+    presentation: Literal["auto", "file", "image"] = "auto"
+    title: Annotated[str, Field(max_length=512)] = ""
+    alt_text: Annotated[str, Field(max_length=2_000)] = ""
+
+
+class MessageAction(IntegrationContract):
+    """Non-blocking action carried by one completed assistant message."""
+
+    kind: Literal["suggested_reply", "external_link"]
+    label: Annotated[str, Field(min_length=1, max_length=255)]
+    value: Annotated[str, Field(max_length=4_000)] = ""
+    href: Annotated[str, Field(max_length=4_000)] = ""
+    style: Literal["primary", "danger", "default"] = "default"
+
+    @model_validator(mode="after")
+    def _validate_action_target(self) -> MessageAction:
+        if self.kind == "suggested_reply":
+            if not self.value:
+                raise ValueError("suggested_reply requires value")
+            if self.href:
+                raise ValueError("suggested_reply forbids href")
+        else:
+            if self.value:
+                raise ValueError("external_link forbids value")
+            parsed = urlparse(self.href)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("external_link requires an absolute HTTP(S) href")
+        return self
+
+
 class MessageCompletedPayload(IntegrationContract):
     """Semantic payload completing one assistant message."""
 
     message_id: Identifier
     text: BoundedText
-    artifact_ids: tuple[Identifier, ...] = ()
+    attachments: tuple[MessageAttachmentRef, ...] = ()
+    actions: tuple[MessageAction, ...] = ()
+
+    @field_validator("attachments", "actions")
+    @classmethod
+    def _unique_message_components(cls, value: tuple[Any, ...]) -> tuple[Any, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("message components must be unique")
+        return value
 
 
 class PhaseChangedPayload(IntegrationContract):
@@ -770,7 +821,7 @@ class LegacyToolActivityPayload(IntegrationContract):
 
 
 class ToolErrorPayload(IntegrationContract):
-    """Bounded prompt-safe Tool failure projected by semantic event v2."""
+    """Bounded prompt-safe Tool failure projected by semantic event v3."""
 
     kind: Literal["rejected", "runtime", "internal", "integrity"]
     code: Annotated[
@@ -816,9 +867,9 @@ class ToolActivityPayload(LegacyToolActivityPayload):
     @model_validator(mode="after")
     def _validate_error_status(self) -> ToolActivityPayload:
         if self.status == "failed" and self.error is None:
-            raise ValueError("Failed v2 Tool activity requires a structured error")
+            raise ValueError("Failed v3 Tool activity requires a structured error")
         if self.status != "failed" and self.error is not None:
-            raise ValueError("Only failed v2 Tool activity may carry an error")
+            raise ValueError("Only failed v3 Tool activity may carry an error")
         return self
 
 
@@ -882,7 +933,7 @@ LegacySemanticPayload: TypeAlias = (
     InputAcceptedPayload
     | MessageStartedPayload
     | MessageDeltaPayload
-    | MessageCompletedPayload
+    | LegacyMessageCompletedPayload
     | PhaseChangedPayload
     | ProgressChangedPayload
     | InteractionRequestedPayload
@@ -900,7 +951,7 @@ _LEGACY_PAYLOAD_BY_KIND: dict[LegacySemanticEventKind, type[IntegrationContract]
     LegacySemanticEventKind.INPUT_ACCEPTED: InputAcceptedPayload,
     LegacySemanticEventKind.MESSAGE_STARTED: MessageStartedPayload,
     LegacySemanticEventKind.MESSAGE_DELTA: MessageDeltaPayload,
-    LegacySemanticEventKind.MESSAGE_COMPLETED: MessageCompletedPayload,
+    LegacySemanticEventKind.MESSAGE_COMPLETED: LegacyMessageCompletedPayload,
     LegacySemanticEventKind.PHASE_CHANGED: PhaseChangedPayload,
     LegacySemanticEventKind.PROGRESS_CHANGED: ProgressChangedPayload,
     LegacySemanticEventKind.INTERACTION_REQUESTED: InteractionRequestedPayload,
@@ -994,7 +1045,7 @@ _PAYLOAD_BY_KIND: dict[SemanticEventKind, type[IntegrationContract]] = {
 class SemanticEvent(IntegrationContract):
     """Ordered canonical semantic event with structured errors and one outcome."""
 
-    schema_version: Literal["aethergraph.semantic-event/v2"] = SEMANTIC_EVENT_PROTOCOL_VERSION
+    schema_version: Literal["aethergraph.semantic-event/v3"] = SEMANTIC_EVENT_PROTOCOL_VERSION
     event_id: Identifier
     deployment_id: Identifier
     session_id: Identifier

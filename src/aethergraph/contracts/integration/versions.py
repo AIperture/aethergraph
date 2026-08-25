@@ -3,7 +3,7 @@
 from typing import Final
 
 INGRESS_PROTOCOL_VERSION: Final = "aethergraph.ingress/v2"
-SEMANTIC_EVENT_PROTOCOL_VERSION: Final = "aethergraph.semantic-event/v2"
+SEMANTIC_EVENT_PROTOCOL_VERSION: Final = "aethergraph.semantic-event/v3"
 HOST_MANIFEST_SCHEMA_VERSION: Final = "aethergraph.host-manifest/v4"
 HOST_READY_PROTOCOL_VERSION: Final = "aethergraph.host-ready/v2"
 INTEGRATION_ROUTE_SCHEMA_VERSION: Final = "aethergraph.integration-route/v2"

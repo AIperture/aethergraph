@@ -87,7 +87,7 @@ def _validate_inbound(value: InboundEventDraft | InboundEventRecord) -> None:
 
 
 class SemanticEventKind(StrEnum):
-    """Exact active semantic-event v2 classification persisted by providers."""
+    """Exact active semantic-event v3 classification persisted by providers."""
 
     INPUT_ACCEPTED = "input.accepted"
     MESSAGE_STARTED = "message.started"

@@ -1,6 +1,6 @@
 import os
 
-from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
 from aethergraph.services.continuations.continuation import Correlator
 from aethergraph.utils.optdeps import require
 
@@ -103,6 +103,12 @@ class SlackChannelAdapter(ChannelAdapter):
                 )
             }
 
+        if event.attachments:
+            raise RuntimeError(
+                "Slack delivery of artifact-backed Channel attachments requires an "
+                "artifact content projector."
+            )
+
         # streaming/upsert: we use chat.update keyed by upsert_key
         if (
             event.type
@@ -113,6 +119,7 @@ class SlackChannelAdapter(ChannelAdapter):
                 "agent.message.update",
             )
             and event.upsert_key
+            and not event.actions
         ):
             # stash ts per upsert_key inside thread cache
             key = (event.channel, event.upsert_key)
@@ -129,10 +136,18 @@ class SlackChannelAdapter(ChannelAdapter):
                     await self.client.chat_update(channel=channel, ts=ts, text=event.text)
             return
 
-        if event.type in ("session.need_approval", "link.buttons"):
+        if event.type == "session.need_approval" or event.actions:
             # Collect up to 5 buttons (Slack max per "actions" block)
             elements = []
-            buttons = getattr(event, "buttons", None) or []
+            buttons = getattr(event, "buttons", None) or [
+                Button(
+                    label=action.label,
+                    value=action.value or None,
+                    url=action.href or None,
+                    style=action.style,
+                )
+                for action in (event.actions or [])
+            ]
             if not buttons:
                 # fallback to meta options
                 opts = (event.meta or {}).get("choices") or (event.meta or {}).get(
@@ -144,12 +159,16 @@ class SlackChannelAdapter(ChannelAdapter):
                         "B",
                         (),
                         {
-                            "label": getattr(opts[0], "get", lambda x, y=None: None)("label")
-                            if isinstance(opts[0], dict)
-                            else opts[0],
-                            "value": getattr(opts[0], "get", lambda x, y=None: None)("id")
-                            if isinstance(opts[0], dict)
-                            else opts[0],
+                            "label": (
+                                getattr(opts[0], "get", lambda x, y=None: None)("label")
+                                if isinstance(opts[0], dict)
+                                else opts[0]
+                            ),
+                            "value": (
+                                getattr(opts[0], "get", lambda x, y=None: None)("id")
+                                if isinstance(opts[0], dict)
+                                else opts[0]
+                            ),
                             "style": "primary",
                             "url": None,
                         },
@@ -158,12 +177,16 @@ class SlackChannelAdapter(ChannelAdapter):
                         "B",
                         (),
                         {
-                            "label": getattr(opts[-1], "get", lambda x, y=None: None)("label")
-                            if isinstance(opts[-1], dict)
-                            else opts[-1],
-                            "value": getattr(opts[-1], "get", lambda x, y=None: None)("id")
-                            if isinstance(opts[-1], dict)
-                            else opts[-1],
+                            "label": (
+                                getattr(opts[-1], "get", lambda x, y=None: None)("label")
+                                if isinstance(opts[-1], dict)
+                                else opts[-1]
+                            ),
+                            "value": (
+                                getattr(opts[-1], "get", lambda x, y=None: None)("id")
+                                if isinstance(opts[-1], dict)
+                                else opts[-1]
+                            ),
                             "style": "danger",
                             "url": None,
                         },

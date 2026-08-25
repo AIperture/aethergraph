@@ -55,6 +55,11 @@ class _Artifacts:
         self.writer_mime = mime
         return _Writer(self)
 
+    async def get_by_id(self, artifact_id: str) -> Artifact | None:
+        if self.last_artifact is not None and self.last_artifact.artifact_id == artifact_id:
+            return self.last_artifact
+        return None
+
 
 class _Context:
     def __init__(self) -> None:
@@ -133,7 +138,8 @@ async def test_send_file_persists_and_publishes_one_canonical_mimetype() -> None
         "mimetype": "text/csv",
     }
     assert len(context.services.channels.events) == 1
-    assert context.services.channels.events[0].file["mimetype"] == "text/csv"
+    assert context.services.channels.events[0].file is None
+    assert context.services.channels.events[0].attachments[0]["mimetype"] == "text/csv"
 
 
 @pytest.mark.asyncio

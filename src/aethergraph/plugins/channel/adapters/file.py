@@ -11,7 +11,7 @@ Use cases include:
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import json
 import logging
 from pathlib import Path
@@ -51,7 +51,7 @@ class FileChannelAdapter(ChannelAdapter):
         return (self.root / rel).resolve()
 
     def _format_line(self, event: OutEvent) -> str:
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(UTC).isoformat()
         # base = {
         #     "type": event.type,
         #     "channel": event.channel,
@@ -71,16 +71,38 @@ class FileChannelAdapter(ChannelAdapter):
                 "name": event.file.get("filename") or event.file.get("name"),
                 "mimetype": event.file.get("mimetype"),
             }
+        if event.attachments:
+            extras["attachments"] = [
+                {
+                    "artifact_id": item.get("artifact_id"),
+                    "name": item.get("filename") or item.get("name"),
+                    "mimetype": item.get("mimetype"),
+                    "presentation": item.get("presentation"),
+                }
+                for item in event.attachments
+            ]
+        if event.actions:
+            extras["actions"] = [
+                {
+                    "kind": action.kind,
+                    "label": action.label,
+                    "value": action.value,
+                    "href": action.href,
+                    "style": action.style,
+                }
+                for action in event.actions
+            ]
         if event.buttons:
-            extras["buttons"] = {
-                k: {
+            extras["buttons"] = [
+                {
+                    "key": str(index),
                     "label": b.label,
                     "value": b.value,
                     "url": b.url,
                     "style": b.style,
                 }
-                for k, b in event.buttons.items()
-            }
+                for index, b in enumerate(event.buttons)
+            ]
 
         if extras:
             line += " | " + json.dumps(extras, ensure_ascii=False)

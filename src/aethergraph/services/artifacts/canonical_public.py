@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+import ipaddress
 import json
 import mimetypes
 from pathlib import Path, PurePosixPath
+import socket
 from typing import Any, Literal
-from urllib.parse import unquote, urlparse
+from urllib.error import HTTPError
+from urllib.parse import unquote, urljoin, urlparse, urlunparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 import warnings
 
 from aethergraph.contracts.services.artifacts import Artifact
@@ -33,6 +37,82 @@ _CONTENT_PREFIX = "/api/v1/artifacts/"
 _CONTENT_SUFFIX = "/content"
 _DEFAULT_READ_LIMIT = 64 * 1024 * 1024
 _MAX_PUBLIC_PAGE_SIZE = 500
+
+
+class _ValidatedRedirectHandler(HTTPRedirectHandler):
+    max_redirections = 5
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_remote_url(urljoin(req.full_url, newurl))
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _validate_remote_url(url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("remote artifact URL must be absolute HTTP(S)")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("remote artifact URL must not contain credentials")
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(
+                parsed.hostname,
+                parsed.port or (443 if parsed.scheme == "https" else 80),
+                type=socket.SOCK_STREAM,
+            )
+        }
+    except OSError as exc:
+        raise ValueError("remote artifact host could not be resolved") from exc
+    if not addresses:
+        raise ValueError("remote artifact host resolved to no addresses")
+    for raw_address in addresses:
+        address = ipaddress.ip_address(raw_address)
+        if not address.is_global:
+            raise ValueError("remote artifact URL resolves to a non-public address")
+    return url
+
+
+def _download_remote_file(
+    url: str,
+    *,
+    timeout_s: float,
+    max_bytes: int,
+) -> tuple[bytes, str, str, str]:
+    _validate_remote_url(url)
+    opener = build_opener(_ValidatedRedirectHandler())
+    request = Request(url, headers={"User-Agent": "AetherGraph-Artifact/1"})
+    try:
+        with opener.open(request, timeout=timeout_s) as response:
+            final_url = response.geturl()
+            _validate_remote_url(final_url)
+            status = getattr(response, "status", 200)
+            if status < 200 or status >= 300:
+                raise ValueError(f"remote artifact download returned HTTP {status}")
+            raw_length = response.headers.get("Content-Length")
+            if raw_length is not None:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise ValueError("remote artifact Content-Length is invalid") from exc
+                if content_length < 0 or content_length > max_bytes:
+                    raise ValueError("remote artifact exceeds max_bytes")
+            payload = response.read(max_bytes + 1)
+            if len(payload) > max_bytes:
+                raise ValueError("remote artifact exceeds max_bytes")
+            media_type = response.headers.get_content_type() or "application/octet-stream"
+            filename = response.headers.get_filename()
+    except HTTPError as exc:
+        raise ValueError(f"remote artifact download returned HTTP {exc.code}") from exc
+
+    parsed_final = urlparse(final_url)
+    if not filename:
+        filename = PurePosixPath(unquote(parsed_final.path)).name or "download.bin"
+    filename = Path(filename).name
+    if not filename:
+        filename = "download.bin"
+    source = urlunparse((parsed_final.scheme, parsed_final.netloc, parsed_final.path, "", "", ""))
+    return payload, media_type, filename, source
 
 
 class CanonicalPublicArtifactFacade:
@@ -482,6 +562,93 @@ class CanonicalPublicArtifactFacade:
             cleanup=cleanup,
         )
         return self._project(receipt)
+
+    async def save_url(
+        self,
+        url: str,
+        *,
+        kind: str,
+        tags: list[str] | None = None,
+        mime: str | None = None,
+        labels: dict[str, Any] | None = None,
+        metrics: dict[str, float] | None = None,
+        name: str | None = None,
+        pin: bool = False,
+        timeout_s: float = 30.0,
+        max_bytes: int = 64 * 1024 * 1024,
+    ) -> Artifact:
+        """Download one bounded public HTTP(S) resource into canonical storage.
+
+        Examples:
+            Save a remote report:
+                ```python
+                artifact = await artifacts.save_url(
+                    "https://example.test/report.csv",
+                    kind="dataset",
+                    name="report.csv",
+                )
+                ```
+
+            Bound a generated-image copy:
+                ```python
+                artifact = await artifacts.save_url(
+                    provider_url,
+                    kind="image",
+                    max_bytes=16 * 1024 * 1024,
+                )
+                ```
+
+        Args:
+            url: Absolute public HTTP(S) source without embedded credentials.
+            kind: Exact canonical Artifact kind.
+            tags: Optional unique public content tags.
+            mime: Optional safe media-type hint when the response is generic.
+            labels: Optional immutable public content labels.
+            metrics: Optional finite occurrence metrics.
+            name: Optional exact descriptive filename.
+            pin: Whether to create explicit pinned retention intent.
+            timeout_s: Positive total socket timeout for the bounded request.
+            max_bytes: Positive maximum response body size.
+
+        Returns:
+            Artifact: Frozen public Artifact DTO for the committed response body.
+
+        Notes:
+            Redirect targets are revalidated. Loopback, private, link-local, multicast,
+            reserved, and credential-bearing targets fail before content persistence.
+            Query strings and fragments never enter public Artifact metadata.
+        """
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
+        payload, response_mime, response_name, source = await asyncio.to_thread(
+            _download_remote_file,
+            url,
+            timeout_s=timeout_s,
+            max_bytes=max_bytes,
+        )
+        filename = _filename(name=name, suggested_uri=response_name)
+        media_type = response_mime
+        if media_type == "application/octet-stream" and mime:
+            media_type = mime
+        content_labels = _content_labels(
+            tags=tags,
+            labels={**(labels or {}), "source_url": source},
+            filename=filename,
+        )
+        async with self.writer(
+            kind=kind,
+            planned_ext=Path(filename or "").suffix or None,
+            mime=media_type,
+            pin=pin,
+        ) as writer:
+            writer.add_labels(content_labels)
+            writer.add_metrics(metrics or {})
+            await writer.write(payload)
+        if self.last_artifact is None:
+            raise RuntimeError("canonical Artifact writer completed without a public projection")
+        return self.last_artifact
 
     async def save_text(
         self,

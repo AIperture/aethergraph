@@ -82,7 +82,7 @@ class CompiledBuildManifest(_ArtifactContract):
     source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     engine_version: str
     compiler_version: str
-    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v2"]
+    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v3"]
     logical_output_requirements: tuple[Literal["origin"], ...]
     accepted_events: tuple[AcceptedEventContract, ...] = ()
     catalog_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -151,7 +151,7 @@ class ResolvedBuildIdentity(_ProjectionContract):
     """Host-required identity projected from the Engine resolved definition."""
 
     schema_version: Literal["aethergraph.resolved-system/v11"]
-    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v2"]
+    semantic_event_protocol_version: Literal["aethergraph.semantic-event/v3"]
     logical_output_requirements: tuple[Literal["origin"], ...]
     accepted_events: tuple[AcceptedEventContract, ...] = ()
     source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")

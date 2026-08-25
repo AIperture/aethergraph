@@ -33,7 +33,7 @@ from tests._integration_fixtures import contract_compatibility
 
 _DIGEST = "a" * 64
 _PROTOCOL_FIXTURE_PATH = (
-    Path(__file__).parent / "fixtures" / "integration" / "semantic_event_v2.json"
+    Path(__file__).parent / "fixtures" / "integration" / "semantic_event_v3.json"
 )
 
 
@@ -105,7 +105,7 @@ def test_containing_contracts_use_coordinated_negotiation_schema_versions() -> N
     assert manifest.integration_routes[0].required_capabilities.schema_version == (
         INTEGRATION_CAPABILITIES_SCHEMA_VERSION
     )
-    assert SEMANTIC_EVENT_PROTOCOL_VERSION == "aethergraph.semantic-event/v2"
+    assert SEMANTIC_EVENT_PROTOCOL_VERSION == "aethergraph.semantic-event/v3"
 
 
 def test_manifest_accepts_only_the_canonical_semantic_protocol() -> None:

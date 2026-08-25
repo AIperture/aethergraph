@@ -523,6 +523,48 @@ async def test_canonical_semantic_projection_rejects_partially_migrated_input_pa
     await database.close()
 
 
+@pytest.mark.asyncio
+async def test_canonical_semantic_projection_reads_v2_message_attachments(
+    tmp_path: Path,
+) -> None:
+    database = _event_database(tmp_path)
+    repository = LocalSemanticEventRepository(database=database)
+    await repository.append(
+        SemanticEventDraft(
+            event_id="legacy-message-completed",
+            deployment_id="deployment-1",
+            turn_id="turn-1",
+            sequence=0,
+            producer="agent.support",
+            occurred_at=_NOW,
+            kind=StorageSemanticEventKind.MESSAGE_COMPLETED,
+            scope=StorageScope(**_OWNER.as_filter(), session_id="session-1"),
+            payload={
+                "protocol": "aethergraph.semantic-event/v2",
+                "payload": {
+                    "message_id": "message-1",
+                    "text": "Legacy attachment",
+                    "artifact_ids": ["artifact-1"],
+                },
+                "extensions": {},
+            },
+        )
+    )
+    store = CanonicalSemanticEventStore(repository=repository, owner_scope=_OWNER)
+
+    restored = await store.list_session(
+        deployment_id="deployment-1",
+        session_id="session-1",
+    )
+
+    payload = restored[0].event.payload
+    assert isinstance(payload, MessageCompletedPayload)
+    assert tuple(item.artifact_id for item in payload.attachments) == ("artifact-1",)
+    assert payload.actions == ()
+    assert restored[0].event.schema_version == "aethergraph.semantic-event/v3"
+    await database.close()
+
+
 def test_canonical_integration_factory_maps_exact_bundle_fields_without_io() -> None:
     ingress = object()
     sessions = object()

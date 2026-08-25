@@ -20,6 +20,15 @@ class ConsoleChannelAdapter(ChannelAdapter):
                 line += f" [image] {event.image.get('title', '')}: {event.image.get('url', '')}"
             if event.file:
                 line += f" [file]  {event.file.get('filename', '')}: {event.file.get('url', '') or '(binary)'}"
+            if event.attachments:
+                labels = ", ".join(
+                    str(item.get("filename") or item.get("artifact_id"))
+                    for item in event.attachments
+                )
+                line += f" [attachments] {labels}"
+            if event.actions:
+                labels = ", ".join(action.label for action in event.actions)
+                line += f" [actions] {labels}"
             if event.buttons:
                 labels = ", ".join(b.label for b in event.buttons)
                 line += f" [buttons] {labels}"

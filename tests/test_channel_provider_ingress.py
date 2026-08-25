@@ -518,7 +518,7 @@ async def test_slack_buttons_carry_choice_and_public_interaction_id() -> None:
     adapter._first_ts_by_chan = {}
     await adapter.send(
         OutEvent(
-            type="link.buttons",
+            type="session.need_approval",
             channel="slack:team/T1:chan/C1:thread/100.1",
             text="Choose",
             buttons=[Button(label="Ship It", value="ship")],
@@ -547,7 +547,7 @@ async def test_telegram_buttons_keep_compact_public_interaction_id() -> None:
     adapter._api = _api
     await adapter.send(
         OutEvent(
-            type="link.buttons",
+            type="session.need_approval",
             channel="tg:chat/99",
             text="Choose",
             buttons=[
