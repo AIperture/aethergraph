@@ -9,16 +9,42 @@ import pytest
 from aethergraph.contracts.integration import (
     SEMANTIC_EVENT_CODEC_REVISION,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
+    SEMANTIC_EVENT_READ_VERSIONS,
     SemanticEventDecodeError,
     SemanticEventKind,
     decode_semantic_event,
 )
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "integration" / "semantic_event_legacy.json"
+_MANIFEST = (
+    Path(__file__).parent
+    / "fixtures"
+    / "integration"
+    / "semantic_event_compatibility_manifest.json"
+)
 
 
 def _events() -> list[dict[str, object]]:
     return list(json.loads(_FIXTURE.read_text(encoding="utf-8"))["events"])
+
+
+def test_compatibility_manifest_pins_writer_codec_and_released_history() -> None:
+    manifest = json.loads(_MANIFEST.read_text(encoding="utf-8"))
+    fixture_versions = {str(event["schema_version"]) for event in _events()}
+
+    assert manifest["writer_version"] == SEMANTIC_EVENT_PROTOCOL_VERSION
+    assert manifest["codec_revision"] == SEMANTIC_EVENT_CODEC_REVISION
+    assert tuple(manifest["retained_read_versions"]) == SEMANTIC_EVENT_READ_VERSIONS
+    assert fixture_versions == set(SEMANTIC_EVENT_READ_VERSIONS[:-1])
+    assert manifest["migration_steps"] == [
+        f"{source}->{target.rsplit('/', 1)[-1]}"
+        for source, target in zip(
+            SEMANTIC_EVENT_READ_VERSIONS,
+            SEMANTIC_EVENT_READ_VERSIONS[1:],
+            strict=False,
+        )
+    ]
+    assert manifest["historical_fixture"] == _FIXTURE.name
 
 
 def test_codec_decodes_released_history_without_mutating_source() -> None:
