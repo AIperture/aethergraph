@@ -105,11 +105,18 @@ async def send_file(
     file_bytes: bytes | None = None,
     filename: str = "file.bin",
     title: str | None = None,
+    mimetype: str | None = None,
     channel: str | None = None,
     context=None,
 ):
     ch = context.channel(channel)
-    await ch.send_file(url=url, file_bytes=file_bytes, filename=filename, title=title)
+    await ch.send_file(
+        url=url,
+        file_bytes=file_bytes,
+        filename=filename,
+        title=title,
+        mimetype=mimetype,
+    )
     return {"ok": True}
 
 

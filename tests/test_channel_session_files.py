@@ -3,10 +3,12 @@ from __future__ import annotations
 from contextlib import AbstractAsyncContextManager
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from aethergraph.contracts.services.artifacts import Artifact
+from aethergraph.core.tools.builtins.toolset import send_file as send_file_tool
 from aethergraph.services.channel.session import ChannelSession, _artifact_to_chat_file
 from aethergraph.utils.mime_types import mime_type_for_filename
 
@@ -133,3 +135,25 @@ async def test_send_file_persists_and_publishes_one_canonical_mimetype() -> None
     }
     assert len(context.services.channels.events) == 1
     assert context.services.channels.events[0].file["mimetype"] == "text/csv"
+
+
+@pytest.mark.asyncio
+async def test_send_file_tool_forwards_authored_mimetype() -> None:
+    channel = SimpleNamespace(send_file=AsyncMock())
+    context = SimpleNamespace(channel=lambda _: channel)
+
+    result = await send_file_tool(
+        file_bytes=b"report",
+        filename="report.csv",
+        mimetype="text/csv",
+        context=context,
+    )
+
+    assert result == {"ok": True}
+    channel.send_file.assert_awaited_once_with(
+        url=None,
+        file_bytes=b"report",
+        filename="report.csv",
+        title=None,
+        mimetype="text/csv",
+    )
