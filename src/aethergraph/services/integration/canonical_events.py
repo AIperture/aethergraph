@@ -7,12 +7,12 @@ from typing import Any
 from uuid import uuid4
 
 from aethergraph.contracts.integration import (
-    SEMANTIC_EVENT_PROTOCOL_VERSION,
     ExternalSessionBinding,
     IngressEnvelope,
     IntegrationRoute,
     SemanticEvent,
-    SemanticEventKind,
+    SemanticEventDecodeError,
+    decode_semantic_event,
 )
 from aethergraph.services.canonical_storage_scope import (
     merge_storage_scope,
@@ -232,7 +232,7 @@ class CanonicalSemanticEventStore:
         self._max_history_events = max_history_events
 
     async def append(self, event: SemanticEvent) -> PersistedSemanticEvent:
-        """Persist one exact semantic v2 event at its authored sequence.
+        """Persist one exact current semantic Event at its authored sequence.
 
         The active Host kind maps one-to-one to the canonical storage vocabulary.
         Structured payload and namespaced extensions are stored as normalized JSON,
@@ -250,7 +250,7 @@ class CanonicalSemanticEventStore:
                 ```
 
         Args:
-            event: Frozen active semantic v2 event.
+            event: Frozen current semantic Event.
 
         Returns:
             PersistedSemanticEvent: Exact event paired with its integer delivery cursor.
@@ -431,20 +431,8 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
             code="integration.semantic_event_corrupt",
             message="Canonical semantic payload is malformed.",
         )
-    projected_payload = _thaw_json(payload)
-    if protocol == "aethergraph.semantic-event/v2":
-        projected_payload = _project_v2_semantic_payload(
-            kind=record.kind,
-            payload=projected_payload,
-        )
-        protocol = SEMANTIC_EVENT_PROTOCOL_VERSION
-    if record.kind is StorageSemanticEventKind.INPUT_ACCEPTED:
-        projected_payload = _project_input_accepted_payload(
-            projected_payload,
-            producer=record.producer,
-        )
     try:
-        event = SemanticEvent.model_validate(
+        event = decode_semantic_event(
             {
                 "schema_version": protocol,
                 "event_id": record.event_id,
@@ -454,54 +442,17 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
                 "sequence": record.sequence,
                 "producer": record.producer,
                 "timestamp": record.occurred_at,
-                "kind": SemanticEventKind(record.kind.value),
-                "payload": projected_payload,
+                "kind": record.kind.value,
+                "payload": _thaw_json(payload),
                 "extensions": _thaw_json(extensions),
             }
-        )
-    except (TypeError, ValueError) as exc:
+        ).event
+    except SemanticEventDecodeError as exc:
         raise SemanticEventStoreError(
             code="integration.semantic_event_corrupt",
-            message="Canonical semantic event cannot be projected to active v3.",
+            message="Canonical semantic event cannot be decoded to the active contract.",
         ) from exc
     return PersistedSemanticEvent(cursor=record.delivery_cursor, event=event)
-
-
-def _project_input_accepted_payload(payload: Any, *, producer: str) -> Any:
-    if not isinstance(payload, dict):
-        return payload
-    input_fields = {"input_kind", "input_type", "source"}
-    if input_fields.intersection(payload):
-        return payload
-    interaction_id = payload.get("interaction_id")
-    return {
-        **payload,
-        "input_kind": "message",
-        "input_type": "interaction.response" if interaction_id else "user.message",
-        "source": f"legacy:{producer}",
-    }
-
-
-def _project_v2_semantic_payload(*, kind: StorageSemanticEventKind, payload: Any) -> Any:
-    """Project one persisted semantic-event/v2 payload into the active read model."""
-    if not isinstance(payload, dict):
-        return payload
-    if kind is not StorageSemanticEventKind.MESSAGE_COMPLETED:
-        return payload
-    artifact_ids = payload.pop("artifact_ids", [])
-    return {
-        **payload,
-        "attachments": [
-            {
-                "artifact_id": str(artifact_id),
-                "presentation": "auto",
-                "title": "",
-                "alt_text": "",
-            }
-            for artifact_id in artifact_ids
-        ],
-        "actions": [],
-    }
 
 
 def _thaw_json(value: Any) -> Any:

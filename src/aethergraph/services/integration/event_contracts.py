@@ -34,7 +34,7 @@ class SemanticEventStoreError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class PersistedSemanticEvent:
-    """One active semantic v2 event paired with its provider delivery cursor."""
+    """One current semantic Event paired with its provider delivery cursor."""
 
     cursor: int
     event: SemanticEvent
@@ -105,7 +105,7 @@ class SemanticEventStore(Protocol):
     """Provider-neutral ordered semantic-event persistence contract."""
 
     async def append(self, event: SemanticEvent) -> PersistedSemanticEvent:
-        """Append one active semantic v2 event at its authored sequence.
+        """Append one current semantic Event at its authored sequence.
 
         Examples:
             Persist a completed message:
@@ -119,7 +119,7 @@ class SemanticEventStore(Protocol):
                 ```
 
         Args:
-            event: Closed active semantic v2 event.
+            event: Closed current semantic Event.
 
         Returns:
             PersistedSemanticEvent: Event paired with its provider delivery cursor.
@@ -137,7 +137,7 @@ class SemanticEventStore(Protocol):
         after_cursor: int | None = None,
         limit: int | None = None,
     ) -> tuple[PersistedSemanticEvent, ...]:
-        """Read ordered semantic v2 events from one deployment session.
+        """Read ordered current semantic Events from one deployment session.
 
         Examples:
             Read bounded history:

@@ -41,6 +41,12 @@ from .models import (
     TurnOutcomePayload,
     WarningRaisedPayload,
 )
+from .semantic_event_codec import (
+    DecodedSemanticEvent,
+    SemanticEventDecodeError,
+    SemanticEventDecodeErrorCode,
+    decode_semantic_event,
+)
 from .versions import (
     HOST_MANIFEST_SCHEMA_VERSION,
     HOST_READY_PROTOCOL_VERSION,
@@ -48,7 +54,9 @@ from .versions import (
     INTEGRATION_CAPABILITIES_SCHEMA_VERSION,
     INTEGRATION_ROUTE_SCHEMA_VERSION,
     RELEASE_COMPATIBILITY_SCHEMA_VERSION,
+    SEMANTIC_EVENT_CODEC_REVISION,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
+    SEMANTIC_EVENT_READ_VERSIONS,
 )
 
 __all__ = [
@@ -56,6 +64,7 @@ __all__ = [
     "AgentInputResource",
     "AgentInputV1",
     "ArtifactAvailablePayload",
+    "DecodedSemanticEvent",
     "ExternalIdentity",
     "ExternalSessionBinding",
     "HostManifest",
@@ -89,8 +98,12 @@ __all__ = [
     "ReleaseCompatibility",
     "ReleaseDependency",
     "RELEASE_COMPATIBILITY_SCHEMA_VERSION",
+    "SEMANTIC_EVENT_CODEC_REVISION",
     "SEMANTIC_EVENT_PROTOCOL_VERSION",
+    "SEMANTIC_EVENT_READ_VERSIONS",
     "SemanticEvent",
+    "SemanticEventDecodeError",
+    "SemanticEventDecodeErrorCode",
     "SemanticEventKind",
     "SemanticEventProtocolVersion",
     "StructuredOutputPayload",
@@ -98,4 +111,5 @@ __all__ = [
     "ToolErrorPayload",
     "TurnOutcomePayload",
     "WarningRaisedPayload",
+    "decode_semantic_event",
 ]
