@@ -36,7 +36,12 @@ from aethergraph.services.integration import (
     install_integration_ingress,
 )
 from aethergraph.services.integration.event_contracts import SemanticEventStore
-from aethergraph.storage.contracts import PageRequest, RuntimeOutputQuery, StorageScope
+from aethergraph.storage.contracts import (
+    PageRequest,
+    RuntimeOutputQuery,
+    StorageScope,
+    StorageStartupDiagnostic,
+)
 
 from .contracts import (
     RuntimeArtifactRecord,
@@ -173,6 +178,43 @@ class EmbeddedRuntime:
         """
 
         await self._ensure_ready()
+
+    @property
+    def storage_startup_diagnostic(self) -> StorageStartupDiagnostic | None:
+        """Return immutable storage startup evidence without exposing the container.
+
+        Intro:
+            Embedding Hosts can surface a failed provider, data-root, stage, and
+            exception identity while the storage composition remains private.
+
+        Examples:
+            Inspect a healthy runtime:
+                ```python
+                assert runtime.storage_startup_diagnostic is None
+                ```
+
+            Inspect a failed runtime before retirement:
+                ```python
+                diagnostic = runtime.storage_startup_diagnostic
+                assert diagnostic is not None and diagnostic.diagnostic_id
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            StorageStartupDiagnostic | None: Stable lower-boundary diagnostic.
+
+        Notes:
+            The returned object is frozen and contains no provider configuration.
+        """
+
+        composition = getattr(self._container, "storage_composition", None)
+        return (
+            composition.startup_diagnostic
+            if composition is not None
+            else None
+        )
 
     @contextmanager
     def activate(self) -> Iterator[None]:
