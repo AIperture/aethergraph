@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import get_type_hints
 
 from aethergraph.config.config import AppSettings
-from aethergraph.storage.contracts import StorageOpenRequest
+from aethergraph.storage.contracts import StorageOpenRequest, StorageStartupDiagnostic
 
 CONTRACT_ROOT = Path(__file__).parents[1] / "src" / "aethergraph" / "storage" / "contracts"
 STORAGE_ROOT = CONTRACT_ROOT.parent
@@ -66,7 +66,7 @@ def test_canonical_records_exclude_deprecated_application_identity_fields() -> N
     assert violations == []
 
 
-def test_workspace_root_is_the_only_canonical_physical_path_field() -> None:
+def test_workspace_root_is_the_only_canonical_physical_path_field_name() -> None:
     path_fields = []
     for path in sorted(CONTRACT_ROOT.glob("*.py")):
         module = importlib.import_module(f"aethergraph.storage.contracts.{path.stem}")
@@ -79,7 +79,10 @@ def test_workspace_root_is_the_only_canonical_physical_path_field() -> None:
                     (name, field.name) for field in fields(value) if hints.get(field.name) is Path
                 )
 
-    assert path_fields == [(StorageOpenRequest.__name__, "workspace_root")]
+    assert path_fields == [
+        (StorageStartupDiagnostic.__name__, "workspace_root"),
+        (StorageOpenRequest.__name__, "workspace_root"),
+    ]
 
 
 def test_provider_registry_contains_no_implicit_default_or_dynamic_discovery() -> None:

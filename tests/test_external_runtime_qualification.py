@@ -46,6 +46,7 @@ from aethergraph.storage.contracts import (
     StorageOpenRequest,
     StorageProviderSelection,
     StorageScope,
+    StorageStartupError,
     TriggerClaimRequest,
     TriggerKind,
     TriggerRecord,
@@ -197,8 +198,16 @@ async def test_runtime_admission_rejects_incomplete_external_before_health_or_pu
     composition = create_runtime_storage_composition(registry)
 
     prepared = composition.prepare(_external_request(tmp_path))
-    with pytest.raises(StorageCapabilityError, match=missing.value):
+    with pytest.raises(StorageStartupError, match=missing.value) as captured:
         await composition.start()
+
+    assert isinstance(captured.value.__cause__, StorageCapabilityError)
+    assert captured.value.__cause__.missing == (missing.value,)
+    assert captured.value.diagnostic.workspace_root == tmp_path.resolve()
+    assert captured.value.diagnostic.provider_name == EXTERNAL_PROVIDER_NAME
+    assert captured.value.diagnostic.stage == "bundle_validation"
+    assert captured.value.diagnostic.exception_type == "StorageCapabilityError"
+    assert composition.startup_diagnostic == captured.value.diagnostic
 
     assert provider.open_calls == 1
     assert prepared is provider.bundles[0]
