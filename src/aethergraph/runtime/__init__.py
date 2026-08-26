@@ -53,6 +53,10 @@ from aethergraph.runtime.errors import (
     RuntimeInteractionError,
     RuntimeNotReadyError,
 )
+from aethergraph.storage.contracts import (
+    StorageStartupDiagnostic,
+    StorageStartupError,
+)
 
 __all__ = [
     # general service management
@@ -100,5 +104,7 @@ __all__ = [
     "RuntimeRunStatus",
     "RuntimeSemanticEvent",
     "RuntimeStagedArtifact",
+    "StorageStartupDiagnostic",
+    "StorageStartupError",
     "open_embedded_runtime",
 ]

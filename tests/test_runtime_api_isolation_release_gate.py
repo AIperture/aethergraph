@@ -13,6 +13,13 @@ def test_public_runtime_does_not_export_internal_composition() -> None:
     assert all(not hasattr(runtime_api, name) for name in forbidden)
 
 
+def test_public_runtime_exports_host_startup_diagnostics() -> None:
+    assert runtime_api.StorageStartupError.__name__ == "StorageStartupError"
+    assert runtime_api.StorageStartupDiagnostic.__name__ == "StorageStartupDiagnostic"
+    assert "StorageStartupError" in runtime_api.__all__
+    assert "StorageStartupDiagnostic" in runtime_api.__all__
+
+
 def test_superseded_observability_modules_and_router_are_absent() -> None:
     assert not (PACKAGE_ROOT / "observability" / "studio_translation.py").exists()
     assert not (PACKAGE_ROOT / "api" / "v1" / "schemas" / "inspect.py").exists()
