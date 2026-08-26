@@ -149,7 +149,7 @@ def test_catalog_contains_only_provider_native_tool_search_modes() -> None:
     assert "engine_projected" not in json.dumps(catalog.model_dump(mode="json"))
 
 
-def test_catalog_resolves_narrow_openai_family_and_rejects_unsupported_tiers() -> None:
+def test_catalog_resolves_openai_native_tool_search_and_rejects_unsupported_tiers() -> None:
     for model in (
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -159,8 +159,92 @@ def test_catalog_resolves_narrow_openai_family_and_rejects_unsupported_tiers() -
         "gpt-5.6-luna-2026-08-01",
     ):
         assert resolve_model_catalog_entry("openai", model, "chat", "openai_responses") is not None
-    for model in ("gpt-5.4-nano", "gpt-5.5-mini", "gpt-5.6-pro", "gpt-6"):
+    for model in (
+        "gpt-5.4-nano",
+        "gpt-5.5-mini",
+        "gpt-5.6-pro",
+        "gpt-6",
+    ):
         assert resolve_model_catalog_entry("openai", model, "chat", "openai_responses") is None
+
+
+@pytest.mark.parametrize(
+    "model",
+    (
+        "chat-latest",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "gpt-5.2-2025-12-11",
+        "gpt-5.4-nano",
+        "gpt-5.6-terra",
+        "o3-2025-04-16",
+    ),
+)
+def test_catalog_resolves_current_openai_chat_tool_models(model: str) -> None:
+    entry = resolve_model_catalog_capability_entry(
+        "openai",
+        model,
+        "chat",
+        "openai_responses",
+        capability="chat_tools",
+    )
+
+    assert entry is not None
+    assert entry.chat_tools is not None
+    assert entry.chat_tools.native_tool_calling == "supported"
+    assert entry.chat_tools.tool_result_continuation == "supported"
+
+
+@pytest.mark.parametrize(
+    "model",
+    (
+        "gpt-4o-mini-search-preview",
+        "gpt-5.5-mini",
+        "gpt-5.6-pro",
+        "gpt-5.6-lunar",
+        "gpt-6",
+    ),
+)
+def test_catalog_does_not_infer_chat_tools_for_unknown_openai_models(model: str) -> None:
+    assert (
+        resolve_model_catalog_capability_entry(
+            "openai",
+            model,
+            "chat",
+            "openai_responses",
+            capability="chat_tools",
+        )
+        is None
+    )
+
+
+def test_catalog_scopes_responses_only_openai_tool_models_to_responses() -> None:
+    for model in (
+        "gpt-5-pro",
+        "gpt-5.2-pro",
+        "gpt-5.3-codex",
+        "gpt-5.4-pro",
+        "gpt-5.5-pro",
+        "o3-pro",
+    ):
+        responses = resolve_model_catalog_capability_entry(
+            "openai",
+            model,
+            "chat",
+            "openai_responses",
+            capability="chat_tools",
+        )
+        chat_completions = resolve_model_catalog_capability_entry(
+            "openai",
+            model,
+            "chat",
+            "openai_chat_completions",
+            capability="chat_tools",
+        )
+
+        assert responses is not None
+        assert responses.catalog_key == "openai/responses-only-chat-tools/v5"
+        assert chat_completions is None
 
 
 def test_catalog_unknown_model_does_not_manufacture_capabilities() -> None:
@@ -333,8 +417,27 @@ def test_resolver_uses_structured_output_and_prompt_cache_catalog_domains() -> N
     assert binding.valid
     assert binding.capabilities.structured_output.state == "supported"
     assert binding.capabilities.prompt_cache.state == "supported"
-    assert "openai/current-structured-output/v2" in binding.catalog_keys
+    assert "openai/current-structured-output/v5" in binding.catalog_keys
     assert "openai/gpt-5.6-plus-explicit-prompt-cache/v2" in binding.catalog_keys
+
+
+def test_gpt_5_4_pro_preserves_tool_support_without_inventing_structured_output() -> None:
+    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="gpt-5.4-pro"))
+
+    tools = resolve_chat_profile(
+        profile,
+        required=("native_tool_calling", "tool_result_continuation"),
+    )
+    structured = resolve_chat_profile(profile, required=("structured_output",))
+
+    assert tools.valid
+    assert "openai/responses-only-chat-tools/v5" in tools.catalog_keys
+    assert not structured.valid
+    assert structured.capabilities.structured_output.state == "unsupported"
+    assert structured.capabilities.structured_output.provenance[0].reference == (
+        "openai/gpt-5.4-pro-structured-output-unavailable/v5"
+    )
+    assert structured.diagnostics[0].code == "required_capability_unsupported"
 
 
 def test_resolver_uses_chat_tool_catalog_domain_with_provenance() -> None:
@@ -350,7 +453,7 @@ def test_resolver_uses_chat_tool_catalog_domain_with_provenance() -> None:
     assert binding.capabilities.tool_result_continuation.state == "supported"
     assert binding.capabilities.parallel_tool_calls.state == "supported"
     assert binding.capabilities.native_tool_calling.provenance[0].source == "catalog"
-    assert "openai/gpt-5-chat-tools/v4" in binding.catalog_keys
+    assert "openai/current-mainline-chat-tools/v5" in binding.catalog_keys
 
 
 def test_resolver_unknown_does_not_satisfy_required_capability() -> None:
@@ -419,6 +522,26 @@ def test_embedding_resolution_accepts_projected_dimensions() -> None:
     assert binding.capabilities.dimensions.provenance[0].source == "catalog"
 
 
+def test_legacy_openai_embedding_resolves_text_but_rejects_dimensions() -> None:
+    profile = EmbeddingProfileSpec(
+        connection=ProviderConnection(
+            provider_id="openai",
+            endpoint_id="openai_embeddings",
+        ),
+        model=ModelSelection(model_id="text-embedding-ada-002"),
+    )
+
+    text_binding = resolve_embedding_profile(profile, required=("text_embeddings",))
+    dimensions_binding = resolve_embedding_profile(profile, required=("dimensions",))
+
+    assert text_binding.valid
+    assert text_binding.catalog_key == "openai/text-embedding-ada-002/v5"
+    assert text_binding.capabilities.text_embeddings.state == "supported"
+    assert not dimensions_binding.valid
+    assert dimensions_binding.capabilities.dimensions.state == "unsupported"
+    assert dimensions_binding.diagnostics[0].code == "required_capability_unsupported"
+
+
 def test_embedding_override_supplies_unknown_model_fact_when_adapter_implements() -> None:
     profile = EmbeddingProfileSpec(
         connection=ProviderConnection(
@@ -480,6 +603,29 @@ def test_image_resolution_exposes_catalog_truth_and_adapter_clamps() -> None:
     assert google_binding.capabilities.multiple_outputs.provenance[0].state == "unknown"
     assert google_binding.capabilities.multiple_outputs.provenance[-1].source == "adapter"
     assert not google_binding.valid
+
+
+@pytest.mark.parametrize("model", ("gpt-image-2", "gpt-image-2-2026-04-21"))
+def test_gpt_image_2_resolves_required_generation_capabilities(model: str) -> None:
+    profile = ImageGenerationProfile(
+        connection=ProviderConnection(
+            provider_id="openai",
+            endpoint_id="openai_images",
+        ),
+        model=ModelSelection(model_id=model),
+    )
+
+    binding = resolve_image_generation_profile(
+        profile,
+        required=("text_to_image", "multiple_outputs"),
+    )
+
+    assert binding.valid
+    assert binding.catalog_key == "openai/gpt-image-2/v5"
+    assert binding.capabilities.text_to_image.state == "supported"
+    assert binding.capabilities.multiple_outputs.state == "supported"
+    assert binding.capabilities.image_editing.state == "unsupported"
+    assert binding.capabilities.image_editing.provenance[-1].source == "adapter"
 
 
 def test_operation_resolution_preserves_unknown_and_validates_endpoint_operation() -> None:

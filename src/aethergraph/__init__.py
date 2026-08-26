@@ -2,7 +2,13 @@ __version__ = "0.1.0a17"
 
 import logging
 
-from .contracts.services.channel import Button
+from .contracts.services.channel import (
+    Button,
+    ChannelAction,
+    ChannelAttachment,
+    ChannelDeliveryReceipt,
+    ChannelMessage,
+)
 
 # Graphs
 from .core.graph.graph_fn import graph_fn  # full-featured graph decorator
@@ -43,4 +49,8 @@ __all__ = [
     "Service",
     # Channel buttons
     "Button",
+    "ChannelAction",
+    "ChannelAttachment",
+    "ChannelDeliveryReceipt",
+    "ChannelMessage",
 ]

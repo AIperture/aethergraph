@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypedDict
+from urllib.parse import urlparse
 
 EventType = Literal[
     "agent.message",
@@ -16,7 +17,6 @@ EventType = Literal[
     "session.waiting",
     "structured.output",
     "file.upload",
-    "link.buttons",  # link preview with buttons
 ]
 
 
@@ -132,6 +132,137 @@ class Button:
     style: Literal["primary", "danger", "default"] | None = None  # for slack buttons
 
 
+@dataclass(frozen=True, slots=True)
+class ChannelAttachment:
+    """Artifact-backed attachment in one transport-neutral Channel message."""
+
+    artifact_id: str
+    presentation: Literal["auto", "file", "image"] = "auto"
+    title: str = ""
+    alt_text: str = ""
+
+    def __post_init__(self) -> None:
+        artifact_id = _bounded_text(self.artifact_id, "artifact_id", maximum=512)
+        title = _bounded_text(self.title, "title", maximum=512, allow_empty=True)
+        alt_text = _bounded_text(self.alt_text, "alt_text", maximum=2_000, allow_empty=True)
+        object.__setattr__(self, "artifact_id", artifact_id)
+        object.__setattr__(self, "title", title)
+        object.__setattr__(self, "alt_text", alt_text)
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelAction:
+    """Non-blocking action rendered with one logical Channel message."""
+
+    kind: Literal["suggested_reply", "external_link"]
+    label: str
+    value: str = ""
+    href: str = ""
+    style: Literal["primary", "danger", "default"] = "default"
+
+    def __post_init__(self) -> None:
+        label = _bounded_text(self.label, "label", maximum=255)
+        value = _bounded_text(self.value, "value", maximum=4_000, allow_empty=True)
+        href = _bounded_text(self.href, "href", maximum=4_000, allow_empty=True)
+        if self.kind == "suggested_reply":
+            if not value:
+                raise ValueError("suggested_reply requires a non-empty value")
+            if href:
+                raise ValueError("suggested_reply forbids href")
+        elif self.kind == "external_link":
+            if value:
+                raise ValueError("external_link forbids value")
+            parsed = urlparse(href)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("external_link requires an absolute HTTP(S) href")
+        else:
+            raise ValueError(f"Unsupported Channel action kind: {self.kind}")
+        object.__setattr__(self, "label", label)
+        object.__setattr__(self, "value", value)
+        object.__setattr__(self, "href", href)
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelMessage:
+    """One logical assistant message independent of physical channel fan-out."""
+
+    message_id: str
+    text_markdown: str = ""
+    attachments: tuple[ChannelAttachment, ...] = ()
+    actions: tuple[ChannelAction, ...] = ()
+
+    def __post_init__(self) -> None:
+        message_id = _bounded_text(self.message_id, "message_id", maximum=512)
+        text_markdown = _bounded_text(
+            self.text_markdown,
+            "text_markdown",
+            maximum=200_000,
+            allow_empty=True,
+        )
+        attachments = tuple(self.attachments)
+        actions = tuple(self.actions)
+        if not text_markdown and not attachments and not actions:
+            raise ValueError("ChannelMessage requires text, attachments, or actions")
+        attachment_ids = [item.artifact_id for item in attachments]
+        if len(attachment_ids) != len(set(attachment_ids)):
+            raise ValueError("ChannelMessage contains a duplicate attachment artifact_id")
+        action_ids = [(item.kind, item.label, item.value, item.href) for item in actions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError("ChannelMessage contains a duplicate action")
+        if len(attachments) > 64:
+            raise ValueError("ChannelMessage cannot contain more than 64 attachments")
+        if len(actions) > 32:
+            raise ValueError("ChannelMessage cannot contain more than 32 actions")
+        object.__setattr__(self, "message_id", message_id)
+        object.__setattr__(self, "text_markdown", text_markdown)
+        object.__setattr__(self, "attachments", attachments)
+        object.__setattr__(self, "actions", actions)
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelDeliveryReceipt:
+    """Durable identities returned after one logical Channel message is delivered."""
+
+    message_id: str
+    event_cursors: tuple[int, ...] = ()
+    provider_delivery_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "message_id",
+            _bounded_text(self.message_id, "message_id", maximum=512),
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in self.event_cursors
+        ):
+            raise ValueError("event_cursors must contain non-negative integers")
+        provider_ids = tuple(
+            _bounded_text(value, "provider_delivery_id", maximum=512)
+            for value in self.provider_delivery_ids
+        )
+        object.__setattr__(self, "event_cursors", tuple(self.event_cursors))
+        object.__setattr__(self, "provider_delivery_ids", provider_ids)
+
+
+def _bounded_text(
+    value: str,
+    name: str,
+    *,
+    maximum: int,
+    allow_empty: bool = False,
+) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    normalized = value.strip()
+    if not normalized and not allow_empty:
+        raise ValueError(f"{name} must be non-empty")
+    if len(normalized) > maximum:
+        raise ValueError(f"{name} cannot exceed {maximum} characters")
+    return normalized
+
+
 @dataclass(frozen=True)
 class ChoiceOption:
     id: str
@@ -152,6 +283,8 @@ class OutEvent:
     file: dict[str, Any] | None = (
         None  # e.g., {"bytes" b"...", "filename": "...", "mimetype": "..."} or {"url": "...", "filename": "...", "mimetype": "..."}
     )
+    attachments: list[dict[str, Any]] | None = None
+    actions: list[ChannelAction] | None = None
     upsert_key: str | None = None  # for idempotent upserts, e.g., message ID to update same message
 
     def to_printable(self) -> str:
@@ -165,7 +298,7 @@ class ChannelAdapter(Protocol):
     # Capabilities helper
     capabilities: set[str]  # e.g. {"text", "image", "file", "buttons", "rich"}
 
-    async def send(self, event: OutEvent) -> None:
+    async def send(self, event: OutEvent) -> dict | None:
         """
         Send an outgoing event to the appropriate channel.
         E.g., print to console, post to Slack, enqueue in UI, etc.

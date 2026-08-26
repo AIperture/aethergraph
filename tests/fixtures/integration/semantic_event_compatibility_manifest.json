@@ -1,0 +1,15 @@
+{
+  "schema_version": "aethergraph.semantic-event-compatibility-manifest/v1",
+  "writer_version": "aethergraph.semantic-event/v3",
+  "codec_revision": "aethergraph.semantic-event-codec/v1",
+  "retained_read_versions": [
+    "aethergraph.semantic-event/v1",
+    "aethergraph.semantic-event/v2",
+    "aethergraph.semantic-event/v3"
+  ],
+  "migration_steps": [
+    "aethergraph.semantic-event/v1->v2",
+    "aethergraph.semantic-event/v2->v3"
+  ],
+  "historical_fixture": "semantic_event_legacy.json"
+}

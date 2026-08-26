@@ -10,6 +10,7 @@ from typing import Protocol
 from aethergraph.api.v1.deps import RequestIdentity
 from aethergraph.api.v1.registry_helpers import scoped_registry
 from aethergraph.contracts.integration import (
+    AgentInputResource,
     ExternalSessionBinding,
     IngressEnvelope,
     IntegrationRoute,
@@ -207,8 +208,6 @@ class AGRootTurnDispatcher:
             capability_profile_id=envelope.origin_address.capability_profile_id,
         )
         user_meta = dict(envelope.transport_metadata)
-        if envelope.structured_input is not None:
-            user_meta["structured_input"] = envelope.structured_input
 
         async def admit(record) -> None:
             expected_dimensions = {
@@ -352,8 +351,21 @@ class AGRootTurnDispatcher:
         record = await self.container.run_manager.submit_run(
             graph_id=graph_id,
             inputs={
-                "message": envelope.text or "",
-                "attachments": [resource.to_dict() for resource in resources],
+                "input": envelope.input.model_copy(
+                    update={
+                        "resources": tuple(
+                            AgentInputResource(
+                                artifact_id=str(resource.artifact_id),
+                                filename=(
+                                    resource.name or resource.id or str(resource.artifact_id)
+                                ),
+                                content_type=(resource.mime or "application/octet-stream"),
+                                size_bytes=resource.size,
+                            )
+                            for resource in resources
+                        )
+                    }
+                ).model_dump(mode="json"),
                 "session_id": binding.ag_session_id,
                 "user_meta": user_meta,
             },

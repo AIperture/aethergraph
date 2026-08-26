@@ -6,7 +6,10 @@ from datetime import datetime
 from enum import StrEnum
 import json
 from typing import Annotated, Any, Literal, TypeAlias
+from urllib.parse import urlparse
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -18,6 +21,7 @@ from pydantic import (
 
 from .versions import (
     EXTERNAL_SESSION_BINDING_SCHEMA_VERSION,
+    HOST_DIAGNOSTIC_SCHEMA_VERSION,
     HOST_MANIFEST_SCHEMA_VERSION,
     INGRESS_ENVELOPE_SCHEMA_VERSION,
     INGRESS_PROTOCOL_VERSION,
@@ -33,7 +37,7 @@ Identifier = Annotated[str, Field(min_length=1, max_length=255)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 BoundedText = Annotated[str, Field(max_length=1_000_000)]
 MetadataScalar: TypeAlias = str | int | float | bool | None
-SemanticEventProtocolVersion: TypeAlias = Literal["aethergraph.semantic-event/v2"]
+SemanticEventProtocolVersion: TypeAlias = Literal["aethergraph.semantic-event/v3"]
 
 
 class IntegrationContract(BaseModel):
@@ -189,10 +193,40 @@ class ReleaseDependency(IntegrationContract):
     content_sha256: Digest
 
 
+class AcceptedEventContract(IntegrationContract):
+    """Describe one externally accepted event payload at a System surface."""
+
+    type: Identifier
+    title: Annotated[str, Field(min_length=1, max_length=255)]
+    description: Annotated[str, Field(max_length=4_000)] = ""
+    payload_schema: dict[str, JsonValue]
+    example_payload: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_schema_and_example(self) -> AcceptedEventContract:
+        try:
+            Draft202012Validator.check_schema(self.payload_schema)
+            errors = sorted(
+                Draft202012Validator(self.payload_schema).iter_errors(self.example_payload),
+                key=lambda error: tuple(str(part) for part in error.absolute_path),
+            )
+        except SchemaError as exc:
+            raise ValueError(
+                f"payload_schema is not valid Draft 2020-12 JSON Schema: {exc.message}"
+            ) from exc
+        if errors:
+            error = errors[0]
+            path = ".".join(str(part) for part in error.absolute_path) or "<root>"
+            raise ValueError(
+                f"example_payload does not match payload_schema at {path}: {error.message}"
+            )
+        return self
+
+
 class ReleaseCompatibility(IntegrationContract):
     """Exact release and Host runtime contract verified before code import."""
 
-    schema_version: Literal["aethergraph.release-compatibility/v2"] = (
+    schema_version: Literal["aethergraph.release-compatibility/v3"] = (
         RELEASE_COMPATIBILITY_SCHEMA_VERSION
     )
     aethergraph_version: Identifier
@@ -204,11 +238,12 @@ class ReleaseCompatibility(IntegrationContract):
     dependency_lock_digest: Digest
     host_capability_requirements: tuple[Identifier, ...]
     service_requirements: tuple[Identifier, ...]
-    ingress_protocol_version: Literal["aethergraph.ingress/v1"] = INGRESS_PROTOCOL_VERSION
+    ingress_protocol_version: Literal["aethergraph.ingress/v2"] = INGRESS_PROTOCOL_VERSION
     semantic_event_protocol_version: SemanticEventProtocolVersion = SEMANTIC_EVENT_PROTOCOL_VERSION
     logical_output_requirements: tuple[Literal["origin"], ...]
     entrypoint_input_schema: dict[str, JsonValue]
     entrypoint_output_schema: dict[str, JsonValue]
+    accepted_events: tuple[AcceptedEventContract, ...] = ()
     compiled_manifest_sha256: Digest
     provenance: dict[Identifier, MetadataScalar]
 
@@ -224,6 +259,9 @@ class ReleaseCompatibility(IntegrationContract):
         ):
             if not values or len(values) != len(set(values)):
                 raise ValueError(f"{name} must contain unique required values")
+        event_types = [event.type for event in self.accepted_events]
+        if len(event_types) != len(set(event_types)):
+            raise ValueError("accepted_events must contain unique event types")
         return self
 
 
@@ -252,10 +290,25 @@ class IntegrationRoute(IntegrationContract):
         return self
 
 
+class HostDiagnostic(IntegrationContract):
+    """Expose one exact, bounded Python failure from the AG Host process."""
+
+    schema_version: Literal["aethergraph.host-diagnostic/v2"] = HOST_DIAGNOSTIC_SCHEMA_VERSION
+    kind: Literal["host.failed"] = "host.failed"
+    source: Literal["aethergraph_host"] = "aethergraph_host"
+    code: Identifier
+    stage: Identifier
+    detail: str = Field(min_length=1, max_length=20_000)
+    exception_type: Identifier
+    traceback: str = Field(min_length=1, max_length=200_000)
+    missing_module: str | None = Field(default=None, min_length=1, max_length=500)
+    python_executable: str = Field(min_length=1, max_length=2_000)
+
+
 class HostManifest(IntegrationContract):
     """Immutable launch contract consumed by exactly one AG Host deployment."""
 
-    schema_version: Literal["aethergraph.host-manifest/v3"] = HOST_MANIFEST_SCHEMA_VERSION
+    schema_version: Literal["aethergraph.host-manifest/v4"] = HOST_MANIFEST_SCHEMA_VERSION
     deployment_id: Identifier
     build_id: Identifier
     source_digest: Digest
@@ -270,9 +323,10 @@ class HostManifest(IntegrationContract):
     runtime_profile_name: Identifier | None = None
     application_settings_digest: Digest
     semantic_event_protocol_version: SemanticEventProtocolVersion = SEMANTIC_EVENT_PROTOCOL_VERSION
-    ingress_protocol_version: Literal["aethergraph.ingress/v1"] = INGRESS_PROTOCOL_VERSION
+    ingress_protocol_version: Literal["aethergraph.ingress/v2"] = INGRESS_PROTOCOL_VERSION
     release_compatibility: ReleaseCompatibility
     integration_routes: tuple[IntegrationRoute, ...]
+    accepted_events: tuple[AcceptedEventContract, ...] = ()
     logical_output_bindings: dict[Identifier, Identifier] = Field(default_factory=dict)
     workspace_identity: Identifier
     manifest_digest: Digest
@@ -295,7 +349,7 @@ class HostManifest(IntegrationContract):
                 ```python
                 payload = manifest.model_dump(mode="json")
                 payload["semantic_event_protocol_version"] = (
-                    "aethergraph.semantic-event/v2"
+                    "aethergraph.semantic-event/v1"
                 )
                 try:
                     HostManifest.model_validate(payload)
@@ -342,6 +396,8 @@ class HostManifest(IntegrationContract):
                 "integration route semantic event protocol must match the Host manifest: "
                 + ", ".join(mismatched_routes)
             )
+        if self.accepted_events != self.release_compatibility.accepted_events:
+            raise ValueError("Host accepted event contracts must match release compatibility")
         return self
 
 
@@ -388,10 +444,68 @@ class IngressAttachment(IntegrationContract):
     size_bytes: Annotated[int, Field(ge=0)] | None = None
 
 
+class AgentInputResource(IntegrationContract):
+    """Reference one materialized Artifact available to an Agent input."""
+
+    artifact_id: Identifier
+    filename: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+    content_type: Annotated[str, Field(min_length=1, max_length=255)] | None = None
+    size_bytes: Annotated[int, Field(ge=0)] | None = None
+
+
+class AgentInputV1(IntegrationContract):
+    """Carry one canonical message or external event into an Agent session."""
+
+    schema_version: Literal["aethergraph.agent-input/v1"] = "aethergraph.agent-input/v1"
+    input_id: Identifier
+    kind: Literal["message", "event"]
+    type: Identifier
+    source: Annotated[str, Field(min_length=1, max_length=2_048)]
+    occurred_at: datetime
+    subject: Annotated[str, Field(min_length=1, max_length=2_048)] | None = None
+    payload: dict[str, JsonValue]
+    resources: tuple[AgentInputResource, ...] = ()
+
+    @field_validator("payload")
+    @classmethod
+    def _bound_payload(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > 262_144:
+            raise ValueError("Agent input payload cannot exceed 262144 UTF-8 bytes")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_kind(self) -> AgentInputV1:
+        if self.kind == "event" and self.type in {
+            "user.message",
+            "interaction.response",
+        }:
+            raise ValueError("event input cannot use a reserved message type")
+        if self.kind == "message" and self.type not in {
+            "user.message",
+            "interaction.response",
+        }:
+            raise ValueError("message input type must be user.message or interaction.response")
+        if self.type == "user.message" and "text" in self.payload:
+            text = self.payload.get("text")
+            if not isinstance(text, str):
+                raise ValueError("user.message text must be a string")
+        if self.type == "interaction.response":
+            interaction_id = self.payload.get("interaction_id")
+            if not isinstance(interaction_id, str) or not interaction_id.strip():
+                raise ValueError("interaction.response payload requires interaction_id")
+        return self
+
+
 class IngressEnvelope(IntegrationContract):
     """Canonical command accepted by the unified ingress coordinator."""
 
-    schema_version: Literal["aethergraph.ingress-envelope/v1"] = INGRESS_ENVELOPE_SCHEMA_VERSION
+    schema_version: Literal["aethergraph.ingress-envelope/v2"] = INGRESS_ENVELOPE_SCHEMA_VERSION
     integration_id: Identifier
     route_hint: Identifier | None = None
     endpoint_id: Identifier | None = None
@@ -399,10 +513,8 @@ class IngressEnvelope(IntegrationContract):
     external_event_id: Identifier
     idempotency_key: Identifier
     received_at: datetime
-    text: BoundedText | None = None
-    choice: IngressChoice | None = None
+    input: AgentInputV1
     attachments: tuple[IngressAttachment, ...] = ()
-    structured_input: dict[str, JsonValue] | None = None
     transport_metadata: dict[str, MetadataScalar] = Field(default_factory=dict)
     origin_address: OriginAddress
 
@@ -410,16 +522,106 @@ class IngressEnvelope(IntegrationContract):
     def _validate_command(self) -> IngressEnvelope:
         if self.route_hint is not None and self.endpoint_id is not None:
             raise ValueError("route_hint and endpoint_id are mutually exclusive")
-        if not any(
-            (
-                self.text is not None,
-                self.choice is not None,
-                bool(self.attachments),
-                self.structured_input is not None,
-            )
+        if self.external_event_id != self.input.input_id:
+            raise ValueError("external_event_id must match input.input_id")
+        if (
+            self.input.type == "user.message"
+            and not str(self.input.payload.get("text") or "").strip()
+            and not self.input.resources
+            and not self.attachments
         ):
-            raise ValueError("ingress must contain text, choice, attachments, or input")
+            raise ValueError("user.message ingress requires text or attachments")
         return self
+
+    @property
+    def text(self) -> str | None:
+        """Project optional text from the canonical Agent input payload.
+
+        Examples:
+            Read message text:
+            ```python
+            assert envelope.text == "Hello"
+            ```
+
+            Observe that events have no message text:
+            ```python
+            assert event_envelope.text is None
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            str | None: Message text when the payload contains a string value.
+
+        Notes:
+            This is an internal compatibility projection, not a serialized field.
+        """
+
+        value = self.input.payload.get("text")
+        return value if isinstance(value, str) else None
+
+    @property
+    def choice(self) -> IngressChoice | None:
+        """Project an exact choice only from an interaction-response input.
+
+        Examples:
+            Read a validated response:
+            ```python
+            assert envelope.choice.interaction_id == "interaction-1"
+            ```
+
+            Keep an external event outside continuation resolution:
+            ```python
+            assert event_envelope.choice is None
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            IngressChoice | None: Exact interaction choice, when present.
+
+        Notes:
+            Event payloads cannot acquire continuation authority through shape alone.
+        """
+
+        if self.input.type != "interaction.response":
+            return None
+        raw_options = self.input.payload.get("option_ids")
+        if not isinstance(raw_options, list) or not raw_options:
+            return None
+        return IngressChoice(
+            interaction_id=str(self.input.payload["interaction_id"]),
+            option_ids=tuple(str(option) for option in raw_options),
+        )
+
+    @property
+    def structured_input(self) -> dict[str, JsonValue] | None:
+        """Project event payload for existing structured-input consumers.
+
+        Examples:
+            Read event data:
+            ```python
+            assert envelope.structured_input == {"step": 4}
+            ```
+
+            Keep message payloads out of the event projection:
+            ```python
+            assert message_envelope.structured_input is None
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            dict[str, JsonValue] | None: Event payload, or ``None`` for messages.
+
+        Notes:
+            This compatibility projection will be removed after consumers use input.
+        """
+
+        return self.input.payload if self.input.kind == "event" else None
 
 
 class IngressReceipt(IntegrationContract):
@@ -495,6 +697,10 @@ class InputAcceptedPayload(IntegrationContract):
     """Semantic payload recording accepted external user input."""
 
     input_id: Identifier
+    input_kind: Literal["message", "event"]
+    input_type: Identifier
+    source: Annotated[str, Field(min_length=1, max_length=2_048)]
+    input_payload: dict[str, JsonValue] = Field(default_factory=dict)
     text: BoundedText | None = None
     artifacts: tuple[ArtifactAvailablePayload, ...] = ()
     interaction_id: Identifier | None = None
@@ -514,12 +720,62 @@ class MessageDeltaPayload(IntegrationContract):
     delta: BoundedText
 
 
+class LegacyMessageCompletedPayload(IntegrationContract):
+    """Read-only v1/v2 completed message retained for historical projection."""
+
+    message_id: Identifier
+    text: BoundedText
+    artifact_ids: tuple[Identifier, ...] = ()
+
+
+class MessageAttachmentRef(IntegrationContract):
+    """Ordered artifact presentation reference in one completed message."""
+
+    artifact_id: Identifier
+    presentation: Literal["auto", "file", "image"] = "auto"
+    title: Annotated[str, Field(max_length=512)] = ""
+    alt_text: Annotated[str, Field(max_length=2_000)] = ""
+
+
+class MessageAction(IntegrationContract):
+    """Non-blocking action carried by one completed assistant message."""
+
+    kind: Literal["suggested_reply", "external_link"]
+    label: Annotated[str, Field(min_length=1, max_length=255)]
+    value: Annotated[str, Field(max_length=4_000)] = ""
+    href: Annotated[str, Field(max_length=4_000)] = ""
+    style: Literal["primary", "danger", "default"] = "default"
+
+    @model_validator(mode="after")
+    def _validate_action_target(self) -> MessageAction:
+        if self.kind == "suggested_reply":
+            if not self.value:
+                raise ValueError("suggested_reply requires value")
+            if self.href:
+                raise ValueError("suggested_reply forbids href")
+        else:
+            if self.value:
+                raise ValueError("external_link forbids value")
+            parsed = urlparse(self.href)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("external_link requires an absolute HTTP(S) href")
+        return self
+
+
 class MessageCompletedPayload(IntegrationContract):
     """Semantic payload completing one assistant message."""
 
     message_id: Identifier
     text: BoundedText
-    artifact_ids: tuple[Identifier, ...] = ()
+    attachments: tuple[MessageAttachmentRef, ...] = ()
+    actions: tuple[MessageAction, ...] = ()
+
+    @field_validator("attachments", "actions")
+    @classmethod
+    def _unique_message_components(cls, value: tuple[Any, ...]) -> tuple[Any, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("message components must be unique")
+        return value
 
 
 class PhaseChangedPayload(IntegrationContract):
@@ -581,7 +837,7 @@ class LegacyToolActivityPayload(IntegrationContract):
 
 
 class ToolErrorPayload(IntegrationContract):
-    """Bounded prompt-safe Tool failure projected by semantic event v2."""
+    """Bounded prompt-safe Tool failure projected by semantic event v3."""
 
     kind: Literal["rejected", "runtime", "internal", "integrity"]
     code: Annotated[
@@ -627,9 +883,9 @@ class ToolActivityPayload(LegacyToolActivityPayload):
     @model_validator(mode="after")
     def _validate_error_status(self) -> ToolActivityPayload:
         if self.status == "failed" and self.error is None:
-            raise ValueError("Failed v2 Tool activity requires a structured error")
+            raise ValueError("Failed v3 Tool activity requires a structured error")
         if self.status != "failed" and self.error is not None:
-            raise ValueError("Only failed v2 Tool activity may carry an error")
+            raise ValueError("Only failed v3 Tool activity may carry an error")
         return self
 
 
@@ -693,7 +949,7 @@ LegacySemanticPayload: TypeAlias = (
     InputAcceptedPayload
     | MessageStartedPayload
     | MessageDeltaPayload
-    | MessageCompletedPayload
+    | LegacyMessageCompletedPayload
     | PhaseChangedPayload
     | ProgressChangedPayload
     | InteractionRequestedPayload
@@ -711,7 +967,7 @@ _LEGACY_PAYLOAD_BY_KIND: dict[LegacySemanticEventKind, type[IntegrationContract]
     LegacySemanticEventKind.INPUT_ACCEPTED: InputAcceptedPayload,
     LegacySemanticEventKind.MESSAGE_STARTED: MessageStartedPayload,
     LegacySemanticEventKind.MESSAGE_DELTA: MessageDeltaPayload,
-    LegacySemanticEventKind.MESSAGE_COMPLETED: MessageCompletedPayload,
+    LegacySemanticEventKind.MESSAGE_COMPLETED: LegacyMessageCompletedPayload,
     LegacySemanticEventKind.PHASE_CHANGED: PhaseChangedPayload,
     LegacySemanticEventKind.PROGRESS_CHANGED: ProgressChangedPayload,
     LegacySemanticEventKind.INTERACTION_REQUESTED: InteractionRequestedPayload,
@@ -805,7 +1061,7 @@ _PAYLOAD_BY_KIND: dict[SemanticEventKind, type[IntegrationContract]] = {
 class SemanticEvent(IntegrationContract):
     """Ordered canonical semantic event with structured errors and one outcome."""
 
-    schema_version: Literal["aethergraph.semantic-event/v2"] = SEMANTIC_EVENT_PROTOCOL_VERSION
+    schema_version: Literal["aethergraph.semantic-event/v3"] = SEMANTIC_EVENT_PROTOCOL_VERSION
     event_id: Identifier
     deployment_id: Identifier
     session_id: Identifier

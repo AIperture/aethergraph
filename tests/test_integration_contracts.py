@@ -10,6 +10,8 @@ from aethergraph.contracts.integration import (
     INTEGRATION_ROUTE_SCHEMA_VERSION,
     RELEASE_COMPATIBILITY_SCHEMA_VERSION,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
+    AcceptedEventContract,
+    AgentInputV1,
     ExternalIdentity,
     HostManifest,
     IngressEnvelope,
@@ -31,7 +33,7 @@ from tests._integration_fixtures import contract_compatibility
 
 _DIGEST = "a" * 64
 _PROTOCOL_FIXTURE_PATH = (
-    Path(__file__).parent / "fixtures" / "integration" / "semantic_event_v2.json"
+    Path(__file__).parent / "fixtures" / "integration" / "semantic_event_v3.json"
 )
 
 
@@ -97,13 +99,13 @@ def test_host_manifest_is_closed_and_round_trips_across_json_boundary() -> None:
 def test_containing_contracts_use_coordinated_negotiation_schema_versions() -> None:
     manifest = _manifest()
 
-    assert manifest.schema_version == "aethergraph.host-manifest/v3"
+    assert manifest.schema_version == "aethergraph.host-manifest/v4"
     assert manifest.release_compatibility.schema_version == (RELEASE_COMPATIBILITY_SCHEMA_VERSION)
     assert manifest.integration_routes[0].schema_version == INTEGRATION_ROUTE_SCHEMA_VERSION
     assert manifest.integration_routes[0].required_capabilities.schema_version == (
         INTEGRATION_CAPABILITIES_SCHEMA_VERSION
     )
-    assert SEMANTIC_EVENT_PROTOCOL_VERSION == "aethergraph.semantic-event/v2"
+    assert SEMANTIC_EVENT_PROTOCOL_VERSION == "aethergraph.semantic-event/v3"
 
 
 def test_manifest_accepts_only_the_canonical_semantic_protocol() -> None:
@@ -172,7 +174,7 @@ def test_capabilities_reject_superseded_protocol_and_event_kinds() -> None:
     ("field", "value"),
     [
         ("schema_version", "aethergraph.host-manifest/v1"),
-        ("ingress_protocol_version", "aethergraph.ingress/v2"),
+        ("ingress_protocol_version", "aethergraph.ingress/v1"),
         ("semantic_event_protocol_version", "aethergraph.semantic-event/v1"),
     ],
 )
@@ -221,7 +223,14 @@ def test_ingress_envelope_is_closed_and_requires_one_command() -> None:
         external_event_id="event_1",
         idempotency_key="event_1",
         received_at=datetime(2026, 8, 3, tzinfo=UTC),
-        text="Hello",
+        input=AgentInputV1(
+            input_id="event_1",
+            kind="message",
+            type="user.message",
+            source="urn:test:ui",
+            occurred_at=datetime(2026, 8, 3, tzinfo=UTC),
+            payload={"text": "Hello"},
+        ),
         origin_address=OriginAddress(
             channel_key="endpoint:sessions/session_1",
             capability_profile_id="ag_ui_v1",
@@ -232,14 +241,80 @@ def test_ingress_envelope_is_closed_and_requires_one_command() -> None:
     assert restored == envelope
 
     payload = envelope.model_dump(mode="json")
-    payload["text"] = None
-    with pytest.raises(ValidationError, match="ingress must contain"):
+    payload["external_event_id"] = "another-event"
+    with pytest.raises(ValidationError, match="must match input.input_id"):
         IngressEnvelope.model_validate(payload)
 
-    payload["text"] = "Hello"
+    payload["external_event_id"] = "event_1"
     payload["raw_provider_payload"] = {"unbounded": True}
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         IngressEnvelope.model_validate(payload)
+
+
+def test_agent_input_round_trips_message_and_event_without_inferred_kind() -> None:
+    message = AgentInputV1(
+        input_id="message_1",
+        kind="message",
+        type="user.message",
+        source="urn:test:studio",
+        occurred_at=datetime(2026, 8, 23, tzinfo=UTC),
+        payload={"text": "Review this design."},
+    )
+    event = AgentInputV1(
+        input_id="event_1",
+        kind="event",
+        type="simulation.abnormal",
+        source="urn:test:simulator",
+        occurred_at=datetime(2026, 8, 23, tzinfo=UTC),
+        subject="wafer-run-42",
+        payload={"metric": "focus_error_nm", "value": 18.4},
+    )
+
+    assert AgentInputV1.model_validate_json(message.model_dump_json()) == message
+    assert AgentInputV1.model_validate_json(event.model_dump_json()) == event
+
+    with pytest.raises(ValidationError, match="reserved message type"):
+        AgentInputV1.model_validate({**event.model_dump(mode="json"), "type": "user.message"})
+
+
+def test_accepted_event_contract_validates_schema_example_and_manifest_match() -> None:
+    contract = AcceptedEventContract(
+        type="simulation.abnormal",
+        title="Abnormal simulation",
+        payload_schema={
+            "type": "object",
+            "properties": {"value": {"type": "number"}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+        example_payload={"value": 18.4},
+    )
+    compatibility = contract_compatibility().model_copy(update={"accepted_events": (contract,)})
+    manifest = _manifest().model_copy(
+        update={
+            "release_compatibility": compatibility,
+            "accepted_events": (contract,),
+        }
+    )
+
+    assert HostManifest.model_validate_json(manifest.model_dump_json()) == manifest
+
+    with pytest.raises(ValidationError, match="example_payload does not match"):
+        AcceptedEventContract(
+            type="simulation.abnormal",
+            title="Abnormal simulation",
+            payload_schema={
+                "type": "object",
+                "properties": {"value": {"type": "number"}},
+                "required": ["value"],
+            },
+            example_payload={"value": "not-a-number"},
+        )
+
+    with pytest.raises(ValidationError, match="must match release compatibility"):
+        HostManifest.model_validate(
+            manifest.model_copy(update={"accepted_events": ()}).model_dump(mode="json")
+        )
 
 
 def test_receipt_enforces_terminal_result_shape() -> None:

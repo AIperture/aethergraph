@@ -28,6 +28,7 @@ from .control import (
     SessionRecord,
     SessionRepository,
 )
+from .diagnostics import StorageStartupDiagnostic, StorageStartupStage
 from .errors import (
     DuplicateStorageProviderError,
     StorageCapabilityError,
@@ -42,6 +43,7 @@ from .errors import (
     StorageProviderRegistrationError,
     StorageReadOnlyError,
     StorageScopeError,
+    StorageStartupError,
     StorageTimeoutError,
     UnknownStorageProviderError,
 )
@@ -292,6 +294,9 @@ __all__ = [
     "StorageFormatError",
     "StorageHealth",
     "StorageHealthError",
+    "StorageStartupDiagnostic",
+    "StorageStartupError",
+    "StorageStartupStage",
     "StorageIntegrityError",
     "StorageNotFoundError",
     "StorageOpenMode",

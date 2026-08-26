@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
+import re
 from threading import RLock
+from uuid import uuid4
 
 from .contracts import (
     StorageBundle,
@@ -16,6 +18,8 @@ from .contracts import (
     StorageHealth,
     StorageHealthError,
     StorageOpenRequest,
+    StorageStartupDiagnostic,
+    StorageStartupError,
 )
 from .provider_registry import StorageProviderRegistry
 
@@ -42,6 +46,11 @@ class StorageComposition:
         repr=False,
     )
     _startup_error: BaseException | None = field(default=None, init=False, repr=False)
+    _startup_diagnostic: StorageStartupDiagnostic | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
     _state_lock: RLock = field(default_factory=RLock, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
@@ -52,6 +61,40 @@ class StorageComposition:
         ):
             raise TypeError("required_capabilities must contain StorageCapability members")
         self.required_capabilities = frozenset(self.required_capabilities)
+
+    @property
+    def startup_diagnostic(self) -> StorageStartupDiagnostic | None:
+        """Return the immutable primary startup diagnostic, when startup failed.
+
+        Intro:
+            The diagnostic remains available after cleanup and across follow-on calls
+            so callers do not lose the provider, data-root, stage, or primary failure.
+
+        Examples:
+            Inspect a healthy composition:
+                ```python
+                assert composition.startup_diagnostic is None
+                ```
+
+            Inspect a failed composition:
+                ```python
+                diagnostic = composition.startup_diagnostic
+                assert diagnostic is not None and diagnostic.diagnostic_id
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            StorageStartupDiagnostic | None: Stable immutable failure evidence.
+
+        Notes:
+            Cleanup failure augments the same diagnostic without replacing its
+            primary stage, exception type, or message.
+        """
+
+        with self._state_lock:
+            return self._startup_diagnostic
 
     def prepare(self, request: StorageOpenRequest) -> StorageBundle:
         """Construct exactly one selected bundle without publishing it as ready.
@@ -86,11 +129,14 @@ class StorageComposition:
         """
         with self._state_lock:
             if self._state is _CompositionState.CLOSED:
+                if self._startup_diagnostic is not None:
+                    raise StorageStartupError(self._startup_diagnostic) from (
+                        self._startup_error
+                    )
                 raise StorageHealthError("Storage composition is already closed")
             if self._state is _CompositionState.STARTUP_FAILED:
-                raise StorageHealthError("Storage composition startup already failed") from (
-                    self._startup_error
-                )
+                assert self._startup_diagnostic is not None
+                raise StorageStartupError(self._startup_diagnostic) from self._startup_error
             if self._state is not _CompositionState.NEW:
                 raise StorageConflictError("Storage composition already owns a bundle")
 
@@ -145,10 +191,15 @@ class StorageComposition:
                     assert self._bundle is not None
                     return self._bundle
                 if self._state is _CompositionState.CLOSED:
+                    if self._startup_diagnostic is not None:
+                        raise StorageStartupError(self._startup_diagnostic) from (
+                            self._startup_error
+                        )
                     raise StorageHealthError("Storage composition is already closed")
                 if self._state is _CompositionState.STARTUP_FAILED:
-                    raise StorageHealthError(
-                        "Storage composition startup already failed"
+                    assert self._startup_diagnostic is not None
+                    raise StorageStartupError(
+                        self._startup_diagnostic
                     ) from self._startup_error
                 if self._state is _CompositionState.NEW:
                     raise StorageHealthError("Storage composition is not prepared")
@@ -157,8 +208,10 @@ class StorageComposition:
                 bundle = self._bundle
                 request = self._request
 
+            stage = "bundle_validation"
             try:
                 self._validate_bundle(request, bundle)
+                stage = "health_check"
                 health = await bundle.health()
                 if not health.ready:
                     detail = f": {health.detail}" if health.detail else ""
@@ -166,21 +219,34 @@ class StorageComposition:
                         f"Storage provider {bundle.provider_name!r} is not ready{detail}"
                     )
             except BaseException as startup_error:
+                diagnostic = StorageStartupDiagnostic(
+                    diagnostic_id=f"storage_{uuid4().hex}",
+                    workspace_root=request.workspace_root,
+                    provider_name=request.selection.provider,
+                    stage=stage,
+                    exception_type=type(startup_error).__name__,
+                    message=_safe_error_message(startup_error),
+                )
                 with self._state_lock:
                     self._state = _CompositionState.STARTUP_FAILED
                     self._startup_error = startup_error
+                    self._startup_diagnostic = diagnostic
                 try:
                     await bundle.close()
                 except BaseException as cleanup_error:
-                    raise StorageHealthError(
-                        "Storage startup failed and bundle cleanup must be retried: "
-                        f"{cleanup_error}"
-                    ) from startup_error
+                    diagnostic = replace(
+                        diagnostic,
+                        cleanup_exception_type=type(cleanup_error).__name__,
+                        cleanup_message=_safe_error_message(cleanup_error),
+                    )
+                    with self._state_lock:
+                        self._startup_diagnostic = diagnostic
+                    raise StorageStartupError(diagnostic) from startup_error
                 with self._state_lock:
                     self._bundle = None
                     self._request = None
                     self._state = _CompositionState.CLOSED
-                raise
+                raise StorageStartupError(diagnostic) from startup_error
 
             with self._state_lock:
                 self._state = _CompositionState.READY
@@ -257,6 +323,10 @@ class StorageComposition:
         async with self._lock:
             with self._state_lock:
                 if self._state is not _CompositionState.READY or self._bundle is None:
+                    if self._startup_diagnostic is not None:
+                        raise StorageStartupError(self._startup_diagnostic) from (
+                            self._startup_error
+                        )
                     raise StorageHealthError("Storage composition has no active bundle")
                 bundle = self._bundle
             return await bundle.health()
@@ -324,3 +394,18 @@ class StorageComposition:
                 f"{bundle.format_version}, expected {request.expected_format_version}"
             )
         bundle.capabilities.require(bundle.provider_name, self.required_capabilities)
+
+
+def _safe_error_message(error: BaseException) -> str:
+    message = " ".join(str(error).split()) or "Storage startup failed."
+    message = re.sub(
+        r"(?i)([a-z][a-z0-9+.-]*://)([^@\s/]+)@",
+        r"\1***@",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\b(password|token|secret|api[_-]?key)\s*[=:]\s*[^\s,;]+",
+        r"\1=***",
+        message,
+    )
+    return message[:1_000]

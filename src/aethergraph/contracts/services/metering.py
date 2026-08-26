@@ -66,7 +66,7 @@ class MeteringService(Protocol):
             Record complete usage:
                 ```python
                 await meter.record_image_generation(
-                    provider="openai", model="gpt-image-1", image_count=1
+                    provider="openai", model="gpt-image-2", image_count=1
                 )
                 ```
 

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import socket
 import sys
+import traceback
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
@@ -17,7 +18,11 @@ import uvicorn
 from aethergraph.config.config import SlackSettings, TelegramSettings
 from aethergraph.config.context import set_current_settings
 from aethergraph.config.loader import load_settings
-from aethergraph.contracts.integration import HOST_READY_PROTOCOL_VERSION, IntegrationKind
+from aethergraph.contracts.integration import (
+    HOST_READY_PROTOCOL_VERSION,
+    HostDiagnostic,
+    IntegrationKind,
+)
 from aethergraph.services.host import (
     HostCompatibilityError,
     HostManifestError,
@@ -109,16 +114,16 @@ def handle(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         return 0
     except HostCompatibilityError as exc:
-        _emit_failure("host.release_incompatible", str(exc))
+        _emit_failure("host.release_incompatible", "launch_validation", exc)
         return 2
     except (HostManifestError, FileNotFoundError, ValidationError, ValueError) as exc:
-        _emit_failure("host.invalid_launch", str(exc))
+        _emit_failure("host.invalid_launch", "launch_validation", exc)
         return 2
     except ImportError as exc:
-        _emit_failure("host.missing_dependency", str(exc))
+        _emit_failure("host.missing_dependency", "entrypoint_import", exc)
         return 3
     except Exception as exc:
-        _emit_failure("host.start_failed", str(exc))
+        _emit_failure("host.start_failed", "host_start", exc)
         return 1
 
 
@@ -299,22 +304,38 @@ async def _wait_for_server_start(
             await asyncio.sleep(0.02)
 
 
-def _emit_failure(code: str, detail: str) -> None:
-    safe_detail = " ".join(detail.split())[:1000]
+def _emit_failure(code: str, stage: str, exc: BaseException) -> None:
+    safe_detail = " ".join(str(exc).split())[:20_000] or type(exc).__name__
+    rendered_traceback = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[
+        -200_000:
+    ]
+    diagnostic = HostDiagnostic(
+        code=code,
+        stage=stage,
+        detail=safe_detail,
+        exception_type=type(exc).__name__,
+        traceback=rendered_traceback or f"{type(exc).__name__}: {safe_detail}",
+        missing_module=_missing_module(exc),
+        python_executable=sys.executable,
+    )
     print(
-        json.dumps(
-            {
-                "schema_version": "aethergraph.host-diagnostic/v1",
-                "kind": "host.failed",
-                "code": code,
-                "detail": safe_detail,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
+        diagnostic.model_dump_json(exclude_none=True),
         file=sys.stderr,
         flush=True,
     )
+
+
+def _missing_module(exc: BaseException) -> str | None:
+    """Return the deepest exact module name from one chained import failure."""
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ModuleNotFoundError) and current.name:
+            return current.name
+        current = current.__cause__ or current.__context__
+    return None
 
 
 __all__ = ["handle", "register_parser"]

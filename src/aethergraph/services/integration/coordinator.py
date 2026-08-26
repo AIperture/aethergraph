@@ -23,6 +23,7 @@ from .delivery import SemanticEventEmitter
 from .dispatch import RootTurnDispatcher
 from .event_contracts import InboundEventStore
 from .idempotency import IngressIdempotencyStore
+from .input_validation import validate_accepted_event_input
 from .interactions import (
     InteractionResolutionError,
     InteractionResolver,
@@ -269,6 +270,7 @@ class IntegrationIngressCoordinator:
             performs no side effect. Post-dispatch persistence failures remain
             pending for explicit Host reconciliation rather than retrying a path.
         """
+        self.validate_input(envelope)
         claim = await self.idempotency_store.claim(
             deployment_id=self.manifest.deployment_id,
             envelope=envelope,
@@ -342,7 +344,11 @@ class IntegrationIngressCoordinator:
             producer=f"integration.{route.integration_kind.value}",
             kind=SemanticEventKind.INPUT_ACCEPTED,
             payload=InputAcceptedPayload(
-                input_id=envelope.idempotency_key,
+                input_id=envelope.input.input_id,
+                input_kind=envelope.input.kind,
+                input_type=envelope.input.type,
+                source=envelope.input.source,
+                input_payload=envelope.input.payload,
                 text=envelope.text,
                 artifacts=tuple(
                     ArtifactAvailablePayload(
@@ -419,6 +425,38 @@ class IntegrationIngressCoordinator:
             receipt=receipt,
         )
         return receipt
+
+    def validate_input(self, envelope: IngressEnvelope) -> None:
+        """Validate an event against the immutable Host event contracts.
+
+        Examples:
+            Accept an authored event:
+            ```python
+            coordinator.validate_input(event_envelope)
+            ```
+
+            Bypass event schemas for an ordinary message:
+            ```python
+            coordinator.validate_input(message_envelope)
+            ```
+
+        Args:
+            envelope: Canonical message or event ingress envelope.
+
+        Returns:
+            None: Returns after the input is accepted by the Host contract.
+
+        Notes:
+            Event validation precedes idempotency claim and all durable side effects.
+        """
+
+        if envelope.input.kind != "event":
+            return
+        validate_accepted_event_input(
+            self.manifest.accepted_events,
+            event_type=envelope.input.type,
+            payload=envelope.input.payload,
+        )
 
 
 def _request_scope(verified: VerifiedIntegrationContext) -> StorageScope:

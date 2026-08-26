@@ -11,7 +11,8 @@ from aethergraph.contracts.integration import (
     IngressEnvelope,
     IntegrationRoute,
     SemanticEvent,
-    SemanticEventKind,
+    SemanticEventDecodeError,
+    decode_semantic_event,
 )
 from aethergraph.services.canonical_storage_scope import (
     merge_storage_scope,
@@ -185,7 +186,7 @@ class CanonicalSemanticEventStore:
     ) -> None:
         """Bind semantic persistence to one provider-authoritative Host owner.
 
-        The exact active v2 kind, authored sequence, structured payload, extensions,
+        The exact active v3 kind, authored sequence, structured payload, extensions,
         and session scope are normalized before repository access. Bounded history
         reads translate durable integer delivery cursors independently of opaque
         provider pagination cursors.
@@ -231,7 +232,7 @@ class CanonicalSemanticEventStore:
         self._max_history_events = max_history_events
 
     async def append(self, event: SemanticEvent) -> PersistedSemanticEvent:
-        """Persist one exact semantic v2 event at its authored sequence.
+        """Persist one exact current semantic Event at its authored sequence.
 
         The active Host kind maps one-to-one to the canonical storage vocabulary.
         Structured payload and namespaced extensions are stored as normalized JSON,
@@ -249,7 +250,7 @@ class CanonicalSemanticEventStore:
                 ```
 
         Args:
-            event: Frozen active semantic v2 event.
+            event: Frozen current semantic Event.
 
         Returns:
             PersistedSemanticEvent: Exact event paired with its integer delivery cursor.
@@ -413,14 +414,9 @@ def _normalized_inbound_payload(
         },
         "external_identity": envelope.external_identity.model_dump(mode="json"),
         "command": {
-            "text": envelope.text,
-            "choice": envelope.choice.model_dump(mode="json") if envelope.choice else None,
-            "structured_input": envelope.structured_input,
+            "input": envelope.input.model_dump(mode="json"),
             "transport_metadata": envelope.transport_metadata,
             "origin_address": envelope.origin_address.model_dump(mode="json"),
-            "attachments": tuple(
-                attachment.model_dump(mode="json") for attachment in envelope.attachments
-            ),
         },
         "resources": resources,
     }
@@ -436,7 +432,7 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
             message="Canonical semantic payload is malformed.",
         )
     try:
-        event = SemanticEvent.model_validate(
+        event = decode_semantic_event(
             {
                 "schema_version": protocol,
                 "event_id": record.event_id,
@@ -446,15 +442,15 @@ def _persisted_semantic(record: SemanticEventRecord) -> PersistedSemanticEvent:
                 "sequence": record.sequence,
                 "producer": record.producer,
                 "timestamp": record.occurred_at,
-                "kind": SemanticEventKind(record.kind.value),
+                "kind": record.kind.value,
                 "payload": _thaw_json(payload),
                 "extensions": _thaw_json(extensions),
             }
-        )
-    except (TypeError, ValueError) as exc:
+        ).event
+    except SemanticEventDecodeError as exc:
         raise SemanticEventStoreError(
             code="integration.semantic_event_corrupt",
-            message="Canonical semantic event cannot be projected to active v2.",
+            message="Canonical semantic event cannot be decoded to the active contract.",
         ) from exc
     return PersistedSemanticEvent(cursor=record.delivery_cursor, event=event)
 

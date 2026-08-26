@@ -282,7 +282,7 @@ class LLMImageGenerationResolveRequest(LLMApiContract):
                 request = LLMImageGenerationResolveRequest(
                     provider_id="openai",
                     endpoint_id="openai_images",
-                    model_id="gpt-image-1",
+                    model_id="gpt-image-2",
                     required_capabilities=("text_to_image",),
                 )
                 ```
@@ -292,7 +292,7 @@ class LLMImageGenerationResolveRequest(LLMApiContract):
                 LLMImageGenerationResolveRequest(
                     provider_id="openai",
                     endpoint_id="openai_images",
-                    model_id="gpt-image-1",
+                    model_id="gpt-image-2",
                     required_capabilities=("text_to_image", "text_to_image"),
                 )
                 ```

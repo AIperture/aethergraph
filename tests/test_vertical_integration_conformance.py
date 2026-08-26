@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 from aethergraph.contracts.integration import (
+    AgentInputV1,
     ArtifactAvailablePayload,
     ExternalIdentity,
     HostManifest,
@@ -195,6 +196,21 @@ def _envelope(
     choice: IngressChoice | None = None,
     attachments: tuple[IngressAttachment, ...] = (),
 ) -> IngressEnvelope:
+    agent_input = AgentInputV1(
+        input_id=event_id,
+        kind="message",
+        type=("interaction.response" if choice is not None else "user.message"),
+        source=f"urn:test:{case.name}",
+        occurred_at=_NOW + timedelta(seconds=sum(ord(char) for char in event_id)),
+        payload=(
+            {
+                "interaction_id": choice.interaction_id,
+                "option_ids": list(choice.option_ids),
+            }
+            if choice is not None
+            else {"text": text or ""}
+        ),
+    )
     return IngressEnvelope(
         integration_id=case.integration_id,
         route_hint=case.route_id if case.endpoint_id is None else None,
@@ -203,8 +219,7 @@ def _envelope(
         external_event_id=event_id,
         idempotency_key=event_id,
         received_at=_NOW + timedelta(seconds=sum(ord(char) for char in event_id)),
-        text=text,
-        choice=choice,
+        input=agent_input,
         attachments=attachments,
         origin_address=OriginAddress(
             channel_key=f"{case.origin_prefix}:{conversation}",

@@ -1,6 +1,6 @@
 {
   "host_manifest": {
-    "schema_version": "aethergraph.host-manifest/v3",
+    "schema_version": "aethergraph.host-manifest/v4",
     "deployment_id": "deployment_fixture_v2",
     "build_id": "build_fixture_v2",
     "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -13,10 +13,10 @@
     "environment_snapshot_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "runtime_profile_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "application_settings_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
-    "ingress_protocol_version": "aethergraph.ingress/v1",
+    "semantic_event_protocol_version": "aethergraph.semantic-event/v3",
+    "ingress_protocol_version": "aethergraph.ingress/v2",
     "release_compatibility": {
-      "schema_version": "aethergraph.release-compatibility/v2",
+      "schema_version": "aethergraph.release-compatibility/v3",
       "aethergraph_version": "0.1.0a1",
       "engine_version": "0.1.0a1",
       "python_abi": "cp311",
@@ -36,8 +36,8 @@
         "semantic_event_log"
       ],
       "service_requirements": ["channels", "runs", "sessions"],
-      "ingress_protocol_version": "aethergraph.ingress/v1",
-      "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
+      "ingress_protocol_version": "aethergraph.ingress/v2",
+      "semantic_event_protocol_version": "aethergraph.semantic-event/v3",
       "logical_output_requirements": ["origin"],
       "entrypoint_input_schema": {
         "type": "object",
@@ -69,7 +69,7 @@
         "session_policy": {"scope": "conversation"},
         "required_capabilities": {
           "schema_version": "aethergraph.integration-capabilities/v2",
-          "semantic_event_protocol_version": "aethergraph.semantic-event/v2",
+          "semantic_event_protocol_version": "aethergraph.semantic-event/v3",
           "event_kinds": ["tool.activity", "warning.raised", "turn.outcome"],
           "streaming": true,
           "interactions": false,
@@ -84,7 +84,7 @@
   },
   "events": [
     {
-      "schema_version": "aethergraph.semantic-event/v2",
+      "schema_version": "aethergraph.semantic-event/v3",
       "event_id": "event_tool_failed",
       "deployment_id": "deployment_fixture_v2",
       "session_id": "session_fixture",
@@ -112,7 +112,7 @@
       "extensions": {}
     },
     {
-      "schema_version": "aethergraph.semantic-event/v2",
+      "schema_version": "aethergraph.semantic-event/v3",
       "event_id": "event_warning",
       "deployment_id": "deployment_fixture_v2",
       "session_id": "session_fixture",
@@ -129,7 +129,7 @@
       "extensions": {}
     },
     {
-      "schema_version": "aethergraph.semantic-event/v2",
+      "schema_version": "aethergraph.semantic-event/v3",
       "event_id": "event_outcome",
       "deployment_id": "deployment_fixture_v2",
       "session_id": "session_fixture",

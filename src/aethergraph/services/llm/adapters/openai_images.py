@@ -45,7 +45,7 @@ class OpenAIImagesAdapter:
                 result = await OpenAIImagesAdapter.invoke(
                     client,
                     "A quiet observatory",
-                    model="gpt-image-1",
+                    model="gpt-image-2",
                     n=1,
                     size=None,
                     quality=None,
@@ -61,7 +61,7 @@ class OpenAIImagesAdapter:
                 result = await OpenAIImagesAdapter.invoke(
                     client,
                     "A glass compass",
-                    model="gpt-image-1",
+                    model="gpt-image-2",
                     n=1,
                     size="1024x1024",
                     quality="high",

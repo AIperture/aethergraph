@@ -5,6 +5,11 @@ import json
 import mimetypes
 from pathlib import Path
 
+from aethergraph.utils.mime_types import (
+    EXTENSION_MIME_KIND,
+    SPECIAL_EXTENSION_MIME,
+)
+
 
 @dataclass(frozen=True)
 class MimeDetectResult:
@@ -17,9 +22,7 @@ class MimeDetectResult:
 # -----------------------------------------------------------------------------
 # Special / custom formats (you can expand this)
 # -----------------------------------------------------------------------------
-SPECIAL_EXT_MIME: dict[str, str] = {
-    ".zmx": "application/x-zemax-zmx",
-}
+SPECIAL_EXT_MIME = SPECIAL_EXTENSION_MIME
 SPECIAL_EXT_KIND: dict[str, str] = {
     ".zmx": "zmx",
 }
@@ -27,88 +30,7 @@ SPECIAL_EXT_KIND: dict[str, str] = {
 # -----------------------------------------------------------------------------
 # Curated extension->(mime, kind) for "common" files where mimetypes can be vague
 # -----------------------------------------------------------------------------
-EXT_MIME_KIND: dict[str, tuple[str, str]] = {
-    # docs / text-ish
-    ".md": ("text/markdown", "markdown"),
-    ".markdown": ("text/markdown", "markdown"),
-    ".rst": ("text/x-rst", "text"),
-    ".txt": ("text/plain", "text"),
-    ".log": ("text/plain", "text"),
-    ".csv": ("text/csv", "csv"),
-    ".tsv": ("text/tab-separated-values", "csv"),
-    ".yaml": ("application/yaml", "yaml"),
-    ".yml": ("application/yaml", "yaml"),
-    ".toml": ("application/toml", "toml"),
-    ".ini": ("text/plain", "text"),
-    ".cfg": ("text/plain", "text"),
-    ".conf": ("text/plain", "text"),
-    ".json": ("application/json", "json"),
-    ".jsonl": ("application/x-ndjson", "json"),
-    ".ndjson": ("application/x-ndjson", "json"),
-    ".xml": ("application/xml", "xml"),
-    ".html": ("text/html", "html"),
-    ".htm": ("text/html", "html"),
-    ".css": ("text/css", "code"),
-    # code
-    ".py": ("text/x-python", "code"),
-    ".ipynb": ("application/x-ipynb+json", "json"),
-    ".js": ("text/javascript", "code"),
-    ".mjs": ("text/javascript", "code"),
-    ".cjs": ("text/javascript", "code"),
-    ".ts": ("text/typescript", "code"),
-    ".tsx": ("text/tsx", "code"),
-    ".jsx": ("text/jsx", "code"),
-    ".java": ("text/x-java-source", "code"),
-    ".c": ("text/x-c", "code"),
-    ".h": ("text/x-c", "code"),
-    ".cpp": ("text/x-c++", "code"),
-    ".hpp": ("text/x-c++", "code"),
-    ".cc": ("text/x-c++", "code"),
-    ".go": ("text/x-go", "code"),
-    ".rs": ("text/x-rust", "code"),
-    ".rb": ("text/x-ruby", "code"),
-    ".php": ("text/x-php", "code"),
-    ".swift": ("text/x-swift", "code"),
-    ".kt": ("text/x-kotlin", "code"),
-    ".kts": ("text/x-kotlin", "code"),
-    ".sh": ("text/x-shellscript", "code"),
-    ".ps1": ("text/x-powershell", "code"),
-    ".bat": ("text/plain", "code"),
-    ".cmd": ("text/plain", "code"),
-    ".sql": ("application/sql", "code"),
-    ".graphql": ("application/graphql", "code"),
-    # images
-    ".png": ("image/png", "image"),
-    ".jpg": ("image/jpeg", "image"),
-    ".jpeg": ("image/jpeg", "image"),
-    ".gif": ("image/gif", "image"),
-    ".webp": ("image/webp", "image"),
-    ".bmp": ("image/bmp", "image"),
-    ".tif": ("image/tiff", "image"),
-    ".tiff": ("image/tiff", "image"),
-    ".ico": ("image/x-icon", "image"),
-    ".svg": ("image/svg+xml", "image"),
-    # pdf
-    ".pdf": ("application/pdf", "pdf"),
-    # archives
-    ".zip": ("application/zip", "archive"),
-    ".tar": ("application/x-tar", "archive"),
-    ".gz": ("application/gzip", "archive"),
-    ".tgz": ("application/gzip", "archive"),
-    ".bz2": ("application/x-bzip2", "archive"),
-    ".7z": ("application/x-7z-compressed", "archive"),
-    ".rar": ("application/vnd.rar", "archive"),
-    # office
-    ".docx": (
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "document",
-    ),
-    ".xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "document"),
-    ".pptx": (
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "document",
-    ),
-}
+EXT_MIME_KIND = EXTENSION_MIME_KIND
 
 # # Register custom/curated types so mimetypes.guess_type also improves
 # for ext, (mt, _kind) in {**SPECIAL_EXT_MIME, **{k: v[0] for k, v in EXT_MIME_KIND.items()}}.items():

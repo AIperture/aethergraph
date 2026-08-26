@@ -13,6 +13,8 @@ from aethergraph.contracts.integration import (
     ArtifactAvailablePayload,
     InteractionOption,
     InteractionRequestedPayload,
+    MessageAction,
+    MessageAttachmentRef,
     MessageCompletedPayload,
     MessageDeltaPayload,
     MessageStartedPayload,
@@ -65,7 +67,7 @@ class SemanticEventEmitter:
             emitter = SemanticEventEmitter(
                 deployment_id="deployment-1",
                 store=store,
-                semantic_event_protocol_version="aethergraph.semantic-event/v2",
+                semantic_event_protocol_version="aethergraph.semantic-event/v3",
             )
             ```
 
@@ -302,36 +304,47 @@ class SemanticEventEmitter:
                         ),
                     ),
                 )
-            artifact_ids = self._artifact_ids(event)
-            if event.file is not None and not artifact_ids:
-                return (
-                    (
-                        SemanticEventKind.STRUCTURED_OUTPUT,
-                        StructuredOutputPayload(
-                            output_name="channel.attachment",
-                            value={
-                                "text": event.text,
-                                "file": self._json_file(event.file),
-                            },
-                        ),
-                    ),
+            attachments = self._attachments(event)
+            actions = tuple(
+                MessageAction(
+                    kind=action.kind,
+                    label=action.label,
+                    value=action.value,
+                    href=action.href,
+                    style=action.style,
                 )
+                for action in (event.actions or [])
+            )
             completed = (
                 (
                     SemanticEventKind.MESSAGE_COMPLETED,
                     MessageCompletedPayload(
                         message_id=message_id,
                         text=event.text or "",
-                        artifact_ids=artifact_ids,
+                        attachments=tuple(
+                            MessageAttachmentRef(
+                                artifact_id=self._required(
+                                    item.get("artifact_id"), "attachment artifact_id"
+                                ),
+                                presentation=str(item.get("presentation") or "auto"),
+                                title=str(item.get("title") or ""),
+                                alt_text=str(item.get("alt_text") or ""),
+                            )
+                            for item in attachments
+                        ),
+                        actions=actions,
                     ),
                 ),
             )
-            if not artifact_ids:
+            if not attachments:
                 return completed
             return (
-                (
-                    SemanticEventKind.ARTIFACT_AVAILABLE,
-                    self._artifact_available(event, artifact_ids[0]),
+                *(
+                    (
+                        SemanticEventKind.ARTIFACT_AVAILABLE,
+                        self._artifact_available(item),
+                    )
+                    for item in attachments
                 ),
                 *completed,
             )
@@ -436,7 +449,7 @@ class SemanticEventEmitter:
                 payload = ToolActivityPayload(**payload_values, error=error)
             except Exception as exc:
                 raise SemanticDeliveryError(
-                    "Invalid structured Tool activity for semantic-event/v2."
+                    "Invalid structured Tool activity for semantic-event/v3."
                 ) from exc
             return (
                 (
@@ -444,7 +457,7 @@ class SemanticEventEmitter:
                     payload,
                 ),
             )
-        if event.type in {"file.upload", "link.buttons", "session.waiting"}:
+        if event.type in {"file.upload", "session.waiting"}:
             return (
                 (
                     SemanticEventKind.STRUCTURED_OUTPUT,
@@ -469,17 +482,24 @@ class SemanticEventEmitter:
         raise SemanticDeliveryError(f"Unsupported Channel event type: {event.type}")
 
     @staticmethod
-    def _artifact_ids(event: OutEvent) -> tuple[str, ...]:
-        value = (event.file or {}).get("artifact_id") or (event.file or {}).get("id")
-        return (str(value),) if value else ()
+    def _attachments(event: OutEvent) -> tuple[dict[str, Any], ...]:
+        if event.attachments is not None:
+            return tuple(event.attachments)
+        if event.file is None:
+            return ()
+        value = event.file.get("artifact_id") or event.file.get("id")
+        if not value:
+            raise SemanticDeliveryError(
+                "Semantic assistant attachments must reference canonical artifacts."
+            )
+        return (event.file,)
 
     @classmethod
     def _artifact_available(
         cls,
-        event: OutEvent,
-        artifact_id: str,
+        value: dict[str, Any],
     ) -> ArtifactAvailablePayload:
-        value = event.file or {}
+        artifact_id = cls._required(value.get("artifact_id") or value.get("id"), "artifact_id")
         filename = value.get("filename") or value.get("name") or artifact_id
         content_type = (
             value.get("content_type") or value.get("mimetype") or "application/octet-stream"
@@ -580,9 +600,23 @@ class SemanticEventChannelAdapter:
             There is no alternate delivery path if persistence or projection fails.
         """
         persisted = await self.emitter.emit(event)
+        event_cursors = [item.cursor for item in persisted]
         if self.downstream is not None:
-            return await self.downstream.send(event)
-        return {"event_cursor": persisted[-1].cursor if persisted else None}
+            downstream = await self.downstream.send(event)
+            downstream_values = dict(downstream or {})
+            correlator = downstream_values.get("correlator")
+            provider_delivery_ids = []
+            if correlator is not None and getattr(correlator, "message", None):
+                provider_delivery_ids.append(str(correlator.message))
+            return {
+                **downstream_values,
+                "event_cursors": event_cursors,
+                "provider_delivery_ids": provider_delivery_ids,
+            }
+        return {
+            "event_cursor": persisted[-1].cursor if persisted else None,
+            "event_cursors": event_cursors,
+        }
 
 
 class SemanticTurnMonitor:

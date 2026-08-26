@@ -31,6 +31,7 @@ from aethergraph.storage.contracts import (
     StorageOpenRequest,
     StorageProviderSelection,
     StorageScope,
+    StorageStartupError,
     UnknownStorageProviderError,
 )
 from aethergraph.storage.provider_registry import StorageProviderRegistry
@@ -219,8 +220,10 @@ async def test_external_missing_capability_and_health_failure_close_directly(
 ) -> None:
     composition = _composition(provider, required=required)
 
-    with pytest.raises(error):
+    with pytest.raises(StorageStartupError) as captured:
         await composition.open(_request(tmp_path))
+
+    assert isinstance(captured.value.__cause__, error)
 
     assert provider.open_calls == 1
     assert provider.bundles[0].resource.close_calls == 1

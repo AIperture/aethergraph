@@ -11,17 +11,16 @@ End-to-end local smoke test:
 
 import argparse
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
-from pathlib import Path
-
 
 # ---- CONFIG: adjust paths if needed ----
 
 ROOT = Path(__file__).resolve().parent.parent  # assuming script is in ./scripts/
 REPO_ROOT = ROOT.parent                        # monorepo root (aethergraph-suite)
-FRONTEND_DIR = REPO_ROOT / "aethergraph-frontend"
+FRONTEND_DIR = REPO_ROOT / "ag-ui"
 FRONTEND_DIST = FRONTEND_DIR / "dist"
 BACKEND_UI_STATIC = ROOT / "src" / "aethergraph" / "server" / "ui_static"
 DIST_DIR = ROOT / "dist"

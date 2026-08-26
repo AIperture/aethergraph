@@ -55,7 +55,7 @@ def contract_compatibility() -> ReleaseCompatibility:
         entrypoint_input_schema={
             "type": "object",
             "additionalProperties": False,
-            "required": ["message", "attachments", "session_id", "user_meta"],
+            "required": ["input", "session_id", "user_meta"],
         },
         entrypoint_output_schema={
             "type": "object",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+import json
 from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException
@@ -34,6 +36,30 @@ from tests._canonical_storage_fakes import make_session_store
 from tests._integration_fixtures import contract_compatibility
 
 _DIGEST = "a" * 64
+
+
+def _ingress_body(
+    *,
+    session_id: str,
+    idempotency_key: str,
+    text: str = "Hello",
+    resources: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": "aethergraph.endpoint-ingress-request/v2",
+        "session_id": session_id,
+        "idempotency_key": idempotency_key,
+        "input": {
+            "schema_version": "aethergraph.agent-input/v1",
+            "input_id": idempotency_key,
+            "kind": "message",
+            "type": "user.message",
+            "source": "urn:test:agent-endpoint",
+            "occurred_at": datetime.now(UTC).isoformat(),
+            "payload": {"text": text},
+            "resources": resources or [],
+        },
+    }
 
 
 def _manifest() -> HostManifest:
@@ -259,11 +285,10 @@ async def test_endpoint_session_and_ingress_use_manifest_route() -> None:
         session_id = created.json()["session_id"]
         accepted = await client.post(
             "/api/v1/agent-endpoints/support/ingress",
-            json={
-                "session_id": session_id,
-                "idempotency_key": "turn-1",
-                "text": "Hello",
-            },
+            json=_ingress_body(
+                session_id=session_id,
+                idempotency_key="turn-1",
+            ),
         )
 
     assert accepted.status_code == 200
@@ -293,8 +318,12 @@ async def test_endpoint_multipart_upload_reaches_canonical_ingress() -> None:
         accepted = await client.post(
             "/api/v1/agent-endpoints/support/ingress",
             data={
-                "session_id": created.json()["session_id"],
-                "idempotency_key": "turn-upload-1",
+                "input_json": json.dumps(
+                    _ingress_body(
+                        session_id=created.json()["session_id"],
+                        idempotency_key="turn-upload-1",
+                    )
+                ),
             },
             files={"files": ("brief.txt", b"exact contents", "text/plain")},
         )
@@ -325,9 +354,16 @@ async def test_endpoint_artifact_context_requires_only_canonical_identity() -> N
         accepted = await client.post(
             "/api/v1/agent-endpoints/support/ingress",
             files={
-                "session_id": (None, created.json()["session_id"]),
-                "idempotency_key": (None, "turn-context-1"),
-                "attachments_json": (None, '[{"artifact_id":"artifact-1"}]'),
+                "input_json": (
+                    None,
+                    json.dumps(
+                        _ingress_body(
+                            session_id=created.json()["session_id"],
+                            idempotency_key="turn-context-1",
+                            resources=[{"artifact_id": "artifact-1"}],
+                        )
+                    ),
+                ),
             },
         )
 
@@ -350,8 +386,12 @@ async def test_endpoint_rejects_unexpected_multipart_upload_field() -> None:
         response = await client.post(
             "/api/v1/agent-endpoints/support/ingress",
             data={
-                "session_id": created.json()["session_id"],
-                "idempotency_key": "turn-invalid-upload-1",
+                "input_json": json.dumps(
+                    _ingress_body(
+                        session_id=created.json()["session_id"],
+                        idempotency_key="turn-invalid-upload-1",
+                    )
+                ),
             },
             files={"file": ("brief.txt", b"contents", "text/plain")},
         )
@@ -381,7 +421,12 @@ async def test_endpoint_session_metadata_is_scoped_to_route() -> None:
         deleted = await client.delete(f"/api/v1/agent-endpoints/support/sessions/{session_id}")
 
     assert descriptor.status_code == 200
-    assert descriptor.json() == {"endpoint_id": "support", "entry_agent_id": "agent.support"}
+    assert descriptor.json() == {
+        "endpoint_id": "support",
+        "entry_agent_id": "agent.support",
+        "accepted_input_kinds": ["message", "event"],
+        "accepted_events": [],
+    }
     assert listed.status_code == 200
     assert [item["session_id"] for item in listed.json()["items"]] == [session_id]
     assert fetched.status_code == 200
@@ -430,9 +475,10 @@ async def test_endpoint_ingress_rejects_agent_selection_fields() -> None:
         response = await client.post(
             "/api/v1/agent-endpoints/support/ingress",
             json={
-                "session_id": created.json()["session_id"],
-                "idempotency_key": "turn-1",
-                "text": "Hello",
+                **_ingress_body(
+                    session_id=created.json()["session_id"],
+                    idempotency_key="turn-1",
+                ),
                 "agent_id": "agent.other",
             },
         )

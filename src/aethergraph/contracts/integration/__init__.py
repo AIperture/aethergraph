@@ -1,9 +1,13 @@
 """Public transport-neutral integration contracts."""
 
 from .models import (
+    AcceptedEventContract,
+    AgentInputResource,
+    AgentInputV1,
     ArtifactAvailablePayload,
     ExternalIdentity,
     ExternalSessionBinding,
+    HostDiagnostic,
     HostManifest,
     IngressAttachment,
     IngressChoice,
@@ -18,6 +22,8 @@ from .models import (
     InteractionOption,
     InteractionRequestedPayload,
     InteractionResolvedPayload,
+    MessageAction,
+    MessageAttachmentRef,
     MessageCompletedPayload,
     MessageDeltaPayload,
     MessageStartedPayload,
@@ -36,20 +42,35 @@ from .models import (
     TurnOutcomePayload,
     WarningRaisedPayload,
 )
+from .semantic_event_codec import (
+    DecodedSemanticEvent,
+    SemanticEventDecodeError,
+    SemanticEventDecodeErrorCode,
+    decode_semantic_event,
+)
 from .versions import (
+    HOST_DIAGNOSTIC_SCHEMA_VERSION,
     HOST_MANIFEST_SCHEMA_VERSION,
     HOST_READY_PROTOCOL_VERSION,
     INGRESS_PROTOCOL_VERSION,
     INTEGRATION_CAPABILITIES_SCHEMA_VERSION,
     INTEGRATION_ROUTE_SCHEMA_VERSION,
     RELEASE_COMPATIBILITY_SCHEMA_VERSION,
+    SEMANTIC_EVENT_CODEC_REVISION,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
+    SEMANTIC_EVENT_READ_VERSIONS,
 )
 
 __all__ = [
+    "AcceptedEventContract",
+    "AgentInputResource",
+    "AgentInputV1",
     "ArtifactAvailablePayload",
+    "DecodedSemanticEvent",
     "ExternalIdentity",
     "ExternalSessionBinding",
+    "HostDiagnostic",
+    "HOST_DIAGNOSTIC_SCHEMA_VERSION",
     "HostManifest",
     "HOST_MANIFEST_SCHEMA_VERSION",
     "HOST_READY_PROTOCOL_VERSION",
@@ -69,6 +90,8 @@ __all__ = [
     "InteractionOption",
     "InteractionRequestedPayload",
     "InteractionResolvedPayload",
+    "MessageAction",
+    "MessageAttachmentRef",
     "MessageCompletedPayload",
     "MessageDeltaPayload",
     "MessageStartedPayload",
@@ -79,8 +102,12 @@ __all__ = [
     "ReleaseCompatibility",
     "ReleaseDependency",
     "RELEASE_COMPATIBILITY_SCHEMA_VERSION",
+    "SEMANTIC_EVENT_CODEC_REVISION",
     "SEMANTIC_EVENT_PROTOCOL_VERSION",
+    "SEMANTIC_EVENT_READ_VERSIONS",
     "SemanticEvent",
+    "SemanticEventDecodeError",
+    "SemanticEventDecodeErrorCode",
     "SemanticEventKind",
     "SemanticEventProtocolVersion",
     "StructuredOutputPayload",
@@ -88,4 +115,5 @@ __all__ = [
     "ToolErrorPayload",
     "TurnOutcomePayload",
     "WarningRaisedPayload",
+    "decode_semantic_event",
 ]

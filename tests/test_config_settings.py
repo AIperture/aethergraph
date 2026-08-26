@@ -67,6 +67,10 @@ def test_embeddings_are_opt_in_and_support_explicit_environment_enablement(
     assert settings.embed.enabled is True
 
 
+def test_fresh_image_generation_settings_use_current_openai_model() -> None:
+    assert AppSettings().image_generation.default.model == "gpt-image-2"
+
+
 def test_replace_dotenv_removes_stale_rows(tmp_path: Path) -> None:
     target = tmp_path / ".env"
     target.write_text("STALE=value\nKEEP=old\n", encoding="utf-8")
@@ -130,7 +134,7 @@ def test_operation_profile_environment_writers_round_trip_independently(
             {
                 "default": ImageGenerationProfileSettings(
                     provider="openai",
-                    model="gpt-image-1",
+                    model="gpt-image-2",
                     endpoint_id="openai_images",
                 ),
                 "design": ImageGenerationProfileSettings(

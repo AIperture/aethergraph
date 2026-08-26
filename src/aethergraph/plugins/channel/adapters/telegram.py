@@ -4,7 +4,7 @@ import os
 
 import httpx
 
-from aethergraph.contracts.services.channel import ChannelAdapter, OutEvent
+from aethergraph.contracts.services.channel import Button, ChannelAdapter, OutEvent
 from aethergraph.services.continuations.continuation import Correlator
 
 
@@ -167,6 +167,12 @@ class TelegramChannelAdapter(ChannelAdapter):
                 )
             }
 
+        if event.attachments:
+            raise RuntimeError(
+                "Telegram delivery of artifact-backed Channel attachments requires an "
+                "artifact content projector."
+            )
+
         # Streaming & upsert (editMessageText)
         if (
             event.type
@@ -177,6 +183,7 @@ class TelegramChannelAdapter(ChannelAdapter):
                 "agent.message.update",
             )
             and event.upsert_key
+            and not event.actions
         ):
             key = (event.channel, event.upsert_key)
             if key not in self._msg_id_cache:
@@ -195,8 +202,16 @@ class TelegramChannelAdapter(ChannelAdapter):
             return None
 
         # Buttons / approvals
-        if event.type in ("session.need_approval", "link.buttons"):
-            buttons = getattr(event, "buttons", None) or []
+        if event.type == "session.need_approval" or event.actions:
+            buttons = getattr(event, "buttons", None) or [
+                Button(
+                    label=action.label,
+                    value=action.value or None,
+                    url=action.href or None,
+                    style=action.style,
+                )
+                for action in (event.actions or [])
+            ]
             if not buttons:
                 opts = (event.meta or {}).get("choices") or (event.meta or {}).get(
                     "options", ["Approve", "Reject"]
@@ -216,9 +231,9 @@ class TelegramChannelAdapter(ChannelAdapter):
                         "B",
                         (),
                         {
-                            "label": opts[-1].get("label")
-                            if isinstance(opts[-1], dict)
-                            else opts[-1],
+                            "label": (
+                                opts[-1].get("label") if isinstance(opts[-1], dict) else opts[-1]
+                            ),
                             "value": opts[-1].get("id") if isinstance(opts[-1], dict) else opts[-1],
                             "style": None,
                             "url": None,

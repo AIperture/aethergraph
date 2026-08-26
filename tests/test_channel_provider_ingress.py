@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -102,7 +103,12 @@ async def test_slack_message_translates_to_canonical_ingress() -> None:
     assert envelope.external_identity.conversation_id == "team/T1:chan/C1"
     assert envelope.external_identity.thread_id == "100.1"
     assert envelope.external_identity.user_id == "U1"
-    assert envelope.text == "hello from Slack"
+    assert envelope.input.kind == "message"
+    assert envelope.input.type == "user.message"
+    assert envelope.input.source == "urn:slack:team:T1"
+    assert envelope.input.subject == "C1"
+    assert envelope.input.payload == {"text": "hello from Slack"}
+    assert envelope.input.occurred_at == datetime.fromtimestamp(100.1, UTC)
     assert envelope.origin_address.channel_key == "slack:team/T1:chan/C1:thread/100.1"
 
 
@@ -124,8 +130,46 @@ async def test_telegram_message_translates_to_canonical_ingress() -> None:
     assert envelope.external_identity.tenant_id == "telegram"
     assert envelope.external_identity.conversation_id == "chat/99"
     assert envelope.external_identity.user_id == "42"
-    assert envelope.text == "hello from Telegram"
+    assert envelope.input.kind == "message"
+    assert envelope.input.type == "user.message"
+    assert envelope.input.source == "urn:telegram:bot"
+    assert envelope.input.subject == "99"
+    assert envelope.input.payload == {"text": "hello from Telegram"}
+    assert envelope.input.occurred_at == datetime.fromtimestamp(10, UTC)
     assert envelope.origin_address.channel_key == "tg:chat/99"
+
+
+@pytest.mark.asyncio
+async def test_provider_messages_fall_back_to_receipt_time_for_invalid_timestamps() -> None:
+    """Verify malformed provider timestamps use the canonical receipt-time fallback."""
+
+    slack_container = _Container()
+    slack_payload = _slack_message_payload()
+    slack_payload["event"]["ts"] = "not-a-timestamp"
+    telegram_container = _Container()
+    telegram_payload = _telegram_message_payload()
+    telegram_payload["message"]["date"] = "not-a-timestamp"
+
+    before = datetime.now(UTC)
+    await slack_utils.handle_slack_events_common(
+        slack_container,
+        _slack_settings(),
+        slack_payload,
+    )
+    await telegram_utils._process_update(
+        telegram_container,
+        telegram_payload,
+        token="",
+        integration_id="telegram-main",
+    )
+    after = datetime.now(UTC)
+
+    slack_occurred_at = slack_container.integration_ingress.calls[0]["envelope"].input.occurred_at
+    telegram_occurred_at = telegram_container.integration_ingress.calls[0][
+        "envelope"
+    ].input.occurred_at
+    assert before <= slack_occurred_at <= after
+    assert before <= telegram_occurred_at <= after
 
 
 @pytest.mark.asyncio
@@ -190,8 +234,13 @@ async def test_slack_callback_submits_exact_public_interaction() -> None:
     )
 
     envelope = container.integration_ingress.calls[0]["envelope"]
-    assert envelope.choice.interaction_id == "interaction-public-1"
-    assert envelope.choice.option_ids == ("ship",)
+    assert envelope.input.kind == "message"
+    assert envelope.input.type == "interaction.response"
+    assert envelope.input.payload == {
+        "interaction_id": "interaction-public-1",
+        "option_ids": ["ship"],
+    }
+    assert envelope.input.occurred_at == datetime.fromtimestamp(100.4, UTC)
     assert "token" not in json.dumps(envelope.model_dump(mode="json"))
 
 
@@ -224,8 +273,12 @@ async def test_telegram_callback_submits_exact_public_interaction() -> None:
 
     envelope = container.integration_ingress.calls[0]["envelope"]
     assert acknowledgments == ["answerCallbackQuery"]
-    assert envelope.choice.interaction_id == "interaction-public-2"
-    assert envelope.choice.option_ids == ("2",)
+    assert envelope.input.kind == "message"
+    assert envelope.input.type == "interaction.response"
+    assert envelope.input.payload == {
+        "interaction_id": "interaction-public-2",
+        "option_ids": ["2"],
+    }
 
 
 @pytest.mark.asyncio
@@ -465,7 +518,7 @@ async def test_slack_buttons_carry_choice_and_public_interaction_id() -> None:
     adapter._first_ts_by_chan = {}
     await adapter.send(
         OutEvent(
-            type="link.buttons",
+            type="session.need_approval",
             channel="slack:team/T1:chan/C1:thread/100.1",
             text="Choose",
             buttons=[Button(label="Ship It", value="ship")],
@@ -494,7 +547,7 @@ async def test_telegram_buttons_keep_compact_public_interaction_id() -> None:
     adapter._api = _api
     await adapter.send(
         OutEvent(
-            type="link.buttons",
+            type="session.need_approval",
             channel="tg:chat/99",
             text="Choose",
             buttons=[

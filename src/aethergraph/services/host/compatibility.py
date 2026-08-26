@@ -19,7 +19,7 @@ HOST_SERVICES = frozenset(
 ENTRYPOINT_INPUT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["message", "attachments", "session_id", "user_meta"],
+    "required": ["input", "session_id", "user_meta"],
 }
 ENTRYPOINT_OUTPUT_SCHEMA = {
     "type": "object",
@@ -103,6 +103,7 @@ def build_release_compatibility(
         logical_output_requirements=compiled.logical_output_requirements,
         entrypoint_input_schema=ENTRYPOINT_INPUT_SCHEMA,
         entrypoint_output_schema=ENTRYPOINT_OUTPUT_SCHEMA,
+        accepted_events=compiled.accepted_events,
         compiled_manifest_sha256=sha256(manifest_path.read_bytes()).hexdigest(),
         provenance={
             "build_id": compiled.build_id,

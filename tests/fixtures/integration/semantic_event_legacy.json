@@ -1,0 +1,72 @@
+{
+  "events": [
+    {
+      "schema_version": "aethergraph.semantic-event/v1",
+      "event_id": "legacy_message",
+      "deployment_id": "deployment_fixture",
+      "session_id": "session_fixture",
+      "turn_id": "turn_fixture",
+      "sequence": 1,
+      "producer": "agent.fixture",
+      "timestamp": "2026-08-03T12:00:00Z",
+      "kind": "message.completed",
+      "payload": {
+        "message_id": "message_fixture",
+        "text": "Historical reply",
+        "artifact_ids": ["artifact_fixture"]
+      },
+      "extensions": {}
+    },
+    {
+      "schema_version": "aethergraph.semantic-event/v1",
+      "event_id": "legacy_tool_failure",
+      "deployment_id": "deployment_fixture",
+      "session_id": "session_fixture",
+      "turn_id": "turn_fixture",
+      "sequence": 2,
+      "producer": "agent.fixture",
+      "timestamp": "2026-08-03T12:00:01Z",
+      "kind": "tool.activity",
+      "payload": {
+        "tool_call_id": "tool_call_fixture",
+        "tool_name": "historical_tool",
+        "status": "failed",
+        "message": "Historical Tool failure"
+      },
+      "extensions": {}
+    },
+    {
+      "schema_version": "aethergraph.semantic-event/v1",
+      "event_id": "legacy_turn_completed",
+      "deployment_id": "deployment_fixture",
+      "session_id": "session_fixture",
+      "turn_id": "turn_fixture",
+      "sequence": 3,
+      "producer": "agent.fixture",
+      "timestamp": "2026-08-03T12:00:02Z",
+      "kind": "turn.completed",
+      "payload": {"result_available": true},
+      "extensions": {}
+    },
+    {
+      "schema_version": "aethergraph.semantic-event/v2",
+      "event_id": "legacy_input",
+      "deployment_id": "deployment_fixture",
+      "session_id": "session_fixture",
+      "turn_id": "turn_fixture",
+      "sequence": 4,
+      "producer": "agent.fixture",
+      "timestamp": "2026-08-03T12:00:03Z",
+      "kind": "input.accepted",
+      "payload": {
+        "input_id": "input_fixture",
+        "input_payload": {},
+        "text": "Continue",
+        "artifacts": [],
+        "interaction_id": null,
+        "option_ids": []
+      },
+      "extensions": {}
+    }
+  ]
+}

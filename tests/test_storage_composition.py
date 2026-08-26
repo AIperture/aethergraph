@@ -23,6 +23,7 @@ from aethergraph.storage.contracts import (
     StorageProvider,
     StorageProviderSelection,
     StorageScope,
+    StorageStartupError,
     UnknownStorageProviderError,
 )
 from aethergraph.storage.provider_registry import StorageProviderRegistry
@@ -128,7 +129,14 @@ def test_provider_construction_is_synchronous_while_bundle_lifecycle_is_async() 
 
 
 def test_two_phase_composition_public_docstrings_follow_required_format() -> None:
-    for name in ("prepare", "start", "open", "health", "close"):
+    for name in (
+        "startup_diagnostic",
+        "prepare",
+        "start",
+        "open",
+        "health",
+        "close",
+    ):
         docstring = inspect.getdoc(getattr(StorageComposition, name)) or ""
         assert docstring.index("Intro:") < docstring.index("Examples:")
         assert docstring.index("Examples:") < docstring.index("Args:")
@@ -220,13 +228,18 @@ async def test_composition_closes_partial_bundle_on_every_post_open_failure(
 ) -> None:
     composition, provider = _composition(bundle)
 
-    with pytest.raises(error):
+    with pytest.raises(StorageStartupError) as captured:
         await composition.open(_request(tmp_path))
+
+    assert isinstance(captured.value.__cause__, error)
+    assert captured.value.diagnostic.workspace_root == tmp_path.resolve()
+    assert captured.value.diagnostic.provider_name == "company.external"
 
     assert provider.open_calls == 1
     assert bundle.close_calls == 1
-    with pytest.raises(StorageHealthError, match="already closed"):
+    with pytest.raises(StorageStartupError) as repeated:
         await composition.open(_request(tmp_path))
+    assert repeated.value.diagnostic == captured.value.diagnostic
     assert provider.open_calls == 1
 
 
@@ -270,23 +283,61 @@ async def test_failed_startup_cleanup_retains_exact_bundle_for_close_retry(
     composition, provider = _composition(bundle)
     composition.prepare(_request(tmp_path))
 
-    with pytest.raises(StorageHealthError, match="cleanup must be retried"):
+    with pytest.raises(StorageStartupError) as captured:
         await composition.start()
 
     assert provider.open_calls == 1
     assert bundle.health_calls == 1
     assert bundle.close_calls == 1
-    with pytest.raises(StorageHealthError, match="startup already failed"):
+    diagnostic = captured.value.diagnostic
+    assert diagnostic.stage == "health_check"
+    assert diagnostic.exception_type == "StorageHealthError"
+    assert diagnostic.cleanup_exception_type == "StorageHealthError"
+    assert diagnostic.cleanup_message == "durable flush failed"
+    assert composition.startup_diagnostic == diagnostic
+    concurrent = await asyncio.gather(
+        composition.start(),
+        composition.start(),
+        return_exceptions=True,
+    )
+    assert all(
+        isinstance(error, StorageStartupError)
+        and error.diagnostic == diagnostic
+        for error in concurrent
+    )
+    with pytest.raises(StorageStartupError) as prepare_again:
         composition.prepare(_request(tmp_path))
-    with pytest.raises(StorageHealthError, match="startup already failed"):
+    with pytest.raises(StorageStartupError) as start_again:
         await composition.start()
+    assert prepare_again.value.diagnostic == diagnostic
+    assert start_again.value.diagnostic == diagnostic
     assert provider.open_calls == 1
 
     await composition.close()
 
     assert bundle.close_calls == 2
-    with pytest.raises(StorageHealthError, match="no active bundle"):
+    with pytest.raises(StorageStartupError) as health_after_close:
         await composition.health()
+    assert health_after_close.value.diagnostic == diagnostic
+
+
+@pytest.mark.asyncio
+async def test_failed_composition_diagnostic_does_not_poison_fresh_data_root(
+    tmp_path: Path,
+) -> None:
+    failed, _provider = _composition(_Bundle(ready=False))
+    with pytest.raises(StorageStartupError) as captured:
+        await failed.open(_request(tmp_path / "failed"))
+
+    fresh, fresh_provider = _composition(_Bundle(ready=True))
+    fresh_request = _request(tmp_path / "fresh")
+    ready = await fresh.open(fresh_request)
+
+    assert captured.value.diagnostic.workspace_root == (tmp_path / "failed").resolve()
+    assert failed.startup_diagnostic == captured.value.diagnostic
+    assert fresh.startup_diagnostic is None
+    assert ready is fresh_provider.bundle
+    await fresh.close()
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,12 @@ from aethergraph.services.integration import (
     install_integration_ingress,
 )
 from aethergraph.services.integration.event_contracts import SemanticEventStore
-from aethergraph.storage.contracts import PageRequest, RuntimeOutputQuery, StorageScope
+from aethergraph.storage.contracts import (
+    PageRequest,
+    RuntimeOutputQuery,
+    StorageScope,
+    StorageStartupDiagnostic,
+)
 
 from .contracts import (
     RuntimeArtifactRecord,
@@ -141,6 +146,75 @@ class EmbeddedRuntime:
         self._readiness_lock = asyncio.Lock()
         self._ready = False
         self._closed = False
+
+    async def start(self) -> None:
+        """Establish storage readiness before publishing this runtime to callers.
+
+        The explicit barrier runs the same idempotent readiness path used by every
+        runtime operation, allowing an embedding Host to keep a failed runtime private.
+
+        Examples:
+            Start after construction:
+            ```python
+            runtime = open_embedded_runtime(request)
+            await runtime.start()
+            ```
+
+            Reuse established readiness:
+            ```python
+            await runtime.start()
+            await runtime.start()
+            ```
+
+        Args:
+            None.
+
+        Returns:
+            None: The selected storage composition is ready.
+
+        Notes:
+            Startup failure remains terminal for this runtime instance. The embedding
+            Host may close it and construct a fresh instance from its owned request.
+        """
+
+        await self._ensure_ready()
+
+    @property
+    def storage_startup_diagnostic(self) -> StorageStartupDiagnostic | None:
+        """Return immutable storage startup evidence without exposing the container.
+
+        Intro:
+            Embedding Hosts can surface a failed provider, data-root, stage, and
+            exception identity while the storage composition remains private.
+
+        Examples:
+            Inspect a healthy runtime:
+                ```python
+                assert runtime.storage_startup_diagnostic is None
+                ```
+
+            Inspect a failed runtime before retirement:
+                ```python
+                diagnostic = runtime.storage_startup_diagnostic
+                assert diagnostic is not None and diagnostic.diagnostic_id
+                ```
+
+        Args:
+            None.
+
+        Returns:
+            StorageStartupDiagnostic | None: Stable lower-boundary diagnostic.
+
+        Notes:
+            The returned object is frozen and contains no provider configuration.
+        """
+
+        composition = getattr(self._container, "storage_composition", None)
+        return (
+            composition.startup_diagnostic
+            if composition is not None
+            else None
+        )
 
     @contextmanager
     def activate(self) -> Iterator[None]:
@@ -1180,29 +1254,32 @@ class EmbeddedRuntime:
         Notes:
             The operation is idempotent and never closes resources owned by another runtime.
         """
-        if self._closed:
-            return
-        failures: list[str] = []
-        for run_id in tuple(self._active_run_ids):
+        async with self._readiness_lock:
+            if self._closed:
+                return
+            failures: list[str] = []
+            for run_id in tuple(self._active_run_ids):
+                try:
+                    await self._require_run_manager().cancel_run(run_id)
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(f"cancel {run_id}: {exc}")
+            self._active_run_ids.clear()
+            if self._output_capture is not None:
+                try:
+                    await self._output_capture.close()
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(f"runtime output: {exc}")
+                self._output_capture = None
+            storage_closed = False
             try:
-                await self._require_run_manager().cancel_run(run_id)
+                await self._container.close_storage()
+                storage_closed = True
             except Exception as exc:  # noqa: BLE001
-                failures.append(f"cancel {run_id}: {exc}")
-        self._active_run_ids.clear()
-        if self._output_capture is not None:
-            try:
-                await self._output_capture.close()
-            except Exception as exc:  # noqa: BLE001
-                failures.append(f"runtime output: {exc}")
-            self._output_capture = None
-        try:
-            await self._container.close_storage()
-        except Exception as exc:  # noqa: BLE001
-            failures.append(f"storage: {exc}")
-        self._ready = False
-        self._closed = True
-        if failures:
-            raise RuntimeError("Embedded runtime close failed: " + "; ".join(failures))
+                failures.append(f"storage: {exc}")
+            self._ready = False
+            self._closed = storage_closed
+            if failures:
+                raise RuntimeError("Embedded runtime close failed: " + "; ".join(failures))
 
     def _ensure_open(self) -> None:
         if self._closed:

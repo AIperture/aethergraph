@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .diagnostics import StorageStartupDiagnostic
+
 
 class StorageError(RuntimeError):
     """Base class for failures owned by the storage-provider boundary."""
@@ -73,6 +75,44 @@ class StorageFormatError(StorageError):
 
 class StorageHealthError(StorageError):
     """A provider failed its required readiness or health check."""
+
+
+class StorageStartupError(StorageHealthError):
+    """A canonical storage startup failed with immutable diagnostic evidence."""
+
+    def __init__(self, diagnostic: StorageStartupDiagnostic) -> None:
+        """Bind one immutable startup diagnostic to a typed storage failure.
+
+        Intro:
+            The exception keeps the same diagnostic available across cleanup and
+            follow-on lifecycle calls while preserving the primary failure as cause.
+
+        Examples:
+            Raise a typed startup failure:
+                ```python
+                raise StorageStartupError(diagnostic)
+                ```
+
+            Read stable evidence at a Host boundary:
+                ```python
+                assert error.diagnostic.diagnostic_id
+                ```
+
+        Args:
+            diagnostic: Immutable primary and optional cleanup failure evidence.
+
+        Returns:
+            None: The exception instance is initialized.
+
+        Notes:
+            Provider configuration and credentials must never enter the diagnostic.
+        """
+
+        self.diagnostic = diagnostic
+        super().__init__(
+            f"Storage startup {diagnostic.diagnostic_id} failed during "
+            f"{diagnostic.stage}: {diagnostic.message}"
+        )
 
 
 class StorageTimeoutError(StorageError, TimeoutError):

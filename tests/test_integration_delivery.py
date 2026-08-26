@@ -16,7 +16,7 @@ from aethergraph.contracts.integration import (
     TurnOutcomePayload,
     WarningRaisedPayload,
 )
-from aethergraph.contracts.services.channel import Button, OutEvent
+from aethergraph.contracts.services.channel import Button, ChannelAction, OutEvent
 from aethergraph.core.runtime.run_types import RunStatus
 from aethergraph.services.channel.channel_bus import ChannelBus
 from aethergraph.services.continuations.continuation import Continuation
@@ -71,8 +71,8 @@ async def test_semantic_adapter_persists_ordered_message_and_interaction(tmp_pat
         deployment_id="deployment-1",
         session_id="session-1",
     )
-    assert first == {"event_cursor": 1}
-    assert second == {"event_cursor": 2}
+    assert first == {"event_cursor": 1, "event_cursors": [1]}
+    assert second == {"event_cursor": 2, "event_cursors": [2]}
     assert [item.event.sequence for item in history] == [0, 1]
     assert [item.event.kind for item in history] == [
         SemanticEventKind.MESSAGE_COMPLETED,
@@ -202,14 +202,14 @@ async def test_semantic_adapter_preserves_authored_buttons(tmp_path) -> None:
 
     await adapter.send(
         OutEvent(
-            type="link.buttons",
+            type="agent.message",
             channel="endpoint:sessions/public-1",
             text="Choose",
-            buttons=[
-                Button(
+            actions=[
+                ChannelAction(
+                    kind="external_link",
                     label="Open report",
-                    value="report",
-                    url="https://example.test/report",
+                    href="https://example.test/report",
                     style="primary",
                 )
             ],
@@ -223,56 +223,33 @@ async def test_semantic_adapter_preserves_authored_buttons(tmp_path) -> None:
             session_id="session-1",
         )
     )[0].event.payload
-    assert isinstance(payload, StructuredOutputPayload)
-    assert payload.output_name == "channel.link.buttons"
-    assert payload.value == {
-        "text": "Choose",
-        "buttons": [
-            {
-                "label": "Open report",
-                "value": "report",
-                "url": "https://example.test/report",
-                "style": "primary",
-            }
-        ],
-        "file": None,
-    }
+    assert isinstance(payload, MessageCompletedPayload)
+    assert payload.text == "Choose"
+    assert len(payload.actions) == 1
+    assert payload.actions[0].kind == "external_link"
+    assert payload.actions[0].href == "https://example.test/report"
     await event_log.close()
 
 
 @pytest.mark.asyncio
-async def test_semantic_adapter_projects_remote_file_as_structured_output(tmp_path) -> None:
+async def test_semantic_adapter_rejects_url_only_assistant_file(tmp_path) -> None:
     event_log = make_semantic_event_store()
     store = event_log
     adapter = SemanticEventChannelAdapter(
         emitter=SemanticEventEmitter(deployment_id="deployment-1", store=store)
     )
 
-    await adapter.send(
-        OutEvent(
-            type="agent.message",
-            channel="endpoint:sessions/public-1",
-            text="Report",
-            file={"filename": "report.pdf", "url": "https://example.test/report.pdf"},
-            meta=_meta(),
+    with pytest.raises(SemanticDeliveryError, match="canonical artifacts"):
+        await adapter.send(
+            OutEvent(
+                type="agent.message",
+                channel="endpoint:sessions/public-1",
+                text="Report",
+                file={"filename": "report.pdf", "url": "https://example.test/report.pdf"},
+                meta=_meta(),
+            )
         )
-    )
-
-    payload = (
-        await store.list_session(
-            deployment_id="deployment-1",
-            session_id="session-1",
-        )
-    )[0].event.payload
-    assert isinstance(payload, StructuredOutputPayload)
-    assert payload.output_name == "channel.attachment"
-    assert payload.value == {
-        "text": "Report",
-        "file": {
-            "filename": "report.pdf",
-            "url": "https://example.test/report.pdf",
-        },
-    }
+    assert await store.list_session(deployment_id="deployment-1", session_id="session-1") == ()
     await event_log.close()
 
 
@@ -305,7 +282,7 @@ async def test_semantic_adapter_announces_artifact_before_referencing_message(
         deployment_id="deployment-1",
         session_id="session-1",
     )
-    assert result == {"event_cursor": 2}
+    assert result == {"event_cursor": 2, "event_cursors": [1, 2]}
     assert [item.event.kind for item in history] == [
         SemanticEventKind.ARTIFACT_AVAILABLE,
         SemanticEventKind.MESSAGE_COMPLETED,
@@ -318,7 +295,7 @@ async def test_semantic_adapter_announces_artifact_before_referencing_message(
     assert available.size_bytes == 67
     message = history[1].event.payload
     assert isinstance(message, MessageCompletedPayload)
-    assert message.artifact_ids == ("artifact-1",)
+    assert tuple(item.artifact_id for item in message.attachments) == ("artifact-1",)
     await event_log.close()
 
 
