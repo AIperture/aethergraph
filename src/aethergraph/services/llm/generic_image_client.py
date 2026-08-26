@@ -73,7 +73,7 @@ class GenericImageGenerationClient(ImageGenerationClientProtocol):
                 ```python
                 client = GenericImageGenerationClient(
                     provider="openai",
-                    model="gpt-image-1",
+                    model="gpt-image-2",
                     endpoint_id="openai_images",
                 )
                 ```

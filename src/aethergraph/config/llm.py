@@ -170,7 +170,7 @@ class EmbeddingSettings(BaseModel):
 
 class ImageGenerationProfileSettings(BaseModel):
     provider: Provider = "openai"
-    model: str = "gpt-image-1"
+    model: str = "gpt-image-2"
     endpoint_id: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = None
     timeout: float = 60.0

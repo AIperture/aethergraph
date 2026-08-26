@@ -269,7 +269,7 @@ class CanonicalMeteringService(MeteringService):
                 ```python
                 await service.record_image_generation(
                     provider="openai",
-                    model="gpt-image-1",
+                    model="gpt-image-2",
                     image_count=1,
                     input_tokens=4,
                     output_tokens=6,

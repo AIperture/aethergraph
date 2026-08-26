@@ -255,9 +255,9 @@ def encode_image_generation_profile_env(
             ```python
             rows = encode_image_generation_profile_env(
                 "default",
-                ImageGenerationProfileSettings(model="gpt-image-1"),
+                ImageGenerationProfileSettings(model="gpt-image-2"),
             )
-            assert rows["AETHERGRAPH_IMAGE_GENERATION__DEFAULT__MODEL"] == "gpt-image-1"
+            assert rows["AETHERGRAPH_IMAGE_GENERATION__DEFAULT__MODEL"] == "gpt-image-2"
             ```
 
         Encode a named profile:

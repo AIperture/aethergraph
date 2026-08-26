@@ -1,25 +1,69 @@
 {
   "schema_version": "aethergraph.model-catalog/v1",
-  "catalog_revision": 4,
+  "catalog_revision": 5,
   "entries": [
     {
-      "catalog_key": "openai/gpt-5-chat-tools/v4",
+      "catalog_key": "openai/current-mainline-chat-tools/v5",
       "provider_id": "openai",
       "operation": "chat",
       "endpoint_ids": ["openai_responses", "openai_chat_completions"],
-      "model_pattern": "(?:gpt-5(?:-2025-08-07)?|gpt-5-(?:mini|nano)(?:-2025-08-07)?|gpt-5\\.[456](?:-[a-z0-9.-]+)?)",
+      "model_pattern": "(?:chat-latest|(?:gpt-4o(?:-mini)?|gpt-4\\.1(?:-mini)?|gpt-5(?:-(?:mini|nano))?|gpt-5\\.(?:1|2)|gpt-5\\.4(?:-(?:mini|nano))?|gpt-5\\.5|gpt-5\\.6(?:-(?:sol|terra|luna))?)(?:-\\d{4}-\\d{2}-\\d{2})?)",
       "chat_tools": {
         "native_tool_calling": "supported",
         "tool_result_continuation": "supported",
         "parallel_tool_calls": "supported"
       },
       "sources": [
-        "https://developers.openai.com/api/docs/models/gpt-5-mini",
-        "https://developers.openai.com/api/docs/models/gpt-5-nano",
+        "https://developers.openai.com/api/docs/models/all",
+        "https://developers.openai.com/api/docs/models/chat-latest",
+        "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "https://developers.openai.com/api/docs/models/gpt-4.1",
         "https://developers.openai.com/api/docs/guides/function-calling"
       ],
-      "verified_at": "2026-08-13",
-      "catalog_revision": 4,
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/responses-only-chat-tools/v5",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses"],
+      "model_pattern": "(?:gpt-5-pro|gpt-5\\.(?:2|4|5)-pro|gpt-5\\.3-codex|o3-pro)(?:-\\d{4}-\\d{2}-\\d{2})?",
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-5.5-pro",
+        "https://developers.openai.com/api/docs/models/gpt-5.3-codex",
+        "https://developers.openai.com/api/docs/models/o3-pro",
+        "https://developers.openai.com/api/docs/guides/function-calling"
+      ],
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/o3-chat-tools/v5",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses", "openai_chat_completions"],
+      "model_pattern": "o3(?:-\\d{4}-\\d{2}-\\d{2})?",
+      "chat_tools": {
+        "native_tool_calling": "supported",
+        "tool_result_continuation": "supported",
+        "parallel_tool_calls": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/o3",
+        "https://developers.openai.com/api/docs/guides/function-calling"
+      ],
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
       "evidence_status": "verified",
       "priority": 100
     },
@@ -181,11 +225,30 @@
       "priority": 100
     },
     {
-      "catalog_key": "openai/current-structured-output/v2",
+      "catalog_key": "openai/gpt-5.4-pro-structured-output-unavailable/v5",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses"],
+      "model_pattern": "gpt-5\\.4-pro(?:-\\d{4}-\\d{2}-\\d{2})?",
+      "structured_output": {
+        "native_strict_schema": false,
+        "native_schema": false,
+        "json_object": false,
+        "prompt_json": true,
+        "capability_source": "openai_model_page/gpt-5.4-pro"
+      },
+      "sources": ["https://developers.openai.com/api/docs/models/gpt-5.4-pro"],
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "openai/current-structured-output/v5",
       "provider_id": "openai",
       "operation": "chat",
       "endpoint_ids": ["openai_responses", "openai_chat_completions"],
-      "model_pattern": "(?:gpt-4o.*|gpt-4\\.1.*|gpt-5.*|o1.*|o3.*|o4.*)",
+      "model_pattern": "(?:chat-latest|gpt-4o.*|gpt-4\\.1.*|gpt-5.*|o1.*|o3.*|o4.*)",
       "structured_output": {
         "native_strict_schema": true,
         "native_schema": true,
@@ -193,9 +256,12 @@
         "prompt_json": true,
         "capability_source": "ag_static/openai_responses_v1"
       },
-      "sources": ["https://developers.openai.com/api/docs/guides/structured-outputs"],
-      "verified_at": "2026-08-12",
-      "catalog_revision": 2,
+      "sources": [
+        "https://developers.openai.com/api/docs/models/chat-latest",
+        "https://developers.openai.com/api/docs/guides/structured-outputs"
+      ],
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
       "evidence_status": "verified",
       "priority": 100
     },
@@ -542,19 +608,58 @@
       "priority": 100
     },
     {
-      "catalog_key": "openai/gpt-image-current/v3",
+      "catalog_key": "openai/text-embedding-ada-002/v5",
+      "provider_id": "openai",
+      "operation": "embeddings",
+      "endpoint_ids": ["openai_embeddings"],
+      "model_id": "text-embedding-ada-002",
+      "embeddings": {
+        "text_embeddings": "supported",
+        "dimensions": "unsupported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/text-embedding-ada-002",
+        "https://developers.openai.com/api/reference/resources/embeddings/methods/create"
+      ],
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
+      "evidence_status": "verified",
+      "priority": 100
+    },
+    {
+      "catalog_key": "openai/gpt-image-2/v5",
       "provider_id": "openai",
       "operation": "image_generation",
       "endpoint_ids": ["openai_images"],
-      "model_pattern": "gpt-image-1(?:\\.5|-mini)?",
+      "model_pattern": "gpt-image-2(?:-\\d{4}-\\d{2}-\\d{2})?",
+      "image_generation": {
+        "text_to_image": "supported",
+        "image_editing": "supported",
+        "multiple_outputs": "supported"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/models/gpt-image-2",
+        "https://developers.openai.com/api/docs/guides/image-generation"
+      ],
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
+      "evidence_status": "verified",
+      "priority": 110
+    },
+    {
+      "catalog_key": "openai/gpt-image-1-legacy/v5",
+      "provider_id": "openai",
+      "operation": "image_generation",
+      "endpoint_ids": ["openai_images"],
+      "model_pattern": "gpt-image-1(?:\\.5|-mini)?(?:-\\d{4}-\\d{2}-\\d{2})?",
       "image_generation": {
         "text_to_image": "supported",
         "image_editing": "supported",
         "multiple_outputs": "supported"
       },
       "sources": ["https://developers.openai.com/api/docs/guides/image-generation"],
-      "verified_at": "2026-08-12",
-      "catalog_revision": 3,
+      "verified_at": "2026-08-25",
+      "catalog_revision": 5,
       "evidence_status": "verified",
       "priority": 100
     },
