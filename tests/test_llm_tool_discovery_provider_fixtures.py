@@ -6,8 +6,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from aethergraph.services.llm import (
-    ToolDiscoveryCapabilities,
-    ToolDiscoveryModeCapability,
+    resolve_tool_discovery_capabilities,
 )
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "llm_tool_discovery" / "provider_matrix.json"
@@ -32,9 +31,9 @@ def _record(provider: str) -> dict[str, Any]:
 def test_provider_matrix_has_only_exact_bounded_bindings() -> None:
     matrix = _matrix()
 
-    assert matrix["schema_version"] == "aethergraph.provider-discovery-fixture/v3"
+    assert matrix["schema_version"] == "aethergraph.provider-discovery-fixture/v4"
     assert matrix["capability_authority"] == "aethergraph.services.llm.catalog"
-    assert matrix["captured_at"] == "2026-08-26"
+    assert matrix["captured_at"] == "2026-08-27"
     records = matrix["records"]
     assert {row["binding"]["provider"] for row in records} == _EXPECTED_PROVIDERS
 
@@ -68,6 +67,7 @@ def test_provider_matrix_has_only_exact_bounded_bindings() -> None:
             assert mode["result_limit_behavior"] in {
                 "request_bound",
                 "provider_fixed",
+                "post_validated",
             }
             assert mode["protocol_version"]
             if mode["max_results"] is None:
@@ -81,35 +81,34 @@ def test_provider_matrix_has_only_exact_bounded_bindings() -> None:
         assert all(urlparse(source).hostname in _OFFICIAL_SOURCE_HOSTS for source in row["sources"])
 
 
-def test_bindable_fixture_modes_use_existing_capability_values() -> None:
+def test_fixture_native_modes_match_production_capability_authority() -> None:
     for row in _matrix()["records"]:
-        bindable_modes = tuple(
-            ToolDiscoveryModeCapability(
-                mode=mode["mode"],
-                replay_requirement=mode["replay_requirement"],
-                result_limit_behavior=mode["result_limit_behavior"],
-                max_results=mode["max_results"],
-                protocol_version=mode["protocol_version"],
-            )
-            for mode in row["modes"]
-            if mode["bindable"]
-        )
-        if not bindable_modes:
-            continue
-
         binding = row["binding"]
-        capability = ToolDiscoveryCapabilities(
-            provider=binding["provider"],
-            model=binding["model"],
-            endpoint_family=binding["endpoint_family"],
-            supported_modes=bindable_modes,
+        capability = resolve_tool_discovery_capabilities(
+            binding["provider"],
+            binding["model"],
+            binding["endpoint_family"],
         )
-
+        native_rows = {
+            mode["mode"]: mode for mode in row["modes"] if mode["mode"] != "engine_projected"
+        }
+        if not native_rows:
+            assert capability is None
+            continue
+        assert capability is not None
         assert capability.provider == binding["provider"]
         assert capability.model == binding["model"]
-        assert tuple(mode.mode for mode in capability.supported_modes) == tuple(
-            mode["mode"] for mode in row["modes"] if mode["bindable"]
-        )
+        actual_modes = {mode.mode: mode for mode in capability.supported_modes}
+        assert set(actual_modes) == {name for name, mode in native_rows.items() if mode["bindable"]}
+        for name, fixture_mode in native_rows.items():
+            actual = actual_modes.get(name)
+            assert (actual is not None) is fixture_mode["bindable"]
+            if actual is None:
+                continue
+            assert actual.replay_requirement == fixture_mode["replay_requirement"]
+            assert actual.result_limit_behavior == fixture_mode["result_limit_behavior"]
+            assert actual.max_results == fixture_mode["max_results"]
+            assert actual.protocol_version == fixture_mode["protocol_version"]
 
 
 def test_openai_and_azure_client_replay_preserves_order_and_call_identity() -> None:

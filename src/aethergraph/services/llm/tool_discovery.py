@@ -14,6 +14,11 @@ ToolExposure = Literal["immediate", "deferred"]
 ToolDiscoveryMode = Literal["native_hosted", "native_client", "engine_projected"]
 ToolDiscoverySource = Literal["engine", "provider_hosted", "provider_client"]
 ToolDiscoveryStatus = Literal["completed", "failed"]
+ToolTransportCheckpointPurpose = Literal[
+    "pending_discovery_result",
+    "pending_tool_outputs",
+    "consumed",
+]
 ToolReplayRequirement = Literal["none", "previous_response", "full_history"]
 ToolResultLimitBehavior = Literal[
     "request_bound",
@@ -399,6 +404,7 @@ class ToolTransportCheckpoint:
     contract_version: str
     turn_id: str
     integrity_digest: str
+    purpose: ToolTransportCheckpointPurpose = "pending_tool_outputs"
     expires_at: Literal["end_of_turn"] = "end_of_turn"
     opaque_payload: dict[str, JSONValue] | None = None
     durable_ref: str | None = None
@@ -469,6 +475,12 @@ class ToolTransportCheckpoint:
             raise ValueError("Checkpoint revision must be at least 1")
         if _DIGEST_PATTERN.fullmatch(str(self.integrity_digest or "")) is None:
             raise ValueError("Checkpoint integrity_digest must be lowercase SHA-256")
+        if self.purpose not in {
+            "pending_discovery_result",
+            "pending_tool_outputs",
+            "consumed",
+        }:
+            raise ValueError("Checkpoint purpose is invalid")
         if self.expires_at != "end_of_turn":
             raise ValueError("Checkpoint expiration must be end_of_turn")
         durable_ref = None
@@ -853,5 +865,6 @@ __all__ = [
     "ToolRepresentation",
     "ToolSelectionOwner",
     "ToolTransportCheckpoint",
+    "ToolTransportCheckpointPurpose",
     "resolve_tool_discovery_capabilities",
 ]

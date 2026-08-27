@@ -316,6 +316,7 @@ def _openai_like_checkpoint(
         contract_version="chat.completions.tool_results/v1",
         turn_id=str(request.turn_id or ""),
         integrity_digest=digest,
+        purpose="pending_tool_outputs",
         opaque_payload=payload,
     )
 

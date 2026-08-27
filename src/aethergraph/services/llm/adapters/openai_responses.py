@@ -343,6 +343,11 @@ def _openai_checkpoint(
         contract_version="responses.tool_search",
         turn_id=str(request.turn_id or ""),
         integrity_digest=digest,
+        purpose={
+            "pending_search": "pending_discovery_result",
+            "pending_tool_outputs": "pending_tool_outputs",
+            "consumed": "consumed",
+        }[state],
         opaque_payload=payload,
     )
 
@@ -401,6 +406,13 @@ def _openai_checkpoint_payload(
         "consumed",
     }:
         raise ValueError("OpenAI Tool checkpoint state is invalid")
+    expected_purpose = {
+        "pending_search": "pending_discovery_result",
+        "pending_tool_outputs": "pending_tool_outputs",
+        "consumed": "consumed",
+    }[payload["state"]]
+    if checkpoint.purpose != expected_purpose:
+        raise ValueError("OpenAI Tool checkpoint purpose does not match replay state")
     if payload["state"] == "pending_search" and (
         not str(payload.get("response_id") or "").strip()
         or not str(payload.get("call_id") or "").strip()
@@ -552,7 +564,7 @@ def _openai_tool_call_response(
                 raise LLMToolCallResponseError(
                     code="discovery_execution_unsupported",
                     message=(
-                        "OpenAI returned Tool search with unsupported execution " f"{execution!r}."
+                        f"OpenAI returned Tool search with unsupported execution {execution!r}."
                     ),
                 )
             if discovery is None or discovery.mode != expected_mode:
@@ -708,7 +720,7 @@ def _openai_tool_call_response(
             prompt_stable_message_count=prompt_stable_message_count,
             prompt_stable_prefix_digest=prompt_stable_prefix_digest,
         )
-    elif function_call_ids and provider == "openai" and tool_request.discovery is not None:
+    elif function_call_ids and str(tool_request.turn_id or "").strip():
         if not response_id:
             raise LLMToolCallResponseError(
                 code="tool_call_reference_missing",
@@ -721,6 +733,11 @@ def _openai_tool_call_response(
             state="pending_tool_outputs",
             provider=provider,
             pending_call_ids=function_call_ids,
+            response_output=(
+                [dict(item) for item in output_items if isinstance(item, dict)]
+                if provider == "azure"
+                else None
+            ),
             prompt_stable_message_count=prompt_stable_message_count,
             prompt_stable_prefix_digest=prompt_stable_prefix_digest,
         )
@@ -729,7 +746,7 @@ def _openai_tool_call_response(
             tool_request.transport_checkpoint,
             provider=provider,
         )
-        if prior_payload["state"] == "pending_search":
+        if prior_payload["state"] in {"pending_search", "pending_tool_outputs"}:
             checkpoint = _openai_checkpoint(
                 request=tool_request,
                 model=model,

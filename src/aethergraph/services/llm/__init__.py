@@ -154,6 +154,7 @@ from .tool_discovery import (
     ToolResultLimitBehavior,
     ToolSelectionOwner,
     ToolTransportCheckpoint,
+    ToolTransportCheckpointPurpose,
     resolve_tool_discovery_capabilities,
 )
 from .types import (
@@ -320,6 +321,7 @@ __all__ = [
     "ToolRepresentation",
     "ToolSelectionOwner",
     "ToolTransportCheckpoint",
+    "ToolTransportCheckpointPurpose",
     "UsageAvailability",
     "MultimodalInputPolicy",
     "get_endpoint_adapter",

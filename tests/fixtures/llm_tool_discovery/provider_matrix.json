@@ -1,7 +1,7 @@
 {
-  "schema_version": "aethergraph.provider-discovery-fixture/v3",
+  "schema_version": "aethergraph.provider-discovery-fixture/v4",
   "capability_authority": "aethergraph.services.llm.catalog",
-  "captured_at": "2026-08-26",
+  "captured_at": "2026-08-27",
   "records": [
     {
       "binding": {
@@ -24,11 +24,11 @@
         {
           "mode": "native_hosted",
           "replay_requirement": "none",
-          "result_limit_behavior": "provider_fixed",
-          "max_results": null,
+          "result_limit_behavior": "post_validated",
+          "max_results": 50,
           "protocol_version": "responses.tool_search",
-          "bindable": false,
-          "blocker": "provider_reference_limit_not_documented"
+          "bindable": true,
+          "limit_source": "aethergraph_post_validation"
         }
       ],
       "baseline": {

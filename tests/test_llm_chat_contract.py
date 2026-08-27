@@ -1703,6 +1703,7 @@ async def test_openai_compatible_tool_results_continue_with_integrity_bound_repl
     assert initial.continuation is not None
     assert initial.continuation.provider == provider
     assert initial.continuation.revision == 1
+    assert initial.continuation.purpose == "pending_tool_outputs"
 
     fake_http.payload = final_payload
     final = await client.generate(
@@ -1880,6 +1881,7 @@ async def test_openai_compatible_continuation_advances_multi_round_replay() -> N
 
     assert second.continuation is not None
     assert second.continuation.revision == 2
+    assert second.continuation.purpose == "pending_tool_outputs"
     assert second.calls[0].call_id == "call_2"
     assert fake_http.last_json is not None
     assert [message["role"] for message in fake_http.last_json["messages"]] == [

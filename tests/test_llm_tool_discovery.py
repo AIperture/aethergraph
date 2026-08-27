@@ -540,6 +540,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert first.discovery_events[0].provider_reference_ids == ("search_call_1",)
     assert first.transport_checkpoint is not None
     assert first.transport_checkpoint.revision == 1
+    assert first.transport_checkpoint.purpose == "pending_discovery_result"
     assert fake_http.last_json is not None
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tools"][-1]["execution"] == "client"
@@ -593,6 +594,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert second.calls[0].name == "read_document"
     assert second.transport_checkpoint is not None
     assert second.transport_checkpoint.revision == 2
+    assert second.transport_checkpoint.purpose == "pending_tool_outputs"
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_search_1"
     assert [tool.get("name") or tool["type"] for tool in fake_http.last_json["tools"]] == [
@@ -679,6 +681,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert third.calls[0].name == "finish"
     assert third.transport_checkpoint is not None
     assert third.transport_checkpoint.revision == 3
+    assert third.transport_checkpoint.purpose == "pending_tool_outputs"
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_call_1"
     assert [tool.get("name") or tool["type"] for tool in fake_http.last_json["tools"]] == [
@@ -982,37 +985,33 @@ async def test_anthropic_hosted_search_normalizes_references_before_call() -> No
         api_key="test",
         base_url="https://api.anthropic.test",
     )
+    hosted_content = [
+        {
+            "type": "server_tool_use",
+            "id": "srvtoolu_1",
+            "name": "tool_search_tool_bm25",
+            "input": {"query": "open document"},
+        },
+        {
+            "type": "tool_search_tool_result",
+            "tool_use_id": "srvtoolu_1",
+            "content": {
+                "type": "tool_search_tool_search_result",
+                "tool_references": [{"type": "tool_reference", "tool_name": "read_document"}],
+            },
+        },
+        {
+            "type": "tool_use",
+            "id": "toolu_read_1",
+            "name": "read_document",
+            "input": {"path": "a.md"},
+        },
+    ]
     fake_http = _CountingHttpClient(
         {
             "id": "msg_hosted_1",
             "stop_reason": "tool_use",
-            "content": [
-                {
-                    "type": "server_tool_use",
-                    "id": "srvtoolu_1",
-                    "name": "tool_search_tool_bm25",
-                    "input": {"query": "open document"},
-                },
-                {
-                    "type": "tool_search_tool_result",
-                    "tool_use_id": "srvtoolu_1",
-                    "content": {
-                        "type": "tool_search_tool_search_result",
-                        "tool_references": [
-                            {
-                                "type": "tool_reference",
-                                "tool_name": "read_document",
-                            }
-                        ],
-                    },
-                },
-                {
-                    "type": "tool_use",
-                    "id": "toolu_read_1",
-                    "name": "read_document",
-                    "input": {"path": "a.md"},
-                },
-            ],
+            "content": hosted_content,
             "usage": {"input_tokens": 10, "cache_read_input_tokens": 8},
         }
     )
@@ -1044,6 +1043,8 @@ async def test_anthropic_hosted_search_normalizes_references_before_call() -> No
     ]
     assert response.discovery_events[0].tool_refs == ("read_document",)
     assert response.calls[0].call_id == "toolu_read_1"
+    assert response.transport_checkpoint is not None
+    assert response.transport_checkpoint.purpose == "pending_tool_outputs"
     assert fake_http.last_headers is not None
     assert fake_http.last_headers["anthropic-version"] == "2023-06-01"
     assert fake_http.last_json is not None
@@ -1056,6 +1057,48 @@ async def test_anthropic_hosted_search_normalizes_references_before_call() -> No
     )
     assert deferred_body["defer_loading"] is True
     assert "cache_control" not in deferred_body
+
+    fake_http.payload = {
+        "id": "msg_hosted_finish_1",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_finish_1",
+                "name": "finish",
+                "input": {},
+            }
+        ],
+    }
+    finished, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=ToolCallRequest(
+            tools=request.tools,
+            choice="required",
+            discovery=request.discovery,
+            turn_id="turn_1",
+            active_tool_names=("read_document",),
+            transport_checkpoint=response.transport_checkpoint,
+            tool_outputs=(ToolCallOutput("toolu_read_1", '{"status":"ok"}'),),
+        ),
+    )
+
+    assert isinstance(finished, ToolCallResponse)
+    assert finished.calls[0].name == "finish"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["messages"][-2]["role"] == "assistant"
+    assert fake_http.last_json["messages"][-2]["content"] == hosted_content
+    assert fake_http.last_json["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_read_1",
+                "content": '{"status":"ok"}',
+            }
+        ],
+    }
+    assert any(tool.get("name") == "finish" for tool in fake_http.last_json["tools"])
 
 
 @pytest.mark.asyncio
@@ -1169,6 +1212,7 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
     assert first.calls == ()
     assert first.discovery_events[0].query == "open document"
     assert first.transport_checkpoint is not None
+    assert first.transport_checkpoint.purpose == "pending_discovery_result"
     first_tools = list(fake_http.last_json["tools"])
     assert "lexical_queries" in first_tools[0]["description"]
     fake_http.payload = {
@@ -1202,6 +1246,7 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
     assert second.calls[0].name == "read_document"
     assert second.transport_checkpoint is not None
     assert second.transport_checkpoint.revision == 2
+    assert second.transport_checkpoint.purpose == "pending_tool_outputs"
     assert fake_http.last_json is not None
     assert fake_http.last_json["tools"] == first_tools
     assert fake_http.last_json["messages"][-2] == {
@@ -1215,6 +1260,54 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
                 "type": "tool_result",
                 "tool_use_id": "toolu_search_1",
                 "content": [{"type": "tool_reference", "tool_name": "read_document"}],
+            }
+        ],
+    }
+
+    fake_http.payload = {
+        "id": "msg_finish_1",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_finish_1",
+                "name": "finish",
+                "input": {},
+            }
+        ],
+    }
+    third, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=ToolCallRequest(
+            tools=(immediate, deferred),
+            choice="required",
+            discovery=initial_request.discovery,
+            turn_id="turn_1",
+            active_tool_names=("read_document",),
+            transport_checkpoint=second.transport_checkpoint,
+            tool_outputs=(ToolCallOutput("toolu_read_1", '{"status":"ok"}'),),
+        ),
+    )
+
+    assert isinstance(third, ToolCallResponse)
+    assert third.calls[0].name == "finish"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["tools"] == first_tools
+    assert fake_http.last_json["messages"][-2]["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_read_1",
+            "name": "read_document",
+            "input": {"path": "a.md"},
+        }
+    ]
+    assert fake_http.last_json["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_read_1",
+                "content": '{"status":"ok"}',
             }
         ],
     }
@@ -1269,6 +1362,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert isinstance(response, ToolCallResponse)
     assert response.transport_checkpoint is not None
     assert response.transport_checkpoint.provider == "azure"
+    assert response.transport_checkpoint.purpose == "pending_discovery_result"
     assert client.endpoint_id == "azure_responses"
     assert fake_http.last_url == ("https://example.openai.azure.com/openai/v1/responses")
     assert fake_http.last_headers is not None
@@ -1307,6 +1401,8 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
 
     assert isinstance(called, ToolCallResponse)
     assert called.calls[0].call_id == "azure_read_1"
+    assert called.transport_checkpoint is not None
+    assert called.transport_checkpoint.purpose == "pending_tool_outputs"
     assert fake_http.last_json is not None
     assert "previous_response_id" not in fake_http.last_json
     assert [tool.get("name") or tool["type"] for tool in fake_http.last_json["tools"]] == [
@@ -1318,6 +1414,46 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert fake_http.last_json["input"][0]["type"] == "tool_search_call"
     assert fake_http.last_json["input"][-1]["type"] == "tool_search_output"
     assert fake_http.last_json["input"][-1]["call_id"] == "azure_search_1"
+
+    fake_http.payload = {
+        "id": "resp_azure_finish_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "azure_finish_1",
+                "name": "finish",
+                "arguments": "{}",
+            }
+        ],
+    }
+    finished, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=ToolCallRequest(
+            tools=request.tools,
+            choice="required",
+            discovery=request.discovery,
+            turn_id="turn_1",
+            active_tool_names=("read_document",),
+            transport_checkpoint=called.transport_checkpoint,
+            tool_outputs=(ToolCallOutput("azure_read_1", '{"status":"ok"}'),),
+        ),
+    )
+
+    assert isinstance(finished, ToolCallResponse)
+    assert finished.calls[0].name == "finish"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["input"][0]["type"] == "function_call"
+    assert fake_http.last_json["input"][0]["call_id"] == "azure_read_1"
+    assert fake_http.last_json["input"][1] == {
+        "type": "function_call_output",
+        "call_id": "azure_read_1",
+        "output": '{"status":"ok"}',
+    }
+    assert [tool.get("name") or tool["type"] for tool in fake_http.last_json["tools"]] == [
+        "finish",
+        "tool_search",
+    ]
 
 
 @pytest.mark.asyncio

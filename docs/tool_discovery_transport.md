@@ -41,6 +41,34 @@ definitions can appear in one provider response. An Engine may project linked
 search/activation domain events into its Timeline, but those events remain separate
 from AG's provider-neutral LLM ledger.
 
+## Continuation purpose and Tool-result replay
+
+`ToolTransportCheckpoint` is provider replay state, not Tool-discovery or execution
+authority. Its public `purpose` is one of:
+
+- `pending_discovery_result`: the next request must return a client-executed search
+  result or references;
+- `pending_tool_outputs`: the next request must return the exact results for the
+  provider call identities stored in the opaque adapter payload; or
+- `consumed`: replay responsibility has ended and a caller must not retain the
+  checkpoint as pending work.
+
+Callers may use the safe purpose, provider, model, contract version, turn, and revision
+to manage lifecycle. They must not inspect `opaque_payload`. The adapter validates the
+purpose against its private payload before provider traffic.
+
+Every continuation request resends the request-owned Tool declarations and selection
+controls. A response identifier or replayed assistant content preserves conversation
+items; it does not imply that the provider retained request-scoped Tools. OpenAI and
+Azure Responses replay exact function-call IDs with matching `function_call_output`
+items. Anthropic Messages replays the exact assistant content blocks and appends user
+`tool_result` blocks with matching `tool_use_id` values. OpenAI-compatible Chat
+Completions replays the exact assistant Tool-call message and matching Tool messages.
+
+Adapter lifecycle tests must continue through search, selected Tool, returned Tool
+result, and a following decision. A mock must not return a Tool call that was absent
+from the outgoing request it received.
+
 ## Prompt caching is diagnostic
 
 Tool search is designed to append loaded Tools at the end of model context so a
