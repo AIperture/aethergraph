@@ -1,7 +1,7 @@
 {
-  "schema_version": "aethergraph.provider-discovery-fixture/v2",
+  "schema_version": "aethergraph.provider-discovery-fixture/v3",
   "capability_authority": "aethergraph.services.llm.catalog",
-  "captured_at": "2026-08-07",
+  "captured_at": "2026-08-26",
   "records": [
     {
       "binding": {
@@ -93,7 +93,8 @@
         "continuation": {
           "previous_response_id": "resp_openai_1",
           "input_item_type": "tool_search_output",
-          "call_id_must_match": true
+          "call_id_must_match": true,
+          "send_request_owned_tools": true
         },
         "cache_observation": {
           "strategy": "append_loaded_tools",
@@ -171,7 +172,8 @@
         "continuation": {
           "input_includes_previous_output": true,
           "input_item_type": "tool_search_output",
-          "call_id_must_match": true
+          "call_id_must_match": true,
+          "send_request_owned_tools": true
         },
         "cache_observation": {
           "strategy": "append_loaded_tools",

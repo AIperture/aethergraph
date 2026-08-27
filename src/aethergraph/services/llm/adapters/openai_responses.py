@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 import hashlib
 import json
 from typing import Any
@@ -166,14 +167,44 @@ def _openai_request_tools(
                 "parameters": request.discovery.search_schema,
             }
         )
-    elif discovery_mode == "native_hosted":
-        result.append(
-            {
-                "type": "tool_search",
-                "description": render_tool_search_description(request),
-            }
-        )
+    elif discovery_mode == "native_hosted" and any(
+        tool.exposure == "deferred" and tool.name not in active_names for tool in request.tools
+    ):
+        # Server-executed Tool search reads the declared deferred inventory and
+        # rejects client-authored description/parameter fields. It also rejects
+        # an empty searchable inventory after every deferred Tool is active.
+        result.append({"type": "tool_search"})
     return result
+
+
+def _openai_continuation_request_tools(request: ToolCallRequest) -> list[dict[str, Any]]:
+    """Encode request-owned Tools that must survive a Responses continuation.
+
+    Examples:
+        Preserve immediate Tools during client-executed search:
+            ```python
+            values = _openai_continuation_request_tools(client_request)
+            assert values[0]["name"] == "finish"
+            assert values[-1]["type"] == "tool_search"
+            ```
+
+    Args:
+        request: Exact current same-turn Tool request.
+
+    Returns:
+        list[dict[str, Any]]: Stable request-owned Tool declarations.
+
+    Notes:
+        Client search outputs already inject activated deferred Tools into the
+        provider context. Clearing only the projection's active-name set avoids
+        declaring those Tools a second time while retaining immediate Tools and
+        the searchable catalog description. Hosted and ordinary Tool calling
+        require the complete current request surface on every continuation.
+    """
+
+    if request.discovery is not None and request.discovery.mode == "native_client":
+        request = replace(request, active_tool_names=())
+    return _openai_request_tools(request)
 
 
 def _openai_hosted_tool_refs(item: dict[str, Any]) -> tuple[str, ...]:
@@ -949,10 +980,13 @@ class OpenAIResponsesAdapter:
         if tool_request is not None:
             if checkpoint_payload is None or checkpoint_payload["state"] == "consumed":
                 body["tools"] = _openai_request_tools(tool_request)
-                # Responses rejects Tool selection controls when this request omits
-                # the corresponding Tool definitions. Keep the fields atomic.
-                body["tool_choice"] = tool_request.choice
-                body["parallel_tool_calls"] = tool_request.max_calls > 1
+            else:
+                body["tools"] = _openai_continuation_request_tools(tool_request)
+            # Responses binds Tool selection controls to the declarations in
+            # this exact request. Keep the current Engine surface and controls
+            # atomic across search and Tool-result continuations.
+            body["tool_choice"] = tool_request.choice
+            body["parallel_tool_calls"] = tool_request.max_calls > 1
         elif tools is not None:
             body["tools"] = tools
         if tool_choice is not None:

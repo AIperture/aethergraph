@@ -32,9 +32,9 @@ def _record(provider: str) -> dict[str, Any]:
 def test_provider_matrix_has_only_exact_bounded_bindings() -> None:
     matrix = _matrix()
 
-    assert matrix["schema_version"] == "aethergraph.provider-discovery-fixture/v2"
+    assert matrix["schema_version"] == "aethergraph.provider-discovery-fixture/v3"
     assert matrix["capability_authority"] == "aethergraph.services.llm.catalog"
-    assert matrix["captured_at"] == "2026-08-07"
+    assert matrix["captured_at"] == "2026-08-26"
     records = matrix["records"]
     assert {row["binding"]["provider"] for row in records} == _EXPECTED_PROVIDERS
 
@@ -125,6 +125,7 @@ def test_openai_and_azure_client_replay_preserves_order_and_call_identity() -> N
         assert item_types[:2] == ["tool_search_call", "tool_search_output"]
         assert baseline["response_items"][0]["call_id"] == baseline["response_items"][1]["call_id"]
         assert baseline["continuation"]["call_id_must_match"] is True
+        assert baseline["continuation"]["send_request_owned_tools"] is True
         assert baseline["cache_observation"]["expected_catalog_prefix"] == "stable"
 
     azure = _record("azure")

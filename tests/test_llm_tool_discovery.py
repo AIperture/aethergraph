@@ -595,9 +595,12 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert second.transport_checkpoint.revision == 2
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_search_1"
-    assert "tools" not in fake_http.last_json
-    assert "tool_choice" not in fake_http.last_json
-    assert "parallel_tool_calls" not in fake_http.last_json
+    assert [tool.get("name") or tool["type"] for tool in fake_http.last_json["tools"]] == [
+        "finish",
+        "tool_search",
+    ]
+    assert fake_http.last_json["tool_choice"] == "required"
+    assert fake_http.last_json["parallel_tool_calls"] is False
     assert fake_http.last_json["prompt_cache_key"] == cache_key
     assert "prompt_cache_options" not in fake_http.last_json
     search_output = fake_http.last_json["input"][0]
@@ -678,9 +681,12 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert third.transport_checkpoint.revision == 3
     assert fake_http.last_json is not None
     assert fake_http.last_json["previous_response_id"] == "resp_call_1"
-    assert "tools" not in fake_http.last_json
-    assert "tool_choice" not in fake_http.last_json
-    assert "parallel_tool_calls" not in fake_http.last_json
+    assert [tool.get("name") or tool["type"] for tool in fake_http.last_json["tools"]] == [
+        "finish",
+        "tool_search",
+    ]
+    assert fake_http.last_json["tool_choice"] == "required"
+    assert fake_http.last_json["parallel_tool_calls"] is False
     assert fake_http.last_json["prompt_cache_key"] == cache_key
     assert "prompt_cache_options" not in fake_http.last_json
     assert fake_http.last_json["input"][0] == {
@@ -765,6 +771,7 @@ async def test_openai_native_hosted_uses_current_server_search_contract() -> Non
     client._bound_loop = asyncio.get_running_loop()
     request = ToolCallRequest(
         tools=(
+            ToolDefinition("finish", "Finish.", {"type": "object"}),
             ToolDefinition(
                 "read_document",
                 "Read one document.",
@@ -793,6 +800,45 @@ async def test_openai_native_hosted_uses_current_server_search_contract() -> Non
     assert fake_http.last_json is not None
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert "execution" not in fake_http.last_json["tools"][-1]
+    assert "description" not in fake_http.last_json["tools"][-1]
+
+    fake_http.payload = {
+        "id": "resp_hosted_finish_1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call_finish_1",
+                "name": "finish",
+                "arguments": "{}",
+            }
+        ],
+    }
+    continuation = ToolCallRequest(
+        tools=request.tools,
+        choice="required",
+        discovery=request.discovery,
+        turn_id="turn_1",
+        active_tool_names=("read_document",),
+        transport_checkpoint=response.transport_checkpoint,
+        tool_outputs=(ToolCallOutput("call_read_1", '{"status":"ok"}'),),
+    )
+
+    finished, _usage = await client.chat(
+        [{"role": "user", "content": "open a document"}],
+        tool_request=continuation,
+    )
+
+    assert isinstance(finished, ToolCallResponse)
+    assert finished.calls[0].name == "finish"
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["previous_response_id"] == "resp_hosted_1"
+    assert fake_http.last_json["tools"][0]["name"] == "finish"
+    namespace = next(tool for tool in fake_http.last_json["tools"] if tool["type"] == "namespace")
+    assert namespace["tools"][0]["name"] == "read_document"
+    assert "defer_loading" not in namespace["tools"][0]
+    assert all(tool["type"] != "tool_search" for tool in fake_http.last_json["tools"])
+    assert fake_http.last_json["tool_choice"] == "required"
 
 
 def test_openai_tool_search_rejects_unknown_execution_value() -> None:
@@ -1263,9 +1309,12 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert called.calls[0].call_id == "azure_read_1"
     assert fake_http.last_json is not None
     assert "previous_response_id" not in fake_http.last_json
-    assert "tools" not in fake_http.last_json
-    assert "tool_choice" not in fake_http.last_json
-    assert "parallel_tool_calls" not in fake_http.last_json
+    assert [tool.get("name") or tool["type"] for tool in fake_http.last_json["tools"]] == [
+        "finish",
+        "tool_search",
+    ]
+    assert fake_http.last_json["tool_choice"] == "required"
+    assert fake_http.last_json["parallel_tool_calls"] is False
     assert fake_http.last_json["input"][0]["type"] == "tool_search_call"
     assert fake_http.last_json["input"][-1]["type"] == "tool_search_output"
     assert fake_http.last_json["input"][-1]["call_id"] == "azure_search_1"
