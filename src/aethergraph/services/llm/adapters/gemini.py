@@ -26,6 +26,20 @@ from aethergraph.services.llm.utils import (
 )
 
 
+def _gemini_function_parameters(schema: Any) -> Any:
+    """Project canonical JSON Schema into Gemini's FunctionDeclaration subset."""
+
+    if isinstance(schema, dict):
+        return {
+            key: _gemini_function_parameters(value)
+            for key, value in schema.items()
+            if key != "additionalProperties"
+        }
+    if isinstance(schema, list):
+        return [_gemini_function_parameters(value) for value in schema]
+    return schema
+
+
 def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
     """Normalize Gemini function-call parts without flattening part boundaries."""
 
@@ -200,7 +214,7 @@ def _gemini_generate_content_payload(
                     {
                         "name": tool.name,
                         "description": tool.description,
-                        "parameters": tool.input_schema,
+                        "parameters": _gemini_function_parameters(tool.input_schema),
                     }
                     for tool in tool_request.tools
                 ]

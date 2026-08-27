@@ -36,6 +36,20 @@ DeltaCallback = Callable[[str], Awaitable[None]]
 ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 
 
+def _anthropic_sampling_fields(options: dict[str, Any]) -> dict[str, Any]:
+    """Select at most one Anthropic sampling control for all request paths."""
+
+    temperature = options.get("temperature", 0.5)
+    top_p = options.get("top_p")
+    if temperature is not None and top_p is not None:
+        raise ValueError("Anthropic requests may specify temperature or top_p, not both")
+    if temperature is not None:
+        return {"temperature": temperature}
+    if top_p is not None:
+        return {"top_p": top_p}
+    return {}
+
+
 def _anthropic_function_tool(tool: ModelToolSpec) -> dict[str, Any]:
     """Encode one shared Tool definition for Anthropic Messages.
 
@@ -718,8 +732,7 @@ class AnthropicMessagesAdapter:
         ):
             raise ValueError("Native Tool calling cannot be combined with structured output")
 
-        temperature = kw.get("temperature", 0.5)
-        top_p = kw.get("top_p", 1.0)
+        sampling_fields = _anthropic_sampling_fields(kw)
 
         system_payload = _anthropic_system_payload(messages, output_format=output_format)
 
@@ -816,8 +829,7 @@ class AnthropicMessagesAdapter:
             "model": model,
             "max_tokens": max_output_tokens or kw.get("max_tokens", 1024),
             "messages": conv,
-            "temperature": temperature,
-            "top_p": top_p,
+            **sampling_fields,
         }
         request_cache_control = _anthropic_cache_control(kw.get("cache_control"))
         if request_cache_control:
@@ -988,8 +1000,7 @@ class AnthropicMessagesAdapter:
         await host._ensure_client()
         assert host._client is not None
 
-        temperature = kw.get("temperature", 0.5)
-        top_p = kw.get("top_p", 1.0)
+        sampling_fields = _anthropic_sampling_fields(kw)
 
         system_payload = _anthropic_system_payload(messages, output_format=output_format)
 
@@ -1020,8 +1031,7 @@ class AnthropicMessagesAdapter:
         elif kw.get("reasoning_effort") is not None:
             payload["thinking"] = {"type": "adaptive", "effort": kw.get("reasoning_effort")}
         else:
-            payload["temperature"] = temperature
-            payload["top_p"] = top_p
+            payload.update(sampling_fields)
 
         request_cache_control = _anthropic_cache_control(kw.get("cache_control"))
         if request_cache_control:

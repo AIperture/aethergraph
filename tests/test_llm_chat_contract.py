@@ -33,6 +33,7 @@ from aethergraph.services.llm.adapters import (
     registered_chat_stream_adapter_ids,
     registered_image_adapter_ids,
 )
+from aethergraph.services.llm.adapters.gemini import _gemini_generate_content_payload
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
@@ -2179,6 +2180,47 @@ async def test_anthropic_tools_are_not_silently_dropped_in_compat_mode() -> None
 
 
 @pytest.mark.asyncio
+async def test_anthropic_sends_only_one_sampling_control() -> None:
+    payload = {
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="anthropic-key",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    await AnthropicMessagesAdapter.invoke(
+        client,
+        [{"role": "user", "content": "hello"}],
+        model="claude-test",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+    )
+
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["temperature"] == 0.5
+    assert "top_p" not in fake_http.last_json
+
+    with pytest.raises(ValueError, match="temperature or top_p"):
+        await AnthropicMessagesAdapter.invoke(
+            client,
+            [{"role": "user", "content": "hello"}],
+            model="claude-test",
+            output_format="text",
+            json_schema=None,
+            fail_on_unsupported=False,
+            temperature=0.2,
+            top_p=0.8,
+        )
+
+
+@pytest.mark.asyncio
 async def test_anthropic_without_cache_control_keeps_classic_system_string() -> None:
     payload = {
         "content": [{"type": "text", "text": "ok"}],
@@ -2330,6 +2372,51 @@ async def test_gemini_tools_are_not_passed_through_in_compat_mode() -> None:
             fail_on_unsupported=False,
             tools=[{"type": "function", "function": {"name": "lookup"}}],
         )
+
+
+def test_gemini_tool_declarations_project_unsupported_schema_keywords() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "receipt": {"type": "string"},
+            "metadata": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+        "required": ["receipt"],
+        "additionalProperties": False,
+    }
+    payload = _gemini_generate_content_payload(
+        [{"role": "user", "content": "Run the tool."}],
+        temperature=0.5,
+        top_p=1.0,
+        max_output_tokens=128,
+        thinking_config=None,
+        output_format="text",
+        json_schema=None,
+        structured_output_fields=None,
+        tool_request=ToolCallRequest(
+            tools=(ToolDefinition("finish", "Finish.", schema),),
+            choice="required",
+            turn_id="turn-1",
+        ),
+    )
+
+    declaration = payload["tools"][0]["functionDeclarations"][0]
+    assert declaration["parameters"] == {
+        "type": "object",
+        "properties": {
+            "receipt": {"type": "string"},
+            "metadata": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}},
+            },
+        },
+        "required": ["receipt"],
+    }
+    assert schema["additionalProperties"] is False
 
 
 def test_encode_llm_profile_env_includes_compatibility_policy() -> None:
