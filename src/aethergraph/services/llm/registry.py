@@ -178,7 +178,7 @@ _ENDPOINTS = (
             "structured_output",
             *_RUNTIME_OBSERVABILITY_CAPABILITIES,
         ),
-        adapter_revision=2,
+        adapter_revision=3,
     ),
     EndpointAdapterDescriptor(
         "gemini_generate_content",

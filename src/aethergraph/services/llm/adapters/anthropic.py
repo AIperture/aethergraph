@@ -23,6 +23,7 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
     assistant_output_identity,
+    tool_call_request_fingerprint,
 )
 from aethergraph.services.llm.tool_discovery import (
     ToolDiscoveryError,
@@ -39,7 +40,7 @@ ThinkingDeltaCallback = Callable[[str], Awaitable[None]]
 def _anthropic_sampling_fields(options: dict[str, Any]) -> dict[str, Any]:
     """Select at most one Anthropic sampling control for all request paths."""
 
-    temperature = options.get("temperature", 0.5)
+    temperature = options.get("temperature")
     top_p = options.get("top_p")
     if temperature is not None and top_p is not None:
         raise ValueError("Anthropic requests may specify temperature or top_p, not both")
@@ -144,14 +145,22 @@ def _anthropic_request_tools(request: ToolCallRequest) -> list[dict[str, Any]]:
     return result
 
 
+def _anthropic_messages_digest(messages: list[dict[str, Any]]) -> str:
+    """Bind private Anthropic replay state to the exact stable prompt."""
+
+    canonical = json.dumps(messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _anthropic_checkpoint(
     *,
     request: ToolCallRequest,
     model: str,
+    stable_messages: list[dict[str, Any]],
     state: str,
     assistant_content: list[dict[str, Any]] | None = None,
     search_call_id: str = "",
-    pending_call_ids: list[str] | None = None,
+    pending_calls: list[dict[str, str]] | None = None,
 ) -> ToolTransportCheckpoint:
     """Build one integrity-bound Anthropic full-history checkpoint.
 
@@ -164,6 +173,7 @@ def _anthropic_checkpoint(
             checkpoint = _anthropic_checkpoint(
                 request=request,
                 model=model,
+                stable_messages=messages,
                 state="pending_search",
                 assistant_content=blocks,
                 search_call_id="toolu_1",
@@ -176,6 +186,7 @@ def _anthropic_checkpoint(
             checkpoint = _anthropic_checkpoint(
                 request=continued_request,
                 model=model,
+                stable_messages=messages,
                 state="consumed",
             )
             assert checkpoint.revision == 2
@@ -184,10 +195,11 @@ def _anthropic_checkpoint(
     Args:
         request: Exact same-turn discovery request.
         model: Exact Anthropic model binding.
+        stable_messages: Original provider-projected prompt messages.
         state: Private replay state: pending_search, pending_tool_outputs, or consumed.
         assistant_content: Exact prior assistant blocks for pending replay.
         search_call_id: Exact custom search Tool-use identity.
-        pending_call_ids: Exact ordinary Tool-use identities awaiting results.
+        pending_calls: Exact ordinary Tool-use identities and names awaiting results.
 
     Returns:
         ToolTransportCheckpoint: Bounded latest full-history checkpoint.
@@ -200,9 +212,12 @@ def _anthropic_checkpoint(
     revision = 1 if previous is None else previous.revision + 1
     payload = {
         "state": state,
+        "tool_contract_fingerprint": tool_call_request_fingerprint(request),
+        "prompt_message_count": len(stable_messages),
+        "prompt_digest": _anthropic_messages_digest(stable_messages),
         "assistant_content": list(assistant_content or []),
         "search_call_id": search_call_id,
-        "pending_call_ids": list(pending_call_ids or []),
+        "pending_calls": list(pending_calls or []),
         "active_tool_names": list(request.active_tool_names),
     }
     canonical = json.dumps(
@@ -217,7 +232,7 @@ def _anthropic_checkpoint(
         revision=revision,
         provider="anthropic",
         model=model,
-        contract_version="messages.tool_reference",
+        contract_version="messages.tool_continuation/v2",
         turn_id=str(request.turn_id or ""),
         integrity_digest=digest,
         purpose={
@@ -231,6 +246,10 @@ def _anthropic_checkpoint(
 
 def _anthropic_checkpoint_payload(
     checkpoint: ToolTransportCheckpoint,
+    *,
+    request: ToolCallRequest,
+    model: str,
+    stable_messages: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Validate and return one private Anthropic replay payload.
 
@@ -240,20 +259,33 @@ def _anthropic_checkpoint_payload(
     Examples:
         Restore valid pending history:
             ```python
-            payload = _anthropic_checkpoint_payload(checkpoint)
+            payload = _anthropic_checkpoint_payload(
+                checkpoint,
+                request=request,
+                model=model,
+                stable_messages=messages,
+            )
             assert payload["state"] == "pending_search"
             ```
 
         Reject a modified payload:
             ```python
             try:
-                _anthropic_checkpoint_payload(modified_checkpoint)
+                _anthropic_checkpoint_payload(
+                    modified_checkpoint,
+                    request=request,
+                    model=model,
+                    stable_messages=messages,
+                )
             except ValueError:
                 pass
             ```
 
     Args:
         checkpoint: Candidate Anthropic same-turn replay checkpoint.
+        request: Exact continued Tool request.
+        model: Exact configured Anthropic model identity.
+        stable_messages: Current original provider-projected prompt messages.
 
     Returns:
         dict[str, Any]: Detached validated private replay mapping.
@@ -264,7 +296,8 @@ def _anthropic_checkpoint_payload(
 
     if (
         checkpoint.provider != "anthropic"
-        or checkpoint.contract_version != "messages.tool_reference"
+        or checkpoint.model != model
+        or checkpoint.contract_version != "messages.tool_continuation/v2"
     ):
         raise ValueError("Anthropic Tool checkpoint binding does not match")
     payload = dict(checkpoint.opaque_payload or {})
@@ -283,6 +316,12 @@ def _anthropic_checkpoint_payload(
         "consumed",
     }:
         raise ValueError("Anthropic Tool checkpoint state is invalid")
+    if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(request):
+        raise ValueError("Anthropic Tool checkpoint contract changed")
+    if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
+        "prompt_digest"
+    ) != _anthropic_messages_digest(stable_messages):
+        raise ValueError("Anthropic Tool checkpoint prompt changed")
     expected_purpose = {
         "pending_search": "pending_discovery_result",
         "pending_tool_outputs": "pending_tool_outputs",
@@ -290,7 +329,13 @@ def _anthropic_checkpoint_payload(
     }[payload["state"]]
     if checkpoint.purpose != expected_purpose:
         raise ValueError("Anthropic Tool checkpoint purpose does not match replay state")
-    if not isinstance(payload.get("active_tool_names"), list):
+    active_tool_names = payload.get("active_tool_names")
+    if (
+        not isinstance(active_tool_names, list)
+        or not all(isinstance(name, str) and name.strip() for name in active_tool_names)
+        or len(active_tool_names) != len(set(active_tool_names))
+        or not set(active_tool_names).issubset({tool.name for tool in request.tools})
+    ):
         raise ValueError("Anthropic Tool checkpoint activation state is invalid")
     if payload["state"] == "pending_search" and (
         not str(payload.get("search_call_id") or "").strip()
@@ -298,15 +343,25 @@ def _anthropic_checkpoint_payload(
         or not payload["assistant_content"]
     ):
         raise ValueError("Anthropic pending Tool checkpoint identity is invalid")
-    pending_call_ids = payload.get("pending_call_ids", [])
-    if not isinstance(pending_call_ids, list) or not all(
-        isinstance(call_id, str) and call_id.strip() for call_id in pending_call_ids
+    pending_calls = payload.get("pending_calls", [])
+    if not isinstance(pending_calls, list) or not all(
+        isinstance(item, dict)
+        and isinstance(item.get("call_id"), str)
+        and str(item.get("call_id") or "").strip()
+        and isinstance(item.get("name"), str)
+        and str(item.get("name") or "").strip()
+        for item in pending_calls
     ):
         raise ValueError("Anthropic Tool checkpoint pending-call state is invalid")
+    pending_call_ids = [str(item["call_id"]) for item in pending_calls]
     if len(pending_call_ids) != len(set(pending_call_ids)):
         raise ValueError("Anthropic Tool checkpoint pending-call identities are not unique")
+    if not {str(item["name"]) for item in pending_calls}.issubset(
+        {tool.name for tool in request.tools}
+    ):
+        raise ValueError("Anthropic Tool checkpoint pending-call name is invalid")
     if payload["state"] == "pending_tool_outputs" and (
-        not pending_call_ids
+        not pending_calls
         or not isinstance(payload.get("assistant_content"), list)
         or not payload["assistant_content"]
     ):
@@ -319,6 +374,7 @@ def _anthropic_tool_call_response(
     *,
     tool_request: ToolCallRequest,
     model: str,
+    stable_messages: list[dict[str, Any]],
 ) -> ToolCallResponse:
     """Normalize ordered Anthropic discovery and Tool-use blocks.
 
@@ -328,13 +384,23 @@ def _anthropic_tool_call_response(
     Examples:
         Normalize hosted discovery and a call:
             ```python
-            response = _anthropic_tool_call_response(data, tool_request=request, model=model)
+            response = _anthropic_tool_call_response(
+                data,
+                tool_request=request,
+                model=model,
+                stable_messages=messages,
+            )
             assert response.discovery_events
             ```
 
         Normalize a custom client search:
             ```python
-            response = _anthropic_tool_call_response(client_data, tool_request=request, model=model)
+            response = _anthropic_tool_call_response(
+                client_data,
+                tool_request=request,
+                model=model,
+                stable_messages=messages,
+            )
             assert response.transport_checkpoint is not None
             ```
 
@@ -342,6 +408,7 @@ def _anthropic_tool_call_response(
         data: Detached Anthropic Messages response payload.
         tool_request: Exact request used for this decision.
         model: Exact Anthropic model binding.
+        stable_messages: Original provider-projected prompt messages.
 
     Returns:
         ToolCallResponse: Ordered provider-neutral items and private checkpoint.
@@ -355,7 +422,9 @@ def _anthropic_tool_call_response(
     response_id = str(data.get("id") or "").strip()
     hosted_calls: dict[str, dict[str, Any]] = {}
     client_search_ids: list[str] = []
-    ordinary_call_ids: list[str] = []
+    pending_calls: list[dict[str, str]] = []
+    seen_call_ids: set[str] = set()
+    allowed_tool_names = {tool.name for tool in tool_request.tools}
     for block_index, block in enumerate(blocks):
         if not isinstance(block, dict):
             continue
@@ -397,6 +466,12 @@ def _anthropic_tool_call_response(
                     code="discovery_reference_missing",
                     message="Anthropic hosted Tool search omitted its identity or input.",
                 )
+            if server_id in seen_call_ids:
+                raise LLMToolCallResponseError(
+                    code="tool_call_identity_duplicate",
+                    message="Anthropic returned a duplicate Tool-call identity.",
+                )
+            seen_call_ids.add(server_id)
             hosted_calls[server_id] = dict(arguments)
             continue
         if block_type == "tool_search_tool_result":
@@ -469,11 +544,23 @@ def _anthropic_tool_call_response(
                     f"Anthropic Tool call '{block.get('name') or '?'}' input must be an object."
                 ),
             )
-        call_id = str(block.get("id") or f"anthropic-call-{block_index}")
+        call_id = str(block.get("id") or "").strip()
+        if not call_id:
+            raise LLMToolCallResponseError(
+                code="tool_call_identity_missing",
+                message="Anthropic Tool use omitted its provider identity.",
+            )
+        if call_id in seen_call_ids:
+            raise LLMToolCallResponseError(
+                code="tool_call_identity_duplicate",
+                message="Anthropic returned a duplicate Tool-call identity.",
+            )
+        seen_call_ids.add(call_id)
+        tool_name = str(block.get("name") or "").strip()
         if (
             tool_request.discovery is not None
             and tool_request.discovery.mode == "native_client"
-            and block.get("name") == "tool_search"
+            and tool_name == "tool_search"
         ):
             items.append(
                 ToolDiscoveryEvent(
@@ -487,15 +574,20 @@ def _anthropic_tool_call_response(
             )
             client_search_ids.append(call_id)
             continue
+        if tool_name not in allowed_tool_names:
+            raise LLMToolCallResponseError(
+                code="unknown_tool",
+                message="Anthropic selected a Tool outside the exact request catalog.",
+            )
         items.append(
             ToolCall(
                 call_id=call_id,
-                name=str(block.get("name") or ""),
+                name=tool_name,
                 arguments=dict(arguments),
                 provider_metadata={"content_block_index": block_index},
             )
         )
-        ordinary_call_ids.append(call_id)
+        pending_calls.append({"call_id": call_id, "name": tool_name})
     if hosted_calls:
         raise LLMToolCallResponseError(
             code="invalid_discovery_response",
@@ -506,34 +598,47 @@ def _anthropic_tool_call_response(
             code="discovery_cardinality_invalid",
             message="Anthropic returned more than one pending client Tool search.",
         )
-    if client_search_ids and ordinary_call_ids:
+    if client_search_ids and pending_calls:
         raise LLMToolCallResponseError(
             code="discovery_order_invalid",
             message="Anthropic returned Tool calls before completing client Tool search.",
+        )
+    if len(pending_calls) > tool_request.max_calls:
+        raise LLMToolCallResponseError(
+            code="tool_call_cardinality_exceeded",
+            message="Anthropic returned more Tool calls than the request permits.",
         )
     checkpoint: ToolTransportCheckpoint | None = None
     if client_search_ids:
         checkpoint = _anthropic_checkpoint(
             request=tool_request,
             model=model,
+            stable_messages=stable_messages,
             state="pending_search",
             assistant_content=[dict(block) for block in blocks if isinstance(block, dict)],
             search_call_id=client_search_ids[0],
         )
-    elif ordinary_call_ids and str(tool_request.turn_id or "").strip():
+    elif pending_calls and str(tool_request.turn_id or "").strip():
         checkpoint = _anthropic_checkpoint(
             request=tool_request,
             model=model,
+            stable_messages=stable_messages,
             state="pending_tool_outputs",
             assistant_content=[dict(block) for block in blocks if isinstance(block, dict)],
-            pending_call_ids=ordinary_call_ids,
+            pending_calls=pending_calls,
         )
     elif tool_request.transport_checkpoint is not None:
-        prior = _anthropic_checkpoint_payload(tool_request.transport_checkpoint)
+        prior = _anthropic_checkpoint_payload(
+            tool_request.transport_checkpoint,
+            request=tool_request,
+            model=model,
+            stable_messages=stable_messages,
+        )
         if prior["state"] in {"pending_search", "pending_tool_outputs"}:
             checkpoint = _anthropic_checkpoint(
                 request=tool_request,
                 model=model,
+                stable_messages=stable_messages,
                 state="consumed",
             )
     return ToolCallResponse(
@@ -748,7 +853,12 @@ class AnthropicMessagesAdapter:
 
         checkpoint_payload: dict[str, Any] | None = None
         if tool_request is not None and tool_request.transport_checkpoint is not None:
-            checkpoint_payload = _anthropic_checkpoint_payload(tool_request.transport_checkpoint)
+            checkpoint_payload = _anthropic_checkpoint_payload(
+                tool_request.transport_checkpoint,
+                request=tool_request,
+                model=model,
+                stable_messages=messages,
+            )
             if checkpoint_payload["state"] == "pending_search":
                 prior_active_names = {
                     str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
@@ -794,16 +904,18 @@ class AnthropicMessagesAdapter:
                     }
                 )
             elif checkpoint_payload["state"] == "pending_tool_outputs":
-                pending_call_ids = tuple(
-                    str(call_id)
-                    for call_id in list(checkpoint_payload.get("pending_call_ids") or [])
+                pending_calls = tuple(
+                    dict(item) for item in list(checkpoint_payload.get("pending_calls") or [])
                 )
+                pending_call_ids = tuple(str(item["call_id"]) for item in pending_calls)
                 outputs_by_id = {item.call_id: item.output for item in tool_request.tool_outputs}
-                missing = [call_id for call_id in pending_call_ids if call_id not in outputs_by_id]
-                if missing:
+                if set(outputs_by_id) != set(pending_call_ids):
                     raise LLMToolCallResponseError(
-                        code="tool_output_missing",
-                        message="Anthropic continuation is missing a completed Tool output.",
+                        code="tool_output_mismatch",
+                        message=(
+                            "Anthropic continuation Tool outputs do not exactly match "
+                            "the pending calls."
+                        ),
                     )
                 conv.append(
                     {
@@ -847,12 +959,13 @@ class AnthropicMessagesAdapter:
                     "schema": json_schema,
                 }
             }
-        if thinking_mode == "off":
-            pass
-        elif reasoning_effort is not None:
-            payload["thinking"] = {"type": "adaptive", "effort": reasoning_effort}
-        elif thinking_mode == "on":
+        if thinking_mode == "on" and reasoning_effort is None:
             payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget or 4096}
+        elif thinking_mode != "off" and reasoning_effort is not None:
+            payload["thinking"] = {"type": "adaptive"}
+            output_config = dict(payload.get("output_config") or {})
+            output_config["effort"] = reasoning_effort
+            payload["output_config"] = output_config
         if tool_request is not None:
             payload["tools"] = _anthropic_request_tools(tool_request)
             choice_type = {
@@ -860,7 +973,8 @@ class AnthropicMessagesAdapter:
                 "required": "any",
                 "none": "none",
             }[tool_request.choice]
-            if choice_type == "any" and (reasoning_effort is not None or thinking_mode == "on"):
+            thinking_type = (payload.get("thinking") or {}).get("type")
+            if choice_type == "any" and thinking_type == "enabled":
                 raise LLMToolCallCapabilityError(
                     provider="anthropic",
                     model=model,
@@ -906,6 +1020,7 @@ class AnthropicMessagesAdapter:
                             data,
                             tool_request=tool_request,
                             model=model,
+                            stable_messages=messages,
                         ),
                         usage,
                     ),
@@ -1029,7 +1144,8 @@ class AnthropicMessagesAdapter:
         if thinking_budget is not None:
             payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
         elif kw.get("reasoning_effort") is not None:
-            payload["thinking"] = {"type": "adaptive", "effort": kw.get("reasoning_effort")}
+            payload["thinking"] = {"type": "adaptive"}
+            payload["output_config"] = {"effort": kw.get("reasoning_effort")}
         else:
             payload.update(sampling_fields)
 

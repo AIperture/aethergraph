@@ -436,6 +436,278 @@ async def test_anthropic_does_not_silently_weaken_required_tool_choice() -> None
 
 
 @pytest.mark.asyncio
+async def test_anthropic_adaptive_thinking_uses_current_effort_wire() -> None:
+    payload = {
+        "id": "msg_adaptive",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "lookup",
+                "input": {"key": "A"},
+            }
+        ],
+    }
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "look up"}],
+        tool_request=_native_tool_request(max_calls=1),
+        reasoning_effort="low",
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["thinking"] == {"type": "adaptive"}
+    assert fake_http.last_json["output_config"] == {"effort": "low"}
+    assert fake_http.last_json["tool_choice"] == {
+        "type": "any",
+        "disable_parallel_tool_use": True,
+    }
+
+    await client.chat(
+        [{"role": "user", "content": "look up"}],
+        tool_request=_native_tool_request(max_calls=1),
+        reasoning_effort="low",
+        thinking_mode="off",
+    )
+    assert fake_http.last_json is not None
+    assert "thinking" not in fake_http.last_json
+    assert "output_config" not in fake_http.last_json
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "max_calls", "error_code"),
+    [
+        (
+            [{"type": "tool_use", "name": "lookup", "input": {"key": "A"}}],
+            1,
+            "tool_call_identity_missing",
+        ),
+        (
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "delete_everything",
+                    "input": {},
+                }
+            ],
+            1,
+            "unknown_tool",
+        ),
+        (
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "lookup",
+                    "input": {"key": "A"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "finish",
+                    "input": {},
+                },
+            ],
+            2,
+            "tool_call_identity_duplicate",
+        ),
+        (
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "lookup",
+                    "input": {"key": "A"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_2",
+                    "name": "finish",
+                    "input": {},
+                },
+            ],
+            1,
+            "tool_call_cardinality_exceeded",
+        ),
+    ],
+)
+async def test_anthropic_rejects_invalid_provider_tool_identity(
+    content: list[dict[str, Any]],
+    max_calls: int,
+    error_code: str,
+) -> None:
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(
+        {
+            "id": "msg_invalid",
+            "stop_reason": "tool_use",
+            "content": content,
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMToolCallResponseError) as exc_info:
+        await client.chat(
+            [{"role": "user", "content": "use a Tool"}],
+            tool_request=_native_tool_request(max_calls=max_calls),
+        )
+
+    assert exc_info.value.code == error_code
+
+
+@pytest.mark.asyncio
+async def test_anthropic_continuation_binds_prompt_tools_and_pending_outputs() -> None:
+    first_content = [
+        {"type": "text", "text": "I will look that up."},
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "lookup",
+            "input": {"key": "A"},
+        },
+    ]
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(
+        {
+            "id": "msg_first",
+            "stop_reason": "tool_use",
+            "content": first_content,
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    messages = (message_from_text("user", "Look up A, then finish."),)
+    tools = _native_tool_request(max_calls=1).tools
+
+    first = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="required",
+            turn_id="turn-1",
+        )
+    )
+
+    assert first.continuation is not None
+    assert first.continuation.contract_version == "messages.tool_continuation/v2"
+    first_payload = fake_http.last_json
+
+    with pytest.raises(LLMToolCallResponseError) as output_error:
+        await client.generate(
+            ModelRequest(
+                messages=messages,
+                tools=tools,
+                tool_choice="required",
+                turn_id="turn-1",
+                continuation=first.continuation,
+                tool_outputs=(
+                    ToolCallOutput("toolu_1", '{"value":"A"}'),
+                    ToolCallOutput("toolu_extra", "unexpected"),
+                ),
+            )
+        )
+    assert output_error.value.code == "tool_output_mismatch"
+    assert fake_http.last_json is first_payload
+
+    with pytest.raises(ValueError, match="checkpoint prompt changed"):
+        await client.generate(
+            ModelRequest(
+                messages=(message_from_text("user", "Look up B, then finish."),),
+                tools=tools,
+                tool_choice="required",
+                turn_id="turn-1",
+                continuation=first.continuation,
+                tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
+            )
+        )
+    assert fake_http.last_json is first_payload
+
+    changed_tools = (
+        ToolDefinition(
+            name="lookup",
+            description="Look up one changed record.",
+            input_schema=tools[0].input_schema,
+        ),
+        tools[1],
+    )
+    with pytest.raises(ValueError, match="checkpoint contract changed"):
+        await client.generate(
+            ModelRequest(
+                messages=messages,
+                tools=changed_tools,
+                tool_choice="required",
+                turn_id="turn-1",
+                continuation=first.continuation,
+                tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
+            )
+        )
+    assert fake_http.last_json is first_payload
+
+    fake_http.payload = {
+        "id": "msg_finish",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "finish",
+                "input": {},
+            }
+        ],
+    }
+    final = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="required",
+            turn_id="turn-1",
+            continuation=first.continuation,
+            tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
+        )
+    )
+
+    assert [call.name for call in final.calls] == ["finish"]
+    assert final.continuation is not None
+    assert final.continuation.revision == 2
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["messages"][-2] == {
+        "role": "assistant",
+        "content": first_content,
+    }
+    assert fake_http.last_json["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": '{"value":"A"}',
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() -> None:
     payload = {
         "candidates": [
@@ -1435,6 +1707,46 @@ async def test_azure_chat_completions_stream_uses_native_sse_and_terminal_usage(
 
 
 @pytest.mark.asyncio
+async def test_anthropic_stream_uses_current_adaptive_effort_wire() -> None:
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeStreamingHttpClient(
+        [
+            "event: message_start",
+            'data: {"message":{"usage":{"input_tokens":3}}}',
+            "event: content_block_delta",
+            'data: {"delta":{"type":"text_delta","text":"Hello"}}',
+            "event: message_delta",
+            'data: {"usage":{"output_tokens":1}}',
+        ]
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    result = await AnthropicMessagesAdapter.stream(
+        client,
+        [{"role": "user", "content": "Hello"}],
+        model="claude-test",
+        thinking_budget=None,
+        max_output_tokens=128,
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=True,
+        reasoning_effort="low",
+    )
+
+    assert result.value == ("Hello", {"input_tokens": 3, "output_tokens": 1})
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["thinking"] == {"type": "adaptive"}
+    assert fake_http.last_json["output_config"] == {"effort": "low"}
+    assert "temperature" not in fake_http.last_json
+    assert "top_p" not in fake_http.last_json
+
+
+@pytest.mark.asyncio
 async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
     client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
     fake_http = _FakeStreamingHttpClient(
@@ -2402,7 +2714,20 @@ async def test_anthropic_sends_only_one_sampling_control() -> None:
     )
 
     assert fake_http.last_json is not None
-    assert fake_http.last_json["temperature"] == 0.5
+    assert "temperature" not in fake_http.last_json
+    assert "top_p" not in fake_http.last_json
+
+    await AnthropicMessagesAdapter.invoke(
+        client,
+        [{"role": "user", "content": "hello"}],
+        model="claude-test",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+        temperature=0.2,
+    )
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["temperature"] == 0.2
     assert "top_p" not in fake_http.last_json
 
     with pytest.raises(ValueError, match="temperature or top_p"):

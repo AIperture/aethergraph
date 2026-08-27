@@ -86,7 +86,16 @@ def test_tool_result_continuation_is_declared_only_by_implementing_adapters() ->
         "anthropic_messages",
         "gemini_generate_content",
     }
-    assert {ENDPOINT_ADAPTERS[adapter_id].adapter_revision for adapter_id in capable} == {2}
+    assert {
+        adapter_id: ENDPOINT_ADAPTERS[adapter_id].adapter_revision for adapter_id in capable
+    } == {
+        "openai_responses": 2,
+        "openai_chat_completions": 2,
+        "azure_responses": 2,
+        "azure_chat_completions": 2,
+        "anthropic_messages": 3,
+        "gemini_generate_content": 2,
+    }
 
 
 def test_registry_model_discovery_adapters_have_one_implementation_owner() -> None:
