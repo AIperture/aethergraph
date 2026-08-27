@@ -1177,7 +1177,7 @@ class GenericLLMClient(LLMClientProtocol):
         if thinking is None:
             if thinking_mode == "off":
                 thinking = {"type": "disabled"}
-            elif thinking_mode in {"auto", "on"}:
+            elif thinking_mode == "on":
                 thinking = {"type": "enabled"}
         if isinstance(thinking, dict):
             return {"thinking": thinking}
@@ -1469,7 +1469,7 @@ class GenericLLMClient(LLMClientProtocol):
     ) -> dict[str, Any] | None:
         if thinking_mode == "off":
             if model.startswith("gemini-3"):
-                return {"thinkingLevel": "minimal"}
+                return None
             return {"thinkingBudget": 0}
         if reasoning_effort is None:
             if thinking_mode == "on" and model.startswith("gemini-3"):

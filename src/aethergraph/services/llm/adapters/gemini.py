@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -16,7 +17,9 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
     assistant_output_identity,
+    tool_call_request_fingerprint,
 )
+from aethergraph.services.llm.tool_discovery import ToolTransportCheckpoint
 from aethergraph.services.llm.types import (
     ChatOutputFormat,
     LLMUnsupportedFeatureError,
@@ -40,11 +43,193 @@ def _gemini_function_parameters(schema: Any) -> Any:
     return schema
 
 
-def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
+def _gemini_stable_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project the caller-owned stable conversation into Gemini contents."""
+
+    system_parts: list[str] = []
+    for message in messages:
+        if message.get("role") == "system":
+            content = message.get("content")
+            system_parts.append(content if isinstance(content, str) else str(content))
+    system = "\n".join(system_parts)
+    contents = [
+        {
+            "role": "user" if message.get("role") == "user" else "model",
+            "parts": _to_gemini_parts(message.get("content")),
+        }
+        for message in messages
+        if message.get("role") != "system"
+    ]
+    if system:
+        contents.insert(
+            0,
+            {"role": "user", "parts": [{"text": f"System instructions: {system}"}]},
+        )
+    return contents
+
+
+def _gemini_messages_digest(messages: list[dict[str, Any]]) -> str:
+    """Bind private Gemini replay state to the exact stable prompt."""
+
+    canonical = json.dumps(messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _gemini_checkpoint(
+    *,
+    request: ToolCallRequest,
+    model: str,
+    stable_messages: list[dict[str, Any]],
+    replay_contents: tuple[dict[str, Any], ...],
+    pending_calls: tuple[dict[str, str], ...],
+) -> ToolTransportCheckpoint:
+    """Build one integrity-bound Gemini function-result checkpoint."""
+
+    previous = request.transport_checkpoint
+    revision = 1 if previous is None else previous.revision + 1
+    payload = {
+        "state": "pending_tool_outputs",
+        "tool_contract_fingerprint": tool_call_request_fingerprint(request),
+        "prompt_message_count": len(stable_messages),
+        "prompt_digest": _gemini_messages_digest(stable_messages),
+        "replay_contents": list(replay_contents),
+        "pending_calls": list(pending_calls),
+    }
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return ToolTransportCheckpoint(
+        checkpoint_id=f"google_generate_content_{revision}_{digest[:16]}",
+        revision=revision,
+        provider="google",
+        model=model,
+        contract_version="generate_content.tool_results/v1",
+        turn_id=str(request.turn_id or ""),
+        integrity_digest=digest,
+        purpose="pending_tool_outputs",
+        opaque_payload=payload,
+    )
+
+
+def _gemini_checkpoint_payload(
+    checkpoint: ToolTransportCheckpoint,
+    *,
+    request: ToolCallRequest,
+    model: str,
+    stable_messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Validate and detach one Gemini function-result checkpoint."""
+
+    if (
+        checkpoint.provider != "google"
+        or checkpoint.model != model
+        or checkpoint.contract_version != "generate_content.tool_results/v1"
+    ):
+        raise ValueError("Gemini Tool checkpoint binding does not match")
+    payload = dict(checkpoint.opaque_payload or {})
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if digest != checkpoint.integrity_digest:
+        raise ValueError("Gemini Tool checkpoint integrity validation failed")
+    if payload.get("state") != "pending_tool_outputs":
+        raise ValueError("Gemini Tool checkpoint state is invalid")
+    if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(request):
+        raise ValueError("Gemini Tool checkpoint contract changed")
+    if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
+        "prompt_digest"
+    ) != _gemini_messages_digest(stable_messages):
+        raise ValueError("Gemini Tool checkpoint prompt changed")
+    pending_calls = payload.get("pending_calls")
+    if not isinstance(pending_calls, list) or not pending_calls:
+        raise ValueError("Gemini Tool checkpoint has no pending calls")
+    call_ids = [str(item.get("call_id") or "") for item in pending_calls if isinstance(item, dict)]
+    if len(call_ids) != len(pending_calls) or any(not call_id for call_id in call_ids):
+        raise ValueError("Gemini Tool checkpoint call identity is invalid")
+    if len(call_ids) != len(set(call_ids)):
+        raise ValueError("Gemini Tool checkpoint call identities are not unique")
+    if any(
+        not isinstance(item.get("name"), str) or not str(item.get("name") or "").strip()
+        for item in pending_calls
+    ):
+        raise ValueError("Gemini Tool checkpoint call name is invalid")
+    replay_contents = payload.get("replay_contents")
+    if (
+        not isinstance(replay_contents, list)
+        or not replay_contents
+        or not all(isinstance(content, dict) for content in replay_contents)
+    ):
+        raise ValueError("Gemini Tool checkpoint replay state is invalid")
+    return payload
+
+
+def _gemini_tool_output_response(output: str) -> dict[str, Any]:
+    """Convert one opaque Engine Tool result into Gemini's required object."""
+
+    try:
+        decoded = json.loads(output)
+    except json.JSONDecodeError:
+        decoded = output
+    return decoded if isinstance(decoded, dict) else {"output": decoded}
+
+
+def _gemini_continuation_contents(
+    messages: list[dict[str, Any]],
+    *,
+    tool_request: ToolCallRequest,
+    model: str,
+) -> tuple[list[dict[str, Any]], tuple[dict[str, Any], ...]]:
+    """Append exact Gemini function calls and matching function responses."""
+
+    stable_contents = _gemini_stable_contents(messages)
+    checkpoint = tool_request.transport_checkpoint
+    if checkpoint is None:
+        return stable_contents, ()
+    payload = _gemini_checkpoint_payload(
+        checkpoint,
+        request=tool_request,
+        model=model,
+        stable_messages=messages,
+    )
+    pending_calls = tuple(dict(item) for item in payload["pending_calls"])
+    outputs_by_id = {output.call_id: output.output for output in tool_request.tool_outputs}
+    pending_ids = {str(item["call_id"]) for item in pending_calls}
+    if set(outputs_by_id) != pending_ids:
+        raise LLMToolCallResponseError(
+            code="tool_output_mismatch",
+            message="Gemini continuation requires exactly every pending Tool output.",
+        )
+    result_parts: list[dict[str, Any]] = []
+    for item in pending_calls:
+        response: dict[str, Any] = {
+            "name": str(item["name"]),
+            "response": _gemini_tool_output_response(outputs_by_id[str(item["call_id"])]),
+        }
+        provider_call_id = str(item.get("provider_call_id") or "").strip()
+        if provider_call_id:
+            response["id"] = provider_call_id
+        result_parts.append({"functionResponse": response})
+    replay = (
+        *(dict(content) for content in payload["replay_contents"]),
+        {"role": "user", "parts": result_parts},
+    )
+    return [*stable_contents, *replay], replay
+
+
+def _gemini_tool_call_response(
+    candidate: dict[str, Any],
+    *,
+    tool_request: ToolCallRequest,
+    model: str,
+    stable_messages: list[dict[str, Any]],
+    replay_contents: tuple[dict[str, Any], ...],
+) -> ToolCallResponse:
     """Normalize Gemini function-call parts without flattening part boundaries."""
 
     items: list[AssistantOutput | ToolCall] = []
-    parts = list((candidate.get("content") or {}).get("parts") or [])
+    pending_calls: list[dict[str, str]] = []
+    content = candidate.get("content")
+    content = dict(content) if isinstance(content, dict) else {}
+    parts = list(content.get("parts") or [])
+    allowed_names = {tool.name for tool in tool_request.tools}
     for part_index, part in enumerate(parts):
         if not isinstance(part, dict):
             continue
@@ -79,19 +264,47 @@ def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
                     "arguments must be an object."
                 ),
             )
+        name = str(function_call.get("name") or "").strip()
+        if name not in allowed_names:
+            raise LLMToolCallResponseError(
+                code="unknown_tool",
+                message=f"Gemini returned unknown Tool {name or '?'}.",
+            )
         metadata: dict[str, Any] = {"part_index": part_index}
         thought_signature = part.get("thoughtSignature") or part.get("thought_signature")
         if thought_signature is not None:
             metadata["thought_signature"] = thought_signature
+        provider_call_id = str(function_call.get("id") or part.get("id") or "").strip()
+        call_id = provider_call_id or f"gemini-call-{part_index}"
         items.append(
             ToolCall(
-                call_id=str(
-                    function_call.get("id") or part.get("id") or f"gemini-call-{part_index}"
-                ),
-                name=str(function_call.get("name") or ""),
+                call_id=call_id,
+                name=name,
                 arguments=dict(arguments),
                 provider_metadata=metadata,
             )
+        )
+        pending_call = {"call_id": call_id, "name": name}
+        if provider_call_id:
+            pending_call["provider_call_id"] = provider_call_id
+        pending_calls.append(pending_call)
+    if len(pending_calls) > tool_request.max_calls:
+        raise LLMToolCallResponseError(
+            code="tool_call_cardinality_exceeded",
+            message=(
+                f"Gemini returned {len(pending_calls)} Tool calls, exceeding the "
+                f"request maximum of {tool_request.max_calls}."
+            ),
+        )
+    checkpoint = None
+    if pending_calls and tool_request.turn_id:
+        content["role"] = str(content.get("role") or "model")
+        checkpoint = _gemini_checkpoint(
+            request=tool_request,
+            model=model,
+            stable_messages=stable_messages,
+            replay_contents=(*replay_contents, content),
+            pending_calls=tuple(pending_calls),
         )
     return ToolCallResponse(
         items=tuple(items),
@@ -100,6 +313,7 @@ def _gemini_tool_call_response(candidate: dict[str, Any]) -> ToolCallResponse:
             "candidate_index": int(candidate.get("index") or 0),
             "part_count": len(parts),
         },
+        transport_checkpoint=checkpoint,
     )
 
 
@@ -114,6 +328,7 @@ def _gemini_generate_content_payload(
     json_schema: dict[str, Any] | None,
     structured_output_fields: dict[str, Any] | None,
     tool_request: ToolCallRequest | None,
+    provider_contents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one shared Gemini GenerateContent request payload.
 
@@ -162,6 +377,7 @@ def _gemini_generate_content_payload(
         json_schema: Optional canonical JSON schema.
         structured_output_fields: Optional prepared native structured fields.
         tool_request: Optional canonical native Tool request.
+        provider_contents: Optional validated continuation-aware contents.
 
     Returns:
         dict[str, Any]: Complete detached Gemini request body.
@@ -172,21 +388,11 @@ def _gemini_generate_content_payload(
         migration and are not changed by the streaming cutover.
     """
 
-    system_parts: list[str] = []
-    for message in messages:
-        if message.get("role") == "system":
-            content = message.get("content")
-            system_parts.append(content if isinstance(content, str) else str(content))
-    system = "\n".join(system_parts)
-
-    turns: list[dict[str, Any]] = []
-    for message in messages:
-        if message.get("role") == "system":
-            continue
-        role = "user" if message.get("role") == "user" else "model"
-        turns.append({"role": role, "parts": _to_gemini_parts(message.get("content"))})
-    if system:
-        turns.insert(0, {"role": "user", "parts": [{"text": f"System instructions: {system}"}]})
+    turns = (
+        [dict(content) for content in provider_contents]
+        if provider_contents is not None
+        else _gemini_stable_contents(messages)
+    )
 
     generation_config: dict[str, Any] = {"temperature": temperature, "topP": top_p}
     if max_output_tokens is not None:
@@ -400,6 +606,15 @@ class GeminiGenerateContentAdapter:
             thinking_cfg = host._gemini_thinking_config(
                 model=model, reasoning_effort=reasoning_effort, thinking_mode=thinking_mode
             )
+            if tool_request is None:
+                provider_contents = _gemini_stable_contents(messages)
+                replay_contents: tuple[dict[str, Any], ...] = ()
+            else:
+                provider_contents, replay_contents = _gemini_continuation_contents(
+                    messages,
+                    tool_request=tool_request,
+                    model=model,
+                )
             payload = _gemini_generate_content_payload(
                 messages,
                 temperature=temperature,
@@ -410,6 +625,7 @@ class GeminiGenerateContentAdapter:
                 json_schema=json_schema,
                 structured_output_fields=structured_output_fields,
                 tool_request=tool_request,
+                provider_contents=provider_contents,
             )
 
             r = await host._client.post(
@@ -436,7 +652,19 @@ class GeminiGenerateContentAdapter:
                             "native Tool selection."
                         ),
                     )
-                return ProviderCallResult((_gemini_tool_call_response(cand), usage), metadata)
+                return ProviderCallResult(
+                    (
+                        _gemini_tool_call_response(
+                            cand,
+                            tool_request=tool_request,
+                            model=model,
+                            stable_messages=messages,
+                            replay_contents=replay_contents,
+                        ),
+                        usage,
+                    ),
+                    metadata,
+                )
             txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
             return ProviderCallResult((txt, usage), metadata)
 

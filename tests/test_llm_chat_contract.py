@@ -485,6 +485,171 @@ async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() 
 
 
 @pytest.mark.asyncio
+async def test_gemini_replays_exact_function_call_and_matching_tool_result() -> None:
+    initial_payload = {
+        "candidates": [
+            {
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "id": "gemini_1",
+                                "name": "lookup",
+                                "args": {"key": "A"},
+                            },
+                            "thoughtSignature": "opaque-signature",
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    final_payload = {
+        "candidates": [
+            {
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "id": "gemini_2",
+                                "name": "finish",
+                                "args": {},
+                            }
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
+    fake_http = _FakeHttpClient(initial_payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    stable_messages = [
+        {"role": "system", "content": "Use the tools."},
+        {"role": "user", "content": "Look up A, then finish."},
+    ]
+    base = _native_tool_request(max_calls=1)
+    initial_request = ToolCallRequest(
+        tools=base.tools,
+        choice="required",
+        max_calls=1,
+        turn_id="turn-1",
+    )
+
+    initial, _usage = await client.chat(stable_messages, tool_request=initial_request)
+
+    assert isinstance(initial, ToolCallResponse)
+    assert initial.transport_checkpoint is not None
+    assert initial.transport_checkpoint.contract_version == "generate_content.tool_results/v1"
+    fake_http.payload = final_payload
+    continued_request = ToolCallRequest(
+        tools=base.tools,
+        choice="required",
+        max_calls=1,
+        turn_id="turn-1",
+        transport_checkpoint=initial.transport_checkpoint,
+        tool_outputs=(ToolCallOutput("gemini_1", '{"value":"A"}'),),
+    )
+
+    finished, _usage = await client.chat(stable_messages, tool_request=continued_request)
+
+    assert isinstance(finished, ToolCallResponse)
+    assert [call.name for call in finished.calls] == ["finish"]
+    assert finished.transport_checkpoint is not None
+    assert finished.transport_checkpoint.revision == 2
+    assert fake_http.last_json is not None
+    assert [content["role"] for content in fake_http.last_json["contents"]] == [
+        "user",
+        "user",
+        "model",
+        "user",
+    ]
+    assert fake_http.last_json["contents"][-2]["parts"] == [
+        {
+            "functionCall": {
+                "id": "gemini_1",
+                "name": "lookup",
+                "args": {"key": "A"},
+            },
+            "thoughtSignature": "opaque-signature",
+        }
+    ]
+    assert fake_http.last_json["contents"][-1]["parts"] == [
+        {
+            "functionResponse": {
+                "id": "gemini_1",
+                "name": "lookup",
+                "response": {"value": "A"},
+            }
+        }
+    ]
+    assert [
+        declaration["name"]
+        for declaration in fake_http.last_json["tools"][0]["functionDeclarations"]
+    ] == ["lookup", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_rejects_incomplete_tool_outputs_before_transport() -> None:
+    client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
+    fake_http = _FakeHttpClient(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "id": "gemini_1",
+                                    "name": "lookup",
+                                    "args": {"key": "A"},
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    base = _native_tool_request(max_calls=1)
+    initial, _usage = await client.chat(
+        [{"role": "user", "content": "Look up A."}],
+        tool_request=ToolCallRequest(
+            tools=base.tools,
+            choice="required",
+            max_calls=1,
+            turn_id="turn-1",
+        ),
+    )
+    assert isinstance(initial, ToolCallResponse)
+    assert initial.transport_checkpoint is not None
+    first_payload = fake_http.last_json
+
+    with pytest.raises(LLMToolCallResponseError, match="exactly every pending"):
+        await client.chat(
+            [{"role": "user", "content": "Look up A."}],
+            tool_request=ToolCallRequest(
+                tools=base.tools,
+                choice="required",
+                max_calls=1,
+                turn_id="turn-1",
+                transport_checkpoint=initial.transport_checkpoint,
+            ),
+        )
+
+    assert fake_http.last_json is first_payload
+
+
+@pytest.mark.asyncio
 async def test_gemini_profile_thinking_mode_is_projected_once() -> None:
     client = GenericLLMClient(
         provider="google",
@@ -510,6 +675,27 @@ async def test_gemini_profile_thinking_mode_is_projected_once() -> None:
     assert text == "done"
     assert fake_http.last_json is not None
     assert fake_http.last_json["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+@pytest.mark.asyncio
+async def test_gemini_3_off_omits_unsupported_minimal_thinking_level() -> None:
+    client = GenericLLMClient(
+        provider="google",
+        model="gemini-3.7-flash",
+        api_key="google-key",
+        thinking_mode="off",
+    )
+    fake_http = _FakeHttpClient(
+        {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "done"}]}}]}
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, _usage = await client.chat([{"role": "user", "content": "Hello"}])
+
+    assert text == "done"
+    assert fake_http.last_json is not None
+    assert "thinkingConfig" not in fake_http.last_json["generationConfig"]
 
 
 def test_structured_output_request_detaches_caller_schema() -> None:
@@ -1373,6 +1559,18 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     assert fake_http.last_json["response_format"] == {"type": "json_object"}
     assert fake_http.last_json["max_tokens"] == 256
     assert fake_http.last_json["reasoning_effort"] == "max"
+    assert "thinking" not in fake_http.last_json
+
+    await OpenAICompatibleChatAdapter.invoke(
+        client,
+        [{"role": "user", "content": "hello"}],
+        model="deepseek-v4-pro",
+        thinking_mode="on",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+    )
+    assert fake_http.last_json is not None
     assert fake_http.last_json["thinking"] == {"type": "enabled"}
 
 
@@ -2807,4 +3005,4 @@ async def test_chat_uses_profile_reasoning_effort_when_call_omits_it() -> None:
     assert json.loads(text) == {"ok": True}
     assert fake_http.last_json is not None
     assert fake_http.last_json["reasoning_effort"] == "max"
-    assert fake_http.last_json["thinking"] == {"type": "enabled"}
+    assert "thinking" not in fake_http.last_json

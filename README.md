@@ -32,7 +32,7 @@ python -m pip install "aethergraph[discord]"
 Pin alpha releases in deployed applications:
 
 ```text
-aethergraph==0.1.0a18
+aethergraph==0.1.0a19
 ```
 
 ## Quickstart
@@ -125,7 +125,7 @@ aethergraph serve \
 ```
 
 The initial in-process run creates the current workspace manifest required by
-0.1.0a18 before server coordination metadata is written. It is needed only when
+0.1.0a19 before server coordination metadata is written. It is needed only when
 the local workspace has not been initialized yet.
 
 Run a graph in-process:

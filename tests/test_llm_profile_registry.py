@@ -71,6 +71,24 @@ def test_registered_runtime_endpoints_declare_manifest_observability() -> None:
     )
 
 
+def test_tool_result_continuation_is_declared_only_by_implementing_adapters() -> None:
+    capable = {
+        adapter_id
+        for adapter_id, descriptor in ENDPOINT_ADAPTERS.items()
+        if "tool_result_continuation" in descriptor.implementation_capabilities
+    }
+
+    assert capable == {
+        "openai_responses",
+        "openai_chat_completions",
+        "azure_responses",
+        "azure_chat_completions",
+        "anthropic_messages",
+        "gemini_generate_content",
+    }
+    assert {ENDPOINT_ADAPTERS[adapter_id].adapter_revision for adapter_id in capable} == {2}
+
+
 def test_registry_model_discovery_adapters_have_one_implementation_owner() -> None:
     for provider in PROVIDERS.values():
         if provider.model_discovery_adapter_id is not None:
