@@ -277,7 +277,7 @@ def _anthropic_checkpoint_payload(
                     model=model,
                     stable_messages=messages,
                 )
-            except ValueError:
+            except LLMToolCallResponseError:
                 pass
             ```
 
@@ -299,7 +299,10 @@ def _anthropic_checkpoint_payload(
         or checkpoint.model != model
         or checkpoint.contract_version != "messages.tool_continuation/v2"
     ):
-        raise ValueError("Anthropic Tool checkpoint binding does not match")
+        raise LLMToolCallResponseError(
+            code="model_continuation_binding_mismatch",
+            message="Anthropic Tool checkpoint binding does not match.",
+        )
     payload = dict(checkpoint.opaque_payload or {})
     canonical = json.dumps(
         payload,
@@ -309,26 +312,41 @@ def _anthropic_checkpoint_payload(
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if digest != checkpoint.integrity_digest:
-        raise ValueError("Anthropic Tool checkpoint integrity validation failed")
+        raise LLMToolCallResponseError(
+            code="model_continuation_integrity_invalid",
+            message="Anthropic Tool checkpoint integrity validation failed.",
+        )
     if payload.get("state") not in {
         "pending_search",
         "pending_tool_outputs",
         "consumed",
     }:
-        raise ValueError("Anthropic Tool checkpoint state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_state_invalid",
+            message="Anthropic Tool checkpoint state is invalid.",
+        )
     if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(request):
-        raise ValueError("Anthropic Tool checkpoint contract changed")
+        raise LLMToolCallResponseError(
+            code="model_exchange_tool_contract_changed",
+            message="Anthropic Tool checkpoint contract changed.",
+        )
     if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
         "prompt_digest"
     ) != _anthropic_messages_digest(stable_messages):
-        raise ValueError("Anthropic Tool checkpoint prompt changed")
+        raise LLMToolCallResponseError(
+            code="prompt_continuation_diverged",
+            message="Anthropic Tool checkpoint prompt changed.",
+        )
     expected_purpose = {
         "pending_search": "pending_discovery_result",
         "pending_tool_outputs": "pending_tool_outputs",
         "consumed": "consumed",
     }[payload["state"]]
     if checkpoint.purpose != expected_purpose:
-        raise ValueError("Anthropic Tool checkpoint purpose does not match replay state")
+        raise LLMToolCallResponseError(
+            code="model_continuation_purpose_invalid",
+            message="Anthropic Tool checkpoint purpose does not match replay state.",
+        )
     active_tool_names = payload.get("active_tool_names")
     if (
         not isinstance(active_tool_names, list)
@@ -336,13 +354,19 @@ def _anthropic_checkpoint_payload(
         or len(active_tool_names) != len(set(active_tool_names))
         or not set(active_tool_names).issubset({tool.name for tool in request.tools})
     ):
-        raise ValueError("Anthropic Tool checkpoint activation state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_exchange_tool_surface_invalid",
+            message="Anthropic Tool checkpoint activation state is invalid.",
+        )
     if payload["state"] == "pending_search" and (
         not str(payload.get("search_call_id") or "").strip()
         or not isinstance(payload.get("assistant_content"), list)
         or not payload["assistant_content"]
     ):
-        raise ValueError("Anthropic pending Tool checkpoint identity is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Anthropic pending Tool checkpoint identity is invalid.",
+        )
     pending_calls = payload.get("pending_calls", [])
     if not isinstance(pending_calls, list) or not all(
         isinstance(item, dict)
@@ -352,20 +376,32 @@ def _anthropic_checkpoint_payload(
         and str(item.get("name") or "").strip()
         for item in pending_calls
     ):
-        raise ValueError("Anthropic Tool checkpoint pending-call state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Anthropic Tool checkpoint pending-call state is invalid.",
+        )
     pending_call_ids = [str(item["call_id"]) for item in pending_calls]
     if len(pending_call_ids) != len(set(pending_call_ids)):
-        raise ValueError("Anthropic Tool checkpoint pending-call identities are not unique")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Anthropic Tool checkpoint pending-call identities are not unique.",
+        )
     if not {str(item["name"]) for item in pending_calls}.issubset(
         {tool.name for tool in request.tools}
     ):
-        raise ValueError("Anthropic Tool checkpoint pending-call name is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Anthropic Tool checkpoint pending-call name is invalid.",
+        )
     if payload["state"] == "pending_tool_outputs" and (
         not pending_calls
         or not isinstance(payload.get("assistant_content"), list)
         or not payload["assistant_content"]
     ):
-        raise ValueError("Anthropic pending Tool-output checkpoint is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_replay_invalid",
+            message="Anthropic pending Tool-output checkpoint is invalid.",
+        )
     return payload
 
 

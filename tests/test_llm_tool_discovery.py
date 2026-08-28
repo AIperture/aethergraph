@@ -1682,10 +1682,11 @@ async def test_checkpoint_request_binding_rejects_before_provider_traffic() -> N
         transport_checkpoint=wrong_turn_model,
     )
 
-    with pytest.raises(ValueError, match="binding does not match"):
+    with pytest.raises(LLMToolCallResponseError) as raised:
         await client.chat(
             [{"role": "user", "content": "finish"}],
             tool_request=request,
         )
 
+    assert raised.value.code == "model_continuation_binding_mismatch"
     assert fake_http.calls == 0

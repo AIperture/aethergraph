@@ -124,40 +124,70 @@ def _gemini_checkpoint_payload(
         or checkpoint.model != model
         or checkpoint.contract_version != "generate_content.tool_results/v1"
     ):
-        raise ValueError("Gemini Tool checkpoint binding does not match")
+        raise LLMToolCallResponseError(
+            code="model_continuation_binding_mismatch",
+            message="Gemini Tool checkpoint binding does not match.",
+        )
     payload = dict(checkpoint.opaque_payload or {})
     canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if digest != checkpoint.integrity_digest:
-        raise ValueError("Gemini Tool checkpoint integrity validation failed")
+        raise LLMToolCallResponseError(
+            code="model_continuation_integrity_invalid",
+            message="Gemini Tool checkpoint integrity validation failed.",
+        )
     if payload.get("state") != "pending_tool_outputs":
-        raise ValueError("Gemini Tool checkpoint state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_state_invalid",
+            message="Gemini Tool checkpoint state is invalid.",
+        )
     if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(request):
-        raise ValueError("Gemini Tool checkpoint contract changed")
+        raise LLMToolCallResponseError(
+            code="model_exchange_tool_contract_changed",
+            message="Gemini Tool checkpoint contract changed.",
+        )
     if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
         "prompt_digest"
     ) != _gemini_messages_digest(stable_messages):
-        raise ValueError("Gemini Tool checkpoint prompt changed")
+        raise LLMToolCallResponseError(
+            code="prompt_continuation_diverged",
+            message="Gemini Tool checkpoint prompt changed.",
+        )
     pending_calls = payload.get("pending_calls")
     if not isinstance(pending_calls, list) or not pending_calls:
-        raise ValueError("Gemini Tool checkpoint has no pending calls")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Gemini Tool checkpoint has no pending calls.",
+        )
     call_ids = [str(item.get("call_id") or "") for item in pending_calls if isinstance(item, dict)]
     if len(call_ids) != len(pending_calls) or any(not call_id for call_id in call_ids):
-        raise ValueError("Gemini Tool checkpoint call identity is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Gemini Tool checkpoint call identity is invalid.",
+        )
     if len(call_ids) != len(set(call_ids)):
-        raise ValueError("Gemini Tool checkpoint call identities are not unique")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Gemini Tool checkpoint call identities are not unique.",
+        )
     if any(
         not isinstance(item.get("name"), str) or not str(item.get("name") or "").strip()
         for item in pending_calls
     ):
-        raise ValueError("Gemini Tool checkpoint call name is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Gemini Tool checkpoint call name is invalid.",
+        )
     replay_contents = payload.get("replay_contents")
     if (
         not isinstance(replay_contents, list)
         or not replay_contents
         or not all(isinstance(content, dict) for content in replay_contents)
     ):
-        raise ValueError("Gemini Tool checkpoint replay state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_replay_invalid",
+            message="Gemini Tool checkpoint replay state is invalid.",
+        )
     return payload
 
 

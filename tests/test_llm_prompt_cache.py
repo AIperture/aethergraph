@@ -295,15 +295,18 @@ def test_disabled_policy_emits_no_cache_directive_or_key() -> None:
     assert prepared.observation["key_fingerprint"] == ""
 
 
-def test_required_policy_rejects_unknown_cache_capability() -> None:
-    with pytest.raises(LLMUnsupportedFeatureError, match="prompt_cache"):
-        prepare_prompt_cache(
-            PromptCacheRequest((0,), "agent.v1"),
-            [{"role": "system", "content": "stable"}],
-            provider="deepseek",
-            model="deepseek-v4-pro",
-            policy="required",
-        )
+def test_required_policy_accepts_deepseek_implicit_cache_without_wire_fields() -> None:
+    prepared = prepare_prompt_cache(
+        PromptCacheRequest((0,), "agent.v1"),
+        [{"role": "system", "content": "stable"}],
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        policy="required",
+    )
+
+    assert prepared.observation["effective_mode"] == "implicit"
+    assert prepared.observation["capability_source"] == ("deepseek_automatic_prefix_cache")
+    assert prepared.provider_request_fields == {}
 
 
 @pytest.mark.asyncio

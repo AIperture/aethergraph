@@ -373,7 +373,7 @@ def _openai_checkpoint_payload(
             ```python
             try:
                 _openai_checkpoint_payload(foreign_checkpoint)
-            except ValueError:
+            except LLMToolCallResponseError:
                 pass
             ```
 
@@ -389,7 +389,10 @@ def _openai_checkpoint_payload(
     """
 
     if checkpoint.provider != provider or checkpoint.contract_version != "responses.tool_search":
-        raise ValueError("Responses Tool checkpoint binding does not match")
+        raise LLMToolCallResponseError(
+            code="model_continuation_binding_mismatch",
+            message="Responses Tool checkpoint binding does not match.",
+        )
     payload = dict(checkpoint.opaque_payload or {})
     canonical = json.dumps(
         payload,
@@ -399,48 +402,81 @@ def _openai_checkpoint_payload(
     )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if digest != checkpoint.integrity_digest:
-        raise ValueError("OpenAI Tool checkpoint integrity validation failed")
+        raise LLMToolCallResponseError(
+            code="model_continuation_integrity_invalid",
+            message="OpenAI Tool checkpoint integrity validation failed.",
+        )
     if payload.get("state") not in {
         "pending_search",
         "pending_tool_outputs",
         "consumed",
     }:
-        raise ValueError("OpenAI Tool checkpoint state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_state_invalid",
+            message="OpenAI Tool checkpoint state is invalid.",
+        )
     expected_purpose = {
         "pending_search": "pending_discovery_result",
         "pending_tool_outputs": "pending_tool_outputs",
         "consumed": "consumed",
     }[payload["state"]]
     if checkpoint.purpose != expected_purpose:
-        raise ValueError("OpenAI Tool checkpoint purpose does not match replay state")
+        raise LLMToolCallResponseError(
+            code="model_continuation_purpose_invalid",
+            message="OpenAI Tool checkpoint purpose does not match replay state.",
+        )
     if payload["state"] == "pending_search" and (
         not str(payload.get("response_id") or "").strip()
         or not str(payload.get("call_id") or "").strip()
     ):
-        raise ValueError("OpenAI pending Tool checkpoint identity is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="OpenAI pending Tool checkpoint identity is invalid.",
+        )
     pending_call_ids = payload.get("pending_call_ids", [])
     if not isinstance(pending_call_ids, list) or not all(
         isinstance(call_id, str) and call_id.strip() for call_id in pending_call_ids
     ):
-        raise ValueError("OpenAI Tool checkpoint pending-call state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="OpenAI Tool checkpoint pending-call state is invalid.",
+        )
     if len(pending_call_ids) != len(set(pending_call_ids)):
-        raise ValueError("OpenAI Tool checkpoint pending-call identities are not unique")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="OpenAI Tool checkpoint pending-call identities are not unique.",
+        )
     if payload["state"] == "pending_tool_outputs" and not pending_call_ids:
-        raise ValueError("OpenAI pending Tool-output checkpoint has no calls")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="OpenAI pending Tool-output checkpoint has no calls.",
+        )
     active_names = payload.get("active_tool_names")
     if not isinstance(active_names, list) or not all(
         isinstance(name, str) and name.strip() for name in active_names
     ):
-        raise ValueError("OpenAI Tool checkpoint activation state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_exchange_tool_surface_invalid",
+            message="OpenAI Tool checkpoint activation state is invalid.",
+        )
     prompt_count = payload.get("prompt_stable_message_count")
     prompt_digest = payload.get("prompt_stable_prefix_digest")
     if (prompt_count is None) != (prompt_digest is None):
-        raise ValueError("OpenAI Tool checkpoint prompt state is incomplete")
+        raise LLMToolCallResponseError(
+            code="prompt_continuation_state_missing",
+            message="OpenAI Tool checkpoint prompt state is incomplete.",
+        )
     if prompt_count is not None:
         if isinstance(prompt_count, bool) or not isinstance(prompt_count, int) or prompt_count <= 0:
-            raise ValueError("OpenAI Tool checkpoint prompt count is invalid")
+            raise LLMToolCallResponseError(
+                code="prompt_continuation_state_missing",
+                message="OpenAI Tool checkpoint prompt count is invalid.",
+            )
         if not isinstance(prompt_digest, str) or len(prompt_digest) != 64:
-            raise ValueError("OpenAI Tool checkpoint prompt digest is invalid")
+            raise LLMToolCallResponseError(
+                code="prompt_continuation_state_missing",
+                message="OpenAI Tool checkpoint prompt digest is invalid.",
+            )
     return payload
 
 

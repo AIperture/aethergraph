@@ -630,7 +630,7 @@ async def test_anthropic_continuation_binds_prompt_tools_and_pending_outputs() -
     assert output_error.value.code == "tool_output_mismatch"
     assert fake_http.last_json is first_payload
 
-    with pytest.raises(ValueError, match="checkpoint prompt changed"):
+    with pytest.raises(LLMToolCallResponseError) as prompt_error:
         await client.generate(
             ModelRequest(
                 messages=(message_from_text("user", "Look up B, then finish."),),
@@ -641,6 +641,7 @@ async def test_anthropic_continuation_binds_prompt_tools_and_pending_outputs() -
                 tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
             )
         )
+    assert prompt_error.value.code == "prompt_continuation_diverged"
     assert fake_http.last_json is first_payload
 
     changed_tools = (
@@ -651,7 +652,7 @@ async def test_anthropic_continuation_binds_prompt_tools_and_pending_outputs() -
         ),
         tools[1],
     )
-    with pytest.raises(ValueError, match="checkpoint contract changed"):
+    with pytest.raises(LLMToolCallResponseError) as contract_error:
         await client.generate(
             ModelRequest(
                 messages=messages,
@@ -662,6 +663,7 @@ async def test_anthropic_continuation_binds_prompt_tools_and_pending_outputs() -
                 tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
             )
         )
+    assert contract_error.value.code == "model_exchange_tool_contract_changed"
     assert fake_http.last_json is first_payload
 
     fake_http.payload = {
@@ -2300,7 +2302,7 @@ async def test_openai_compatible_continuation_requires_exact_pending_outputs() -
 
     assert fake_http.last_json is first_payload
 
-    with pytest.raises(ValueError, match="checkpoint prompt changed"):
+    with pytest.raises(LLMToolCallResponseError) as prompt_error:
         await client.generate(
             ModelRequest(
                 messages=(message_from_text("user", "Look up B"),),
@@ -2311,6 +2313,8 @@ async def test_openai_compatible_continuation_requires_exact_pending_outputs() -
                 tool_outputs=(ToolCallOutput("call_1", '{"value":"A"}'),),
             )
         )
+
+    assert prompt_error.value.code == "prompt_continuation_diverged"
 
     assert fake_http.last_json is first_payload
 

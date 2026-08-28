@@ -83,6 +83,7 @@ from aethergraph.services.llm.structured_output import (
 from aethergraph.services.llm.tool_calling import (
     AssistantOutput,
     LLMToolCallCapabilityError,
+    LLMToolCallResponseError,
     ModelResponse,
     ToolCallRequest,
     ToolCallResponse,
@@ -786,7 +787,10 @@ class GenericLLMClient(LLMClientProtocol):
         actual = (checkpoint.provider, checkpoint.model)
         expected = (self.provider, str(model))
         if actual != expected:
-            raise ValueError("Tool transport checkpoint binding does not match this LLM client")
+            raise LLMToolCallResponseError(
+                code="model_continuation_binding_mismatch",
+                message="Tool transport checkpoint binding does not match this LLM client.",
+            )
 
     @staticmethod
     def _inline_checkpoint_reference(checkpoint: ToolTransportCheckpoint) -> str:
