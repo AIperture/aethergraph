@@ -659,8 +659,11 @@ class GeminiGenerateContentAdapter:
             )
 
             r = await host._client.post(
-                f"{host.base_url}/v1beta/models/{model}:generateContent?key={host.api_key}",
-                headers={"Content-Type": "application/json"},
+                f"{host.base_url}/v1beta/models/{model}:generateContent",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": host.api_key,
+                },
                 json=payload,
             )
             metadata = checked_response_metadata("google", model, "chat", r)
@@ -788,17 +791,17 @@ class GeminiGenerateContentAdapter:
             structured_output_fields=None,
             tool_request=None,
         )
-        url = (
-            f"{host.base_url}/v1beta/models/{model}:streamGenerateContent"
-            f"?alt=sse&key={host.api_key}"
-        )
+        url = f"{host.base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse"
         text_chunks: list[str] = []
         usage: dict[str, int] = {}
 
         async with host._client.stream(
             "POST",
             url,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": host.api_key,
+            },
             json=payload,
         ) as response:
             if response.is_error:

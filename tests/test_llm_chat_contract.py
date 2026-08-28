@@ -71,11 +71,13 @@ class _FakeResponse:
 class _FakeHttpClient:
     def __init__(self, payload: dict[str, Any]):
         self.payload = payload
+        self.last_headers: dict[str, str] | None = None
         self.last_json: dict[str, Any] | None = None
         self.last_url: str | None = None
 
     async def post(self, url: str, headers: dict[str, str], json: dict[str, Any], timeout=None):
         self.last_url = url
+        self.last_headers = dict(headers)
         self.last_json = json
         return _FakeResponse(self.payload)
 
@@ -104,11 +106,13 @@ class _FakeStreamResponse:
 class _FakeStreamingHttpClient:
     def __init__(self, lines: list[str]):
         self.lines = list(lines)
+        self.last_headers: dict[str, str] | None = None
         self.last_json: dict[str, Any] | None = None
         self.last_url: str | None = None
 
     def stream(self, method: str, url: str, headers: dict[str, str], json: dict[str, Any]):
         self.last_url = url
+        self.last_headers = dict(headers)
         self.last_json = json
         return _FakeStreamResponse(self.lines)
 
@@ -754,7 +758,11 @@ async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() 
     assert response.calls[0].provider_metadata["thought_signature"] == "opaque"
     assert fake_http.last_json is not None
     assert fake_http.last_url is not None
-    assert "/v1beta/models/gemini-test:generateContent?" in fake_http.last_url
+    assert fake_http.last_url.endswith("/v1beta/models/gemini-test:generateContent")
+    assert fake_http.last_headers == {
+        "Content-Type": "application/json",
+        "x-goog-api-key": "test",
+    }
     function_config = fake_http.last_json["toolConfig"]["functionCallingConfig"]
     assert function_config["mode"] == "ANY"
     assert function_config["allowedFunctionNames"] == ["lookup", "finish"]
@@ -1793,7 +1801,11 @@ async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
     assert usage == {"input_tokens": 4, "output_tokens": 2, "reasoning_tokens": 3}
     assert usage_updates == [usage]
     assert fake_http.last_url is not None
-    assert "/v1beta/models/gemini-test:streamGenerateContent?alt=sse&key=" in fake_http.last_url
+    assert fake_http.last_url.endswith("/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+    assert fake_http.last_headers == {
+        "Content-Type": "application/json",
+        "x-goog-api-key": "test",
+    }
     assert fake_http.last_json is not None
     assert fake_http.last_json["generationConfig"]["thinkingConfig"]["includeThoughts"] is True
 
