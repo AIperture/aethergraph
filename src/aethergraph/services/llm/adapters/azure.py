@@ -13,6 +13,7 @@ from aethergraph.services.llm.adapters.openai_compatible import (
 )
 from aethergraph.services.llm.adapters.openai_responses import (
     _openai_checkpoint_payload,
+    _openai_continuation_request_tools,
     _openai_function_tool,
     _openai_request_tools,
     _openai_tool_call_response,
@@ -414,12 +415,43 @@ class AzureChatAdapter:
                         ],
                     },
                 ]
-        if checkpoint_payload is None or checkpoint_payload["state"] != "pending_search":
+            elif checkpoint_payload["state"] == "pending_tool_outputs":
+                previous_output = checkpoint_payload.get("response_output")
+                if not isinstance(previous_output, list) or not previous_output:
+                    raise ValueError("Azure Tool checkpoint output history is invalid")
+                pending_call_ids = tuple(
+                    str(call_id)
+                    for call_id in list(checkpoint_payload.get("pending_call_ids") or [])
+                )
+                outputs_by_id = {item.call_id: item.output for item in tool_request.tool_outputs}
+                missing = [call_id for call_id in pending_call_ids if call_id not in outputs_by_id]
+                if missing:
+                    raise LLMToolCallResponseError(
+                        code="tool_output_missing",
+                        message="Azure continuation is missing a completed Tool output.",
+                    )
+                body["input"] = [
+                    *[dict(item) for item in previous_output if isinstance(item, dict)],
+                    *[
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": outputs_by_id[call_id],
+                        }
+                        for call_id in pending_call_ids
+                    ],
+                ]
+        if checkpoint_payload is not None and checkpoint_payload["state"] in {
+            "pending_search",
+            "pending_tool_outputs",
+        }:
+            body["tools"] = _openai_continuation_request_tools(tool_request)
+        else:
             body["tools"] = _openai_request_tools(tool_request)
-            # Responses rejects Tool selection controls when this request omits
-            # the corresponding Tool definitions. Keep the fields atomic.
-            body["tool_choice"] = tool_request.choice
-            body["parallel_tool_calls"] = tool_request.max_calls > 1
+        # Azure Responses shares the exact-request Tool-surface contract: the
+        # replay items do not retain request-owned immediate declarations.
+        body["tool_choice"] = tool_request.choice
+        body["parallel_tool_calls"] = tool_request.max_calls > 1
 
         request_timeout = kw.get("request_timeout_s") or kw.get("timeout")
         normalized_base = str(host.base_url).rstrip("/")

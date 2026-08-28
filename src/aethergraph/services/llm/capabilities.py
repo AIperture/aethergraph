@@ -187,7 +187,7 @@ _ADAPTER_FLAGS: dict[ChatCapabilityName, str] = {
     "image_input": "image_input",
     "streaming": "streaming",
     "native_tool_calling": "native_tools",
-    "tool_result_continuation": "native_tools",
+    "tool_result_continuation": "tool_result_continuation",
     "parallel_tool_calls": "native_tools",
     "structured_output": "structured_output",
     "native_tool_search_hosted": "native_tool_search",
@@ -209,8 +209,9 @@ def _resolve_operation_capabilities(
     profile: EmbeddingProfileSpec | ImageGenerationProfile,
     *,
     operation: Literal["embeddings", "image_generation"],
-    capability_names: tuple[EmbeddingCapabilityName, ...]
-    | tuple[ImageGenerationCapabilityName, ...],
+    capability_names: (
+        tuple[EmbeddingCapabilityName, ...] | tuple[ImageGenerationCapabilityName, ...]
+    ),
     required: tuple[EmbeddingCapabilityName, ...] | tuple[ImageGenerationCapabilityName, ...],
 ) -> tuple[
     dict[str, EffectiveCapability],

@@ -297,6 +297,7 @@ def normalize_llm_usage(usage: dict[str, Any] | None) -> dict[str, Any]:
         raw,
         "cache_read_tokens",
         "cache_read_input_tokens",
+        "prompt_cache_hit_tokens",
     )
     cache_write_tokens = _first_int(
         raw,
@@ -323,6 +324,8 @@ def normalize_llm_usage(usage: dict[str, Any] | None) -> dict[str, Any]:
 
     if "uncached_input_tokens" in raw:
         uncached_input_tokens = _int_or_zero(raw.get("uncached_input_tokens"))
+    elif "prompt_cache_miss_tokens" in raw:
+        uncached_input_tokens = _int_or_zero(raw.get("prompt_cache_miss_tokens"))
     elif "prompt_tokens" in raw or "input_tokens_details" in raw:
         uncached_input_tokens = max(
             0,

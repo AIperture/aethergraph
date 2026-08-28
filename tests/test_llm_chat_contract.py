@@ -33,6 +33,7 @@ from aethergraph.services.llm.adapters import (
     registered_chat_stream_adapter_ids,
     registered_image_adapter_ids,
 )
+from aethergraph.services.llm.adapters.gemini import _gemini_generate_content_payload
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.provider_transport import (
     LLMProviderRequestError,
@@ -70,11 +71,13 @@ class _FakeResponse:
 class _FakeHttpClient:
     def __init__(self, payload: dict[str, Any]):
         self.payload = payload
+        self.last_headers: dict[str, str] | None = None
         self.last_json: dict[str, Any] | None = None
         self.last_url: str | None = None
 
     async def post(self, url: str, headers: dict[str, str], json: dict[str, Any], timeout=None):
         self.last_url = url
+        self.last_headers = dict(headers)
         self.last_json = json
         return _FakeResponse(self.payload)
 
@@ -103,11 +106,13 @@ class _FakeStreamResponse:
 class _FakeStreamingHttpClient:
     def __init__(self, lines: list[str]):
         self.lines = list(lines)
+        self.last_headers: dict[str, str] | None = None
         self.last_json: dict[str, Any] | None = None
         self.last_url: str | None = None
 
     def stream(self, method: str, url: str, headers: dict[str, str], json: dict[str, Any]):
         self.last_url = url
+        self.last_headers = dict(headers)
         self.last_json = json
         return _FakeStreamResponse(self.lines)
 
@@ -435,6 +440,280 @@ async def test_anthropic_does_not_silently_weaken_required_tool_choice() -> None
 
 
 @pytest.mark.asyncio
+async def test_anthropic_adaptive_thinking_uses_current_effort_wire() -> None:
+    payload = {
+        "id": "msg_adaptive",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "lookup",
+                "input": {"key": "A"},
+            }
+        ],
+    }
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "look up"}],
+        tool_request=_native_tool_request(max_calls=1),
+        reasoning_effort="low",
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["thinking"] == {"type": "adaptive"}
+    assert fake_http.last_json["output_config"] == {"effort": "low"}
+    assert fake_http.last_json["tool_choice"] == {
+        "type": "any",
+        "disable_parallel_tool_use": True,
+    }
+
+    await client.chat(
+        [{"role": "user", "content": "look up"}],
+        tool_request=_native_tool_request(max_calls=1),
+        reasoning_effort="low",
+        thinking_mode="off",
+    )
+    assert fake_http.last_json is not None
+    assert "thinking" not in fake_http.last_json
+    assert "output_config" not in fake_http.last_json
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "max_calls", "error_code"),
+    [
+        (
+            [{"type": "tool_use", "name": "lookup", "input": {"key": "A"}}],
+            1,
+            "tool_call_identity_missing",
+        ),
+        (
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "delete_everything",
+                    "input": {},
+                }
+            ],
+            1,
+            "unknown_tool",
+        ),
+        (
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "lookup",
+                    "input": {"key": "A"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "finish",
+                    "input": {},
+                },
+            ],
+            2,
+            "tool_call_identity_duplicate",
+        ),
+        (
+            [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_1",
+                    "name": "lookup",
+                    "input": {"key": "A"},
+                },
+                {
+                    "type": "tool_use",
+                    "id": "toolu_2",
+                    "name": "finish",
+                    "input": {},
+                },
+            ],
+            1,
+            "tool_call_cardinality_exceeded",
+        ),
+    ],
+)
+async def test_anthropic_rejects_invalid_provider_tool_identity(
+    content: list[dict[str, Any]],
+    max_calls: int,
+    error_code: str,
+) -> None:
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(
+        {
+            "id": "msg_invalid",
+            "stop_reason": "tool_use",
+            "content": content,
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(LLMToolCallResponseError) as exc_info:
+        await client.chat(
+            [{"role": "user", "content": "use a Tool"}],
+            tool_request=_native_tool_request(max_calls=max_calls),
+        )
+
+    assert exc_info.value.code == error_code
+
+
+@pytest.mark.asyncio
+async def test_anthropic_continuation_binds_prompt_tools_and_pending_outputs() -> None:
+    first_content = [
+        {"type": "text", "text": "I will look that up."},
+        {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "lookup",
+            "input": {"key": "A"},
+        },
+    ]
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeHttpClient(
+        {
+            "id": "msg_first",
+            "stop_reason": "tool_use",
+            "content": first_content,
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    messages = (message_from_text("user", "Look up A, then finish."),)
+    tools = _native_tool_request(max_calls=1).tools
+
+    first = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="required",
+            turn_id="turn-1",
+        )
+    )
+
+    assert first.continuation is not None
+    assert first.continuation.contract_version == "messages.tool_continuation/v2"
+    first_payload = fake_http.last_json
+
+    with pytest.raises(LLMToolCallResponseError) as output_error:
+        await client.generate(
+            ModelRequest(
+                messages=messages,
+                tools=tools,
+                tool_choice="required",
+                turn_id="turn-1",
+                continuation=first.continuation,
+                tool_outputs=(
+                    ToolCallOutput("toolu_1", '{"value":"A"}'),
+                    ToolCallOutput("toolu_extra", "unexpected"),
+                ),
+            )
+        )
+    assert output_error.value.code == "tool_output_mismatch"
+    assert fake_http.last_json is first_payload
+
+    with pytest.raises(LLMToolCallResponseError) as prompt_error:
+        await client.generate(
+            ModelRequest(
+                messages=(message_from_text("user", "Look up B, then finish."),),
+                tools=tools,
+                tool_choice="required",
+                turn_id="turn-1",
+                continuation=first.continuation,
+                tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
+            )
+        )
+    assert prompt_error.value.code == "prompt_continuation_diverged"
+    assert fake_http.last_json is first_payload
+
+    changed_tools = (
+        ToolDefinition(
+            name="lookup",
+            description="Look up one changed record.",
+            input_schema=tools[0].input_schema,
+        ),
+        tools[1],
+    )
+    with pytest.raises(LLMToolCallResponseError) as contract_error:
+        await client.generate(
+            ModelRequest(
+                messages=messages,
+                tools=changed_tools,
+                tool_choice="required",
+                turn_id="turn-1",
+                continuation=first.continuation,
+                tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
+            )
+        )
+    assert contract_error.value.code == "model_exchange_tool_contract_changed"
+    assert fake_http.last_json is first_payload
+
+    fake_http.payload = {
+        "id": "msg_finish",
+        "stop_reason": "tool_use",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "toolu_2",
+                "name": "finish",
+                "input": {},
+            }
+        ],
+    }
+    final = await client.generate(
+        ModelRequest(
+            messages=messages,
+            tools=tools,
+            tool_choice="required",
+            turn_id="turn-1",
+            continuation=first.continuation,
+            tool_outputs=(ToolCallOutput("toolu_1", '{"value":"A"}'),),
+        )
+    )
+
+    assert [call.name for call in final.calls] == ["finish"]
+    assert final.continuation is not None
+    assert final.continuation.revision == 2
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["messages"][-2] == {
+        "role": "assistant",
+        "content": first_content,
+    }
+    assert fake_http.last_json["messages"][-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": '{"value":"A"}',
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
 async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() -> None:
     payload = {
         "candidates": [
@@ -478,9 +757,180 @@ async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() 
     assert [call.call_id for call in response.calls] == ["gemini_1", "gemini_2"]
     assert response.calls[0].provider_metadata["thought_signature"] == "opaque"
     assert fake_http.last_json is not None
+    assert fake_http.last_url is not None
+    assert fake_http.last_url.endswith("/v1beta/models/gemini-test:generateContent")
+    assert fake_http.last_headers == {
+        "Content-Type": "application/json",
+        "x-goog-api-key": "test",
+    }
     function_config = fake_http.last_json["toolConfig"]["functionCallingConfig"]
     assert function_config["mode"] == "ANY"
     assert function_config["allowedFunctionNames"] == ["lookup", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_replays_exact_function_call_and_matching_tool_result() -> None:
+    initial_payload = {
+        "candidates": [
+            {
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "id": "gemini_1",
+                                "name": "lookup",
+                                "args": {"key": "A"},
+                            },
+                            "thoughtSignature": "opaque-signature",
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    final_payload = {
+        "candidates": [
+            {
+                "index": 0,
+                "finishReason": "STOP",
+                "content": {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "id": "gemini_2",
+                                "name": "finish",
+                                "args": {},
+                            }
+                        }
+                    ],
+                },
+            }
+        ]
+    }
+    client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
+    fake_http = _FakeHttpClient(initial_payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    stable_messages = [
+        {"role": "system", "content": "Use the tools."},
+        {"role": "user", "content": "Look up A, then finish."},
+    ]
+    base = _native_tool_request(max_calls=1)
+    initial_request = ToolCallRequest(
+        tools=base.tools,
+        choice="required",
+        max_calls=1,
+        turn_id="turn-1",
+    )
+
+    initial, _usage = await client.chat(stable_messages, tool_request=initial_request)
+
+    assert isinstance(initial, ToolCallResponse)
+    assert initial.transport_checkpoint is not None
+    assert initial.transport_checkpoint.contract_version == "generate_content.tool_results/v1"
+    fake_http.payload = final_payload
+    continued_request = ToolCallRequest(
+        tools=base.tools,
+        choice="required",
+        max_calls=1,
+        turn_id="turn-1",
+        transport_checkpoint=initial.transport_checkpoint,
+        tool_outputs=(ToolCallOutput("gemini_1", '{"value":"A"}'),),
+    )
+
+    finished, _usage = await client.chat(stable_messages, tool_request=continued_request)
+
+    assert isinstance(finished, ToolCallResponse)
+    assert [call.name for call in finished.calls] == ["finish"]
+    assert finished.transport_checkpoint is not None
+    assert finished.transport_checkpoint.revision == 2
+    assert fake_http.last_json is not None
+    assert [content["role"] for content in fake_http.last_json["contents"]] == [
+        "user",
+        "user",
+        "model",
+        "user",
+    ]
+    assert fake_http.last_json["contents"][-2]["parts"] == [
+        {
+            "functionCall": {
+                "id": "gemini_1",
+                "name": "lookup",
+                "args": {"key": "A"},
+            },
+            "thoughtSignature": "opaque-signature",
+        }
+    ]
+    assert fake_http.last_json["contents"][-1]["parts"] == [
+        {
+            "functionResponse": {
+                "id": "gemini_1",
+                "name": "lookup",
+                "response": {"value": "A"},
+            }
+        }
+    ]
+    assert [
+        declaration["name"]
+        for declaration in fake_http.last_json["tools"][0]["functionDeclarations"]
+    ] == ["lookup", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_rejects_incomplete_tool_outputs_before_transport() -> None:
+    client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
+    fake_http = _FakeHttpClient(
+        {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "id": "gemini_1",
+                                    "name": "lookup",
+                                    "args": {"key": "A"},
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    base = _native_tool_request(max_calls=1)
+    initial, _usage = await client.chat(
+        [{"role": "user", "content": "Look up A."}],
+        tool_request=ToolCallRequest(
+            tools=base.tools,
+            choice="required",
+            max_calls=1,
+            turn_id="turn-1",
+        ),
+    )
+    assert isinstance(initial, ToolCallResponse)
+    assert initial.transport_checkpoint is not None
+    first_payload = fake_http.last_json
+
+    with pytest.raises(LLMToolCallResponseError, match="exactly every pending"):
+        await client.chat(
+            [{"role": "user", "content": "Look up A."}],
+            tool_request=ToolCallRequest(
+                tools=base.tools,
+                choice="required",
+                max_calls=1,
+                turn_id="turn-1",
+                transport_checkpoint=initial.transport_checkpoint,
+            ),
+        )
+
+    assert fake_http.last_json is first_payload
 
 
 @pytest.mark.asyncio
@@ -509,6 +959,27 @@ async def test_gemini_profile_thinking_mode_is_projected_once() -> None:
     assert text == "done"
     assert fake_http.last_json is not None
     assert fake_http.last_json["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+@pytest.mark.asyncio
+async def test_gemini_3_off_omits_unsupported_minimal_thinking_level() -> None:
+    client = GenericLLMClient(
+        provider="google",
+        model="gemini-3.7-flash",
+        api_key="google-key",
+        thinking_mode="off",
+    )
+    fake_http = _FakeHttpClient(
+        {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": "done"}]}}]}
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    text, _usage = await client.chat([{"role": "user", "content": "Hello"}])
+
+    assert text == "done"
+    assert fake_http.last_json is not None
+    assert "thinkingConfig" not in fake_http.last_json["generationConfig"]
 
 
 def test_structured_output_request_detaches_caller_schema() -> None:
@@ -1248,6 +1719,46 @@ async def test_azure_chat_completions_stream_uses_native_sse_and_terminal_usage(
 
 
 @pytest.mark.asyncio
+async def test_anthropic_stream_uses_current_adaptive_effort_wire() -> None:
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="test",
+    )
+    fake_http = _FakeStreamingHttpClient(
+        [
+            "event: message_start",
+            'data: {"message":{"usage":{"input_tokens":3}}}',
+            "event: content_block_delta",
+            'data: {"delta":{"type":"text_delta","text":"Hello"}}',
+            "event: message_delta",
+            'data: {"usage":{"output_tokens":1}}',
+        ]
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    result = await AnthropicMessagesAdapter.stream(
+        client,
+        [{"role": "user", "content": "Hello"}],
+        model="claude-test",
+        thinking_budget=None,
+        max_output_tokens=128,
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=True,
+        reasoning_effort="low",
+    )
+
+    assert result.value == ("Hello", {"input_tokens": 3, "output_tokens": 1})
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["thinking"] == {"type": "adaptive"}
+    assert fake_http.last_json["output_config"] == {"effort": "low"}
+    assert "temperature" not in fake_http.last_json
+    assert "top_p" not in fake_http.last_json
+
+
+@pytest.mark.asyncio
 async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
     client = GenericLLMClient(provider="google", model="gemini-test", api_key="test")
     fake_http = _FakeStreamingHttpClient(
@@ -1290,7 +1801,11 @@ async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
     assert usage == {"input_tokens": 4, "output_tokens": 2, "reasoning_tokens": 3}
     assert usage_updates == [usage]
     assert fake_http.last_url is not None
-    assert ":streamGenerateContent?alt=sse&key=" in fake_http.last_url
+    assert fake_http.last_url.endswith("/v1beta/models/gemini-test:streamGenerateContent?alt=sse")
+    assert fake_http.last_headers == {
+        "Content-Type": "application/json",
+        "x-goog-api-key": "test",
+    }
     assert fake_http.last_json is not None
     assert fake_http.last_json["generationConfig"]["thinkingConfig"]["includeThoughts"] is True
 
@@ -1372,7 +1887,79 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     assert fake_http.last_json["response_format"] == {"type": "json_object"}
     assert fake_http.last_json["max_tokens"] == 256
     assert fake_http.last_json["reasoning_effort"] == "max"
+    assert "thinking" not in fake_http.last_json
+
+    await OpenAICompatibleChatAdapter.invoke(
+        client,
+        [{"role": "user", "content": "hello"}],
+        model="deepseek-v4-pro",
+        thinking_mode="on",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+    )
+    assert fake_http.last_json is not None
     assert fake_http.last_json["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thinking_mode", "expects_tool_choice"),
+    [("off", True), ("on", False), ("auto", False)],
+)
+async def test_deepseek_thinking_omits_unsupported_tool_choice(
+    thinking_mode: str,
+    expects_tool_choice: bool,
+) -> None:
+    payload = {
+        "id": "deepseek-tool-1",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "private provider reasoning",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"A"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 3},
+    }
+    client = GenericLLMClient(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        api_key="test",
+        thinking_mode=thinking_mode,
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response = await client.generate(
+        ModelRequest(
+            messages=(message_from_text("user", "Look up A"),),
+            tools=_native_tool_request(max_calls=1).tools,
+            tool_choice="required",
+        )
+    )
+
+    assert response.calls[0].name == "lookup"
+    assert fake_http.last_json is not None
+    assert ("tool_choice" in fake_http.last_json) is expects_tool_choice
+    if thinking_mode == "auto":
+        assert "thinking" not in fake_http.last_json
+    else:
+        assert fake_http.last_json["thinking"] == {
+            "type": "disabled" if thinking_mode == "off" else "enabled"
+        }
 
 
 def test_openai_compatible_chat_is_not_inherited_by_generic_client() -> None:
@@ -1703,6 +2290,7 @@ async def test_openai_compatible_tool_results_continue_with_integrity_bound_repl
     assert initial.continuation is not None
     assert initial.continuation.provider == provider
     assert initial.continuation.revision == 1
+    assert initial.continuation.purpose == "pending_tool_outputs"
 
     fake_http.payload = final_payload
     final = await client.generate(
@@ -1788,7 +2376,7 @@ async def test_openai_compatible_continuation_requires_exact_pending_outputs() -
 
     assert fake_http.last_json is first_payload
 
-    with pytest.raises(ValueError, match="checkpoint prompt changed"):
+    with pytest.raises(LLMToolCallResponseError) as prompt_error:
         await client.generate(
             ModelRequest(
                 messages=(message_from_text("user", "Look up B"),),
@@ -1799,6 +2387,8 @@ async def test_openai_compatible_continuation_requires_exact_pending_outputs() -
                 tool_outputs=(ToolCallOutput("call_1", '{"value":"A"}'),),
             )
         )
+
+    assert prompt_error.value.code == "prompt_continuation_diverged"
 
     assert fake_http.last_json is first_payload
 
@@ -1880,6 +2470,7 @@ async def test_openai_compatible_continuation_advances_multi_round_replay() -> N
 
     assert second.continuation is not None
     assert second.continuation.revision == 2
+    assert second.continuation.purpose == "pending_tool_outputs"
     assert second.calls[0].call_id == "call_2"
     assert fake_http.last_json is not None
     assert [message["role"] for message in fake_http.last_json["messages"]] == [
@@ -2177,6 +2768,60 @@ async def test_anthropic_tools_are_not_silently_dropped_in_compat_mode() -> None
 
 
 @pytest.mark.asyncio
+async def test_anthropic_sends_only_one_sampling_control() -> None:
+    payload = {
+        "content": [{"type": "text", "text": "ok"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+    client = GenericLLMClient(
+        provider="anthropic",
+        model="claude-test",
+        api_key="anthropic-key",
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    await AnthropicMessagesAdapter.invoke(
+        client,
+        [{"role": "user", "content": "hello"}],
+        model="claude-test",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+    )
+
+    assert fake_http.last_json is not None
+    assert "temperature" not in fake_http.last_json
+    assert "top_p" not in fake_http.last_json
+
+    await AnthropicMessagesAdapter.invoke(
+        client,
+        [{"role": "user", "content": "hello"}],
+        model="claude-test",
+        output_format="text",
+        json_schema=None,
+        fail_on_unsupported=False,
+        temperature=0.2,
+    )
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["temperature"] == 0.2
+    assert "top_p" not in fake_http.last_json
+
+    with pytest.raises(ValueError, match="temperature or top_p"):
+        await AnthropicMessagesAdapter.invoke(
+            client,
+            [{"role": "user", "content": "hello"}],
+            model="claude-test",
+            output_format="text",
+            json_schema=None,
+            fail_on_unsupported=False,
+            temperature=0.2,
+            top_p=0.8,
+        )
+
+
+@pytest.mark.asyncio
 async def test_anthropic_without_cache_control_keeps_classic_system_string() -> None:
     payload = {
         "content": [{"type": "text", "text": "ok"}],
@@ -2328,6 +2973,51 @@ async def test_gemini_tools_are_not_passed_through_in_compat_mode() -> None:
             fail_on_unsupported=False,
             tools=[{"type": "function", "function": {"name": "lookup"}}],
         )
+
+
+def test_gemini_tool_declarations_project_unsupported_schema_keywords() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "receipt": {"type": "string"},
+            "metadata": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+        "required": ["receipt"],
+        "additionalProperties": False,
+    }
+    payload = _gemini_generate_content_payload(
+        [{"role": "user", "content": "Run the tool."}],
+        temperature=0.5,
+        top_p=1.0,
+        max_output_tokens=128,
+        thinking_config=None,
+        output_format="text",
+        json_schema=None,
+        structured_output_fields=None,
+        tool_request=ToolCallRequest(
+            tools=(ToolDefinition("finish", "Finish.", schema),),
+            choice="required",
+            turn_id="turn-1",
+        ),
+    )
+
+    declaration = payload["tools"][0]["functionDeclarations"][0]
+    assert declaration["parameters"] == {
+        "type": "object",
+        "properties": {
+            "receipt": {"type": "string"},
+            "metadata": {
+                "type": "object",
+                "properties": {"source": {"type": "string"}},
+            },
+        },
+        "required": ["receipt"],
+    }
+    assert schema["additionalProperties"] is False
 
 
 def test_encode_llm_profile_env_includes_compatibility_policy() -> None:
@@ -2718,4 +3408,4 @@ async def test_chat_uses_profile_reasoning_effort_when_call_omits_it() -> None:
     assert json.loads(text) == {"ok": True}
     assert fake_http.last_json is not None
     assert fake_http.last_json["reasoning_effort"] == "max"
-    assert fake_http.last_json["thinking"] == {"type": "enabled"}
+    assert "thinking" not in fake_http.last_json

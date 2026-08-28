@@ -22,6 +22,7 @@ from aethergraph.services.llm import (
     resolve_image_generation_profile,
     resolve_model_request,
 )
+import aethergraph.services.llm.capabilities as capability_resolution
 from aethergraph.services.llm.capabilities import resolve_chat_profile
 from aethergraph.services.llm.catalog import (
     ModelCatalog,
@@ -35,6 +36,7 @@ from aethergraph.services.llm.catalog import (
 from aethergraph.services.llm.catalog.maintenance import catalog_report, main
 from aethergraph.services.llm.compat import chat_profile_from_legacy
 from aethergraph.services.llm.profiles import ChatCapabilityOverrides
+from aethergraph.services.llm.registry import EndpointAdapterDescriptor
 from aethergraph.services.llm.tool_discovery import (
     resolve_tool_discovery_capabilities,
 )
@@ -454,6 +456,34 @@ def test_resolver_uses_chat_tool_catalog_domain_with_provenance() -> None:
     assert binding.capabilities.parallel_tool_calls.state == "supported"
     assert binding.capabilities.native_tool_calling.provenance[0].source == "catalog"
     assert "openai/current-mainline-chat-tools/v5" in binding.catalog_keys
+
+
+def test_native_tools_do_not_imply_tool_result_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = chat_profile_from_legacy(LLMProfile(provider="openai", model="gpt-5-mini"))
+    monkeypatch.setattr(
+        capability_resolution,
+        "get_endpoint_adapter",
+        lambda _endpoint_id: EndpointAdapterDescriptor(
+            "openai_responses",
+            "responses",
+            ("chat",),
+            ("native_tools",),
+        ),
+    )
+
+    binding = capability_resolution.resolve_chat_profile(
+        profile,
+        required=("tool_result_continuation",),
+    )
+
+    assert binding.capabilities.native_tool_calling.state == "supported"
+    assert binding.capabilities.tool_result_continuation.state == "unsupported"
+    assert binding.capabilities.tool_result_continuation.provenance[-1].reference == (
+        "openai_responses:tool_result_continuation:unimplemented"
+    )
+    assert binding.diagnostics[0].code == "required_capability_unsupported"
 
 
 def test_resolver_unknown_does_not_satisfy_required_capability() -> None:

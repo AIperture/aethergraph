@@ -34,7 +34,20 @@ def test_registry_api_returns_visible_providers_and_exact_endpoints() -> None:
         "azure_embeddings",
         "azure_images",
     ]
-    assert all(item["adapter_revision"] == 1 for item in providers["azure"]["endpoints"])
+    assert [item["adapter_revision"] for item in providers["azure"]["endpoints"]] == [
+        2,
+        2,
+        1,
+        1,
+    ]
+    assert (
+        "tool_result_continuation"
+        in providers["azure"]["endpoints"][0]["implementation_capabilities"]
+    )
+    assert (
+        "tool_result_continuation"
+        in providers["azure"]["endpoints"][1]["implementation_capabilities"]
+    )
     assert all("api_key" not in provider for provider in providers.values())
 
 
@@ -76,9 +89,7 @@ def test_model_discovery_api_reports_missing_environment_credential(
     assert payload["schema_version"] == "aethergraph.model-discovery/v1"
     assert payload["provider_id"] == "openai"
     assert payload["status"] == "unavailable"
-    assert payload["diagnostics"][0]["code"] == (
-        "model_discovery_credential_required"
-    )
+    assert payload["diagnostics"][0]["code"] == ("model_discovery_credential_required")
 
 
 def test_chat_resolve_api_distinguishes_azure_endpoint_capabilities() -> None:

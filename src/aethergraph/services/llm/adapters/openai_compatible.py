@@ -316,6 +316,7 @@ def _openai_like_checkpoint(
         contract_version="chat.completions.tool_results/v1",
         turn_id=str(request.turn_id or ""),
         integrity_digest=digest,
+        purpose="pending_tool_outputs",
         opaque_payload=payload,
     )
 
@@ -356,7 +357,7 @@ def _openai_like_checkpoint_payload(
                     model="local-model",
                     stable_messages=messages,
                 )
-            except ValueError:
+            except LLMToolCallResponseError:
                 pass
             ```
 
@@ -379,34 +380,61 @@ def _openai_like_checkpoint_payload(
         or checkpoint.model != model
         or checkpoint.contract_version != "chat.completions.tool_results/v1"
     ):
-        raise ValueError("Chat Completions Tool checkpoint binding does not match")
+        raise LLMToolCallResponseError(
+            code="model_continuation_binding_mismatch",
+            message="Chat Completions Tool checkpoint binding does not match.",
+        )
     payload = dict(checkpoint.opaque_payload or {})
     canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if digest != checkpoint.integrity_digest:
-        raise ValueError("Chat Completions Tool checkpoint integrity validation failed")
+        raise LLMToolCallResponseError(
+            code="model_continuation_integrity_invalid",
+            message="Chat Completions Tool checkpoint integrity validation failed.",
+        )
     if payload.get("state") != "pending_tool_outputs":
-        raise ValueError("Chat Completions Tool checkpoint state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_state_invalid",
+            message="Chat Completions Tool checkpoint state is invalid.",
+        )
     if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(request):
-        raise ValueError("Chat Completions Tool checkpoint contract changed")
+        raise LLMToolCallResponseError(
+            code="model_exchange_tool_contract_changed",
+            message="Chat Completions Tool checkpoint contract changed.",
+        )
     if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
         "prompt_digest"
     ) != _openai_like_messages_digest(stable_messages):
-        raise ValueError("Chat Completions Tool checkpoint prompt changed")
+        raise LLMToolCallResponseError(
+            code="prompt_continuation_diverged",
+            message="Chat Completions Tool checkpoint prompt changed.",
+        )
     pending_call_ids = payload.get("pending_call_ids")
     if not isinstance(pending_call_ids, list) or not pending_call_ids:
-        raise ValueError("Chat Completions Tool checkpoint has no pending calls")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Chat Completions Tool checkpoint has no pending calls.",
+        )
     if not all(isinstance(call_id, str) and call_id.strip() for call_id in pending_call_ids):
-        raise ValueError("Chat Completions Tool checkpoint call identity is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Chat Completions Tool checkpoint call identity is invalid.",
+        )
     if len(pending_call_ids) != len(set(pending_call_ids)):
-        raise ValueError("Chat Completions Tool checkpoint call identities are not unique")
+        raise LLMToolCallResponseError(
+            code="model_continuation_pending_calls_invalid",
+            message="Chat Completions Tool checkpoint call identities are not unique.",
+        )
     replay_messages = payload.get("replay_messages")
     if (
         not isinstance(replay_messages, list)
         or not replay_messages
         or not all(isinstance(message, dict) for message in replay_messages)
     ):
-        raise ValueError("Chat Completions Tool checkpoint replay state is invalid")
+        raise LLMToolCallResponseError(
+            code="model_continuation_replay_invalid",
+            message="Chat Completions Tool checkpoint replay state is invalid.",
+        )
     return payload
 
 
@@ -769,21 +797,29 @@ class OpenAICompatibleChatAdapter:
                 "temperature": temperature,
                 "top_p": top_p,
             }
+            deepseek_thinking_enabled = False
             if max_output_tokens is not None:
                 body["max_tokens"] = max_output_tokens
             if reasoning_effort is not None and host.provider == "deepseek":
                 body["reasoning_effort"] = host._map_deepseek_reasoning_effort(reasoning_effort)
             if host.provider == "deepseek":
-                body.update(host._deepseek_thinking_body(**kw))
+                thinking_body = host._deepseek_thinking_body(**kw)
+                body.update(thinking_body)
+                thinking_type = thinking_body.get("thinking", {}).get("type")
+                deepseek_thinking_enabled = thinking_type == "enabled" or (
+                    thinking_type is None
+                    and (model.startswith("deepseek-v4-") or model == "deepseek-reasoner")
+                )
             if response_format is not None:
                 body["response_format"] = response_format
             if tool_request is not None:
                 body["tools"] = _openai_like_tool_definitions(tool_request)
-                body["tool_choice"] = tool_request.choice
+                if not deepseek_thinking_enabled:
+                    body["tool_choice"] = tool_request.choice
                 body["parallel_tool_calls"] = tool_request.max_calls > 1
             elif tools is not None:
                 body["tools"] = tools
-            if tool_request is None and tool_choice is not None:
+            if tool_request is None and tool_choice is not None and not deepseek_thinking_enabled:
                 body["tool_choice"] = tool_choice
 
             r = await host._client.post(

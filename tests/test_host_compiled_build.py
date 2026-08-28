@@ -23,7 +23,7 @@ def _write_build(parent: Path) -> Path:
     generated.parent.mkdir(parents=True)
     generated.write_text("VALUE = 1\n", encoding="utf-8")
     resolved = {
-        "schema_version": "aethergraph.resolved-system/v11",
+        "schema_version": "aethergraph.resolved-system/v12",
         "semantic_event_protocol_version": SEMANTIC_EVENT_PROTOCOL_VERSION,
         "logical_output_requirements": ["origin"],
         "source_digest": "a" * 64,
@@ -48,7 +48,7 @@ def _write_build(parent: Path) -> Path:
             }
         )
     manifest = {
-        "schema_version": "aethergraph.compiled-system-manifest/v14",
+        "schema_version": "aethergraph.compiled-system-manifest/v15",
         "build_id": build_id,
         "package_name": "demo_compiled",
         "entrypoint_module": "demo_compiled.entry",
@@ -82,6 +82,45 @@ def test_inspect_compiled_build_without_engine_package(tmp_path) -> None:
 
     assert result.manifest.build_id == root.name
     assert result.resolved_definition.entry_agent_ref == "agent.demo"
+
+
+def test_inspect_compiled_build_rejects_legacy_manifest_version(tmp_path) -> None:
+    root = _write_build(tmp_path)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = "aethergraph.compiled-system-manifest/v14"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(CompiledBuildError, match="Invalid compiled build"):
+        inspect_compiled_build(root)
+
+
+def test_inspect_compiled_build_rejects_legacy_resolved_definition_version(
+    tmp_path,
+) -> None:
+    root = _write_build(tmp_path)
+    resolved_path = root / "resolved-system.json"
+    resolved = json.loads(resolved_path.read_text(encoding="utf-8"))
+    resolved["schema_version"] = "aethergraph.resolved-system/v11"
+    resolved_path.write_text(json.dumps(resolved), encoding="utf-8")
+    content = resolved_path.read_bytes()
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    indexed = next(item for item in manifest["files"] if item["path"] == "resolved-system.json")
+    indexed["size"] = len(content)
+    indexed["sha256"] = sha256(content).hexdigest()
+    manifest["resolved_definition_digest"] = sha256(
+        json.dumps(
+            resolved,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(CompiledBuildError, match="Invalid compiled build"):
+        inspect_compiled_build(root)
 
 
 def test_inspect_compiled_build_rejects_tampered_file(tmp_path) -> None:
