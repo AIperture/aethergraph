@@ -659,7 +659,7 @@ class GeminiGenerateContentAdapter:
             )
 
             r = await host._client.post(
-                f"{host.base_url}/v1/models/{model}:generateContent?key={host.api_key}",
+                f"{host.base_url}/v1beta/models/{model}:generateContent?key={host.api_key}",
                 headers={"Content-Type": "application/json"},
                 json=payload,
             )
@@ -788,7 +788,10 @@ class GeminiGenerateContentAdapter:
             structured_output_fields=None,
             tool_request=None,
         )
-        url = f"{host.base_url}/v1/models/{model}:streamGenerateContent?alt=sse&key={host.api_key}"
+        url = (
+            f"{host.base_url}/v1beta/models/{model}:streamGenerateContent"
+            f"?alt=sse&key={host.api_key}"
+        )
         text_chunks: list[str] = []
         usage: dict[str, int] = {}
 

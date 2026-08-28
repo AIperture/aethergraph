@@ -753,6 +753,8 @@ async def test_gemini_native_function_parts_preserve_multiple_call_boundaries() 
     assert [call.call_id for call in response.calls] == ["gemini_1", "gemini_2"]
     assert response.calls[0].provider_metadata["thought_signature"] == "opaque"
     assert fake_http.last_json is not None
+    assert fake_http.last_url is not None
+    assert "/v1beta/models/gemini-test:generateContent?" in fake_http.last_url
     function_config = fake_http.last_json["toolConfig"]["functionCallingConfig"]
     assert function_config["mode"] == "ANY"
     assert function_config["allowedFunctionNames"] == ["lookup", "finish"]
@@ -1791,7 +1793,7 @@ async def test_gemini_stream_uses_native_sse_with_thoughts_and_usage() -> None:
     assert usage == {"input_tokens": 4, "output_tokens": 2, "reasoning_tokens": 3}
     assert usage_updates == [usage]
     assert fake_http.last_url is not None
-    assert ":streamGenerateContent?alt=sse&key=" in fake_http.last_url
+    assert "/v1beta/models/gemini-test:streamGenerateContent?alt=sse&key=" in fake_http.last_url
     assert fake_http.last_json is not None
     assert fake_http.last_json["generationConfig"]["thinkingConfig"]["includeThoughts"] is True
 
@@ -1886,6 +1888,66 @@ async def test_deepseek_non_streaming_uses_openai_compatible_body() -> None:
     )
     assert fake_http.last_json is not None
     assert fake_http.last_json["thinking"] == {"type": "enabled"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thinking_mode", "expects_tool_choice"),
+    [("off", True), ("on", False), ("auto", False)],
+)
+async def test_deepseek_thinking_omits_unsupported_tool_choice(
+    thinking_mode: str,
+    expects_tool_choice: bool,
+) -> None:
+    payload = {
+        "id": "deepseek-tool-1",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "private provider reasoning",
+                    "tool_calls": [
+                        {
+                            "id": "call-1",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": '{"key":"A"}'},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 8, "completion_tokens": 3},
+    }
+    client = GenericLLMClient(
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        api_key="test",
+        thinking_mode=thinking_mode,
+    )
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response = await client.generate(
+        ModelRequest(
+            messages=(message_from_text("user", "Look up A"),),
+            tools=_native_tool_request(max_calls=1).tools,
+            tool_choice="required",
+        )
+    )
+
+    assert response.calls[0].name == "lookup"
+    assert fake_http.last_json is not None
+    assert ("tool_choice" in fake_http.last_json) is expects_tool_choice
+    if thinking_mode == "auto":
+        assert "thinking" not in fake_http.last_json
+    else:
+        assert fake_http.last_json["thinking"] == {
+            "type": "disabled" if thinking_mode == "off" else "enabled"
+        }
 
 
 def test_openai_compatible_chat_is_not_inherited_by_generic_client() -> None:

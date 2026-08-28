@@ -797,21 +797,29 @@ class OpenAICompatibleChatAdapter:
                 "temperature": temperature,
                 "top_p": top_p,
             }
+            deepseek_thinking_enabled = False
             if max_output_tokens is not None:
                 body["max_tokens"] = max_output_tokens
             if reasoning_effort is not None and host.provider == "deepseek":
                 body["reasoning_effort"] = host._map_deepseek_reasoning_effort(reasoning_effort)
             if host.provider == "deepseek":
-                body.update(host._deepseek_thinking_body(**kw))
+                thinking_body = host._deepseek_thinking_body(**kw)
+                body.update(thinking_body)
+                thinking_type = thinking_body.get("thinking", {}).get("type")
+                deepseek_thinking_enabled = thinking_type == "enabled" or (
+                    thinking_type is None
+                    and (model.startswith("deepseek-v4-") or model == "deepseek-reasoner")
+                )
             if response_format is not None:
                 body["response_format"] = response_format
             if tool_request is not None:
                 body["tools"] = _openai_like_tool_definitions(tool_request)
-                body["tool_choice"] = tool_request.choice
+                if not deepseek_thinking_enabled:
+                    body["tool_choice"] = tool_request.choice
                 body["parallel_tool_calls"] = tool_request.max_calls > 1
             elif tools is not None:
                 body["tools"] = tools
-            if tool_request is None and tool_choice is not None:
+            if tool_request is None and tool_choice is not None and not deepseek_thinking_enabled:
                 body["tool_choice"] = tool_choice
 
             r = await host._client.post(
