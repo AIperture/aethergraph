@@ -41,6 +41,12 @@ definitions can appear in one provider response. An Engine may project linked
 search/activation domain events into its Timeline, but those events remain separate
 from AG's provider-neutral LLM ledger.
 
+AetherGraph transports caller-owned `trace_context` as bounded generic observation
+data and never interprets it as Ledger or repair authority. AG Engine's consumer
+contract for Ledger compilation, exchange-root recovery, Tool closure, and cache
+interpretation is documented in
+[Ledger compilation, errors, and repair](https://github.com/AIperture/ag-engine/blob/main/docs/19_ledger_compilation_error_and_repair.md).
+
 ## Continuation purpose and Tool-result replay
 
 `ToolTransportCheckpoint` is provider replay state, not Tool-discovery or execution
