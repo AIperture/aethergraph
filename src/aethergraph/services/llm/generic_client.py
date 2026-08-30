@@ -2152,7 +2152,7 @@ class GenericLLMClient(LLMClientProtocol):
             ),
             tool_request=tool_request,
             prompt_cache=request.prompt_cache,
-            trace_payload=request.trace_context or None,
+            trace_payload=request.caller_context or None,
             **generation_params,
         )
 

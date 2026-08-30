@@ -339,7 +339,7 @@ class ModelRequest:
     prompt_cache: PromptCacheRequest | None = None
     continuation: ModelContinuation | None = None
     call_name: str | None = None
-    trace_context: dict[str, Any] = field(default_factory=dict)
+    caller_context: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Validate and detach one canonical generation request.
@@ -418,21 +418,21 @@ class ModelRequest:
         call_name = None if self.call_name is None else str(self.call_name).strip()
         if self.call_name is not None and not call_name:
             raise ValueError("model request call_name must not be empty")
-        if not isinstance(self.trace_context, dict):
-            raise TypeError("model request trace_context must be an object")
+        if not isinstance(self.caller_context, dict):
+            raise TypeError("model request caller_context must be an object")
         try:
-            encoded_trace_context = json.dumps(
-                self.trace_context,
+            encoded_caller_context = json.dumps(
+                self.caller_context,
                 allow_nan=False,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
             raise TypeError(
-                "model request trace_context must contain JSON-compatible values"
+                "model request caller_context must contain JSON-compatible values"
             ) from exc
-        if len(encoded_trace_context) > 64 * 1024:
-            raise ValueError("model request trace_context must not exceed 65536 bytes")
+        if len(encoded_caller_context) > 64 * 1024:
+            raise ValueError("model request caller_context must not exceed 65536 bytes")
         if not all(isinstance(output, ToolCallOutput) for output in tool_outputs):
             raise TypeError("model request tool_outputs must be ToolCallOutput values")
         call_ids = tuple(output.call_id for output in tool_outputs)
@@ -482,7 +482,7 @@ class ModelRequest:
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "tool_outputs", tool_outputs)
         object.__setattr__(self, "call_name", call_name)
-        object.__setattr__(self, "trace_context", copy.deepcopy(self.trace_context))
+        object.__setattr__(self, "caller_context", copy.deepcopy(self.caller_context))
 
 
 def message_from_text(role: MessageRole, text: str) -> ChatMessage:

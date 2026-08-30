@@ -345,7 +345,7 @@ async def test_canonical_request_versions_fingerprint_without_rotating_legacy_di
         tools=(_tool(),),
         tool_choice="auto",
         call_name="engine.select_action",
-        trace_context={
+        caller_context={
             "ledger_snapshot": {"state": "warm"},
             "exchange_root": {"disposition": "initial"},
         },
@@ -366,7 +366,7 @@ async def test_canonical_request_versions_fingerprint_without_rotating_legacy_di
     )
     assert projected.fingerprint_version == "model_request/v1"
     assert captured["call_name"] == "engine.select_action"
-    assert captured["trace_payload"] == canonical_request.trace_context
+    assert captured["trace_payload"] == canonical_request.caller_context
     assert tool_call_request_fingerprint(projected) != tool_call_request_fingerprint(legacy)
 
 
