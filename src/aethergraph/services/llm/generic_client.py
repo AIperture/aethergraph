@@ -2654,6 +2654,10 @@ class GenericLLMClient(LLMClientProtocol):
             )
             provider_value, usage = provider_result.value
             observation_record.attempts = provider_result.attempts
+            if provider_result.metadata.request_facts:
+                observation_record.provider_request_args.update(
+                    copy.deepcopy(provider_result.metadata.request_facts)
+                )
 
             observation_record.raw_text = (
                 provider_value.observation_text()

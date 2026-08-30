@@ -230,6 +230,64 @@ def _openai_continuation_request_tools(
     return _openai_request_tools(request)
 
 
+def _openai_provider_tool_projection(
+    body: dict[str, Any],
+    checkpoint_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Summarize the exact provider-dispatched Tool projection safely."""
+
+    top_level_tools = [
+        dict(tool)
+        for tool in list(body.get("tools") or [])
+        if isinstance(tool, dict)
+    ]
+    embedded_tools: list[dict[str, Any]] = []
+    for item in list(body.get("input") or []):
+        if not isinstance(item, dict) or item.get("type") != "tool_search_output":
+            continue
+        embedded_tools.extend(
+            dict(tool)
+            for tool in list(item.get("tools") or [])
+            if isinstance(tool, dict)
+        )
+    fingerprint_input = {
+        "tools": top_level_tools,
+        "embedded_discovery_tools": embedded_tools,
+        "tool_choice": body.get("tool_choice"),
+        "parallel_tool_calls": body.get("parallel_tool_calls"),
+    }
+    canonical = json.dumps(
+        fingerprint_input,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    checkpoint_state = (
+        str(checkpoint_payload.get("state") or "")
+        if checkpoint_payload is not None
+        else ""
+    )
+    request_family = {
+        "pending_search": "pending_discovery_result",
+        "pending_tool_outputs": "pending_tool_outputs",
+    }.get(checkpoint_state, "full_root")
+
+    def _name(tool: dict[str, Any]) -> str:
+        return str(tool.get("name") or tool.get("type") or "unknown")
+
+    return {
+        "schema_version": "aethergraph.provider-tool-projection/v1",
+        "request_family": request_family,
+        "top_level_tool_count": len(top_level_tools),
+        "top_level_tool_names": [_name(tool) for tool in top_level_tools],
+        "embedded_discovery_tool_count": len(embedded_tools),
+        "embedded_discovery_tool_names": [_name(tool) for tool in embedded_tools],
+        "tool_choice": body.get("tool_choice"),
+        "parallel_tool_calls": body.get("parallel_tool_calls"),
+        "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
+
+
 def _openai_hosted_tool_refs(item: dict[str, Any]) -> tuple[str, ...]:
     """Decode callable names selected by one hosted Tool-search output."""
 
@@ -1154,6 +1212,15 @@ class OpenAIResponsesAdapter:
                 timeout=request_timeout,
             )
             metadata = checked_response_metadata("openai", model, "chat", r)
+            metadata = replace(
+                metadata,
+                request_facts={
+                    "tool_projection": _openai_provider_tool_projection(
+                        body,
+                        checkpoint_payload,
+                    )
+                },
+            )
 
             data = r.json()
             usage = data.get("usage", {}) or {}

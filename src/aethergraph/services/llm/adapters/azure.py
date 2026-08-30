@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from typing import Any
 
@@ -15,6 +16,7 @@ from aethergraph.services.llm.adapters.openai_responses import (
     _openai_checkpoint_payload,
     _openai_continuation_request_tools,
     _openai_function_tool,
+    _openai_provider_tool_projection,
     _openai_request_tools,
     _openai_tool_call_response,
 )
@@ -493,6 +495,15 @@ class AzureChatAdapter:
             timeout=request_timeout,
         )
         metadata = checked_response_metadata("azure", model, "chat", r)
+        metadata = replace(
+            metadata,
+            request_facts={
+                "tool_projection": _openai_provider_tool_projection(
+                    body,
+                    checkpoint_payload,
+                )
+            },
+        )
         data = r.json()
         return ProviderCallResult(
             (
