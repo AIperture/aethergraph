@@ -658,7 +658,7 @@ def tool_call_continuation_inputs(
     if request is None or request.transport_checkpoint is None:
         return None
     checkpoint = request.transport_checkpoint
-    return {
+    continuation: dict[str, Any] = {
         "checkpoint": {
             "purpose": checkpoint.purpose,
             "revision": checkpoint.revision,
@@ -672,27 +672,25 @@ def tool_call_continuation_inputs(
             }
             for ordinal, item in enumerate(request.tool_outputs)
         ],
-        "discovery_result": (
-            None
-            if request.discovery_result is None
-            else {
-                "discovery_event_id": request.discovery_result.discovery_event_id,
-                "provider_reference_id": request.discovery_result.provider_reference_id,
-                "status": request.discovery_result.status,
-                "tool_names": list(request.discovery_result.tool_names),
-                "error": (
-                    None
-                    if request.discovery_result.error is None
-                    else {
-                        "code": request.discovery_result.error.code,
-                        "summary": request.discovery_result.error.summary,
-                        "retryable": request.discovery_result.error.retryable,
-                        "details": dict(request.discovery_result.error.details),
-                    }
-                ),
-            }
-        ),
     }
+    if request.discovery_result is not None:
+        continuation["discovery_result"] = {
+            "discovery_event_id": request.discovery_result.discovery_event_id,
+            "provider_reference_id": request.discovery_result.provider_reference_id,
+            "status": request.discovery_result.status,
+            "tool_names": list(request.discovery_result.tool_names),
+            "error": (
+                None
+                if request.discovery_result.error is None
+                else {
+                    "code": request.discovery_result.error.code,
+                    "summary": request.discovery_result.error.summary,
+                    "retryable": request.discovery_result.error.retryable,
+                    "details": dict(request.discovery_result.error.details),
+                }
+            ),
+        }
+    return continuation
 
 
 def tool_call_response_item_summaries(
