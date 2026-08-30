@@ -177,7 +177,10 @@ def _openai_request_tools(
     return result
 
 
-def _openai_continuation_request_tools(request: ToolCallRequest) -> list[dict[str, Any]]:
+def _openai_continuation_request_tools(
+    request: ToolCallRequest,
+    checkpoint_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     """Encode request-owned Tools that must survive a Responses continuation.
 
     Examples:
@@ -195,15 +198,35 @@ def _openai_continuation_request_tools(request: ToolCallRequest) -> list[dict[st
         list[dict[str, Any]]: Stable request-owned Tool declarations.
 
     Notes:
-        Client search outputs already inject activated deferred Tools into the
-        provider context. Clearing only the projection's active-name set avoids
-        declaring those Tools a second time while retaining immediate Tools and
-        the searchable catalog description. Hosted and ordinary Tool calling
-        require the complete current request surface on every continuation.
+        Client search outputs already inject their selected deferred Tools into
+        the provider context. Only those exact search-output declarations are
+        omitted from later requests in the same response chain. Active Tools
+        declared by an independent request root remain request-owned and must be
+        resent on its Tool-output continuations.
     """
 
     if request.discovery is not None and request.discovery.mode == "native_client":
-        request = replace(request, active_tool_names=())
+        declaration_sources = dict(checkpoint_payload["active_tool_sources"])
+        omitted_names = {
+            name
+            for name, source in declaration_sources.items()
+            if source == "search_output"
+        }
+        if checkpoint_payload["state"] == "pending_search":
+            prior_active_names = {
+                str(name)
+                for name in list(checkpoint_payload.get("active_tool_names") or [])
+            }
+            if request.discovery_result is not None:
+                omitted_names.update(request.discovery_result.tool_names)
+            else:
+                omitted_names.update(set(request.active_tool_names) - prior_active_names)
+        request = replace(
+            request,
+            active_tool_names=tuple(
+                name for name in request.active_tool_names if name not in omitted_names
+            ),
+        )
     return _openai_request_tools(request)
 
 
@@ -314,11 +337,33 @@ def _openai_checkpoint(
 
     previous = request.transport_checkpoint
     revision = 1 if previous is None else previous.revision + 1
+    active_tool_sources = {
+        name: "request_tools" for name in request.active_tool_names
+    }
+    if previous is not None:
+        previous_payload = _openai_checkpoint_payload(previous, provider=provider)
+        previous_sources = dict(previous_payload["active_tool_sources"])
+        active_tool_sources = {
+            name: str(previous_sources.get(name) or "request_tools")
+            for name in request.active_tool_names
+        }
+        if previous_payload["state"] == "pending_search":
+            prior_active_names = {
+                str(name)
+                for name in list(previous_payload.get("active_tool_names") or [])
+            }
+            newly_selected_names = set(request.active_tool_names) - prior_active_names
+            if request.discovery_result is not None:
+                newly_selected_names = set(request.discovery_result.tool_names)
+            for name in newly_selected_names:
+                if name in active_tool_sources:
+                    active_tool_sources[name] = "search_output"
     payload = {
         "state": state,
         "response_id": response_id,
         "call_id": call_id,
         "active_tool_names": list(request.active_tool_names),
+        "active_tool_sources": active_tool_sources,
         "pending_call_ids": list(pending_call_ids or []),
     }
     if response_output is not None:
@@ -458,6 +503,19 @@ def _openai_checkpoint_payload(
         raise LLMToolCallResponseError(
             code="model_exchange_tool_surface_invalid",
             message="OpenAI Tool checkpoint activation state is invalid.",
+        )
+    active_sources = payload.get("active_tool_sources")
+    if (
+        not isinstance(active_sources, dict)
+        or set(active_sources) != set(active_names)
+        or any(
+            source not in {"request_tools", "search_output"}
+            for source in active_sources.values()
+        )
+    ):
+        raise LLMToolCallResponseError(
+            code="model_exchange_tool_surface_invalid",
+            message="OpenAI Tool checkpoint declaration provenance is invalid.",
         )
     prompt_count = payload.get("prompt_stable_message_count")
     prompt_digest = payload.get("prompt_stable_prefix_digest")
@@ -991,49 +1049,56 @@ class OpenAIResponsesAdapter:
                         code="discovery_result_reference_mismatch",
                         message="OpenAI discovery result does not match the pending search.",
                     )
-                if discovery_result is not None and discovery_result.status == "failed":
-                    raise LLMToolCallResponseError(
-                        code="discovery_failure_output_unsupported",
-                        message=(
-                            "OpenAI Responses has no verified client Tool-search "
-                            "failure continuation shape."
-                        ),
-                    )
                 prior_active_names = {
                     str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
                 }
                 newly_active_names = set(tool_request.active_tool_names) - prior_active_names
                 if discovery_result is not None:
                     newly_active_names = set(discovery_result.tool_names)
-                loaded_tools = [
-                    tool
-                    for tool in tool_request.tools
-                    if tool.exposure == "deferred" and tool.name in newly_active_names
-                ]
-                if not loaded_tools:
-                    raise LLMToolCallResponseError(
-                        code="discovery_result_missing",
-                        message="OpenAI client Tool search has no newly activated result.",
-                    )
-                assert tool_request.discovery is not None
-                if len(loaded_tools) > tool_request.discovery.max_results:
-                    raise LLMToolCallResponseError(
-                        code="discovery_result_limit_exceeded",
-                        message="OpenAI client Tool-search results exceed the request bound.",
-                    )
                 body["previous_response_id"] = str(checkpoint_payload.get("response_id") or "")
-                body["input"] = [
-                    {
-                        "type": "tool_search_output",
-                        "execution": "client",
-                        "call_id": str(checkpoint_payload.get("call_id") or ""),
-                        "status": "completed",
-                        "tools": [
-                            _openai_function_tool(tool, defer_loading=True) for tool in loaded_tools
-                        ],
-                    },
-                    *appended_prompt_input,
-                ]
+                if discovery_result is not None and discovery_result.status == "failed":
+                    body["input"] = [
+                        {
+                            "type": "tool_search_output",
+                            "execution": "client",
+                            "call_id": pending_search_call_id,
+                            "status": "incomplete",
+                            "tools": [],
+                        },
+                        *appended_prompt_input,
+                    ]
+                else:
+                    loaded_tools = [
+                        tool
+                        for tool in tool_request.tools
+                        if tool.exposure == "deferred" and tool.name in newly_active_names
+                    ]
+                    if not loaded_tools:
+                        raise LLMToolCallResponseError(
+                            code="discovery_result_missing",
+                            message="OpenAI client Tool search has no newly activated result.",
+                        )
+                    assert tool_request.discovery is not None
+                    if len(loaded_tools) > tool_request.discovery.max_results:
+                        raise LLMToolCallResponseError(
+                            code="discovery_result_limit_exceeded",
+                            message=(
+                                "OpenAI client Tool-search results exceed the request bound."
+                            ),
+                        )
+                    body["input"] = [
+                        {
+                            "type": "tool_search_output",
+                            "execution": "client",
+                            "call_id": pending_search_call_id,
+                            "status": "completed",
+                            "tools": [
+                                _openai_function_tool(tool, defer_loading=True)
+                                for tool in loaded_tools
+                            ],
+                        },
+                        *appended_prompt_input,
+                    ]
             elif checkpoint_payload["state"] == "pending_tool_outputs":
                 pending_call_ids = tuple(
                     str(call_id)
@@ -1061,7 +1126,10 @@ class OpenAIResponsesAdapter:
             if checkpoint_payload is None or checkpoint_payload["state"] == "consumed":
                 body["tools"] = _openai_request_tools(tool_request)
             else:
-                body["tools"] = _openai_continuation_request_tools(tool_request)
+                body["tools"] = _openai_continuation_request_tools(
+                    tool_request,
+                    checkpoint_payload,
+                )
             # Responses binds Tool selection controls to the declarations in
             # this exact request. Keep the current Engine surface and controls
             # atomic across search and Tool-result continuations.

@@ -468,7 +468,10 @@ class AzureChatAdapter:
             "pending_search",
             "pending_tool_outputs",
         }:
-            body["tools"] = _openai_continuation_request_tools(tool_request)
+            body["tools"] = _openai_continuation_request_tools(
+                tool_request,
+                checkpoint_payload,
+            )
         else:
             body["tools"] = _openai_request_tools(tool_request)
         # Azure Responses shares the exact-request Tool-surface contract: the
