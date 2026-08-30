@@ -94,6 +94,7 @@ class LLMObservationRecord:
     attempts: tuple[ProviderTransportAttempt, ...] = ()
     tool_surface: dict[str, Any] | None = None
     request_items: list[dict[str, Any]] = field(default_factory=list)
+    continuation_inputs: dict[str, Any] | None = None
     response_items: list[dict[str, Any]] = field(default_factory=list)
     tool_definitions: list[dict[str, Any]] = field(default_factory=list)
     lifecycle_status: str = "in_progress"
@@ -123,6 +124,7 @@ class LLMObservationRecord:
         call_name: str | None = None,
         tool_surface: dict[str, Any] | None = None,
         request_items: list[dict[str, Any]] | None = None,
+        continuation_inputs: dict[str, Any] | None = None,
         tool_definitions: list[dict[str, Any]] | None = None,
     ) -> LLMObservationRecord:
         return cls(
@@ -149,6 +151,7 @@ class LLMObservationRecord:
             trace_payload=trace_payload,
             tool_surface=tool_surface,
             request_items=request_items or [],
+            continuation_inputs=continuation_inputs,
             tool_definitions=tool_definitions or [],
         )
 

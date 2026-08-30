@@ -88,6 +88,7 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
     assistant_output_identity,
+    tool_call_continuation_inputs,
     tool_call_definitions,
     tool_call_request_item_summaries,
     tool_call_response_item_summaries,
@@ -1974,6 +1975,7 @@ class GenericLLMClient(LLMClientProtocol):
         call_name: str | None = None,
         tool_surface: dict[str, Any] | None = None,
         request_items: list[dict[str, Any]] | None = None,
+        continuation_inputs: dict[str, Any] | None = None,
         tool_definitions: list[dict[str, Any]] | None = None,
     ) -> LLMObservationRecord:
         record = LLMObservationRecord.new(
@@ -1998,6 +2000,7 @@ class GenericLLMClient(LLMClientProtocol):
             call_name=call_name,
             tool_surface=tool_surface,
             request_items=request_items,
+            continuation_inputs=continuation_inputs,
             tool_definitions=tool_definitions,
         )
         begin_llm_call_correlation(record.llm_call_id)
@@ -2428,6 +2431,7 @@ class GenericLLMClient(LLMClientProtocol):
                     call_name=call_name,
                     tool_surface=tool_call_surface_summary(tool_request),
                     request_items=list(tool_call_request_item_summaries(tool_request)),
+                    continuation_inputs=tool_call_continuation_inputs(tool_request),
                     tool_definitions=tool_call_definitions(tool_request),
                 )
                 await self._begin_observation(observation_record)
@@ -2553,6 +2557,7 @@ class GenericLLMClient(LLMClientProtocol):
             call_name=call_name,
             tool_surface=tool_call_surface_summary(tool_request),
             request_items=list(tool_call_request_item_summaries(tool_request)),
+            continuation_inputs=tool_call_continuation_inputs(tool_request),
             tool_definitions=tool_call_definitions(tool_request),
         )
         tags = ["llm", "chat"]

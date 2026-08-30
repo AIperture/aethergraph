@@ -173,6 +173,16 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
         request_args={"temperature": 0},
         provider_request_args={"temperature": 0},
         compatibility_notes=["normalized"],
+        continuation_inputs={
+            "checkpoint": {
+                "purpose": "pending_tool_outputs",
+                "revision": 2,
+                "turn_id": "turn-1",
+            },
+            "tool_outputs": [
+                {"ordinal": 0, "call_id": "call-a", "content": "tool result"}
+            ],
+        },
         trace_payload={"step": "done"},
         raw_text="hello back",
         usage={"input_tokens": 2, "output_tokens": 2},
@@ -238,6 +248,8 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
     assert detail.reasoning_effort == "low"
     assert detail.tools is not None
     assert detail.tools[0]["name"] == "read"
+    assert detail.continuation_inputs is not None
+    assert detail.continuation_inputs["tool_outputs"][0]["content"] == "tool result"
     summary = await reader.summarize_llm_calls("run-1")
     assert summary.total_calls == 1
     assert summary.total_prompt_tokens == 2

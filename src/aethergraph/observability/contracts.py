@@ -150,6 +150,7 @@ class LLMCallRecord(BaseModel):
     attempts: list[LLMCallAttempt] = Field(default_factory=list)
     tool_surface: dict[str, Any] | None = None
     request_items: list[dict[str, Any]] = Field(default_factory=list)
+    continuation_inputs: dict[str, Any] | None = None
     response_items: list[dict[str, Any]] = Field(default_factory=list)
     tools: list[dict[str, Any]] | None = None
 

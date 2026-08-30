@@ -157,6 +157,12 @@ async def test_canonical_llm_projection_is_atomic_idempotent_and_capture_bounded
         request_args={"temperature": 0},
         provider_request_args={"temperature": 0},
         compatibility_notes=[],
+        continuation_inputs={
+            "checkpoint": {"purpose": "pending_tool_outputs", "revision": 2},
+            "tool_outputs": [
+                {"ordinal": 0, "call_id": "call-a", "content": "result-a"}
+            ],
+        },
         trace_payload={"step": "complete"},
         raw_text="hello back",
         usage={"input_tokens": 3, "output_tokens": 2},
@@ -204,6 +210,12 @@ async def test_canonical_llm_projection_is_atomic_idempotent_and_capture_bounded
     )
     assert detail.record.prompt_manifest_id == "llm-manifest:call-1"
     assert detail.captured_request["messages"][0]["content"] == "hello"
+    assert detail.captured_request["continuation_inputs"]["tool_outputs"][0] == {
+        "ordinal": 0,
+        "call_id": "call-a",
+        "content": "result-a",
+    }
+    assert detail.record.observation.attributes["request_hash_version"] == 2
     assert detail.captured_response == {"text": "hello back"}
     assert detail.trace_payload == {"step": "complete"}
     assert detail.record.attempts[0].elapsed_ms == 25

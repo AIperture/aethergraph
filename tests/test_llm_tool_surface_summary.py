@@ -3,10 +3,15 @@ from __future__ import annotations
 from aethergraph.services.llm.tool_calling import (
     TOOL_SURFACE_SUMMARY_VERSION,
     ModelToolSpec,
+    ToolCallOutput,
     ToolCallRequest,
+    tool_call_continuation_inputs,
     tool_call_surface_summary,
 )
-from aethergraph.services.llm.tool_discovery import ToolDiscoveryRequest
+from aethergraph.services.llm.tool_discovery import (
+    ToolDiscoveryRequest,
+    ToolTransportCheckpoint,
+)
 
 
 def _tool(name: str, *, exposure: str) -> ModelToolSpec:
@@ -50,3 +55,39 @@ def test_tool_surface_separates_immediate_activated_and_searchable_tools() -> No
 
 def test_tool_surface_is_absent_without_native_tool_request() -> None:
     assert tool_call_surface_summary(None) is None
+
+
+def test_continuation_capture_includes_outputs_but_not_opaque_checkpoint() -> None:
+    request = ToolCallRequest(
+        tools=(_tool("finish", exposure="immediate"),),
+        turn_id="turn-1",
+        transport_checkpoint=ToolTransportCheckpoint(
+            checkpoint_id="checkpoint-1",
+            revision=2,
+            provider="openai",
+            model="gpt-test",
+            contract_version="responses/v1",
+            turn_id="turn-1",
+            integrity_digest="a" * 64,
+            opaque_payload={"secret_provider_state": "must-not-be-captured"},
+        ),
+        tool_outputs=(ToolCallOutput("call-1", '{"summary":"first result"}'),),
+    )
+
+    continuation = tool_call_continuation_inputs(request)
+
+    assert continuation == {
+        "checkpoint": {
+            "purpose": "pending_tool_outputs",
+            "revision": 2,
+            "turn_id": "turn-1",
+        },
+        "tool_outputs": [
+            {
+                "ordinal": 0,
+                "call_id": "call-1",
+                "content": '{"summary":"first result"}',
+            }
+        ],
+    }
+    assert "secret_provider_state" not in repr(continuation)

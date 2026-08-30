@@ -608,6 +608,31 @@ def tool_call_request_item_summaries(
     )
 
 
+def tool_call_continuation_inputs(
+    request: ToolCallRequest | None,
+) -> dict[str, Any] | None:
+    """Project the bounded call-specific continuation without private payloads."""
+
+    if request is None or request.transport_checkpoint is None:
+        return None
+    checkpoint = request.transport_checkpoint
+    return {
+        "checkpoint": {
+            "purpose": checkpoint.purpose,
+            "revision": checkpoint.revision,
+            "turn_id": checkpoint.turn_id,
+        },
+        "tool_outputs": [
+            {
+                "ordinal": ordinal,
+                "call_id": item.call_id,
+                "content": item.output,
+            }
+            for ordinal, item in enumerate(request.tool_outputs)
+        ],
+    }
+
+
 def tool_call_response_item_summaries(
     response: ToolCallResponse | ModelResponse,
 ) -> tuple[dict[str, Any], ...]:
@@ -1100,6 +1125,7 @@ __all__ = [
     "ToolChoice",
     "ToolDefinition",
     "tool_call_request_fingerprint",
+    "tool_call_continuation_inputs",
     "tool_call_definitions",
     "tool_call_request_item_summaries",
     "tool_call_response_item_summaries",
