@@ -45,7 +45,9 @@ def render_tool_search_description(request: ToolCallRequest) -> str:
     prefix = (
         "Find authorized project Tools. Keep goal as semantic intent. For ranked "
         "search provide 1-4 concise keyword lexical_queries. Use complete_paths "
-        "only for exhaustive authorized namespace selection. Available primary "
+        "only for exhaustive authorized namespace selection. Select no more than "
+        f"{request.discovery.max_results} Tools in one search; if a complete path "
+        "contains more, choose a narrower path or use ranked search. Available primary "
         "capability paths"
     )
     return f"{prefix}: {manifest}." if manifest else f"{prefix}: none."

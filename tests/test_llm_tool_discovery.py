@@ -547,6 +547,10 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json["tool_choice"] == "required"
     assert fake_http.last_json["parallel_tool_calls"] is False
     assert "lexical_queries" in fake_http.last_json["tools"][-1]["description"]
+    assert (
+        "Select no more than 5 Tools"
+        in fake_http.last_json["tools"][-1]["description"]
+    )
     assert "studio.docs" in fake_http.last_json["tools"][-1]["description"]
     assert "prompt_cache_options" not in fake_http.last_json
     cache_key = fake_http.last_json["prompt_cache_key"]
