@@ -974,10 +974,33 @@ class OpenAIResponsesAdapter:
                 checkpoint_payload=checkpoint_payload,
             )
             if checkpoint_payload["state"] == "pending_search":
+                discovery_result = tool_request.discovery_result
+                pending_search_call_id = str(
+                    checkpoint_payload.get("call_id") or ""
+                )
+                if (
+                    discovery_result is not None
+                    and discovery_result.provider_reference_id
+                    != pending_search_call_id
+                ):
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_reference_mismatch",
+                        message="OpenAI discovery result does not match the pending search.",
+                    )
+                if discovery_result is not None and discovery_result.status == "failed":
+                    raise LLMToolCallResponseError(
+                        code="discovery_failure_output_unsupported",
+                        message=(
+                            "OpenAI Responses has no verified client Tool-search "
+                            "failure continuation shape."
+                        ),
+                    )
                 prior_active_names = {
                     str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
                 }
                 newly_active_names = set(tool_request.active_tool_names) - prior_active_names
+                if discovery_result is not None:
+                    newly_active_names = set(discovery_result.tool_names)
                 loaded_tools = [
                     tool
                     for tool in tool_request.tools

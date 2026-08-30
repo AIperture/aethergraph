@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
 from .tool_calling import ModelToolSpec, ToolCallOutput, ToolChoice
-from .tool_discovery import ModelContinuation, ToolDiscoveryRequest
+from .tool_discovery import (
+    ModelContinuation,
+    ToolDiscoveryRequest,
+    ToolDiscoveryResult,
+)
 from .types import ImageInput, PromptCacheRequest, StructuredOutputRequest
 
 MessageRole = Literal["system", "developer", "user", "assistant", "tool"]
@@ -327,6 +331,7 @@ class ModelRequest:
     active_tool_names: tuple[str, ...] = ()
     turn_id: str | None = None
     tool_outputs: tuple[ToolCallOutput, ...] = ()
+    discovery_result: ToolDiscoveryResult | None = None
     response_format: ModelResponseFormat = "text"
     generation: GenerationOptions = field(default_factory=GenerationOptions)
     prompt_cache: PromptCacheRequest | None = None
@@ -424,6 +429,26 @@ class ModelRequest:
                 raise ValueError("model continuation turn_id must match the request")
         if tool_outputs and self.continuation is None:
             raise ValueError("model Tool outputs require a continuation")
+        if self.discovery_result is not None:
+            if not isinstance(self.discovery_result, ToolDiscoveryResult):
+                raise TypeError(
+                    "model request discovery_result must be ToolDiscoveryResult or None"
+                )
+            if self.continuation is None:
+                raise ValueError("model discovery result requires a continuation")
+            if tool_outputs:
+                raise ValueError(
+                    "model discovery result cannot accompany ordinary Tool outputs"
+                )
+            if (
+                self.discovery_result.status == "completed"
+                and not set(self.discovery_result.tool_names).issubset(
+                    set(active_tool_names)
+                )
+            ):
+                raise ValueError(
+                    "completed model discovery result Tools must be active"
+                )
         if not isinstance(self.generation, GenerationOptions):
             raise TypeError("model request generation must be GenerationOptions")
         if self.prompt_cache is not None and not isinstance(self.prompt_cache, PromptCacheRequest):

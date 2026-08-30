@@ -896,6 +896,19 @@ class AnthropicMessagesAdapter:
                 stable_messages=messages,
             )
             if checkpoint_payload["state"] == "pending_search":
+                discovery_result = tool_request.discovery_result
+                pending_search_call_id = str(
+                    checkpoint_payload.get("search_call_id") or ""
+                )
+                if (
+                    discovery_result is not None
+                    and discovery_result.provider_reference_id
+                    != pending_search_call_id
+                ):
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_reference_mismatch",
+                        message="Anthropic discovery result does not match the pending search.",
+                    )
                 prior_active_names = {
                     str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
                 }
@@ -904,7 +917,9 @@ class AnthropicMessagesAdapter:
                     for name in tool_request.active_tool_names
                     if name not in prior_active_names
                 )
-                if not newly_active_names:
+                if discovery_result is not None and discovery_result.status == "completed":
+                    newly_active_names = discovery_result.tool_names
+                if discovery_result is None and not newly_active_names:
                     raise LLMToolCallResponseError(
                         code="discovery_result_missing",
                         message="Anthropic client Tool search has no newly activated result.",
@@ -921,22 +936,41 @@ class AnthropicMessagesAdapter:
                         "content": list(checkpoint_payload["assistant_content"]),
                     }
                 )
+                if discovery_result is not None and discovery_result.status == "failed":
+                    assert discovery_result.error is not None
+                    result_content: list[dict[str, Any]] | str = json.dumps(
+                        {
+                            "code": discovery_result.error.code,
+                            "summary": discovery_result.error.summary,
+                            "retryable": discovery_result.error.retryable,
+                            "details": discovery_result.error.details,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    result_block = {
+                        "type": "tool_result",
+                        "tool_use_id": pending_search_call_id,
+                        "content": result_content,
+                        "is_error": True,
+                    }
+                else:
+                    result_block = {
+                        "type": "tool_result",
+                        "tool_use_id": pending_search_call_id,
+                        "content": [
+                            {
+                                "type": "tool_reference",
+                                "tool_name": name,
+                            }
+                            for name in newly_active_names
+                        ],
+                    }
                 conv.append(
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": str(checkpoint_payload.get("search_call_id") or ""),
-                                "content": [
-                                    {
-                                        "type": "tool_reference",
-                                        "tool_name": name,
-                                    }
-                                    for name in newly_active_names
-                                ],
-                            }
-                        ],
+                        "content": [result_block],
                     }
                 )
             elif checkpoint_payload["state"] == "pending_tool_outputs":

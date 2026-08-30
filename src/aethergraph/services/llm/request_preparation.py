@@ -94,6 +94,7 @@ def prepare_model_request(
             active_tool_names=request.active_tool_names,
             transport_checkpoint=request.continuation,
             tool_outputs=request.tool_outputs,
+            discovery_result=request.discovery_result,
             fingerprint_version=MODEL_REQUEST_CONTRACT_VERSION,
         )
     return messages, tool_request

@@ -21,6 +21,7 @@ from aethergraph.services.llm import (
     ToolDiscoveryMode,
     ToolDiscoveryModeCapability,
     ToolDiscoveryRequest,
+    ToolDiscoveryResult,
     ToolPath,
     ToolTransportCheckpoint,
     resolve_tool_discovery_capabilities,
@@ -31,6 +32,7 @@ from aethergraph.services.llm.adapters.openai_responses import (
     _openai_prompt_prefix_digest,
     _openai_tool_call_response,
 )
+from aethergraph.services.llm.adapters.anthropic import _anthropic_checkpoint
 from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.tool_calling import (
     LLMToolCallResponseError,
@@ -120,6 +122,174 @@ def _openai_capabilities(
         model="example-model",
         endpoint_family="responses",
         supported_modes=modes,
+    )
+
+
+def _failed_discovery_result(
+    *,
+    event_id: str = "search_call_1",
+    provider_reference_id: str = "search_call_1",
+) -> ToolDiscoveryResult:
+    return ToolDiscoveryResult(
+        discovery_event_id=event_id,
+        provider_reference_id=provider_reference_id,
+        status="failed",
+        error=ToolDiscoveryError(
+            code="tool_discovery_no_matches",
+            summary="No new eligible Tools matched; search differently.",
+            retryable=True,
+            details={"remaining_capacity": 1},
+        ),
+    )
+
+
+def test_discovery_result_requires_a_matching_continuation_kind() -> None:
+    result = _failed_discovery_result()
+    tool = ToolDefinition("finish", "Finish.", {"type": "object"})
+
+    with pytest.raises(ValueError, match="transport checkpoint"):
+        ToolCallRequest(
+            tools=(tool,),
+            discovery=ToolDiscoveryRequest(
+                "native_client",
+                search_schema=_CLIENT_SEARCH_SCHEMA,
+            ),
+            turn_id="turn_1",
+            discovery_result=result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_openai_failed_client_discovery_requests_typed_fresh_root() -> None:
+    client = GenericLLMClient(
+        "openai",
+        "gpt-5.6",
+        api_key="test",
+        base_url="https://api.openai.test/v1",
+    )
+    fake_http = _CountingHttpClient()
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    tools = (
+        ToolDefinition("finish", "Finish.", {"type": "object"}),
+        ToolDefinition(
+            "read_document",
+            "Read.",
+            {"type": "object"},
+            exposure="deferred",
+        ),
+    )
+    initial = ToolCallRequest(
+        tools=tools,
+        discovery=ToolDiscoveryRequest(
+            "native_client",
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+        ),
+        turn_id="turn_1",
+    )
+    checkpoint = _openai_checkpoint(
+        request=initial,
+        model="gpt-5.6",
+        response_id="resp_search_1",
+        state="pending_search",
+        call_id="search_call_1",
+    )
+    continued = ToolCallRequest(
+        tools=tools,
+        discovery=initial.discovery,
+        turn_id="turn_1",
+        transport_checkpoint=checkpoint,
+        discovery_result=_failed_discovery_result(),
+    )
+
+    with pytest.raises(LLMToolCallResponseError) as unsupported:
+        await client.chat(
+            [{"role": "user", "content": "find a document Tool"}],
+            tool_request=continued,
+        )
+
+    assert unsupported.value.code == "discovery_failure_output_unsupported"
+    assert fake_http.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_anthropic_failed_client_discovery_uses_tool_result_error() -> None:
+    client = GenericLLMClient(
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        api_key="test",
+        base_url="https://api.anthropic.test",
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "msg_finish_1",
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_finish_1",
+                    "name": "finish",
+                    "input": {},
+                }
+            ],
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    messages = [{"role": "user", "content": "find a document Tool"}]
+    search_block = {
+        "type": "tool_use",
+        "id": "toolu_search_1",
+        "name": "tool_search",
+        "input": {"goal": "find a document Tool"},
+    }
+    tools = (
+        ToolDefinition("finish", "Finish.", {"type": "object"}),
+        ToolDefinition(
+            "read_document",
+            "Read.",
+            {"type": "object"},
+            exposure="deferred",
+        ),
+    )
+    initial = ToolCallRequest(
+        tools=tools,
+        discovery=ToolDiscoveryRequest(
+            "native_client",
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+        ),
+        turn_id="turn_1",
+    )
+    checkpoint = _anthropic_checkpoint(
+        request=initial,
+        model="claude-sonnet-4-5-20250929",
+        stable_messages=messages,
+        state="pending_search",
+        assistant_content=[search_block],
+        search_call_id="toolu_search_1",
+    )
+    continued = ToolCallRequest(
+        tools=tools,
+        discovery=initial.discovery,
+        turn_id="turn_1",
+        transport_checkpoint=checkpoint,
+        discovery_result=_failed_discovery_result(
+            event_id="toolu_search_1",
+            provider_reference_id="toolu_search_1",
+        ),
+    )
+
+    response, _usage = await client.chat(messages, tool_request=continued)
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.calls[0].name == "finish"
+    assert fake_http.last_json is not None
+    error_result = fake_http.last_json["messages"][-1]["content"][0]
+    assert error_result["type"] == "tool_result"
+    assert error_result["tool_use_id"] == "toolu_search_1"
+    assert error_result["is_error"] is True
+    assert json.loads(error_result["content"])["code"] == (
+        "tool_discovery_no_matches"
     )
 
 
@@ -1376,6 +1546,27 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tool_choice"] == "required"
     assert fake_http.last_json["parallel_tool_calls"] is False
+
+    calls_before_failed_resolution = fake_http.calls
+    with pytest.raises(LLMToolCallResponseError) as unsupported_failure:
+        await client.chat(
+            [{"role": "user", "content": "open a document"}],
+            tool_request=ToolCallRequest(
+                tools=request.tools,
+                choice="required",
+                discovery=request.discovery,
+                turn_id="turn_1",
+                transport_checkpoint=response.transport_checkpoint,
+                discovery_result=_failed_discovery_result(
+                    event_id="azure_search_1",
+                    provider_reference_id="azure_search_1",
+                ),
+            ),
+        )
+    assert unsupported_failure.value.code == (
+        "discovery_failure_output_unsupported"
+    )
+    assert fake_http.calls == calls_before_failed_resolution
 
     fake_http.payload = {
         "id": "resp_azure_call_1",
