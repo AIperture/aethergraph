@@ -208,6 +208,33 @@ def _record_structured_output_failure(
         request_args["structured_output_error"] = exc.to_dict()
 
 
+def _tool_call_truncation_receipt(
+    response: ToolCallResponse,
+) -> dict[str, Any] | None:
+    """Return bounded provider response evidence for an incomplete Tool selection."""
+
+    metadata = dict(response.provider_metadata or {})
+    finish_reason = str(response.finish_reason or "").strip()
+    normalized_finish = finish_reason.lower()
+    incomplete_reason = str(metadata.get("incomplete_reason") or "").strip()
+    if not incomplete_reason and normalized_finish in {
+        "incomplete",
+        "length",
+        "max_tokens",
+    }:
+        incomplete_reason = normalized_finish
+    if not incomplete_reason:
+        return None
+    return {
+        "provider_status": str(
+            metadata.get("provider_status") or finish_reason or "incomplete"
+        )[:120],
+        "finish_reason": finish_reason[:120],
+        "incomplete_reason": incomplete_reason[:500],
+        "provider_response_id": str(metadata.get("response_id") or "")[:500],
+    }
+
+
 # ---- Generic client -------------------------------------------------------
 class GenericLLMClient(LLMClientProtocol):
     """
@@ -2653,6 +2680,22 @@ class GenericLLMClient(LLMClientProtocol):
                     },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
+                truncation_receipt = _tool_call_truncation_receipt(provider_value)
+                if truncation_receipt is not None:
+                    request_args["tool_call_response_receipt"] = truncation_receipt
+                    observation_record.request_args[
+                        "tool_call_response_receipt"
+                    ] = copy.deepcopy(truncation_receipt)
+                    observation_record.response_items = list(
+                        tool_call_response_item_summaries(provider_value)
+                    )
+                    raise LLMToolCallResponseError(
+                        code="truncated",
+                        message=(
+                            "The provider stopped before completing native Tool "
+                            f"selection: {truncation_receipt['incomplete_reason']}."
+                        ),
+                    )
 
             # Canonical parsing/validation happens only after response evidence
             # and provider usage have been retained and accounted.

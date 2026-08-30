@@ -682,6 +682,10 @@ def _anthropic_tool_call_response(
         finish_reason=str(data.get("stop_reason") or ""),
         provider_metadata={
             "response_id": response_id,
+            "provider_status": str(data.get("stop_reason") or ""),
+            "incomplete_reason": (
+                "max_tokens" if data.get("stop_reason") == "max_tokens" else ""
+            ),
             "content_block_count": len(blocks),
         },
         transport_checkpoint=checkpoint,
@@ -1076,14 +1080,6 @@ class AnthropicMessagesAdapter:
                 return ProviderCallResult((txt, usage), metadata)
 
             if tool_request is not None:
-                if data.get("stop_reason") == "max_tokens":
-                    raise LLMToolCallResponseError(
-                        code="truncated",
-                        message=(
-                            "Anthropic stopped at max_tokens before completing "
-                            "native Tool selection."
-                        ),
-                    )
                 return ProviderCallResult(
                     (
                         _anthropic_tool_call_response(

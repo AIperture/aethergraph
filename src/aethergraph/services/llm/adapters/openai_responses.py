@@ -797,6 +797,10 @@ def _openai_tool_call_response(
         finish_reason=str(data.get("status") or ""),
         provider_metadata={
             "response_id": response_id,
+            "provider_status": str(data.get("status") or ""),
+            "incomplete_reason": str(
+                dict(data.get("incomplete_details") or {}).get("reason") or ""
+            ),
             "output_item_count": len(list(data.get("output") or [])),
         },
         transport_checkpoint=checkpoint,
@@ -1087,12 +1091,7 @@ class OpenAIResponsesAdapter:
             usage = data.get("usage", {}) or {}
             if data.get("status") == "incomplete":
                 detail = data.get("incomplete_details") or {}
-                if tool_request is not None:
-                    raise LLMToolCallResponseError(
-                        code="truncated",
-                        message=f"OpenAI Tool-call response was incomplete: {detail}",
-                    )
-                if structured_output_fields:
+                if tool_request is None and structured_output_fields:
                     raise LLMStructuredOutputTruncationError(
                         f"OpenAI structured response was incomplete: {detail}"
                     )

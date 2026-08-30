@@ -193,6 +193,133 @@ def _native_tool_request(*, max_calls: int = 2) -> ToolCallRequest:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client_kwargs", "payload", "expected_reason", "expected_response_id"),
+    [
+        (
+            {"provider": "openai", "model": "gpt-test", "api_key": "test"},
+            {
+                "id": "resp-openai-incomplete",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [],
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            },
+            "max_output_tokens",
+            "resp-openai-incomplete",
+        ),
+        (
+            {"provider": "anthropic", "model": "claude-test", "api_key": "test"},
+            {
+                "id": "msg-anthropic-incomplete",
+                "stop_reason": "max_tokens",
+                "content": [],
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            },
+            "max_tokens",
+            "msg-anthropic-incomplete",
+        ),
+        (
+            {"provider": "google", "model": "gemini-test", "api_key": "test"},
+            {
+                "candidates": [
+                    {
+                        "index": 0,
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"role": "model", "parts": []},
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 11,
+                    "candidatesTokenCount": 7,
+                },
+            },
+            "max_tokens",
+            "",
+        ),
+        (
+            {
+                "provider": "azure",
+                "model": "deployment-test",
+                "api_key": "test",
+                "endpoint_id": "azure_responses",
+                "base_url": "https://example.openai.azure.com/openai/v1",
+                "azure_deployment": "deployment-test",
+            },
+            {
+                "id": "resp-azure-incomplete",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": [],
+                "usage": {"input_tokens": 11, "output_tokens": 7},
+            },
+            "max_output_tokens",
+            "resp-azure-incomplete",
+        ),
+        (
+            {
+                "provider": "openrouter",
+                "model": "openai/gpt-test",
+                "api_key": "test",
+            },
+            {
+                "id": "chatcmpl-incomplete",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": "", "tool_calls": []},
+                    }
+                ],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7},
+            },
+            "length",
+            "chatcmpl-incomplete",
+        ),
+    ],
+)
+async def test_native_tool_adapters_return_truncation_receipts_to_shared_client(
+    client_kwargs: dict[str, Any],
+    payload: dict[str, Any],
+    expected_reason: str,
+    expected_response_id: str,
+) -> None:
+    finished = []
+
+    class CaptureSink:
+        async def begin_llm_call(self, record, *, capture_mode: str) -> None:
+            del record, capture_mode
+
+        async def finish_llm_call(self, record, *, capture_mode: str) -> None:
+            del capture_mode
+            finished.append(record)
+
+    client = GenericLLMClient(
+        **client_kwargs,
+        observation_sink=CaptureSink(),
+        observation_capture_mode="full",
+    )
+    client._client = _FakeHttpClient(payload)  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    request = ModelRequest(
+        messages=(message_from_text("user", "Choose a Tool."),),
+        tools=_native_tool_request(max_calls=1).tools,
+        tool_choice="required",
+        turn_id="turn-incomplete",
+    )
+
+    with pytest.raises(LLMToolCallResponseError) as raised:
+        await client.generate(request)
+
+    assert raised.value.code == "truncated"
+    assert len(finished) == 1
+    assert finished[0].usage
+    receipt = finished[0].request_args["tool_call_response_receipt"]
+    assert receipt["incomplete_reason"] == expected_reason
+    assert receipt["provider_response_id"] == expected_response_id
+
+
+@pytest.mark.asyncio
 async def test_generate_wraps_direct_assistant_output_with_typed_usage() -> None:
     payload = {
         "id": "response_1",

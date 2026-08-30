@@ -231,6 +231,10 @@ def _openai_like_tool_call_response(
         finish_reason=str(choice.get("finish_reason") or ""),
         provider_metadata={
             "response_id": response_id,
+            "provider_status": str(choice.get("finish_reason") or ""),
+            "incomplete_reason": (
+                "length" if choice.get("finish_reason") == "length" else ""
+            ),
             "choice_index": choice_index,
             "tool_call_count": len(raw_calls),
         },

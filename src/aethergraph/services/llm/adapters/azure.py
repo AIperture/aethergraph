@@ -491,11 +491,6 @@ class AzureChatAdapter:
         )
         metadata = checked_response_metadata("azure", model, "chat", r)
         data = r.json()
-        if data.get("status") == "incomplete":
-            raise LLMToolCallResponseError(
-                code="truncated",
-                message="Azure Tool-call response was incomplete.",
-            )
         return ProviderCallResult(
             (
                 _openai_tool_call_response(

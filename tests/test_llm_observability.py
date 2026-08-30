@@ -16,10 +16,13 @@ from aethergraph.observability.canonical_inspection import CanonicalInspectionRe
 from aethergraph.observability.canonical_service import ProviderObservationService
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.llm import (
+    LLMToolCallResponseError,
+    ModelRequest,
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
+    message_from_text,
 )
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
@@ -180,6 +183,86 @@ async def test_llm_client_records_success_and_provider_error_canonically(
     assert correlation is not None
     assert correlation.llm_call_id in {row.call_id for row in inspect_page.items}
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_truncated_tool_response_retains_attempt_usage_and_response_receipt() -> None:
+    finished: list[LLMObservationRecord] = []
+
+    class CaptureSink:
+        async def begin_llm_call(self, record, *, capture_mode: str) -> None:
+            del record, capture_mode
+
+        async def finish_llm_call(self, record, *, capture_mode: str) -> None:
+            del capture_mode
+            finished.append(record)
+
+    class CaptureMetering:
+        def __init__(self) -> None:
+            self.records: list[dict[str, object]] = []
+
+        async def record_llm(self, **record) -> None:
+            self.records.append(record)
+
+    metering = CaptureMetering()
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=CaptureSink(),
+        observation_capture_mode="full",
+        metering=metering,
+    )
+
+    async def incomplete_dispatch(messages, **kwargs):
+        del messages, kwargs
+        return ProviderCallResult(
+            (
+                ToolCallResponse(
+                    items=(),
+                    finish_reason="incomplete",
+                    provider_metadata={
+                        "response_id": "resp-incomplete",
+                        "provider_status": "incomplete",
+                        "incomplete_reason": "max_output_tokens",
+                    },
+                ),
+                {"input_tokens": 120, "output_tokens": 64},
+            ),
+            ProviderResponseMetadata(request_id="req-incomplete"),
+        )
+
+    client._chat_dispatch = incomplete_dispatch  # type: ignore[method-assign]
+    request = ModelRequest(
+        messages=(message_from_text("user", "Choose a Tool."),),
+        tools=(
+            ToolDefinition(
+                name="finish",
+                description="Finish.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ),
+        tool_choice="required",
+        turn_id="turn-incomplete",
+    )
+
+    with pytest.raises(LLMToolCallResponseError) as raised:
+        await client.generate(request)
+
+    assert raised.value.code == "truncated"
+    assert len(finished) == 1
+    record = finished[0]
+    assert record.lifecycle_status == "failed"
+    assert record.usage == {"input_tokens": 120, "output_tokens": 64}
+    assert record.attempts[0].request_id == "req-incomplete"
+    assert record.request_args["tool_call_response_receipt"] == {
+        "provider_status": "incomplete",
+        "finish_reason": "incomplete",
+        "incomplete_reason": "max_output_tokens",
+        "provider_response_id": "resp-incomplete",
+    }
+    assert len(metering.records) == 1
+    assert metering.records[0]["prompt_tokens"] == 120
+    assert metering.records[0]["completion_tokens"] == 64
 
 
 @pytest.mark.asyncio
