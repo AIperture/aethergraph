@@ -177,7 +177,10 @@ def _openai_request_tools(
     return result
 
 
-def _openai_continuation_request_tools(request: ToolCallRequest) -> list[dict[str, Any]]:
+def _openai_continuation_request_tools(
+    request: ToolCallRequest,
+    checkpoint_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
     """Encode request-owned Tools that must survive a Responses continuation.
 
     Examples:
@@ -195,16 +198,94 @@ def _openai_continuation_request_tools(request: ToolCallRequest) -> list[dict[st
         list[dict[str, Any]]: Stable request-owned Tool declarations.
 
     Notes:
-        Client search outputs already inject activated deferred Tools into the
-        provider context. Clearing only the projection's active-name set avoids
-        declaring those Tools a second time while retaining immediate Tools and
-        the searchable catalog description. Hosted and ordinary Tool calling
-        require the complete current request surface on every continuation.
+        Client search outputs already inject their selected deferred Tools into
+        the provider context. Only those exact search-output declarations are
+        omitted from later requests in the same response chain. Active Tools
+        declared by an independent request root remain request-owned and must be
+        resent on its Tool-output continuations.
     """
 
     if request.discovery is not None and request.discovery.mode == "native_client":
-        request = replace(request, active_tool_names=())
+        declaration_sources = dict(checkpoint_payload["active_tool_sources"])
+        omitted_names = {
+            name
+            for name, source in declaration_sources.items()
+            if source == "search_output"
+        }
+        if checkpoint_payload["state"] == "pending_search":
+            prior_active_names = {
+                str(name)
+                for name in list(checkpoint_payload.get("active_tool_names") or [])
+            }
+            if request.discovery_result is not None:
+                omitted_names.update(request.discovery_result.tool_names)
+            else:
+                omitted_names.update(set(request.active_tool_names) - prior_active_names)
+        request = replace(
+            request,
+            active_tool_names=tuple(
+                name for name in request.active_tool_names if name not in omitted_names
+            ),
+        )
     return _openai_request_tools(request)
+
+
+def _openai_provider_tool_projection(
+    body: dict[str, Any],
+    checkpoint_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Summarize the exact provider-dispatched Tool projection safely."""
+
+    top_level_tools = [
+        dict(tool)
+        for tool in list(body.get("tools") or [])
+        if isinstance(tool, dict)
+    ]
+    embedded_tools: list[dict[str, Any]] = []
+    for item in list(body.get("input") or []):
+        if not isinstance(item, dict) or item.get("type") != "tool_search_output":
+            continue
+        embedded_tools.extend(
+            dict(tool)
+            for tool in list(item.get("tools") or [])
+            if isinstance(tool, dict)
+        )
+    fingerprint_input = {
+        "tools": top_level_tools,
+        "embedded_discovery_tools": embedded_tools,
+        "tool_choice": body.get("tool_choice"),
+        "parallel_tool_calls": body.get("parallel_tool_calls"),
+    }
+    canonical = json.dumps(
+        fingerprint_input,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    checkpoint_state = (
+        str(checkpoint_payload.get("state") or "")
+        if checkpoint_payload is not None
+        else ""
+    )
+    request_family = {
+        "pending_search": "pending_discovery_result",
+        "pending_tool_outputs": "pending_tool_outputs",
+    }.get(checkpoint_state, "full_root")
+
+    def _name(tool: dict[str, Any]) -> str:
+        return str(tool.get("name") or tool.get("type") or "unknown")
+
+    return {
+        "schema_version": "aethergraph.provider-tool-projection/v1",
+        "request_family": request_family,
+        "top_level_tool_count": len(top_level_tools),
+        "top_level_tool_names": [_name(tool) for tool in top_level_tools],
+        "embedded_discovery_tool_count": len(embedded_tools),
+        "embedded_discovery_tool_names": [_name(tool) for tool in embedded_tools],
+        "tool_choice": body.get("tool_choice"),
+        "parallel_tool_calls": body.get("parallel_tool_calls"),
+        "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    }
 
 
 def _openai_hosted_tool_refs(item: dict[str, Any]) -> tuple[str, ...]:
@@ -314,11 +395,33 @@ def _openai_checkpoint(
 
     previous = request.transport_checkpoint
     revision = 1 if previous is None else previous.revision + 1
+    active_tool_sources = {
+        name: "request_tools" for name in request.active_tool_names
+    }
+    if previous is not None:
+        previous_payload = _openai_checkpoint_payload(previous, provider=provider)
+        previous_sources = dict(previous_payload["active_tool_sources"])
+        active_tool_sources = {
+            name: str(previous_sources.get(name) or "request_tools")
+            for name in request.active_tool_names
+        }
+        if previous_payload["state"] == "pending_search":
+            prior_active_names = {
+                str(name)
+                for name in list(previous_payload.get("active_tool_names") or [])
+            }
+            newly_selected_names = set(request.active_tool_names) - prior_active_names
+            if request.discovery_result is not None:
+                newly_selected_names = set(request.discovery_result.tool_names)
+            for name in newly_selected_names:
+                if name in active_tool_sources:
+                    active_tool_sources[name] = "search_output"
     payload = {
         "state": state,
         "response_id": response_id,
         "call_id": call_id,
         "active_tool_names": list(request.active_tool_names),
+        "active_tool_sources": active_tool_sources,
         "pending_call_ids": list(pending_call_ids or []),
     }
     if response_output is not None:
@@ -458,6 +561,19 @@ def _openai_checkpoint_payload(
         raise LLMToolCallResponseError(
             code="model_exchange_tool_surface_invalid",
             message="OpenAI Tool checkpoint activation state is invalid.",
+        )
+    active_sources = payload.get("active_tool_sources")
+    if (
+        not isinstance(active_sources, dict)
+        or set(active_sources) != set(active_names)
+        or any(
+            source not in {"request_tools", "search_output"}
+            for source in active_sources.values()
+        )
+    ):
+        raise LLMToolCallResponseError(
+            code="model_exchange_tool_surface_invalid",
+            message="OpenAI Tool checkpoint declaration provenance is invalid.",
         )
     prompt_count = payload.get("prompt_stable_message_count")
     prompt_digest = payload.get("prompt_stable_prefix_digest")
@@ -797,6 +913,10 @@ def _openai_tool_call_response(
         finish_reason=str(data.get("status") or ""),
         provider_metadata={
             "response_id": response_id,
+            "provider_status": str(data.get("status") or ""),
+            "incomplete_reason": str(
+                dict(data.get("incomplete_details") or {}).get("reason") or ""
+            ),
             "output_item_count": len(list(data.get("output") or [])),
         },
         transport_checkpoint=checkpoint,
@@ -974,39 +1094,69 @@ class OpenAIResponsesAdapter:
                 checkpoint_payload=checkpoint_payload,
             )
             if checkpoint_payload["state"] == "pending_search":
+                discovery_result = tool_request.discovery_result
+                pending_search_call_id = str(
+                    checkpoint_payload.get("call_id") or ""
+                )
+                if (
+                    discovery_result is not None
+                    and discovery_result.provider_reference_id
+                    != pending_search_call_id
+                ):
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_reference_mismatch",
+                        message="OpenAI discovery result does not match the pending search.",
+                    )
                 prior_active_names = {
                     str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
                 }
                 newly_active_names = set(tool_request.active_tool_names) - prior_active_names
-                loaded_tools = [
-                    tool
-                    for tool in tool_request.tools
-                    if tool.exposure == "deferred" and tool.name in newly_active_names
-                ]
-                if not loaded_tools:
-                    raise LLMToolCallResponseError(
-                        code="discovery_result_missing",
-                        message="OpenAI client Tool search has no newly activated result.",
-                    )
-                assert tool_request.discovery is not None
-                if len(loaded_tools) > tool_request.discovery.max_results:
-                    raise LLMToolCallResponseError(
-                        code="discovery_result_limit_exceeded",
-                        message="OpenAI client Tool-search results exceed the request bound.",
-                    )
+                if discovery_result is not None:
+                    newly_active_names = set(discovery_result.tool_names)
                 body["previous_response_id"] = str(checkpoint_payload.get("response_id") or "")
-                body["input"] = [
-                    {
-                        "type": "tool_search_output",
-                        "execution": "client",
-                        "call_id": str(checkpoint_payload.get("call_id") or ""),
-                        "status": "completed",
-                        "tools": [
-                            _openai_function_tool(tool, defer_loading=True) for tool in loaded_tools
-                        ],
-                    },
-                    *appended_prompt_input,
-                ]
+                if discovery_result is not None and discovery_result.status == "failed":
+                    body["input"] = [
+                        {
+                            "type": "tool_search_output",
+                            "execution": "client",
+                            "call_id": pending_search_call_id,
+                            "status": "incomplete",
+                            "tools": [],
+                        },
+                        *appended_prompt_input,
+                    ]
+                else:
+                    loaded_tools = [
+                        tool
+                        for tool in tool_request.tools
+                        if tool.exposure == "deferred" and tool.name in newly_active_names
+                    ]
+                    if not loaded_tools:
+                        raise LLMToolCallResponseError(
+                            code="discovery_result_missing",
+                            message="OpenAI client Tool search has no newly activated result.",
+                        )
+                    assert tool_request.discovery is not None
+                    if len(loaded_tools) > tool_request.discovery.max_results:
+                        raise LLMToolCallResponseError(
+                            code="discovery_result_limit_exceeded",
+                            message=(
+                                "OpenAI client Tool-search results exceed the request bound."
+                            ),
+                        )
+                    body["input"] = [
+                        {
+                            "type": "tool_search_output",
+                            "execution": "client",
+                            "call_id": pending_search_call_id,
+                            "status": "completed",
+                            "tools": [
+                                _openai_function_tool(tool, defer_loading=True)
+                                for tool in loaded_tools
+                            ],
+                        },
+                        *appended_prompt_input,
+                    ]
             elif checkpoint_payload["state"] == "pending_tool_outputs":
                 pending_call_ids = tuple(
                     str(call_id)
@@ -1034,7 +1184,10 @@ class OpenAIResponsesAdapter:
             if checkpoint_payload is None or checkpoint_payload["state"] == "consumed":
                 body["tools"] = _openai_request_tools(tool_request)
             else:
-                body["tools"] = _openai_continuation_request_tools(tool_request)
+                body["tools"] = _openai_continuation_request_tools(
+                    tool_request,
+                    checkpoint_payload,
+                )
             # Responses binds Tool selection controls to the declarations in
             # this exact request. Keep the current Engine surface and controls
             # atomic across search and Tool-result continuations.
@@ -1059,17 +1212,21 @@ class OpenAIResponsesAdapter:
                 timeout=request_timeout,
             )
             metadata = checked_response_metadata("openai", model, "chat", r)
+            metadata = replace(
+                metadata,
+                request_facts={
+                    "tool_projection": _openai_provider_tool_projection(
+                        body,
+                        checkpoint_payload,
+                    )
+                },
+            )
 
             data = r.json()
             usage = data.get("usage", {}) or {}
             if data.get("status") == "incomplete":
                 detail = data.get("incomplete_details") or {}
-                if tool_request is not None:
-                    raise LLMToolCallResponseError(
-                        code="truncated",
-                        message=f"OpenAI Tool-call response was incomplete: {detail}",
-                    )
-                if structured_output_fields:
+                if tool_request is None and structured_output_fields:
                     raise LLMStructuredOutputTruncationError(
                         f"OpenAI structured response was incomplete: {detail}"
                     )

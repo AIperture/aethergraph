@@ -88,6 +88,7 @@ from aethergraph.services.llm.tool_calling import (
     ToolCallRequest,
     ToolCallResponse,
     assistant_output_identity,
+    tool_call_continuation_inputs,
     tool_call_definitions,
     tool_call_request_item_summaries,
     tool_call_response_item_summaries,
@@ -205,6 +206,33 @@ def _record_structured_output_failure(
     request_args["structured_output_response_state"] = response_state
     if isinstance(exc, LLMStructuredOutputResponseError):
         request_args["structured_output_error"] = exc.to_dict()
+
+
+def _tool_call_truncation_receipt(
+    response: ToolCallResponse,
+) -> dict[str, Any] | None:
+    """Return bounded provider response evidence for an incomplete Tool selection."""
+
+    metadata = dict(response.provider_metadata or {})
+    finish_reason = str(response.finish_reason or "").strip()
+    normalized_finish = finish_reason.lower()
+    incomplete_reason = str(metadata.get("incomplete_reason") or "").strip()
+    if not incomplete_reason and normalized_finish in {
+        "incomplete",
+        "length",
+        "max_tokens",
+    }:
+        incomplete_reason = normalized_finish
+    if not incomplete_reason:
+        return None
+    return {
+        "provider_status": str(
+            metadata.get("provider_status") or finish_reason or "incomplete"
+        )[:120],
+        "finish_reason": finish_reason[:120],
+        "incomplete_reason": incomplete_reason[:500],
+        "provider_response_id": str(metadata.get("response_id") or "")[:500],
+    }
 
 
 # ---- Generic client -------------------------------------------------------
@@ -1959,6 +1987,7 @@ class GenericLLMClient(LLMClientProtocol):
         call_type: str,
         model: str,
         messages: list[dict[str, Any]],
+        effective_messages: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None,
         max_output_tokens: int | None,
         output_format: ChatOutputFormat,
@@ -1974,6 +2003,7 @@ class GenericLLMClient(LLMClientProtocol):
         call_name: str | None = None,
         tool_surface: dict[str, Any] | None = None,
         request_items: list[dict[str, Any]] | None = None,
+        continuation_inputs: dict[str, Any] | None = None,
         tool_definitions: list[dict[str, Any]] | None = None,
     ) -> LLMObservationRecord:
         record = LLMObservationRecord.new(
@@ -1982,6 +2012,7 @@ class GenericLLMClient(LLMClientProtocol):
             model=model,
             dimensions=self._current_dimensions(),
             messages=messages,
+            effective_messages=effective_messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,
@@ -1998,6 +2029,7 @@ class GenericLLMClient(LLMClientProtocol):
             call_name=call_name,
             tool_surface=tool_surface,
             request_items=request_items,
+            continuation_inputs=continuation_inputs,
             tool_definitions=tool_definitions,
         )
         begin_llm_call_correlation(record.llm_call_id)
@@ -2098,6 +2130,17 @@ class GenericLLMClient(LLMClientProtocol):
             request,
             image_policy=self.image_preparation_policy,
         )
+        effective_messages = None
+        if request.effective_messages is not None:
+            effective_request = replace(
+                request,
+                messages=request.effective_messages,
+                effective_messages=None,
+            )
+            effective_messages, _ = prepare_model_request(
+                effective_request,
+                image_policy=self.image_preparation_policy,
+            )
         generation_params: dict[str, Any] = {}
         if request.generation.temperature is not None:
             generation_params["temperature"] = request.generation.temperature
@@ -2122,6 +2165,8 @@ class GenericLLMClient(LLMClientProtocol):
             ),
             tool_request=tool_request,
             prompt_cache=request.prompt_cache,
+            trace_payload=request.caller_context or None,
+            effective_messages=effective_messages,
             **generation_params,
         )
 
@@ -2222,6 +2267,7 @@ class GenericLLMClient(LLMClientProtocol):
         self,
         messages: list[dict[str, Any]],
         *,
+        effective_messages: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
         output_format: ChatOutputFormat = "text",
@@ -2428,6 +2474,7 @@ class GenericLLMClient(LLMClientProtocol):
                     call_name=call_name,
                     tool_surface=tool_call_surface_summary(tool_request),
                     request_items=list(tool_call_request_item_summaries(tool_request)),
+                    continuation_inputs=tool_call_continuation_inputs(tool_request),
                     tool_definitions=tool_call_definitions(tool_request),
                 )
                 await self._begin_observation(observation_record)
@@ -2538,6 +2585,7 @@ class GenericLLMClient(LLMClientProtocol):
             call_type="chat",
             model=model,
             messages=messages,
+            effective_messages=effective_messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,
@@ -2553,6 +2601,7 @@ class GenericLLMClient(LLMClientProtocol):
             call_name=call_name,
             tool_surface=tool_call_surface_summary(tool_request),
             request_items=list(tool_call_request_item_summaries(tool_request)),
+            continuation_inputs=tool_call_continuation_inputs(tool_request),
             tool_definitions=tool_call_definitions(tool_request),
         )
         tags = ["llm", "chat"]
@@ -2621,6 +2670,10 @@ class GenericLLMClient(LLMClientProtocol):
             )
             provider_value, usage = provider_result.value
             observation_record.attempts = provider_result.attempts
+            if provider_result.metadata.request_facts:
+                observation_record.provider_request_facts = copy.deepcopy(
+                    provider_result.metadata.request_facts
+                )
 
             observation_record.raw_text = (
                 provider_value.observation_text()
@@ -2647,6 +2700,22 @@ class GenericLLMClient(LLMClientProtocol):
                     },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
+                truncation_receipt = _tool_call_truncation_receipt(provider_value)
+                if truncation_receipt is not None:
+                    request_args["tool_call_response_receipt"] = truncation_receipt
+                    observation_record.request_args[
+                        "tool_call_response_receipt"
+                    ] = copy.deepcopy(truncation_receipt)
+                    observation_record.response_items = list(
+                        tool_call_response_item_summaries(provider_value)
+                    )
+                    raise LLMToolCallResponseError(
+                        code="truncated",
+                        message=(
+                            "The provider stopped before completing native Tool "
+                            f"selection: {truncation_receipt['incomplete_reason']}."
+                        ),
+                    )
 
             # Canonical parsing/validation happens only after response evidence
             # and provider usage have been retained and accounted.

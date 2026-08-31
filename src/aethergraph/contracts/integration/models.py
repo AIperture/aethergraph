@@ -447,6 +447,7 @@ class IngressAttachment(IntegrationContract):
 class AgentInputResource(IntegrationContract):
     """Reference one materialized Artifact available to an Agent input."""
 
+    attachment_id: Identifier | None = None
     artifact_id: Identifier
     filename: Annotated[str, Field(min_length=1, max_length=512)] | None = None
     content_type: Annotated[str, Field(min_length=1, max_length=255)] | None = None

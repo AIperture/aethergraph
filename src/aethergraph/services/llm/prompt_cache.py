@@ -161,6 +161,12 @@ def prepare_prompt_cache(
         )
     translated_messages = copy.deepcopy(messages)
     provider_fields: dict[str, Any] = {}
+    implicit_latest_breakpoint = (
+        normalized_provider == "openai"
+        and capability.mode == "explicit"
+        and endpoint_id in {None, "openai_responses"}
+        and tool_request is not None
+    )
     key = _derive_cache_key(
         provider=normalized_provider,
         model=normalized_model,
@@ -175,11 +181,7 @@ def prepare_prompt_cache(
             selected_indexes,
         )
         provider_fields = _openai_explicit_fields(key)
-        if (
-            tool_request is not None
-            and tool_request.discovery is not None
-            and tool_request.discovery.mode == "native_client"
-        ):
+        if implicit_latest_breakpoint:
             # A Responses continuation grows at the latest Tool/message boundary.
             # Keep Engine-owned stable breakpoints, but retain OpenAI's implicit
             # latest-boundary write instead of restricting writes to explicit-only.
@@ -200,13 +202,7 @@ def prepare_prompt_cache(
         tool_contract_fingerprint=tool_contract_fingerprint,
         tool_surface_fingerprint=tool_surface_fingerprint,
     )
-    if (
-        normalized_provider == "openai"
-        and capability.mode == "explicit"
-        and tool_request is not None
-        and tool_request.discovery is not None
-        and tool_request.discovery.mode == "native_client"
-    ):
+    if implicit_latest_breakpoint:
         observation["implicit_latest_breakpoint"] = True
     if capability.max_new_writes_per_request is not None:
         observation["max_new_writes_per_request"] = capability.max_new_writes_per_request

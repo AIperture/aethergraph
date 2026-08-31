@@ -51,6 +51,43 @@ def test_prompt_persistence_applies_canonical_redaction() -> None:
     assert all(_MARKER in body for body in bodies)
 
 
+def test_prompt_hash_distinguishes_call_specific_continuation_inputs() -> None:
+    common = dict(
+        call_type="chat",
+        provider="test",
+        model="test",
+        dimensions={},
+        messages=[{"role": "user", "content": "same frozen root"}],
+        reasoning_effort=None,
+        max_output_tokens=None,
+        output_format="text",
+        json_schema=None,
+        schema_name=None,
+        strict_schema=None,
+        validate_json=None,
+        extra_params={},
+        request_args={},
+        provider_request_args={},
+        compatibility_notes=[],
+        trace_payload=None,
+    )
+    first = LLMObservationRecord.new(
+        **common,
+        continuation_inputs={"tool_outputs": [{"call_id": "one", "content": "A"}]},
+    )
+    second = LLMObservationRecord.new(
+        **common,
+        continuation_inputs={"tool_outputs": [{"call_id": "two", "content": "B"}]},
+    )
+    store = PromptStore(ObservationPolicy(capture_mode="metadata"))
+
+    first_capture = store.prepare(first)
+    second_capture = store.prepare(second)
+
+    assert first_capture.request_hash_version == 2
+    assert first_capture.assembled_request_hash != second_capture.assembled_request_hash
+
+
 @pytest.mark.asyncio
 async def test_agent_event_persistence_applies_canonical_redaction() -> None:
     sink = _ObservationSink()

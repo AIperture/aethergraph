@@ -49,6 +49,7 @@ class PreparedPromptCapture:
     total_chars: int
     total_bytes: int
     roles: tuple[str, ...]
+    request_hash_version: int = 2
     manifest_id: str | None = None
     fragments: tuple[PreparedFragment, ...] = ()
     parts: tuple[PreparedManifestPart, ...] = ()
@@ -94,6 +95,8 @@ class PromptStore:
         request = {
             "messages": sanitize_content(record.messages),
             "provider_request_args": sanitize_content(record.provider_request_args),
+            "tools": sanitize_content(record.tool_definitions),
+            "continuation_inputs": sanitize_content(record.continuation_inputs),
         }
         request_body = canonical_json(request)
         request_bytes = request_body.encode("utf-8")
@@ -149,7 +152,13 @@ class PromptStore:
                         source_event_id=message.get("source_event_id"),
                     )
                 )
-            config_body = canonical_json(request["provider_request_args"])
+            config_body = canonical_json(
+                {
+                    "provider_request_args": request["provider_request_args"],
+                    "tools": request["tools"],
+                    "continuation_inputs": request["continuation_inputs"],
+                }
+            )
             config_fragment = self._fragment("provider_request_config", config_body)
             prepared_fragments.append(config_fragment)
             prepared_parts.append(

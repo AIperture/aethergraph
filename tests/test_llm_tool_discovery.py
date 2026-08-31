@@ -21,10 +21,12 @@ from aethergraph.services.llm import (
     ToolDiscoveryMode,
     ToolDiscoveryModeCapability,
     ToolDiscoveryRequest,
+    ToolDiscoveryResult,
     ToolPath,
     ToolTransportCheckpoint,
     resolve_tool_discovery_capabilities,
 )
+from aethergraph.services.llm.adapters.anthropic import _anthropic_checkpoint
 from aethergraph.services.llm.adapters.openai_responses import (
     _openai_appended_prompt_input,
     _openai_checkpoint,
@@ -120,6 +122,196 @@ def _openai_capabilities(
         model="example-model",
         endpoint_family="responses",
         supported_modes=modes,
+    )
+
+
+def _failed_discovery_result(
+    *,
+    event_id: str = "search_call_1",
+    provider_reference_id: str = "search_call_1",
+) -> ToolDiscoveryResult:
+    return ToolDiscoveryResult(
+        discovery_event_id=event_id,
+        provider_reference_id=provider_reference_id,
+        status="failed",
+        error=ToolDiscoveryError(
+            code="tool_discovery_no_matches",
+            summary="No new eligible Tools matched; search differently.",
+            retryable=True,
+            details={"remaining_capacity": 1},
+        ),
+    )
+
+
+def test_discovery_result_requires_a_matching_continuation_kind() -> None:
+    result = _failed_discovery_result()
+    tool = ToolDefinition("finish", "Finish.", {"type": "object"})
+
+    with pytest.raises(ValueError, match="transport checkpoint"):
+        ToolCallRequest(
+            tools=(tool,),
+            discovery=ToolDiscoveryRequest(
+                "native_client",
+                search_schema=_CLIENT_SEARCH_SCHEMA,
+            ),
+            turn_id="turn_1",
+            discovery_result=result,
+        )
+
+
+@pytest.mark.asyncio
+async def test_openai_failed_client_discovery_uses_incomplete_search_output() -> None:
+    client = GenericLLMClient(
+        "openai",
+        "gpt-5.6",
+        api_key="test",
+        base_url="https://api.openai.test/v1",
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "resp_finish_1",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "finish_call_1",
+                    "name": "finish",
+                    "arguments": "{}",
+                }
+            ],
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    tools = (
+        ToolDefinition("finish", "Finish.", {"type": "object"}),
+        ToolDefinition(
+            "read_document",
+            "Read.",
+            {"type": "object"},
+            exposure="deferred",
+        ),
+    )
+    initial = ToolCallRequest(
+        tools=tools,
+        discovery=ToolDiscoveryRequest(
+            "native_client",
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+        ),
+        turn_id="turn_1",
+    )
+    checkpoint = _openai_checkpoint(
+        request=initial,
+        model="gpt-5.6",
+        response_id="resp_search_1",
+        state="pending_search",
+        call_id="search_call_1",
+    )
+    continued = ToolCallRequest(
+        tools=tools,
+        discovery=initial.discovery,
+        turn_id="turn_1",
+        transport_checkpoint=checkpoint,
+        discovery_result=_failed_discovery_result(),
+    )
+
+    response, _usage = await client.chat(
+        [{"role": "user", "content": "find a document Tool"}],
+        tool_request=continued,
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.calls[0].name == "finish"
+    assert fake_http.calls == 1
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["previous_response_id"] == "resp_search_1"
+    assert fake_http.last_json["input"][0] == {
+        "type": "tool_search_output",
+        "execution": "client",
+        "call_id": "search_call_1",
+        "status": "incomplete",
+        "tools": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_anthropic_failed_client_discovery_uses_tool_result_error() -> None:
+    client = GenericLLMClient(
+        "anthropic",
+        "claude-sonnet-4-5-20250929",
+        api_key="test",
+        base_url="https://api.anthropic.test",
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "msg_finish_1",
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_finish_1",
+                    "name": "finish",
+                    "input": {},
+                }
+            ],
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    messages = [{"role": "user", "content": "find a document Tool"}]
+    search_block = {
+        "type": "tool_use",
+        "id": "toolu_search_1",
+        "name": "tool_search",
+        "input": {"goal": "find a document Tool"},
+    }
+    tools = (
+        ToolDefinition("finish", "Finish.", {"type": "object"}),
+        ToolDefinition(
+            "read_document",
+            "Read.",
+            {"type": "object"},
+            exposure="deferred",
+        ),
+    )
+    initial = ToolCallRequest(
+        tools=tools,
+        discovery=ToolDiscoveryRequest(
+            "native_client",
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+        ),
+        turn_id="turn_1",
+    )
+    checkpoint = _anthropic_checkpoint(
+        request=initial,
+        model="claude-sonnet-4-5-20250929",
+        stable_messages=messages,
+        state="pending_search",
+        assistant_content=[search_block],
+        search_call_id="toolu_search_1",
+    )
+    continued = ToolCallRequest(
+        tools=tools,
+        discovery=initial.discovery,
+        turn_id="turn_1",
+        transport_checkpoint=checkpoint,
+        discovery_result=_failed_discovery_result(
+            event_id="toolu_search_1",
+            provider_reference_id="toolu_search_1",
+        ),
+    )
+
+    response, _usage = await client.chat(messages, tool_request=continued)
+
+    assert isinstance(response, ToolCallResponse)
+    assert response.calls[0].name == "finish"
+    assert fake_http.last_json is not None
+    error_result = fake_http.last_json["messages"][-1]["content"][0]
+    assert error_result["type"] == "tool_result"
+    assert error_result["tool_use_id"] == "toolu_search_1"
+    assert error_result["is_error"] is True
+    assert json.loads(error_result["content"])["code"] == (
+        "tool_discovery_no_matches"
     )
 
 
@@ -547,10 +739,19 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json["tool_choice"] == "required"
     assert fake_http.last_json["parallel_tool_calls"] is False
     assert "lexical_queries" in fake_http.last_json["tools"][-1]["description"]
+    assert (
+        "Select no more than 5 Tools"
+        in fake_http.last_json["tools"][-1]["description"]
+    )
     assert "studio.docs" in fake_http.last_json["tools"][-1]["description"]
     assert "prompt_cache_options" not in fake_http.last_json
     cache_key = fake_http.last_json["prompt_cache_key"]
     assert all(tool.get("name") != "read_document" for tool in fake_http.last_json["tools"])
+    root_projection = sink.records[-1].provider_request_facts["tool_projection"]
+    assert root_projection["request_family"] == "full_root"
+    assert root_projection["top_level_tool_names"] == ["finish", "tool_search"]
+    assert root_projection["embedded_discovery_tool_names"] == []
+    assert len(root_projection["fingerprint"]) == 64
     fake_http.payload = {
         "id": "resp_call_1",
         "status": "completed",
@@ -635,6 +836,10 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert "native_tool_calling" not in sink.records[-1].provider_request_args
     assert sink.records[-1].response_items[0]["tool_name"] == "read_document"
     assert sink.records[-1].request_args["prompt_cache"]["implicit_latest_breakpoint"] is True
+    discovery_projection = sink.records[-1].provider_request_facts["tool_projection"]
+    assert discovery_projection["request_family"] == "pending_discovery_result"
+    assert discovery_projection["top_level_tool_names"] == ["finish", "tool_search"]
+    assert discovery_projection["embedded_discovery_tool_names"] == ["read_document"]
 
     fake_http.payload = {
         "id": "resp_finish_1",
@@ -715,6 +920,139 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert request_item["call_id"] == "call_1"
     assert request_item["content_bytes"] == len(b'{"path":"a.md","status":"ok"}')
     assert len(request_item["content_sha256"]) == 64
+    result_projection = sink.records[-1].provider_request_facts["tool_projection"]
+    assert result_projection["request_family"] == "pending_tool_outputs"
+    assert result_projection["top_level_tool_names"] == ["finish", "tool_search"]
+    assert result_projection["embedded_discovery_tool_names"] == []
+
+
+@pytest.mark.asyncio
+async def test_openai_new_turn_tool_output_keeps_root_declared_active_tool() -> None:
+    sink = _ObservationSink()
+    client = GenericLLMClient(
+        "openai",
+        "gpt-5.6",
+        api_key="test",
+        base_url="https://api.openai.test/v1",
+        observation_sink=sink,
+    )
+    client.bind_tool_discovery_capabilities(
+        ToolDiscoveryCapabilities(
+            provider="openai",
+            model="gpt-5.6",
+            endpoint_family="responses",
+            supported_modes=(
+                ToolDiscoveryModeCapability(
+                    mode="native_client",
+                    replay_requirement="previous_response",
+                    max_results=50,
+                    protocol_version="responses.tool_search",
+                ),
+            ),
+        )
+    )
+    fake_http = _CountingHttpClient(
+        {
+            "id": "resp_read_turn_2",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "read_call_turn_2",
+                    "name": "read_document",
+                    "arguments": '{"path":"a.md"}',
+                }
+            ],
+        }
+    )
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+    finish = ToolDefinition("finish", "Finish.", {"type": "object"})
+    read_document = ToolDefinition(
+        "read_document",
+        "Read one document.",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+        exposure="deferred",
+    )
+    discovery = ToolDiscoveryRequest(
+        "native_client",
+        max_results=5,
+        search_schema=_CLIENT_SEARCH_SCHEMA,
+    )
+    root_request = ToolCallRequest(
+        tools=(finish, read_document),
+        choice="required",
+        discovery=discovery,
+        turn_id="turn_2",
+        active_tool_names=("read_document",),
+    )
+
+    called, _usage = await client.chat(
+        [{"role": "user", "content": "Read a.md."}],
+        tool_request=root_request,
+    )
+
+    assert isinstance(called, ToolCallResponse)
+    assert called.transport_checkpoint is not None
+    assert called.transport_checkpoint.purpose == "pending_tool_outputs"
+    assert fake_http.last_json is not None
+    assert "read_document" in {
+        tool.get("name") for tool in fake_http.last_json["tools"]
+    }
+    root_projection = sink.records[-1].provider_request_facts["tool_projection"]
+    assert root_projection["request_family"] == "full_root"
+    assert root_projection["top_level_tool_names"] == [
+        "finish",
+        "read_document",
+        "tool_search",
+    ]
+
+    fake_http.payload = {
+        "id": "resp_finish_turn_2",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "finish_call_turn_2",
+                "name": "finish",
+                "arguments": "{}",
+            }
+        ],
+    }
+    finished, _usage = await client.chat(
+        [{"role": "user", "content": "Read a.md."}],
+        tool_request=ToolCallRequest(
+            tools=(finish, read_document),
+            choice="required",
+            discovery=discovery,
+            turn_id="turn_2",
+            active_tool_names=("read_document",),
+            transport_checkpoint=called.transport_checkpoint,
+            tool_outputs=(
+                ToolCallOutput("read_call_turn_2", '{"status":"ok"}'),
+            ),
+        ),
+    )
+
+    assert isinstance(finished, ToolCallResponse)
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["previous_response_id"] == "resp_read_turn_2"
+    assert "read_document" in {
+        tool.get("name") for tool in fake_http.last_json["tools"]
+    }
+    continuation_projection = sink.records[-1].provider_request_facts[
+        "tool_projection"
+    ]
+    assert continuation_projection["request_family"] == "pending_tool_outputs"
+    assert continuation_projection["top_level_tool_names"] == [
+        "finish",
+        "read_document",
+        "tool_search",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1315,6 +1653,7 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
 
 @pytest.mark.asyncio
 async def test_azure_native_client_uses_responses_route_and_checkpoint_binding() -> None:
+    sink = _ObservationSink()
     client = GenericLLMClient(
         "azure",
         "gpt-5.5",
@@ -1322,6 +1661,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
         api_key="azure-test",
         base_url="https://example.openai.azure.com",
         azure_deployment="gpt-5.5",
+        observation_sink=sink,
     )
     fake_http = _CountingHttpClient(
         {
@@ -1372,6 +1712,30 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tool_choice"] == "required"
     assert fake_http.last_json["parallel_tool_calls"] is False
+    assert sink.records[-1].provider_request_facts["tool_projection"][
+        "request_family"
+    ] == "full_root"
+
+    calls_before_failed_resolution = fake_http.calls
+    with pytest.raises(LLMToolCallResponseError) as unsupported_failure:
+        await client.chat(
+            [{"role": "user", "content": "open a document"}],
+            tool_request=ToolCallRequest(
+                tools=request.tools,
+                choice="required",
+                discovery=request.discovery,
+                turn_id="turn_1",
+                transport_checkpoint=response.transport_checkpoint,
+                discovery_result=_failed_discovery_result(
+                    event_id="azure_search_1",
+                    provider_reference_id="azure_search_1",
+                ),
+            ),
+        )
+    assert unsupported_failure.value.code == (
+        "discovery_failure_output_unsupported"
+    )
+    assert fake_http.calls == calls_before_failed_resolution
 
     fake_http.payload = {
         "id": "resp_azure_call_1",

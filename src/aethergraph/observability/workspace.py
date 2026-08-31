@@ -816,7 +816,11 @@ def _prompt_manifest_mapping(detail: Any) -> dict[str, Any]:
                         body=body,
                     )
                 )
-            config = request.get("provider_request_args") or {}
+            config = {
+                "provider_request_args": request.get("provider_request_args") or {},
+                "tools": request.get("tools") or [],
+                "continuation_inputs": request.get("continuation_inputs"),
+            }
             parts.append(
                 _manifest_part(
                     ordinal=len(parts),
@@ -830,6 +834,7 @@ def _prompt_manifest_mapping(detail: Any) -> dict[str, Any]:
         "manifest_id": record.prompt_manifest_id,
         "capture_mode": record.capture_mode.value,
         "assembled_request_hash": attributes.get("assembled_request_hash"),
+        "request_hash_version": attributes.get("request_hash_version", 1),
         "total_chars": attributes.get("prompt_chars", 0),
         "total_bytes": attributes.get("prompt_bytes", 0),
         "roles": list(attributes.get("prompt_roles") or ()),

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Generic, Literal, TypeVar
+from dataclasses import dataclass, field
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -56,6 +56,7 @@ class ProviderResponseMetadata:
     request_id: str | None = None
     retry_after_s: float | None = None
     rate_limits: tuple[ProviderRateLimitSnapshot, ...] = ()
+    request_facts: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -341,6 +341,12 @@ def _gemini_tool_call_response(
         finish_reason=str(candidate.get("finishReason") or ""),
         provider_metadata={
             "candidate_index": int(candidate.get("index") or 0),
+            "provider_status": str(candidate.get("finishReason") or ""),
+            "incomplete_reason": (
+                "max_tokens"
+                if str(candidate.get("finishReason") or "").upper() == "MAX_TOKENS"
+                else ""
+            ),
             "part_count": len(parts),
         },
         transport_checkpoint=checkpoint,
@@ -677,14 +683,6 @@ class GeminiGenerateContentAdapter:
 
             cand = (data.get("candidates") or [{}])[0]
             if tool_request is not None:
-                if str(cand.get("finishReason") or "").upper() == "MAX_TOKENS":
-                    raise LLMToolCallResponseError(
-                        code="truncated",
-                        message=(
-                            "Gemini stopped at maxOutputTokens before completing "
-                            "native Tool selection."
-                        ),
-                    )
                 return ProviderCallResult(
                     (
                         _gemini_tool_call_response(
