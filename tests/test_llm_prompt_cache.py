@@ -10,6 +10,7 @@ import pytest
 from aethergraph.services.llm import (
     PromptCacheRequest,
     ToolCallRequest,
+    ToolCallResponse,
     ToolDefinition,
     prompt_cache,
 )
@@ -141,6 +142,34 @@ def test_prepare_openai_explicit_cache_is_deterministic_and_detached() -> None:
         }
     ]
     assert first.messages[1] == {"role": "user", "content": "volatile"}
+
+
+def test_openai_responses_tool_exchange_keeps_implicit_latest_breakpoint() -> None:
+    prepared = prepare_prompt_cache(
+        PromptCacheRequest((0,), "agent.ledger.v1"),
+        [
+            {"role": "system", "content": "stable header"},
+            {"role": "user", "content": "volatile frame"},
+        ],
+        provider="openai",
+        model="gpt-5.6-luna",
+        endpoint_id="openai_responses",
+        tool_request=ToolCallRequest(
+            tools=(
+                ToolDefinition(
+                    "advance",
+                    "Advance the workflow.",
+                    {"type": "object", "properties": {}},
+                ),
+            ),
+            choice="required",
+            turn_id="turn-1",
+        ),
+    )
+
+    assert prepared.provider_request_fields.keys() == {"prompt_cache_key"}
+    assert prepared.observation["implicit_latest_breakpoint"] is True
+    assert prepared.observation["tool_discovery_mode"] == ""
 
 
 def test_prompt_cache_resolution_honors_preselected_endpoint() -> None:
@@ -400,6 +429,54 @@ async def test_openai_chat_sends_explicit_cache_fields_and_markers() -> None:
         "mode": "explicit"
     }
     assert "prompt_cache_breakpoint" not in str(fake_http.last_json["input"][1])
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_tool_exchange_omits_explicit_only_cache_mode() -> None:
+    payload = {
+        "id": "resp-tool-1",
+        "status": "completed",
+        "output": [
+            {
+                "type": "function_call",
+                "call_id": "call-advance-1",
+                "name": "advance",
+                "arguments": "{}",
+            }
+        ],
+        "usage": {},
+    }
+    client = GenericLLMClient(provider="openai", model="gpt-5.6-luna", api_key="test")
+    fake_http = _FakeHttpClient(payload)
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    response, _usage = await client.chat(
+        [
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "advance"},
+        ],
+        tool_request=ToolCallRequest(
+            tools=(
+                ToolDefinition(
+                    "advance",
+                    "Advance the workflow.",
+                    {"type": "object", "properties": {}},
+                ),
+            ),
+            choice="required",
+            turn_id="turn-1",
+        ),
+        prompt_cache=PromptCacheRequest((0,), "agent.ledger.v1"),
+    )
+
+    assert isinstance(response, ToolCallResponse)
+    assert fake_http.last_json is not None
+    assert fake_http.last_json["prompt_cache_key"].startswith("agpc_")
+    assert "prompt_cache_options" not in fake_http.last_json
+    assert fake_http.last_json["input"][0]["content"][0]["prompt_cache_breakpoint"] == {
+        "mode": "explicit"
+    }
 
 
 @pytest.mark.asyncio
