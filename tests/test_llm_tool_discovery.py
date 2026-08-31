@@ -747,7 +747,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert "prompt_cache_options" not in fake_http.last_json
     cache_key = fake_http.last_json["prompt_cache_key"]
     assert all(tool.get("name") != "read_document" for tool in fake_http.last_json["tools"])
-    root_projection = sink.records[-1].provider_request_args["tool_projection"]
+    root_projection = sink.records[-1].provider_request_facts["tool_projection"]
     assert root_projection["request_family"] == "full_root"
     assert root_projection["top_level_tool_names"] == ["finish", "tool_search"]
     assert root_projection["embedded_discovery_tool_names"] == []
@@ -836,7 +836,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert "native_tool_calling" not in sink.records[-1].provider_request_args
     assert sink.records[-1].response_items[0]["tool_name"] == "read_document"
     assert sink.records[-1].request_args["prompt_cache"]["implicit_latest_breakpoint"] is True
-    discovery_projection = sink.records[-1].provider_request_args["tool_projection"]
+    discovery_projection = sink.records[-1].provider_request_facts["tool_projection"]
     assert discovery_projection["request_family"] == "pending_discovery_result"
     assert discovery_projection["top_level_tool_names"] == ["finish", "tool_search"]
     assert discovery_projection["embedded_discovery_tool_names"] == ["read_document"]
@@ -920,7 +920,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert request_item["call_id"] == "call_1"
     assert request_item["content_bytes"] == len(b'{"path":"a.md","status":"ok"}')
     assert len(request_item["content_sha256"]) == 64
-    result_projection = sink.records[-1].provider_request_args["tool_projection"]
+    result_projection = sink.records[-1].provider_request_facts["tool_projection"]
     assert result_projection["request_family"] == "pending_tool_outputs"
     assert result_projection["top_level_tool_names"] == ["finish", "tool_search"]
     assert result_projection["embedded_discovery_tool_names"] == []
@@ -1003,7 +1003,7 @@ async def test_openai_new_turn_tool_output_keeps_root_declared_active_tool() -> 
     assert "read_document" in {
         tool.get("name") for tool in fake_http.last_json["tools"]
     }
-    root_projection = sink.records[-1].provider_request_args["tool_projection"]
+    root_projection = sink.records[-1].provider_request_facts["tool_projection"]
     assert root_projection["request_family"] == "full_root"
     assert root_projection["top_level_tool_names"] == [
         "finish",
@@ -1044,7 +1044,7 @@ async def test_openai_new_turn_tool_output_keeps_root_declared_active_tool() -> 
     assert "read_document" in {
         tool.get("name") for tool in fake_http.last_json["tools"]
     }
-    continuation_projection = sink.records[-1].provider_request_args[
+    continuation_projection = sink.records[-1].provider_request_facts[
         "tool_projection"
     ]
     assert continuation_projection["request_family"] == "pending_tool_outputs"
@@ -1712,7 +1712,7 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tool_choice"] == "required"
     assert fake_http.last_json["parallel_tool_calls"] is False
-    assert sink.records[-1].provider_request_args["tool_projection"][
+    assert sink.records[-1].provider_request_facts["tool_projection"][
         "request_family"
     ] == "full_root"
 

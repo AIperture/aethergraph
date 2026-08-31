@@ -768,6 +768,11 @@ def _llm(
     captured_request = _thaw_json(detail.captured_request) if detail is not None else None
     captured_response = _thaw_json(detail.captured_response) if detail is not None else None
     messages = captured_request.get("messages") if isinstance(captured_request, Mapping) else None
+    effective_messages = (
+        captured_request.get("effective_messages")
+        if isinstance(captured_request, Mapping)
+        else None
+    )
     tools = captured_request.get("tools") if isinstance(captured_request, Mapping) else None
     continuation_inputs = (
         captured_request.get("continuation_inputs")
@@ -805,6 +810,14 @@ def _llm(
         trace_payload_preview=_thaw_json(record.trace_payload_preview),
         raw_text_preview=_thaw_json(record.response_preview),
         messages=messages,
+        effective_messages=(
+            list(effective_messages) if isinstance(effective_messages, list) else None
+        ),
+        provider_request_facts=(
+            dict(_thaw_json(record.provider_request_facts))
+            if isinstance(_thaw_json(record.provider_request_facts), Mapping)
+            else {}
+        ),
         trace_payload=_thaw_json(detail.trace_payload) if detail is not None else None,
         raw_text=raw_text,
         error_type=record.error_type,

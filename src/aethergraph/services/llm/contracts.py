@@ -304,6 +304,8 @@ class ModelRequest:
 
     Args:
         messages: Ordered canonical conversation messages.
+        effective_messages: Optional complete logical message snapshot retained for
+            observability without changing provider-dispatched `messages`.
         tools: Model-visible Tool specifications.
         tool_choice: Provider-neutral Tool-selection policy.
         max_tool_calls: Maximum ordered Tool calls in one response.
@@ -311,11 +313,15 @@ class ModelRequest:
         active_tool_names: Exact currently active Tool names for native discovery.
         turn_id: Optional semantic turn identity used to bind continuation state.
         tool_outputs: Completed Tool outputs submitted through a continuation.
+        discovery_result: Completed or failed discovery result submitted through a
+            discovery continuation.
         response_format: Text, JSON object, raw, or canonical structured schema.
         generation: Shared provider-neutral generation controls.
         prompt_cache: Optional stable-prefix cache request.
         continuation: Optional opaque provider replay state.
         call_name: Optional stable logical invocation identity for observations.
+        caller_context: Opaque JSON-compatible caller trace context retained for
+            observation without provider interpretation.
 
     Returns:
         ModelRequest: Immutable canonical request state.
@@ -323,6 +329,8 @@ class ModelRequest:
     Notes:
         `engine_projected` discovery is intentionally invalid here. Callers
         express projected search/load controls as ordinary `tools`.
+        `effective_messages` is never projected into a provider request, Tool
+        fingerprint, continuation root, or prompt-cache contract.
     """
 
     messages: tuple[ChatMessage, ...]
@@ -340,6 +348,7 @@ class ModelRequest:
     continuation: ModelContinuation | None = None
     call_name: str | None = None
     caller_context: dict[str, Any] = field(default_factory=dict)
+    effective_messages: tuple[ChatMessage, ...] | None = None
 
     def __post_init__(self) -> None:
         """Validate and detach one canonical generation request.
@@ -379,11 +388,18 @@ class ModelRequest:
         """
 
         messages = tuple(self.messages)
+        effective_messages = (
+            None if self.effective_messages is None else tuple(self.effective_messages)
+        )
         tools = tuple(self.tools)
         active_tool_names = tuple(str(name or "").strip() for name in self.active_tool_names)
         tool_outputs = tuple(self.tool_outputs)
         if not all(isinstance(message, ChatMessage) for message in messages):
             raise TypeError("model request messages must be ChatMessage values")
+        if effective_messages is not None and not all(
+            isinstance(message, ChatMessage) for message in effective_messages
+        ):
+            raise TypeError("model request effective_messages must be ChatMessage values")
         if not all(isinstance(tool, ModelToolSpec) for tool in tools):
             raise TypeError("model request tools must be ModelToolSpec values")
         tool_names = tuple(tool.name for tool in tools)
@@ -477,6 +493,7 @@ class ModelRequest:
         ):
             raise TypeError("model request response_format is unsupported")
         object.__setattr__(self, "messages", messages)
+        object.__setattr__(self, "effective_messages", effective_messages)
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "active_tool_names", active_tool_names)
         object.__setattr__(self, "turn_id", turn_id)

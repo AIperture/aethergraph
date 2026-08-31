@@ -140,6 +140,8 @@ class LLMCallRecord(BaseModel):
     trace_payload_preview: dict[str, Any] | None = None
     raw_text_preview: dict[str, Any] | None = None
     messages: list[dict[str, Any]] | None = None
+    effective_messages: list[dict[str, Any]] | None = None
+    provider_request_facts: dict[str, Any] = Field(default_factory=dict)
     trace_payload: dict[str, Any] | None = None
     raw_text: str | None = None
     error_type: str | None = None

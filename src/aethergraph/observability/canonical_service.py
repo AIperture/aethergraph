@@ -432,6 +432,7 @@ def _llm_draft(
         captured_request = _bounded_capture(
             {
                 "messages": record.messages,
+                "effective_messages": record.effective_messages,
                 "provider_request_args": record.provider_request_args,
                 "tools": record.tool_definitions,
                 "continuation_inputs": record.continuation_inputs,
@@ -532,6 +533,7 @@ def _llm_draft(
         tool_surface=record.tool_surface,
         request_items=record.request_items,
         response_items=record.response_items,
+        provider_request_facts=record.provider_request_facts,
     )
 
 

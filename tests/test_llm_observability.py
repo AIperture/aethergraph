@@ -148,7 +148,17 @@ async def test_llm_client_records_success_and_provider_error_canonically(
             )
         return ProviderCallResult(
             ("hello back", {"prompt_tokens": 11, "completion_tokens": 7}),
-            ProviderResponseMetadata(request_id="req-success"),
+            ProviderResponseMetadata(
+                request_id="req-success",
+                request_facts={
+                    "tool_projection": {
+                        "request_family": "full_root",
+                        "top_level_tool_names": ["finish", "tool_search"],
+                        "embedded_discovery_tool_names": [],
+                        "fingerprint": "a" * 64,
+                    }
+                },
+            ),
         )
 
     client._chat_dispatch = successful_dispatch  # type: ignore[method-assign]
@@ -170,10 +180,16 @@ async def test_llm_client_records_success_and_provider_error_canonically(
     assert {row.error_type for row in inspect_page.items} == {None, "RuntimeError"}
     assert len({row.call_id for row in inspect_page.items}) == 2
     recovered = next(row for row in inspect_page.items if row.error_type is None)
+    assert recovered.lifecycle_status == "completed"
+    assert recovered.usage == {"prompt_tokens": 11, "completion_tokens": 7}
     assert recovered.attempt_count == 2
     assert recovered.retry_count == 1
     assert recovered.attempts == []
     inspect_detail = await reader.get_llm_call(recovered.call_id)
+    assert inspect_detail.provider_request_facts["tool_projection"]["fingerprint"] == (
+        "a" * 64
+    )
+    assert "tool_projection" not in inspect_detail.provider_request_args
     assert len(inspect_detail.attempts) == 2
     assert inspect_detail.total_retry_wait_ms == 598
     assert inspect_detail.attempts[0].error_code == "provider_rate_limited"
@@ -182,6 +198,65 @@ async def test_llm_client_records_success_and_provider_error_canonically(
     correlation = current_llm_call_correlation()
     assert correlation is not None
     assert correlation.llm_call_id in {row.call_id for row in inspect_page.items}
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_effective_messages_are_observed_without_changing_provider_dispatch(
+    tmp_path: Path,
+) -> None:
+    database = LocalSQLiteDatabase.open(
+        workspace_root=tmp_path,
+        role=LocalDatabaseRole.CONTROL,
+        mode=StorageOpenMode.READ_WRITE,
+    )
+    sink = ProviderObservationService(
+        repository=LocalObservationRepository(database=database),
+        owner_scope=StorageScope(project_id="project-effective-messages"),
+        policy=ObservationPolicy(capture_mode="manifest"),
+    )
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=sink,
+        observation_capture_mode="manifest",
+    )
+    dispatched: list[list[dict[str, object]]] = []
+
+    async def dispatch(messages, **kwargs):
+        del kwargs
+        dispatched.append(messages)
+        return ProviderCallResult(
+            ("done", {"input_tokens": 21, "output_tokens": 4}),
+            ProviderResponseMetadata(request_id="req-effective"),
+        )
+
+    client._chat_dispatch = dispatch  # type: ignore[method-assign]
+    request = ModelRequest(
+        messages=(message_from_text("user", "frozen provider root"),),
+        effective_messages=(
+            message_from_text("user", "frozen provider root"),
+            message_from_text("user", "complete Ledger includes the Tool result"),
+        ),
+        call_name="effective-ledger",
+    )
+    token = current_meter_context.set({"run_id": "run-effective-messages"})
+    try:
+        response = await client.generate(request)
+    finally:
+        current_meter_context.reset(token)
+
+    assert response.text == "done"
+    assert dispatched == [[{"role": "user", "content": "frozen provider root"}]]
+    page = await CanonicalInspectionReader(sink).list_llm_calls(
+        run_id="run-effective-messages"
+    )
+    detail = await CanonicalInspectionReader(sink).get_llm_call(page.items[0].call_id)
+    assert detail.messages == [{"role": "user", "content": "frozen provider root"}]
+    assert detail.effective_messages == [
+        {"role": "user", "content": "frozen provider root"},
+        {"role": "user", "content": "complete Ledger includes the Tool result"},
+    ]
     await database.close()
 
 

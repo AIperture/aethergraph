@@ -128,6 +128,14 @@ request fingerprint, status code, and a bounded provider response before re-rais
 AG transport and observation failures likewise propagate after logging; the
 diagnostic never converts a provider error into zero usage or a passing cache result.
 
+Exact post-adapter request facts are terminal observation metadata, not request
+identity. The immutable `provider_request_args` recorded before dispatch must not be
+mutated when OpenAI or Azure Responses returns the exact Tool projection. The
+projection is retained as `provider_request_facts.tool_projection`; usage, response,
+latency, attempts, and those facts are committed together at observation finish.
+This separation is provider-neutral: any future adapter may report bounded request
+facts without changing the identity validated between begin and finish.
+
 ### Sanitized Luna measurement — 2026-08-20
 
 The corrected diagnostic completed against `gpt-5.6-luna`. Each replay pair had an

@@ -1987,6 +1987,7 @@ class GenericLLMClient(LLMClientProtocol):
         call_type: str,
         model: str,
         messages: list[dict[str, Any]],
+        effective_messages: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None,
         max_output_tokens: int | None,
         output_format: ChatOutputFormat,
@@ -2011,6 +2012,7 @@ class GenericLLMClient(LLMClientProtocol):
             model=model,
             dimensions=self._current_dimensions(),
             messages=messages,
+            effective_messages=effective_messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,
@@ -2128,6 +2130,17 @@ class GenericLLMClient(LLMClientProtocol):
             request,
             image_policy=self.image_preparation_policy,
         )
+        effective_messages = None
+        if request.effective_messages is not None:
+            effective_request = replace(
+                request,
+                messages=request.effective_messages,
+                effective_messages=None,
+            )
+            effective_messages, _ = prepare_model_request(
+                effective_request,
+                image_policy=self.image_preparation_policy,
+            )
         generation_params: dict[str, Any] = {}
         if request.generation.temperature is not None:
             generation_params["temperature"] = request.generation.temperature
@@ -2153,6 +2166,7 @@ class GenericLLMClient(LLMClientProtocol):
             tool_request=tool_request,
             prompt_cache=request.prompt_cache,
             trace_payload=request.caller_context or None,
+            effective_messages=effective_messages,
             **generation_params,
         )
 
@@ -2253,6 +2267,7 @@ class GenericLLMClient(LLMClientProtocol):
         self,
         messages: list[dict[str, Any]],
         *,
+        effective_messages: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
         output_format: ChatOutputFormat = "text",
@@ -2570,6 +2585,7 @@ class GenericLLMClient(LLMClientProtocol):
             call_type="chat",
             model=model,
             messages=messages,
+            effective_messages=effective_messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,
@@ -2655,8 +2671,8 @@ class GenericLLMClient(LLMClientProtocol):
             provider_value, usage = provider_result.value
             observation_record.attempts = provider_result.attempts
             if provider_result.metadata.request_facts:
-                observation_record.provider_request_args.update(
-                    copy.deepcopy(provider_result.metadata.request_facts)
+                observation_record.provider_request_facts = copy.deepcopy(
+                    provider_result.metadata.request_facts
                 )
 
             observation_record.raw_text = (

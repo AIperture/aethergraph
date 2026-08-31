@@ -73,6 +73,7 @@ class LLMObservationRecord:
     profile_name: str | None = None
     call_name: str | None = None
     messages: list[dict[str, Any]] = field(default_factory=list)
+    effective_messages: list[dict[str, Any]] | None = None
     reasoning_effort: str | None = None
     max_output_tokens: int | None = None
     output_format: str | None = None
@@ -83,6 +84,7 @@ class LLMObservationRecord:
     extra_params: dict[str, Any] = field(default_factory=dict)
     request_args: dict[str, Any] = field(default_factory=dict)
     provider_request_args: dict[str, Any] = field(default_factory=dict)
+    provider_request_facts: dict[str, Any] = field(default_factory=dict)
     compatibility_notes: list[str] = field(default_factory=list)
     trace_payload: dict[str, Any] | None = None
     raw_text: str | None = None
@@ -108,6 +110,7 @@ class LLMObservationRecord:
         model: str,
         dimensions: dict[str, Any],
         messages: list[dict[str, Any]],
+        effective_messages: list[dict[str, Any]] | None = None,
         reasoning_effort: str | None,
         max_output_tokens: int | None,
         output_format: str,
@@ -137,6 +140,7 @@ class LLMObservationRecord:
             profile_name=profile_name,
             call_name=call_name,
             messages=messages,
+            effective_messages=effective_messages,
             reasoning_effort=reasoning_effort,
             max_output_tokens=max_output_tokens,
             output_format=output_format,

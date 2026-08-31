@@ -162,6 +162,10 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
         model="gpt-test",
         scope=SCOPE,
         messages=[{"role": "user", "content": "hello"}],
+        effective_messages=[
+            {"role": "system", "content": "effective instructions"},
+            {"role": "user", "content": "hello plus durable Tool result"},
+        ],
         reasoning_effort="low",
         max_output_tokens=100,
         output_format="text",
@@ -172,6 +176,12 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
         extra_params={},
         request_args={"temperature": 0},
         provider_request_args={"temperature": 0},
+        provider_request_facts={
+            "tool_projection": {
+                "request_family": "pending_tool_outputs",
+                "fingerprint": "provider-projection-1",
+            }
+        },
         compatibility_notes=["normalized"],
         continuation_inputs={
             "checkpoint": {
@@ -243,6 +253,13 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
     assert page.items[0].response_items[0]["tool_name"] == "read"
     detail = await reader.get_llm_call("call-1", required_run_id="run-1")
     assert detail.messages == [{"role": "user", "content": "hello"}]
+    assert detail.effective_messages == [
+        {"role": "system", "content": "effective instructions"},
+        {"role": "user", "content": "hello plus durable Tool result"},
+    ]
+    assert detail.provider_request_facts["tool_projection"]["fingerprint"] == (
+        "provider-projection-1"
+    )
     assert detail.raw_text == "hello back"
     assert detail.trace_payload == {"step": "done"}
     assert detail.reasoning_effort == "low"

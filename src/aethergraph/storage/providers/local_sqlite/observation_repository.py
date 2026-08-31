@@ -1686,6 +1686,7 @@ def _llm_record(
             tool_surface=typed.get("tool_surface"),
             request_items=typed.get("request_items"),
             response_items=typed.get("response_items"),
+            provider_request_facts=typed.get("provider_request_facts"),
             schema_version=int(row["schema_version"]),
         )
     except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -2597,6 +2598,7 @@ def _llm_digest(call: LLMCallDraft) -> str:
         "tool_surface": call.tool_surface,
         "request_items": call.request_items,
         "response_items": call.response_items,
+        "provider_request_facts": call.provider_request_facts,
         "schema_version": call.schema_version,
     }
     return hashlib.sha256(_json(payload).encode()).hexdigest()
@@ -2642,6 +2644,7 @@ def _stored_llm_request_options(call: LLMCallDraft) -> dict[str, Any]:
         "tool_surface": call.tool_surface,
         "request_items": call.request_items,
         "response_items": call.response_items,
+        "provider_request_facts": call.provider_request_facts,
     }
     return options
 
