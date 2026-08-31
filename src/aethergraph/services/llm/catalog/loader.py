@@ -182,13 +182,13 @@ def resolve_model_catalog_capability_entry(
             )
             ```
 
-        Preserve unknown cache truth:
+        Resolve provider-managed cache truth:
             ```python
             entry = resolve_model_catalog_capability_entry(
                 "deepseek", "deepseek-v4-pro", "chat",
                 "openai_chat_completions", capability="prompt_cache",
             )
-            assert entry is None
+            assert entry is not None
             ```
 
     Args:

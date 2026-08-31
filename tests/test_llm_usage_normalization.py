@@ -37,6 +37,24 @@ def test_normalize_llm_usage_maps_openai_cached_tokens() -> None:
     assert normalized["uncached_input_tokens"] == 36
 
 
+def test_normalize_llm_usage_maps_deepseek_cache_hits() -> None:
+    raw = {
+        "prompt_tokens": 12,
+        "completion_tokens": 3,
+        "prompt_cache_hit_tokens": 8,
+        "prompt_cache_miss_tokens": 4,
+    }
+
+    normalized = normalize_llm_usage(raw)
+
+    assert normalized["input_tokens"] == 12
+    assert normalized["output_tokens"] == 3
+    assert normalized["cache_read_tokens"] == 8
+    assert normalized["cache_write_tokens"] == 0
+    assert normalized["uncached_input_tokens"] == 4
+    assert normalized["provider_usage_raw"] == raw
+
+
 def test_normalize_llm_usage_maps_nested_openai_cache_writes() -> None:
     raw = {
         "input_tokens": 100,
