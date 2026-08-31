@@ -371,6 +371,10 @@ class ResourceIngress:
                     binding=binding,
                     session_scope=session_scope,
                 )
+            resource.labels = {
+                **resource.labels,
+                "attachment_id": attachment.attachment_id,
+            }
             actual_total += resource.size or 0
             if actual_total > self.policy.max_total_bytes:
                 raise ResourceIngressError(

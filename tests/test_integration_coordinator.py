@@ -85,6 +85,7 @@ def _route(*, enabled: bool = True, attachments: bool = True) -> IntegrationRout
 @pytest.mark.asyncio
 async def test_root_dispatch_adopts_resources_before_external_admission(monkeypatch) -> None:
     events: list[tuple[str, object]] = []
+    submitted_inputs: dict[str, object] = {}
 
     class _Registry:
         def get_meta(self, **_kwargs):
@@ -105,6 +106,7 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
 
     class _RunManager:
         async def submit_run(self, **kwargs):
+            submitted_inputs.update(kwargs["inputs"])
             record = SimpleNamespace(
                 run_id="run-root-1",
                 started_at=_NOW,
@@ -148,8 +150,9 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
             InputResource(
                 kind="file",
                 source="slack",
-                id="target_buffer",
+                id="provider-file-1",
                 artifact_id="artifact-input",
+                labels={"attachment_id": "target_buffer"},
             ),
         ),
         admission_callback=persist_admission,
@@ -172,6 +175,14 @@ async def test_root_dispatch_adopts_resources_before_external_admission(monkeypa
     assert scope.project_id == "project-1"
     assert scope.org_id == "org-1"
     assert scope.user_id == "user-1"
+    submitted_resource = submitted_inputs["input"]["resources"][0]
+    assert submitted_resource == {
+        "attachment_id": "target_buffer",
+        "artifact_id": "artifact-input",
+        "filename": "provider-file-1",
+        "content_type": "application/octet-stream",
+        "size_bytes": None,
+    }
 
 
 def _manifest(
@@ -742,7 +753,10 @@ async def test_resource_ingress_validates_existing_artifact_reference(
         mime="application/pdf",
         bytes=100,
         uri="artifact://artifact-1",
-        labels={"filename": "report.pdf"},
+        labels={
+            "filename": "report.pdf",
+            "attachment_id": "stale-attachment",
+        },
     )
 
     class _ArtifactService:
@@ -792,6 +806,7 @@ async def test_resource_ingress_validates_existing_artifact_reference(
     assert resources[0].name == "report.pdf"
     assert resources[0].mime == "application/pdf"
     assert resources[0].size == 100
+    assert resources[0].labels["attachment_id"] == "attachment-1"
 
 
 @pytest.mark.asyncio
@@ -800,6 +815,7 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
 ) -> None:
     payload = b"exact current buffer\n"
     staged: list[bytes] = []
+    staged_file_ids: list[str] = []
 
     class _Stager:
         def __init__(self, **_kwargs) -> None:
@@ -807,11 +823,12 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
 
         async def stage_bytes(self, data, **_kwargs):
             staged.append(bytes(data))
+            staged_file_ids.append(_kwargs["file_id"])
             return InputResource(
                 kind="upload",
                 source="studio",
                 status="materialized",
-                id="buffer-1",
+                id="provider-file-1",
                 name="weather.py",
                 mime="text/x-python",
                 size=len(data),
@@ -829,7 +846,7 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
             IngressAttachment(
                 attachment_id="buffer-1",
                 source_kind="provider_file",
-                source_id="buffer-1",
+                source_id="provider-file-1",
                 filename="weather.py",
                 content_type="text/x-python",
                 size_bytes=len(payload),
@@ -852,7 +869,10 @@ async def test_resource_ingress_materializes_verified_provider_bytes_once(
     )
 
     assert staged == [payload]
+    assert staged_file_ids == ["provider-file-1"]
     assert resources[0].artifact_id == "artifact-buffer"
+    assert resources[0].id == "provider-file-1"
+    assert resources[0].labels["attachment_id"] == "buffer-1"
 
 
 @pytest.mark.asyncio
