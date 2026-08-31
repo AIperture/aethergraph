@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+import json
+from typing import Any, Literal, TypeAlias
 
 from .tool_calling import ModelToolSpec, ToolCallOutput, ToolChoice
-from .tool_discovery import ModelContinuation, ToolDiscoveryRequest
+from .tool_discovery import (
+    ModelContinuation,
+    ToolDiscoveryRequest,
+    ToolDiscoveryResult,
+)
 from .types import ImageInput, PromptCacheRequest, StructuredOutputRequest
 
 MessageRole = Literal["system", "developer", "user", "assistant", "tool"]
@@ -298,6 +304,8 @@ class ModelRequest:
 
     Args:
         messages: Ordered canonical conversation messages.
+        effective_messages: Optional complete logical message snapshot retained for
+            observability without changing provider-dispatched `messages`.
         tools: Model-visible Tool specifications.
         tool_choice: Provider-neutral Tool-selection policy.
         max_tool_calls: Maximum ordered Tool calls in one response.
@@ -305,11 +313,15 @@ class ModelRequest:
         active_tool_names: Exact currently active Tool names for native discovery.
         turn_id: Optional semantic turn identity used to bind continuation state.
         tool_outputs: Completed Tool outputs submitted through a continuation.
+        discovery_result: Completed or failed discovery result submitted through a
+            discovery continuation.
         response_format: Text, JSON object, raw, or canonical structured schema.
         generation: Shared provider-neutral generation controls.
         prompt_cache: Optional stable-prefix cache request.
         continuation: Optional opaque provider replay state.
         call_name: Optional stable logical invocation identity for observations.
+        caller_context: Opaque JSON-compatible caller trace context retained for
+            observation without provider interpretation.
 
     Returns:
         ModelRequest: Immutable canonical request state.
@@ -317,6 +329,8 @@ class ModelRequest:
     Notes:
         `engine_projected` discovery is intentionally invalid here. Callers
         express projected search/load controls as ordinary `tools`.
+        `effective_messages` is never projected into a provider request, Tool
+        fingerprint, continuation root, or prompt-cache contract.
     """
 
     messages: tuple[ChatMessage, ...]
@@ -327,11 +341,14 @@ class ModelRequest:
     active_tool_names: tuple[str, ...] = ()
     turn_id: str | None = None
     tool_outputs: tuple[ToolCallOutput, ...] = ()
+    discovery_result: ToolDiscoveryResult | None = None
     response_format: ModelResponseFormat = "text"
     generation: GenerationOptions = field(default_factory=GenerationOptions)
     prompt_cache: PromptCacheRequest | None = None
     continuation: ModelContinuation | None = None
     call_name: str | None = None
+    caller_context: dict[str, Any] = field(default_factory=dict)
+    effective_messages: tuple[ChatMessage, ...] | None = None
 
     def __post_init__(self) -> None:
         """Validate and detach one canonical generation request.
@@ -371,11 +388,18 @@ class ModelRequest:
         """
 
         messages = tuple(self.messages)
+        effective_messages = (
+            None if self.effective_messages is None else tuple(self.effective_messages)
+        )
         tools = tuple(self.tools)
         active_tool_names = tuple(str(name or "").strip() for name in self.active_tool_names)
         tool_outputs = tuple(self.tool_outputs)
         if not all(isinstance(message, ChatMessage) for message in messages):
             raise TypeError("model request messages must be ChatMessage values")
+        if effective_messages is not None and not all(
+            isinstance(message, ChatMessage) for message in effective_messages
+        ):
+            raise TypeError("model request effective_messages must be ChatMessage values")
         if not all(isinstance(tool, ModelToolSpec) for tool in tools):
             raise TypeError("model request tools must be ModelToolSpec values")
         tool_names = tuple(tool.name for tool in tools)
@@ -410,6 +434,21 @@ class ModelRequest:
         call_name = None if self.call_name is None else str(self.call_name).strip()
         if self.call_name is not None and not call_name:
             raise ValueError("model request call_name must not be empty")
+        if not isinstance(self.caller_context, dict):
+            raise TypeError("model request caller_context must be an object")
+        try:
+            encoded_caller_context = json.dumps(
+                self.caller_context,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "model request caller_context must contain JSON-compatible values"
+            ) from exc
+        if len(encoded_caller_context) > 64 * 1024:
+            raise ValueError("model request caller_context must not exceed 65536 bytes")
         if not all(isinstance(output, ToolCallOutput) for output in tool_outputs):
             raise TypeError("model request tool_outputs must be ToolCallOutput values")
         call_ids = tuple(output.call_id for output in tool_outputs)
@@ -424,6 +463,26 @@ class ModelRequest:
                 raise ValueError("model continuation turn_id must match the request")
         if tool_outputs and self.continuation is None:
             raise ValueError("model Tool outputs require a continuation")
+        if self.discovery_result is not None:
+            if not isinstance(self.discovery_result, ToolDiscoveryResult):
+                raise TypeError(
+                    "model request discovery_result must be ToolDiscoveryResult or None"
+                )
+            if self.continuation is None:
+                raise ValueError("model discovery result requires a continuation")
+            if tool_outputs:
+                raise ValueError(
+                    "model discovery result cannot accompany ordinary Tool outputs"
+                )
+            if (
+                self.discovery_result.status == "completed"
+                and not set(self.discovery_result.tool_names).issubset(
+                    set(active_tool_names)
+                )
+            ):
+                raise ValueError(
+                    "completed model discovery result Tools must be active"
+                )
         if not isinstance(self.generation, GenerationOptions):
             raise TypeError("model request generation must be GenerationOptions")
         if self.prompt_cache is not None and not isinstance(self.prompt_cache, PromptCacheRequest):
@@ -434,11 +493,13 @@ class ModelRequest:
         ):
             raise TypeError("model request response_format is unsupported")
         object.__setattr__(self, "messages", messages)
+        object.__setattr__(self, "effective_messages", effective_messages)
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "active_tool_names", active_tool_names)
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "tool_outputs", tool_outputs)
         object.__setattr__(self, "call_name", call_name)
+        object.__setattr__(self, "caller_context", copy.deepcopy(self.caller_context))
 
 
 def message_from_text(role: MessageRole, text: str) -> ChatMessage:

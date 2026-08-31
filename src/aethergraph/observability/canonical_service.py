@@ -432,8 +432,10 @@ def _llm_draft(
         captured_request = _bounded_capture(
             {
                 "messages": record.messages,
+                "effective_messages": record.effective_messages,
                 "provider_request_args": record.provider_request_args,
                 "tools": record.tool_definitions,
+                "continuation_inputs": record.continuation_inputs,
             },
             policy=policy,
         )
@@ -472,6 +474,7 @@ def _llm_draft(
                 "prompt_chars": prepared.total_chars,
                 "prompt_bytes": prepared.total_bytes,
                 "assembled_request_hash": prepared.assembled_request_hash,
+                "request_hash_version": prepared.request_hash_version,
                 "omission_reason": prepared.omission_reason,
             },
             record.scope.app_id,
@@ -517,6 +520,7 @@ def _llm_draft(
             "chars": prepared.total_chars,
             "bytes": prepared.total_bytes,
             "hash": prepared.assembled_request_hash,
+            "request_hash_version": prepared.request_hash_version,
             "omission_reason": prepared.omission_reason,
         },
         response_preview=(
@@ -529,6 +533,7 @@ def _llm_draft(
         tool_surface=record.tool_surface,
         request_items=record.request_items,
         response_items=record.response_items,
+        provider_request_facts=record.provider_request_facts,
     )
 
 

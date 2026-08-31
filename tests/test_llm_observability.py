@@ -16,10 +16,13 @@ from aethergraph.observability.canonical_inspection import CanonicalInspectionRe
 from aethergraph.observability.canonical_service import ProviderObservationService
 from aethergraph.services.container.default_container import build_default_container
 from aethergraph.services.llm import (
+    LLMToolCallResponseError,
+    ModelRequest,
     ToolCall,
     ToolCallRequest,
     ToolCallResponse,
     ToolDefinition,
+    message_from_text,
 )
 from aethergraph.services.llm.correlation import current_llm_call_correlation
 from aethergraph.services.llm.generic_client import GenericLLMClient
@@ -145,7 +148,17 @@ async def test_llm_client_records_success_and_provider_error_canonically(
             )
         return ProviderCallResult(
             ("hello back", {"prompt_tokens": 11, "completion_tokens": 7}),
-            ProviderResponseMetadata(request_id="req-success"),
+            ProviderResponseMetadata(
+                request_id="req-success",
+                request_facts={
+                    "tool_projection": {
+                        "request_family": "full_root",
+                        "top_level_tool_names": ["finish", "tool_search"],
+                        "embedded_discovery_tool_names": [],
+                        "fingerprint": "a" * 64,
+                    }
+                },
+            ),
         )
 
     client._chat_dispatch = successful_dispatch  # type: ignore[method-assign]
@@ -167,10 +180,16 @@ async def test_llm_client_records_success_and_provider_error_canonically(
     assert {row.error_type for row in inspect_page.items} == {None, "RuntimeError"}
     assert len({row.call_id for row in inspect_page.items}) == 2
     recovered = next(row for row in inspect_page.items if row.error_type is None)
+    assert recovered.lifecycle_status == "completed"
+    assert recovered.usage == {"prompt_tokens": 11, "completion_tokens": 7}
     assert recovered.attempt_count == 2
     assert recovered.retry_count == 1
     assert recovered.attempts == []
     inspect_detail = await reader.get_llm_call(recovered.call_id)
+    assert inspect_detail.provider_request_facts["tool_projection"]["fingerprint"] == (
+        "a" * 64
+    )
+    assert "tool_projection" not in inspect_detail.provider_request_args
     assert len(inspect_detail.attempts) == 2
     assert inspect_detail.total_retry_wait_ms == 598
     assert inspect_detail.attempts[0].error_code == "provider_rate_limited"
@@ -180,6 +199,145 @@ async def test_llm_client_records_success_and_provider_error_canonically(
     assert correlation is not None
     assert correlation.llm_call_id in {row.call_id for row in inspect_page.items}
     await database.close()
+
+
+@pytest.mark.asyncio
+async def test_effective_messages_are_observed_without_changing_provider_dispatch(
+    tmp_path: Path,
+) -> None:
+    database = LocalSQLiteDatabase.open(
+        workspace_root=tmp_path,
+        role=LocalDatabaseRole.CONTROL,
+        mode=StorageOpenMode.READ_WRITE,
+    )
+    sink = ProviderObservationService(
+        repository=LocalObservationRepository(database=database),
+        owner_scope=StorageScope(project_id="project-effective-messages"),
+        policy=ObservationPolicy(capture_mode="manifest"),
+    )
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=sink,
+        observation_capture_mode="manifest",
+    )
+    dispatched: list[list[dict[str, object]]] = []
+
+    async def dispatch(messages, **kwargs):
+        del kwargs
+        dispatched.append(messages)
+        return ProviderCallResult(
+            ("done", {"input_tokens": 21, "output_tokens": 4}),
+            ProviderResponseMetadata(request_id="req-effective"),
+        )
+
+    client._chat_dispatch = dispatch  # type: ignore[method-assign]
+    request = ModelRequest(
+        messages=(message_from_text("user", "frozen provider root"),),
+        effective_messages=(
+            message_from_text("user", "frozen provider root"),
+            message_from_text("user", "complete Ledger includes the Tool result"),
+        ),
+        call_name="effective-ledger",
+    )
+    token = current_meter_context.set({"run_id": "run-effective-messages"})
+    try:
+        response = await client.generate(request)
+    finally:
+        current_meter_context.reset(token)
+
+    assert response.text == "done"
+    assert dispatched == [[{"role": "user", "content": "frozen provider root"}]]
+    page = await CanonicalInspectionReader(sink).list_llm_calls(
+        run_id="run-effective-messages"
+    )
+    detail = await CanonicalInspectionReader(sink).get_llm_call(page.items[0].call_id)
+    assert detail.messages == [{"role": "user", "content": "frozen provider root"}]
+    assert detail.effective_messages == [
+        {"role": "user", "content": "frozen provider root"},
+        {"role": "user", "content": "complete Ledger includes the Tool result"},
+    ]
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_truncated_tool_response_retains_attempt_usage_and_response_receipt() -> None:
+    finished: list[LLMObservationRecord] = []
+
+    class CaptureSink:
+        async def begin_llm_call(self, record, *, capture_mode: str) -> None:
+            del record, capture_mode
+
+        async def finish_llm_call(self, record, *, capture_mode: str) -> None:
+            del capture_mode
+            finished.append(record)
+
+    class CaptureMetering:
+        def __init__(self) -> None:
+            self.records: list[dict[str, object]] = []
+
+        async def record_llm(self, **record) -> None:
+            self.records.append(record)
+
+    metering = CaptureMetering()
+    client = GenericLLMClient(
+        provider="openai",
+        model="gpt-test",
+        observation_sink=CaptureSink(),
+        observation_capture_mode="full",
+        metering=metering,
+    )
+
+    async def incomplete_dispatch(messages, **kwargs):
+        del messages, kwargs
+        return ProviderCallResult(
+            (
+                ToolCallResponse(
+                    items=(),
+                    finish_reason="incomplete",
+                    provider_metadata={
+                        "response_id": "resp-incomplete",
+                        "provider_status": "incomplete",
+                        "incomplete_reason": "max_output_tokens",
+                    },
+                ),
+                {"input_tokens": 120, "output_tokens": 64},
+            ),
+            ProviderResponseMetadata(request_id="req-incomplete"),
+        )
+
+    client._chat_dispatch = incomplete_dispatch  # type: ignore[method-assign]
+    request = ModelRequest(
+        messages=(message_from_text("user", "Choose a Tool."),),
+        tools=(
+            ToolDefinition(
+                name="finish",
+                description="Finish.",
+                input_schema={"type": "object", "properties": {}},
+            ),
+        ),
+        tool_choice="required",
+        turn_id="turn-incomplete",
+    )
+
+    with pytest.raises(LLMToolCallResponseError) as raised:
+        await client.generate(request)
+
+    assert raised.value.code == "truncated"
+    assert len(finished) == 1
+    record = finished[0]
+    assert record.lifecycle_status == "failed"
+    assert record.usage == {"input_tokens": 120, "output_tokens": 64}
+    assert record.attempts[0].request_id == "req-incomplete"
+    assert record.request_args["tool_call_response_receipt"] == {
+        "provider_status": "incomplete",
+        "finish_reason": "incomplete",
+        "incomplete_reason": "max_output_tokens",
+        "provider_response_id": "resp-incomplete",
+    }
+    assert len(metering.records) == 1
+    assert metering.records[0]["prompt_tokens"] == 120
+    assert metering.records[0]["completion_tokens"] == 64
 
 
 @pytest.mark.asyncio

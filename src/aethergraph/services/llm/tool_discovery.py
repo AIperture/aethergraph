@@ -394,6 +394,52 @@ class ToolDiscoveryEvent:
 
 
 @dataclass(frozen=True)
+class ToolDiscoveryResult:
+    """Return one application-resolved client Tool-search result."""
+
+    discovery_event_id: str
+    provider_reference_id: str
+    status: ToolDiscoveryStatus
+    tool_names: tuple[str, ...] = ()
+    error: ToolDiscoveryError | None = None
+
+    def __post_init__(self) -> None:
+        """Validate one bounded discovery continuation result."""
+
+        event_id = _reference(
+            self.discovery_event_id,
+            field_name="discovery result event id",
+        )
+        provider_reference_id = _reference(
+            self.provider_reference_id,
+            field_name="discovery result provider reference id",
+        )
+        if self.status not in {"completed", "failed"}:
+            raise ValueError("Tool discovery result status is unsupported")
+        tool_names = tuple(
+            _reference(name, field_name="discovery result Tool name")
+            for name in self.tool_names
+        )
+        if len(tool_names) > 50 or len(tool_names) != len(set(tool_names)):
+            raise ValueError(
+                "Tool discovery result must contain at most 50 unique Tool names"
+            )
+        if self.status == "completed":
+            if not tool_names:
+                raise ValueError("Completed Tool discovery results require Tool names")
+            if self.error is not None:
+                raise ValueError("Completed Tool discovery results cannot carry an error")
+        else:
+            if tool_names:
+                raise ValueError("Failed Tool discovery results cannot carry Tool names")
+            if not isinstance(self.error, ToolDiscoveryError):
+                raise ValueError("Failed Tool discovery results require an error")
+        object.__setattr__(self, "discovery_event_id", event_id)
+        object.__setattr__(self, "provider_reference_id", provider_reference_id)
+        object.__setattr__(self, "tool_names", tool_names)
+
+
+@dataclass(frozen=True)
 class ToolTransportCheckpoint:
     """Preserve opaque provider replay state for one semantic turn."""
 
@@ -854,6 +900,7 @@ __all__ = [
     "ToolDiscoveryMode",
     "ToolDiscoveryModeCapability",
     "ToolDiscoveryRequest",
+    "ToolDiscoveryResult",
     "ToolDiscoverySource",
     "ToolDiscoveryStatus",
     "ToolExposure",

@@ -11,6 +11,7 @@ from aethergraph.contracts.integration import (
     RELEASE_COMPATIBILITY_SCHEMA_VERSION,
     SEMANTIC_EVENT_PROTOCOL_VERSION,
     AcceptedEventContract,
+    AgentInputResource,
     AgentInputV1,
     ExternalIdentity,
     HostManifest,
@@ -268,10 +269,26 @@ def test_agent_input_round_trips_message_and_event_without_inferred_kind() -> No
         occurred_at=datetime(2026, 8, 23, tzinfo=UTC),
         subject="wafer-run-42",
         payload={"metric": "focus_error_nm", "value": 18.4},
+        resources=(
+            AgentInputResource(
+                attachment_id="simulation-state",
+                artifact_id="artifact-state",
+                filename="state.json",
+                content_type="application/json",
+                size_bytes=42,
+            ),
+        ),
     )
 
     assert AgentInputV1.model_validate_json(message.model_dump_json()) == message
     assert AgentInputV1.model_validate_json(event.model_dump_json()) == event
+    legacy_resource = AgentInputResource.model_validate(
+        {
+            "artifact_id": "artifact-legacy",
+            "filename": "legacy.txt",
+        }
+    )
+    assert legacy_resource.attachment_id is None
 
     with pytest.raises(ValidationError, match="reserved message type"):
         AgentInputV1.model_validate({**event.model_dump(mode="json"), "type": "user.message"})

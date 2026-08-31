@@ -41,6 +41,20 @@ definitions can appear in one provider response. An Engine may project linked
 search/activation domain events into its Timeline, but those events remain separate
 from AG's provider-neutral LLM ledger.
 
+After the adapter constructs the final provider body, AG records a bounded
+`provider_tool_projection` alongside the caller-owned canonical Tool surface. The
+projection contains the provider family, exact declaration count and names,
+selection controls, and a deterministic fingerprint of the actual outgoing Tool
+array. The canonical catalog and provider projection are deliberately separate: an
+adapter may translate or temporarily inject declarations, and cache analysis must
+describe the body that was actually sent rather than infer it from the catalog.
+
+AetherGraph transports caller-owned `trace_context` as bounded generic observation
+data and never interprets it as Ledger or repair authority. AG Engine's consumer
+contract for Ledger compilation, exchange-root recovery, Tool closure, and cache
+interpretation is documented in
+[Ledger compilation, errors, and repair](https://github.com/AIperture/ag-engine/blob/main/docs/19_ledger_compilation_error_and_repair.md).
+
 ## Continuation purpose and Tool-result replay
 
 `ToolTransportCheckpoint` is provider replay state, not Tool-discovery or execution
@@ -56,6 +70,18 @@ authority. Its public `purpose` is one of:
 Callers may use the safe purpose, provider, model, contract version, turn, and revision
 to manage lifecycle. They must not inspect `opaque_payload`. The adapter validates the
 purpose against its private payload before provider traffic.
+
+OpenAI Responses client discovery has a verified failed/no-new-result continuation:
+AG sends the correlated `tool_search_output` with client execution, incomplete
+status, and no selected Tools while retaining `previous_response_id`. Azure Responses
+does not inherit that conclusion and remains explicitly unsupported until its own
+wire contract is verified. An unsupported adapter result is a typed capability
+outcome for the caller; it is not permission for AG to invent a provider payload.
+
+Checkpoint declaration provenance distinguishes Tools declared in the current root
+from Tools injected by the correlated search output. The adapter may avoid duplicating
+the injected definitions in that exact search-result request. It must preserve Tools
+owned by the root on later Tool-output continuations and on a new semantic-turn root.
 
 Every continuation request resends the request-owned Tool declarations and selection
 controls. A response identifier or replayed assistant content preserves conversation
@@ -101,6 +127,14 @@ On an HTTP failure, the raw control logs the phase label, model, credential-free
 request fingerprint, status code, and a bounded provider response before re-raising.
 AG transport and observation failures likewise propagate after logging; the
 diagnostic never converts a provider error into zero usage or a passing cache result.
+
+Exact post-adapter request facts are terminal observation metadata, not request
+identity. The immutable `provider_request_args` recorded before dispatch must not be
+mutated when OpenAI or Azure Responses returns the exact Tool projection. The
+projection is retained as `provider_request_facts.tool_projection`; usage, response,
+latency, attempts, and those facts are committed together at observation finish.
+This separation is provider-neutral: any future adapter may report bounded request
+facts without changing the identity validated between begin and finish.
 
 ### Sanitized Luna measurement — 2026-08-20
 

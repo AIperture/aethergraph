@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from typing import Any
 
@@ -15,6 +16,7 @@ from aethergraph.services.llm.adapters.openai_responses import (
     _openai_checkpoint_payload,
     _openai_continuation_request_tools,
     _openai_function_tool,
+    _openai_provider_tool_projection,
     _openai_request_tools,
     _openai_tool_call_response,
 )
@@ -380,10 +382,33 @@ class AzureChatAdapter:
                 provider="azure",
             )
             if checkpoint_payload["state"] == "pending_search":
+                discovery_result = tool_request.discovery_result
+                pending_search_call_id = str(
+                    checkpoint_payload.get("call_id") or ""
+                )
+                if (
+                    discovery_result is not None
+                    and discovery_result.provider_reference_id
+                    != pending_search_call_id
+                ):
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_reference_mismatch",
+                        message="Azure discovery result does not match the pending search.",
+                    )
+                if discovery_result is not None and discovery_result.status == "failed":
+                    raise LLMToolCallResponseError(
+                        code="discovery_failure_output_unsupported",
+                        message=(
+                            "Azure Responses has no verified client Tool-search "
+                            "failure continuation shape."
+                        ),
+                    )
                 prior_active_names = {
                     str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
                 }
                 newly_active_names = set(tool_request.active_tool_names) - prior_active_names
+                if discovery_result is not None:
+                    newly_active_names = set(discovery_result.tool_names)
                 loaded_tools = [
                     tool
                     for tool in tool_request.tools
@@ -445,7 +470,10 @@ class AzureChatAdapter:
             "pending_search",
             "pending_tool_outputs",
         }:
-            body["tools"] = _openai_continuation_request_tools(tool_request)
+            body["tools"] = _openai_continuation_request_tools(
+                tool_request,
+                checkpoint_payload,
+            )
         else:
             body["tools"] = _openai_request_tools(tool_request)
         # Azure Responses shares the exact-request Tool-surface contract: the
@@ -467,12 +495,16 @@ class AzureChatAdapter:
             timeout=request_timeout,
         )
         metadata = checked_response_metadata("azure", model, "chat", r)
+        metadata = replace(
+            metadata,
+            request_facts={
+                "tool_projection": _openai_provider_tool_projection(
+                    body,
+                    checkpoint_payload,
+                )
+            },
+        )
         data = r.json()
-        if data.get("status") == "incomplete":
-            raise LLMToolCallResponseError(
-                code="truncated",
-                message="Azure Tool-call response was incomplete.",
-            )
         return ProviderCallResult(
             (
                 _openai_tool_call_response(

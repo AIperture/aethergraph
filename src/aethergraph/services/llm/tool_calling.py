@@ -14,6 +14,7 @@ from .tool_discovery import (
     ModelContinuation,
     ToolDiscoveryEvent,
     ToolDiscoveryRequest,
+    ToolDiscoveryResult,
     ToolExposure,
     ToolPath,
     ToolTransportCheckpoint,
@@ -343,6 +344,7 @@ class ToolCallRequest:
     active_tool_names: tuple[str, ...] = ()
     transport_checkpoint: ToolTransportCheckpoint | None = None
     tool_outputs: tuple[ToolCallOutput, ...] = ()
+    discovery_result: ToolDiscoveryResult | None = None
     fingerprint_version: str = LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION
 
     def __post_init__(self) -> None:
@@ -441,6 +443,26 @@ class ToolCallRequest:
             raise ValueError("Tool-call request tool_outputs must have unique call ids")
         if tool_outputs and self.transport_checkpoint is None:
             raise ValueError("Tool-call outputs require a transport checkpoint")
+        if self.discovery_result is not None:
+            if not isinstance(self.discovery_result, ToolDiscoveryResult):
+                raise TypeError(
+                    "Tool-call request discovery_result must be ToolDiscoveryResult or None"
+                )
+            if self.transport_checkpoint is None:
+                raise ValueError("Tool discovery results require a transport checkpoint")
+            if tool_outputs:
+                raise ValueError(
+                    "Tool discovery results cannot accompany ordinary Tool outputs"
+                )
+            if (
+                self.discovery_result.status == "completed"
+                and not set(self.discovery_result.tool_names).issubset(
+                    set(active_tool_names)
+                )
+            ):
+                raise ValueError(
+                    "completed Tool discovery result Tools must be active"
+                )
         fingerprint_version = str(self.fingerprint_version or "").strip()
         if not fingerprint_version:
             raise ValueError("Tool-call request fingerprint_version must not be empty")
@@ -605,7 +627,70 @@ def tool_call_request_item_summaries(
             "content_sha256": hashlib.sha256(item.output.encode("utf-8")).hexdigest(),
         }
         for ordinal, item in enumerate(request.tool_outputs)
+    ) + (
+        (
+            {
+                "ordinal": len(request.tool_outputs),
+                "kind": "discovery_result",
+                "discovery_event_id": request.discovery_result.discovery_event_id,
+                "provider_reference_id": (
+                    request.discovery_result.provider_reference_id
+                ),
+                "status": request.discovery_result.status,
+                "error_code": (
+                    request.discovery_result.error.code
+                    if request.discovery_result.error is not None
+                    else ""
+                ),
+                "tool_count": len(request.discovery_result.tool_names),
+            },
+        )
+        if request.discovery_result is not None
+        else ()
     )
+
+
+def tool_call_continuation_inputs(
+    request: ToolCallRequest | None,
+) -> dict[str, Any] | None:
+    """Project the bounded call-specific continuation without private payloads."""
+
+    if request is None or request.transport_checkpoint is None:
+        return None
+    checkpoint = request.transport_checkpoint
+    continuation: dict[str, Any] = {
+        "checkpoint": {
+            "purpose": checkpoint.purpose,
+            "revision": checkpoint.revision,
+            "turn_id": checkpoint.turn_id,
+        },
+        "tool_outputs": [
+            {
+                "ordinal": ordinal,
+                "call_id": item.call_id,
+                "content": item.output,
+            }
+            for ordinal, item in enumerate(request.tool_outputs)
+        ],
+    }
+    if request.discovery_result is not None:
+        continuation["discovery_result"] = {
+            "discovery_event_id": request.discovery_result.discovery_event_id,
+            "provider_reference_id": request.discovery_result.provider_reference_id,
+            "status": request.discovery_result.status,
+            "tool_names": list(request.discovery_result.tool_names),
+            "error": (
+                None
+                if request.discovery_result.error is None
+                else {
+                    "code": request.discovery_result.error.code,
+                    "summary": request.discovery_result.error.summary,
+                    "retryable": request.discovery_result.error.retryable,
+                    "details": dict(request.discovery_result.error.details),
+                }
+            ),
+        }
+    return continuation
 
 
 def tool_call_response_item_summaries(
@@ -1100,6 +1185,7 @@ __all__ = [
     "ToolChoice",
     "ToolDefinition",
     "tool_call_request_fingerprint",
+    "tool_call_continuation_inputs",
     "tool_call_definitions",
     "tool_call_request_item_summaries",
     "tool_call_response_item_summaries",

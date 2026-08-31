@@ -162,6 +162,10 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
         model="gpt-test",
         scope=SCOPE,
         messages=[{"role": "user", "content": "hello"}],
+        effective_messages=[
+            {"role": "system", "content": "effective instructions"},
+            {"role": "user", "content": "hello plus durable Tool result"},
+        ],
         reasoning_effort="low",
         max_output_tokens=100,
         output_format="text",
@@ -172,7 +176,23 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
         extra_params={},
         request_args={"temperature": 0},
         provider_request_args={"temperature": 0},
+        provider_request_facts={
+            "tool_projection": {
+                "request_family": "pending_tool_outputs",
+                "fingerprint": "provider-projection-1",
+            }
+        },
         compatibility_notes=["normalized"],
+        continuation_inputs={
+            "checkpoint": {
+                "purpose": "pending_tool_outputs",
+                "revision": 2,
+                "turn_id": "turn-1",
+            },
+            "tool_outputs": [
+                {"ordinal": 0, "call_id": "call-a", "content": "tool result"}
+            ],
+        },
         trace_payload={"step": "done"},
         raw_text="hello back",
         usage={"input_tokens": 2, "output_tokens": 2},
@@ -233,11 +253,20 @@ async def test_canonical_llm_reader_separates_bounded_list_and_exact_detail(
     assert page.items[0].response_items[0]["tool_name"] == "read"
     detail = await reader.get_llm_call("call-1", required_run_id="run-1")
     assert detail.messages == [{"role": "user", "content": "hello"}]
+    assert detail.effective_messages == [
+        {"role": "system", "content": "effective instructions"},
+        {"role": "user", "content": "hello plus durable Tool result"},
+    ]
+    assert detail.provider_request_facts["tool_projection"]["fingerprint"] == (
+        "provider-projection-1"
+    )
     assert detail.raw_text == "hello back"
     assert detail.trace_payload == {"step": "done"}
     assert detail.reasoning_effort == "low"
     assert detail.tools is not None
     assert detail.tools[0]["name"] == "read"
+    assert detail.continuation_inputs is not None
+    assert detail.continuation_inputs["tool_outputs"][0]["content"] == "tool result"
     summary = await reader.summarize_llm_calls("run-1")
     assert summary.total_calls == 1
     assert summary.total_prompt_tokens == 2

@@ -208,6 +208,22 @@ class AGRootTurnDispatcher:
             capability_profile_id=envelope.origin_address.capability_profile_id,
         )
         user_meta = dict(envelope.transport_metadata)
+        agent_input_resources: list[AgentInputResource] = []
+        for resource in resources:
+            attachment_id = resource.labels.get("attachment_id")
+            if not isinstance(attachment_id, str) or not attachment_id.strip():
+                raise ValueError(
+                    "Materialized ingress resource has no canonical attachment identity."
+                )
+            agent_input_resources.append(
+                AgentInputResource(
+                    attachment_id=attachment_id,
+                    artifact_id=str(resource.artifact_id),
+                    filename=(resource.name or resource.id or str(resource.artifact_id)),
+                    content_type=(resource.mime or "application/octet-stream"),
+                    size_bytes=resource.size,
+                )
+            )
 
         async def admit(record) -> None:
             expected_dimensions = {
@@ -294,7 +310,9 @@ class AGRootTurnDispatcher:
                 tool_name="integration.resource_admission",
             )
             try:
-                for resource in resources:
+                for resource, agent_input_resource in zip(
+                    resources, agent_input_resources, strict=True
+                ):
                     if not resource.artifact_id:
                         raise RunAdmissionError(
                             run_id=record.run_id,
@@ -303,7 +321,7 @@ class AGRootTurnDispatcher:
                             safe_message="An admitted input resource has no artifact identity.",
                             details={"attachment_id": resource.id or resource.name or "unknown"},
                         )
-                    attachment_identity = resource.id or resource.artifact_id
+                    attachment_identity = str(agent_input_resource.attachment_id)
                     digest = hashlib.sha256(
                         "\x00".join(
                             (record.run_id, attachment_identity, resource.artifact_id)
@@ -352,19 +370,7 @@ class AGRootTurnDispatcher:
             graph_id=graph_id,
             inputs={
                 "input": envelope.input.model_copy(
-                    update={
-                        "resources": tuple(
-                            AgentInputResource(
-                                artifact_id=str(resource.artifact_id),
-                                filename=(
-                                    resource.name or resource.id or str(resource.artifact_id)
-                                ),
-                                content_type=(resource.mime or "application/octet-stream"),
-                                size_bytes=resource.size,
-                            )
-                            for resource in resources
-                        )
-                    }
+                    update={"resources": tuple(agent_input_resources)}
                 ).model_dump(mode="json"),
                 "session_id": binding.ag_session_id,
                 "user_meta": user_meta,
