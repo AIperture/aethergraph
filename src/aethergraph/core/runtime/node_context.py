@@ -1,13 +1,18 @@
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+import logging
+from typing import Any, TypeVar
 import warnings
 
+from aethergraph.contracts import JsonValue
 from aethergraph.contracts.integration import OriginBinding
+from aethergraph.contracts.services.continuations import AsyncContinuationStore
 from aethergraph.contracts.services.llm import (
     EmbeddingClientProtocol,
     ImageGenerationClientProtocol,
+    LLMClientProtocol,
 )
 from aethergraph.core.runtime.run_types import (
     RunImportance,
@@ -18,13 +23,14 @@ from aethergraph.core.runtime.run_types import (
 from aethergraph.core.runtime.runtime_services import get_ext_context_service
 from aethergraph.services.agent_state import AgentStateBackend, CanonicalAgentStateHandle
 from aethergraph.services.artifacts.canonical_public import CanonicalPublicArtifactFacade
+from aethergraph.services.canonical_kv import CanonicalKeyValueFacade
 from aethergraph.services.channel.session import ChannelSession
+from aethergraph.services.clock.clock import SystemClock
 from aethergraph.services.continuations.continuation import (
     ContinuationDraft,
     Correlator,
     CreatedContinuation,
 )
-from aethergraph.services.llm.generic_client import GenericLLMClient
 from aethergraph.services.llm.providers import Provider
 from aethergraph.services.memory.canonical_public import CanonicalPublicMemoryFacade
 from aethergraph.services.registry.facade import RegistryFacade
@@ -35,6 +41,8 @@ from aethergraph.services.viz.facade import VizFacade
 
 from .base_service import _ServiceHandle
 from .node_services import NodeServices
+
+StateT = TypeVar("StateT")
 
 
 @dataclass
@@ -336,7 +344,7 @@ class NodeContext:
         )
         await self.runner().cancel_run(run_id, reason=reason)
 
-    def logger(self):
+    def logger(self) -> logging.Logger:
         if not self.services.logger:
             raise RuntimeError("Logger service not available")
         return self.services.logger.for_node_ctx(
@@ -384,7 +392,7 @@ class NodeContext:
             raise RuntimeError("NodeContext.services.registry is not configured")
         return self.services.registry
 
-    def channel(self, channel_key: str | None = None):
+    def channel(self, channel_key: str | None = None) -> ChannelSession:
         """
         Set up a new ChannelSession for the current node context.
 
@@ -430,15 +438,15 @@ class NodeContext:
         self,
         key: str,
         *,
-        model: type | None = None,
-        default_factory: Any | None = None,
+        model: type[StateT] | None = None,
+        default_factory: Callable[[], StateT] | None = None,
         level: ScopeLevel | None = None,
         scope: Scope | None = None,
         backend: AgentStateBackend = "hybrid",
         tags: list[str] | None = None,
-        meta: dict[str, Any] | None = None,
+        meta: dict[str, JsonValue] | None = None,
         kind: str = "state.snapshot",
-    ) -> CanonicalAgentStateHandle:
+    ) -> CanonicalAgentStateHandle[StateT]:
         """Bind typed Agent state in the canonical provider store.
 
         The default binding uses this node's trusted runtime scope. Callers that
@@ -503,7 +511,7 @@ class NodeContext:
     def artifacts(self) -> CanonicalPublicArtifactFacade:
         return self.services.artifact_store
 
-    def kv(self):
+    def kv(self) -> CanonicalKeyValueFacade:
         if not self.services.kv:
             raise RuntimeError("KV not available")
         return self.services.kv
@@ -554,7 +562,7 @@ class NodeContext:
         api_key: str | None = None,
         azure_deployment: str | None = None,
         timeout: float | None = None,
-    ) -> GenericLLMClient:
+    ) -> LLMClientProtocol:
         """
         Retrieve or configure an LLM client for this context.
 
@@ -693,7 +701,13 @@ class NodeContext:
             raise RuntimeError("Image generation service not available")
         return service.get(profile)
 
-    def llm_set_key(self, provider: str, model: str, api_key: str, profile: str = "default"):
+    def llm_set_key(
+        self,
+        provider: str,
+        model: str,
+        api_key: str,
+        profile: str = "default",
+    ) -> None:
         """
         Quickly configure or override the LLM provider, model, and API key for a given profile.
 
@@ -740,16 +754,16 @@ class NodeContext:
     #     # Deprecated legacy accessor; use context.runner() instead.
     #     return self.runner()
 
-    def continuations(self):
+    def continuations(self) -> AsyncContinuationStore:
         return self.services.continuation_store
 
-    def prepare_wait_for_resume(self, token: str):
+    def prepare_wait_for_resume(self, token: str) -> asyncio.Future[Any]:
         # creates and registers a Future for this token without awaiting
         if not self.services.wait_registry:
             raise RuntimeError("WaitRegistry missing on context/runtime")
         return self.services.wait_registry.register(token)
 
-    def clock(self):
+    def clock(self) -> SystemClock:
         if not self.services.clock:
             raise RuntimeError("Clock service not available")
         return self.services.clock
@@ -923,7 +937,7 @@ class NodeContext:
 
         session_id = getattr(self, "session_id", None)
         interaction_id = payload.get("_interaction_id") if payload else None
-        correlators = ()
+        correlators: tuple[Correlator, ...] = ()
         if isinstance(interaction_id, str) and interaction_id and isinstance(session_id, str):
             correlators = (
                 Correlator(

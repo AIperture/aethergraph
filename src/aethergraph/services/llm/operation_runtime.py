@@ -102,6 +102,7 @@ async def execute_model_operation(
     account_usage: Callable[[_ResultT, int], Awaitable[None]],
     trace: OperationTraceProjection[_ResultT],
     dimensions: Mapping[str, Any],
+    validate_result: Callable[[ProviderCallResult[_ResultT]], None] | None = None,
 ) -> _ResultT:
     """Execute one complete non-Chat model-operation lifecycle.
 
@@ -183,6 +184,8 @@ async def execute_model_operation(
             operation=provider_operation,
             rate_limit_group=host.rate_limit_group,
         )
+        if validate_result is not None:
+            validate_result(provider_result)
         result = provider_result.value
         latency_ms = int((time.perf_counter() - start) * 1000)
         quota_error = host._operation_quota.reconcile(

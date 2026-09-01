@@ -2,7 +2,7 @@ from collections.abc import Callable
 from functools import wraps
 import importlib
 import inspect
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from ..execution.execution_guard import is_tool_execution_active
 from ..execution.wait_types import WaitRequested
@@ -12,6 +12,9 @@ from ..runtime.injection import resolve_node_context_param
 from ..runtime.runtime_registry import current_registry
 from .declaration import ToolDiscoveryMetadata, build_tool_definition
 from .waitable import DualStageTool, waitable_tool
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
 
 
 def _infer_inputs_from_signature(fn: Callable) -> list[str]:
@@ -140,7 +143,7 @@ def tool(
     approval: str = "none",
     exposure: str = "immediate",
     discovery: ToolDiscoveryMetadata | None = None,
-):
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
     """Declare a dual-mode Tool for graph and immediate execution.
 
     The decorator records one versioned Tool definition, including optional
@@ -190,7 +193,7 @@ def tool(
         Deferred Tools require explicit discovery metadata.
     """
 
-    def _wrap(obj):
+    def _wrap(obj: Callable[_P, _R]) -> Callable[_P, _R]:
         waitable = inspect.isclass(obj) and issubclass(obj, DualStageTool)
         impl = waitable_tool(obj) if waitable else obj
         sig = inspect.signature(impl)
@@ -213,7 +216,7 @@ def tool(
         declared_inputs = list(definition.inputs)
 
         @wraps(impl)
-        def proxy(*args, **kwargs):
+        def proxy(*args: _P.args, **kwargs: _P.kwargs) -> Any:
             ctrl, kwargs = _split_control_kwargs(dict(kwargs))
             bound = sig.bind_partial(*args, **kwargs)
             bound.apply_defaults()

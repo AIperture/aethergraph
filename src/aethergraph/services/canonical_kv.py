@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence, Sized
 from datetime import datetime, timedelta
-from typing import Any
+from typing import cast
 
+from aethergraph.contracts import JsonValue
 from aethergraph.services.canonical_storage_scope import validate_storage_owner_scope
 from aethergraph.storage.contracts import (
     FrozenJson,
@@ -83,7 +84,7 @@ class CanonicalKeyValueFacade:
         self._namespace = namespace
         self._clock = clock
 
-    async def get(self, key: str, default: Any = None) -> Any:
+    async def get(self, key: str, default: JsonValue = None) -> JsonValue:
         """Read one exact current value or return the caller default.
 
         Intro:
@@ -116,9 +117,9 @@ class CanonicalKeyValueFacade:
             self._namespace,
             _nonempty("key", key),
         )
-        return record.value if record is not None else default
+        return _json_value(record.value) if record is not None else default
 
-    async def set(self, key: str, value: Any, *, ttl_s: int | None = None) -> None:
+    async def set(self, key: str, value: JsonValue, *, ttl_s: int | None = None) -> None:
         """Create or replace one value through bounded revision-CAS retry.
 
         Intro:
@@ -149,7 +150,7 @@ class CanonicalKeyValueFacade:
         """
         await self._replace(
             key=_nonempty("key", key),
-            value=value,
+            value=cast(FrozenJson, value),
             expires_at=self._expires_at(ttl_s),
         )
 
@@ -182,7 +183,7 @@ class CanonicalKeyValueFacade:
         """
         await self._delete(_nonempty("key", key))
 
-    async def mget(self, keys: list[str]) -> list[Any]:
+    async def mget(self, keys: list[str]) -> list[JsonValue]:
         """Read a bounded ordered collection of exact keys.
 
         Intro:
@@ -212,7 +213,7 @@ class CanonicalKeyValueFacade:
         _bounded_count("keys", keys)
         return [await self.get(key) for key in keys]
 
-    async def mset(self, kv: dict[str, Any], *, ttl_s: int | None = None) -> None:
+    async def mset(self, kv: dict[str, JsonValue], *, ttl_s: int | None = None) -> None:
         """Replace a bounded mapping of exact keys.
 
         Intro:
@@ -382,11 +383,11 @@ class CanonicalKeyValueFacade:
     async def list_append_unique(
         self,
         key: str,
-        items: list[dict[str, Any]],
+        items: list[dict[str, JsonValue]],
         *,
         id_key: str = "id",
         ttl_s: int | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, JsonValue]]:
         """Atomically append mapping items unique by one identity field.
 
         Intro:
@@ -413,7 +414,7 @@ class CanonicalKeyValueFacade:
             ttl_s: Optional positive lifetime for the committed list revision.
 
         Returns:
-            list[dict[str, Any]]: Complete detached provider-committed list.
+            list[dict[str, JsonValue]]: Complete detached provider-committed list.
 
         Notes:
             Existing non-list or non-mapping content fails as storage corruption.
@@ -421,7 +422,7 @@ class CanonicalKeyValueFacade:
         _bounded_count("items", items)
         _nonempty("id_key", id_key)
 
-        def append(current: FrozenJson | None) -> list[dict[str, Any]]:
+        def append(current: FrozenJson | None) -> FrozenJson:
             values = _mapping_list(current)
             seen = {item.get(id_key) for item in values}
             for item in items:
@@ -432,7 +433,7 @@ class CanonicalKeyValueFacade:
                     continue
                 values.append(dict(item))
                 seen.add(identity)
-            return values
+            return cast(FrozenJson, values)
 
         record = await self._mutate(
             key=_nonempty("key", key),
@@ -441,7 +442,7 @@ class CanonicalKeyValueFacade:
         )
         return _mapping_list(record.value)
 
-    async def list_pop_all(self, key: str) -> list[Any]:
+    async def list_pop_all(self, key: str) -> list[JsonValue]:
         """Atomically remove and return the complete current list value.
 
         Intro:
@@ -463,7 +464,7 @@ class CanonicalKeyValueFacade:
             key: Exact list key inside the bound namespace.
 
         Returns:
-            list[Any]: Detached values removed from the provider, or an empty list.
+            list[JsonValue]: Detached values removed from the provider, or an empty list.
 
         Notes:
             Non-list persisted content is deleted but reported as an integrity error;
@@ -741,22 +742,36 @@ def bind_canonical_key_value_facade(
     )
 
 
-def _mapping_list(value: FrozenJson | None) -> list[dict[str, Any]]:
+def _mapping_list(value: FrozenJson | None) -> list[dict[str, JsonValue]]:
     items = _list(value)
-    if not all(isinstance(item, Mapping) for item in items):
-        raise StorageIntegrityError("KV mapping-list operation requires mapping items")
-    return [dict(item) for item in items]
+    result: list[dict[str, JsonValue]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise StorageIntegrityError("KV mapping-list operation requires mapping items")
+        result.append(item)
+    return result
 
 
-def _list(value: FrozenJson | None) -> list[Any]:
+def _list(value: FrozenJson | None) -> list[JsonValue]:
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise StorageIntegrityError("KV list operation requires a list value")
-    return list(value)
+    converted = _json_value(value)
+    if not isinstance(converted, list):
+        raise StorageIntegrityError("KV list operation requires a list value")
+    return converted
 
 
-def _bounded_count(field: str, values: Sequence[object] | Mapping[object, object]) -> None:
+def _json_value(value: FrozenJson) -> JsonValue:
+    if isinstance(value, Mapping):
+        return {key: _json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_json_value(item) for item in value]
+    return cast(JsonValue, value)
+
+
+def _bounded_count(field: str, values: Sized) -> None:
     if len(values) > _MAX_SCAN_KEYS:
         raise StorageCapacityError(f"{field} exceeds {_MAX_SCAN_KEYS} entries")
 

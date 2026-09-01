@@ -10,11 +10,38 @@ from aethergraph.services.llm.operation_runtime import (
     OperationTraceProjection,
     execute_model_operation,
 )
+from aethergraph.services.llm.provider_transport import (
+    LLMProviderRequestError,
+    ProviderCallResult,
+)
 from aethergraph.services.llm.types import ImageGenerationResult, ImageGenerationUsage
 
 ImageUsageAccountant = Callable[
     [str, ImageGenerationUsage, int, str | None, str | None, int], Awaitable[None]
 ]
+
+
+def _validate_image_result(
+    provider_result: ProviderCallResult[ImageGenerationResult],
+    *,
+    host: Any,
+    model: str,
+) -> None:
+    """Reject incomplete normalized image success before quota or metering."""
+
+    images = list(provider_result.value.images or ())
+    if images and all(bool(image.b64 or image.url) for image in images):
+        return
+    raise LLMProviderRequestError(
+        provider=str(host.provider),
+        model=model,
+        operation="image",
+        code="provider_response_malformed",
+        message="The image provider returned an incomplete normalized response.",
+        retryable=False,
+        metadata=provider_result.metadata,
+        attempts=provider_result.attempts,
+    )
 
 
 async def _execute_image_generation(
@@ -82,4 +109,9 @@ async def _execute_image_generation(
             },
         ),
         dimensions=dimensions,
+        validate_result=lambda provider_result: _validate_image_result(
+            provider_result,
+            host=host,
+            model=invocation.model,
+        ),
     )

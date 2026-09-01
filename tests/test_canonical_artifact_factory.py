@@ -217,6 +217,42 @@ async def test_public_factory_projects_runtime_write_read_and_search_core(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_public_artifact_save_bytes_returns_committed_projection(tmp_path: Path) -> None:
+    clock = _Clock()
+    bundle = _open_bundle(tmp_path, clock)
+    factory = CanonicalArtifactFacadeFactory(
+        bundle=bundle,
+        owner_scope=_owner_scope(),
+        clock=clock.now,
+        artifact_id_factory=lambda: "artifact-bytes",
+        occurrence_id_factory=lambda: "occurrence-bytes",
+    )
+    artifacts = factory.for_public_execution(
+        StorageScope(graph_id="graph-1", node_id="node-1"),
+        tool_name="image-generator",
+        tool_version="1",
+    )
+    try:
+        artifact = await artifacts.save_bytes(
+            b"image-bytes",
+            kind="image",
+            mime="image/png",
+            name="generated.png",
+            labels={"renderer": "image"},
+        )
+
+        assert artifact.artifact_id == "artifact-bytes"
+        assert artifact.mime == "image/png"
+        assert artifact.labels == {
+            "filename": "generated.png",
+            "renderer": "image",
+        }
+        assert await artifacts.load_bytes_by_id(artifact.artifact_id) == b"image-bytes"
+    finally:
+        await bundle.close()
+
+
+@pytest.mark.asyncio
 async def test_run_adoption_authorizes_downstream_public_hydration(tmp_path: Path) -> None:
     clock = _Clock()
     bundle = _open_bundle(tmp_path, clock)

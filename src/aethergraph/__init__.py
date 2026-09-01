@@ -2,6 +2,7 @@ __version__ = "0.1.0a20"
 
 import logging
 
+from .contracts.authoring import NodeContextProtocol
 from .contracts.services.channel import (
     Button,
     ChannelAction,
@@ -45,6 +46,7 @@ __all__ = [
     "graphify",
     "TaskGraph",
     "NodeContext",
+    "NodeContextProtocol",
     # Services
     "Service",
     # Channel buttons

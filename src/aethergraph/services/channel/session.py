@@ -2,7 +2,6 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-import inspect
 import logging
 from pathlib import Path, PurePath
 import random
@@ -10,6 +9,7 @@ import time
 from typing import Any, Literal
 import uuid
 
+from aethergraph.contracts import JsonValue
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.contracts.services.channel import (
     Button,
@@ -356,7 +356,7 @@ class ChannelSession:
         return f"inbox:{self._resolve_key()}"
 
     # -------- send --------
-    async def send(self, event: OutEvent, *, channel: str | None = None):
+    async def send(self, event: OutEvent, *, channel: str | None = None) -> None:
         """
         Publish one outbound event after channel/meta normalization.
 
@@ -395,7 +395,7 @@ class ChannelSession:
         self,
         *,
         output_name: str,
-        value: Any,
+        value: JsonValue,
         upsert_key: str | None = None,
         channel: str | None = None,
     ) -> None:
@@ -456,7 +456,7 @@ class ChannelSession:
         tool_name: str,
         status: Literal["started", "running", "waiting", "completed", "failed", "canceled"],
         message: str | None = None,
-        error: dict[str, Any] | None = None,
+        error: dict[str, JsonValue] | None = None,
         channel: str | None = None,
     ) -> None:
         """Send one transport-neutral Tool lifecycle update.
@@ -744,7 +744,7 @@ class ChannelSession:
         self,
         text: str,
         *,
-        meta: dict[str, Any] | None = None,
+        meta: dict[str, JsonValue] | None = None,
         upsert_key: str | None = None,
         channel: str | None = None,
         prefer_stream: bool = False,
@@ -755,10 +755,10 @@ class ChannelSession:
         memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
-    ):
+    ) -> ChannelDeliveryReceipt:
         """
         Send one plain-text message event and optionally log it to memory.
 
@@ -798,7 +798,7 @@ class ChannelSession:
             memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None: Complete when memory logging and publish steps finish.
+            ChannelDeliveryReceipt: Stable identity for the logical delivery.
 
         Notes:
             Set adapter-specific display hints in `meta` (for example `name` or `agent_id`).
@@ -820,8 +820,7 @@ class ChannelSession:
                         stream_kwargs["chars_per_second"] = stream_chars_per_second
                     if stream_target_chunk_chars is not None:
                         stream_kwargs["target_chunk_chars"] = stream_target_chunk_chars
-                    await self.stream_text(text, **stream_kwargs)
-                    return
+                    return await self.stream_text(text, **stream_kwargs)
                 except Exception:
                     logging.getLogger("aethergraph.services.channel.session").debug(
                         "send_text streaming fallback triggered",
@@ -847,12 +846,12 @@ class ChannelSession:
         self,
         message: ChannelMessage,
         *,
-        meta: dict[str, Any] | None = None,
+        meta: dict[str, JsonValue] | None = None,
         channel: str | None = None,
         memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
     ) -> ChannelDeliveryReceipt:
@@ -959,17 +958,17 @@ class ChannelSession:
         self,
         text: str | None = None,
         *,
-        rich: dict[str, Any] | None = None,
-        meta: dict[str, Any] | None = None,
+        rich: dict[str, JsonValue] | None = None,
+        meta: dict[str, JsonValue] | None = None,
         channel: str | None = None,
         # memory logging handled separately
         memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
-    ):
+    ) -> None:
         """
         Send a message with an optional rich payload and optional memory logging.
 
@@ -1057,12 +1056,12 @@ class ChannelSession:
         show_preview: bool = True,
         show_actions: bool = True,
         poll_ms: int | None = None,
-        meta: dict[str, Any] | None = None,
+        meta: dict[str, JsonValue] | None = None,
         channel: str | None = None,
         memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
     ) -> None:
@@ -1157,15 +1156,15 @@ class ChannelSession:
         image_format: str | None = None,
         mimetype: str | None = None,
         channel: str | None = None,
-        artifact_labels: dict[str, Any] | None = None,
+        artifact_labels: dict[str, JsonValue] | None = None,
         # memory logging...
         memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
-    ):
+    ) -> ChannelDeliveryReceipt:
         """
         Send an image attachment via `send_file()` with image defaults.
 
@@ -1208,13 +1207,13 @@ class ChannelSession:
             memory_signal: Optional signal value for memory logging.
 
         Returns:
-            None: Complete when delegated file send finishes.
+            ChannelDeliveryReceipt: Stable identity for the image delivery.
 
         Notes:
             `artifact_labels` are merged with `{"renderer": "image"}`.
         """
 
-        labels = {"renderer": "image"}
+        labels: dict[str, JsonValue] = {"renderer": "image"}
         if artifact_labels:
             labels.update(artifact_labels)
         labels.setdefault("mimetype", _image_mimetype(image_format=image_format, mimetype=mimetype))
@@ -1222,7 +1221,7 @@ class ChannelSession:
         # Reuse memory logging text
         memory_tags = [*(memory_tags or []), "image"]
 
-        await self.send_file(
+        return await self.send_file(
             url=url,
             file_bytes=file_bytes,
             filename=_image_filename_for_format(
@@ -1255,15 +1254,15 @@ class ChannelSession:
         channel: str | None = None,
         # NEW: optional hints for artifact
         artifact_kind: str = "file",
-        artifact_labels: dict[str, Any] | None = None,
+        artifact_labels: dict[str, JsonValue] | None = None,
         # memory logging handled separately
         memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
-    ):
+    ) -> ChannelDeliveryReceipt:
         """
         Materialize a file as a canonical artifact and send one attachment message.
 
@@ -1323,21 +1322,14 @@ class ChannelSession:
 
         artifacts = self.ctx.artifacts()
         if file_bytes is not None:
-            async with artifacts.writer(
+            artifact = await artifacts.save_bytes(
+                bytes(file_bytes),
                 kind=artifact_kind,
-                planned_ext=Path(filename).suffix or None,
                 mime=effective_mimetype,
+                labels=effective_labels,
+                name=filename,
                 pin=False,
-            ) as writer:
-                write_result = writer.write(file_bytes)
-                if inspect.isawaitable(write_result):
-                    await write_result
-                add_labels = getattr(writer, "add_labels", None)
-                if callable(add_labels):
-                    add_labels(effective_labels)
-            artifact = artifacts.last_artifact
-            if artifact is None:
-                raise RuntimeError("Artifact writer completed without a committed artifact")
+            )
         elif url and url.startswith(("http://", "https://")):
             artifact = await artifacts.save_url(
                 url,
@@ -1390,16 +1382,16 @@ class ChannelSession:
         text: str,
         buttons: list[Button],
         *,
-        meta: dict[str, Any] | None = None,
+        meta: dict[str, JsonValue] | None = None,
         channel: str | None = None,
         # memory logging handled separately
         memory_log: bool = False,
         memory_role: Literal["user", "assistant", "system", "tool"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,  # extra structured data
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
-    ):
+    ) -> ChannelDeliveryReceipt:
         """
         Send a button prompt event and optionally log prompt text to memory.
 
@@ -2243,10 +2235,10 @@ class ChannelSession:
             memory_log: bool = False,
             memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
             memory_tags: list[str] | None = None,
-            memory_data: dict[str, Any] | None = None,
+            memory_data: dict[str, JsonValue] | None = None,
             memory_severity: int = 2,
             memory_signal: float | None = None,
-        ) -> None:
+        ) -> ChannelDeliveryReceipt:
             """
             Finalize the stream.
 
@@ -2274,7 +2266,7 @@ class ChannelSession:
             )
 
             # 2) End-of-stream event with final text
-            await self._outer._bus.publish(
+            result = await self._outer._bus.publish(
                 OutEvent(
                     type="agent.stream.end",
                     channel=self._channel_key,
@@ -2284,6 +2276,7 @@ class ChannelSession:
                 )
             )
             self._outer._close_reply_lifecycle()
+            return _delivery_receipt(self._upsert_key, result)
 
     @asynccontextmanager
     async def stream(self, channel: str | None = None) -> AsyncIterator["_StreamSender"]:
@@ -2333,7 +2326,7 @@ class ChannelSession:
         channel: str | None = None,
         memory_log: bool = False,
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,
+        memory_data: dict[str, JsonValue] | None = None,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
         memory_severity: int = 2,
         memory_signal: float | None = None,
@@ -2342,7 +2335,7 @@ class ChannelSession:
         target_chunk_chars: int = 28,
         min_delay: float = 0.05,
         max_delay: float = 0.15,
-    ) -> None:
+    ) -> ChannelDeliveryReceipt:
         """
         Stream pre-existing text with a typing animation effect.
 
@@ -2379,9 +2372,6 @@ class ChannelSession:
             min_delay: Minimum delay in seconds between deltas.
             max_delay: Maximum delay in seconds between deltas.
         """
-        if not full_text:
-            return
-
         paragraphs = full_text.split("\n\n")
 
         async with self.stream(channel=channel) as s:
@@ -2406,7 +2396,7 @@ class ChannelSession:
                     delay = max(min_delay, min(max_delay, delay))
                     await asyncio.sleep(delay)
 
-            await s.end(
+            return await s.end(
                 full_text=full_text,
                 memory_log=memory_log,
                 memory_tags=memory_tags,
@@ -2420,7 +2410,7 @@ class ChannelSession:
         self,
         *,
         llm: Any,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, JsonValue]],
         channel: str | None = None,
         # LLM options
         reasoning_effort: str | None = None,
@@ -2428,12 +2418,12 @@ class ChannelSession:
         reasoning_summary: str | None = None,
         max_output_tokens: int | None = None,
         output_format: str = "text",
-        json_schema: dict[str, Any] | None = None,
+        json_schema: dict[str, JsonValue] | None = None,
         schema_name: str = "output",
         strict_schema: bool = True,
         validate_json: bool = True,
         fail_on_unsupported: bool = True,
-        llm_kwargs: dict[str, Any] | None = None,
+        llm_kwargs: dict[str, JsonValue] | None = None,
         # Thinking phase UX
         thinking_phase: str = "thinking",
         thinking_label_active: str = "Thinking...",
@@ -2445,7 +2435,7 @@ class ChannelSession:
         memory_log: bool = False,
         memory_role: Literal["assistant", "system", "tool", "user"] = "assistant",
         memory_tags: list[str] | None = None,
-        memory_data: dict[str, Any] | None = None,
+        memory_data: dict[str, JsonValue] | None = None,
         memory_severity: int = 2,
         memory_signal: float | None = None,
     ) -> tuple[str, dict[str, int], str]:
