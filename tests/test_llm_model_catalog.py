@@ -509,9 +509,9 @@ def test_deepseek_implicit_cache_satisfies_required_capability() -> None:
 
     assert binding.valid
     assert binding.capabilities.prompt_cache.state == "supported"
-    assert "deepseek/automatic-context-cache/v1" in binding.catalog_keys
+    assert "deepseek/automatic-prefix-cache/v1" in binding.catalog_keys
     assert binding.capabilities.prompt_cache.provenance[0].reference == (
-        "deepseek/automatic-context-cache/v1"
+        "deepseek/automatic-prefix-cache/v1"
     )
 
 

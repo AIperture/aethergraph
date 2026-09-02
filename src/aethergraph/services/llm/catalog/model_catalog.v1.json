@@ -1,6 +1,6 @@
 {
   "schema_version": "aethergraph.model-catalog/v1",
-  "catalog_revision": 6,
+  "catalog_revision": 5,
   "entries": [
     {
       "catalog_key": "openai/current-mainline-chat-tools/v5",
@@ -572,22 +572,6 @@
       "sources": ["https://ai.google.dev/gemini-api/docs/caching"],
       "verified_at": "2026-08-12",
       "catalog_revision": 2,
-      "evidence_status": "verified",
-      "priority": 100
-    },
-    {
-      "catalog_key": "deepseek/automatic-context-cache/v1",
-      "provider_id": "deepseek",
-      "operation": "chat",
-      "endpoint_ids": ["openai_chat_completions"],
-      "model_pattern": ".+",
-      "prompt_cache": {
-        "mode": "implicit",
-        "capability_source": "deepseek_context_cache"
-      },
-      "sources": ["https://api-docs.deepseek.com/guides/kv_cache/"],
-      "verified_at": "2026-08-31",
-      "catalog_revision": 6,
       "evidence_status": "verified",
       "priority": 100
     },
