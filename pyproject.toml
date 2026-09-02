@@ -109,6 +109,7 @@ aethergraph = ["demos/**"]
 [tool.setuptools.package-data]
 # Ship non-Python assets bundled with the package (adjust as needed)
 aethergraph = [
+  "py.typed",
   "**/*.json",
   "**/*.yaml",
   "**/*.yml",

@@ -1,22 +1,32 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
+
+from aethergraph.contracts.json_values import JsonValue
 
 if TYPE_CHECKING:
     from aethergraph.services.llm.contracts import ModelRequest
     from aethergraph.services.llm.streaming import ModelEvent
-    from aethergraph.services.llm.tool_calling import ModelResponse, ToolCallResponse
+    from aethergraph.services.llm.tool_calling import (
+        ModelResponse,
+        ToolCallRequest,
+        ToolCallResponse,
+    )
     from aethergraph.services.llm.types import (
+        ChatOutputFormat,
         EmbeddingResult,
         ImageFormat,
         ImageGenerationResult,
         ImageResponseFormat,
+        LLMRequestEstimate,
+        PromptCacheRequest,
+        StructuredOutputRequest,
     )
 
 
 class LLMClientProtocol(Protocol):
-    def estimate(self, request: ModelRequest) -> Any: ...
+    def estimate(self, request: ModelRequest) -> LLMRequestEstimate: ...
 
     async def generate(self, request: ModelRequest) -> ModelResponse: ...
 
@@ -24,26 +34,28 @@ class LLMClientProtocol(Protocol):
 
     def estimate_chat_request(
         self,
-        messages: list[dict[str, Any]],
-        **kw: Any,
-    ) -> Any: ...
+        messages: list[dict[str, JsonValue]],
+        *,
+        max_output_tokens: int | None,
+        structured_output: StructuredOutputRequest | None = None,
+        tool_request: ToolCallRequest | None = None,
+        json_schema: dict[str, JsonValue] | None = None,
+        tools: list[dict[str, JsonValue]] | None = None,
+        model: str | None = None,
+    ) -> LLMRequestEstimate: ...
 
     async def chat(
         self,
-        messages: list[dict[str, Any]],
-        **kw: Any,
-    ) -> tuple[str | ToolCallResponse, dict[str, int]]: ...
-    async def raw(
-        self,
+        messages: list[dict[str, JsonValue]],
         *,
-        method: str = "POST",
-        path: str | None = None,
-        url: str | None = None,
-        json: Any | None = None,
-        params: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-        return_response: bool = False,
-    ) -> Any: ...
+        reasoning_effort: str | None = None,
+        max_output_tokens: int | None = None,
+        output_format: ChatOutputFormat = "text",
+        structured_output: StructuredOutputRequest | None = None,
+        tool_request: ToolCallRequest | None = None,
+        prompt_cache: PromptCacheRequest | None = None,
+        model: str | None = None,
+    ) -> tuple[str | ToolCallResponse, dict[str, int]]: ...
 
 
 class EmbeddingClientProtocol(Protocol):
@@ -53,7 +65,12 @@ class EmbeddingClientProtocol(Protocol):
         *,
         model: str | None = None,
         dimensions: int | None = None,
-        **kwargs: Any,
+        extra_body: dict[str, JsonValue] | None = None,
+        azure_api_version: str | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        run_id: str | None = None,
+        graph_id: str | None = None,
     ) -> EmbeddingResult:
         """Embed a batch and retain typed provider usage.
 
@@ -79,7 +96,12 @@ class EmbeddingClientProtocol(Protocol):
             texts: Ordered text inputs.
             model: Optional per-call model override.
             dimensions: Optional requested output-vector dimensionality.
-            **kwargs: Bounded provider options and metering dimensions.
+            extra_body: Explicit provider extension body.
+            azure_api_version: Optional Azure API version.
+            user_id: Optional metering user identity.
+            org_id: Optional metering organization identity.
+            run_id: Optional metering run identity.
+            graph_id: Optional metering graph identity.
 
         Returns:
             EmbeddingResult: Ordered vectors and operation-specific usage.
@@ -97,7 +119,12 @@ class EmbeddingClientProtocol(Protocol):
         *,
         model: str | None = None,
         dimensions: int | None = None,
-        **kwargs,
+        extra_body: dict[str, JsonValue] | None = None,
+        azure_api_version: str | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        run_id: str | None = None,
+        graph_id: str | None = None,
     ) -> list[list[float]]: ...
 
     async def embed_one(
@@ -106,7 +133,12 @@ class EmbeddingClientProtocol(Protocol):
         *,
         model: str | None = None,
         dimensions: int | None = None,
-        **kwargs,
+        extra_body: dict[str, JsonValue] | None = None,
+        azure_api_version: str | None = None,
+        user_id: str | None = None,
+        org_id: str | None = None,
+        run_id: str | None = None,
+        graph_id: str | None = None,
     ) -> list[float]: ...
 
 
@@ -125,7 +157,6 @@ class ImageGenerationClientProtocol(Protocol):
         background: str | None = None,
         input_images: list[str] | None = None,
         azure_api_version: str | None = None,
-        **kwargs: Any,
     ) -> ImageGenerationResult:
         """Generate images through one configured image-operation client.
 
@@ -160,8 +191,6 @@ class ImageGenerationClientProtocol(Protocol):
             background: Optional provider background mode.
             input_images: Optional source-image data URLs.
             azure_api_version: Optional Azure Images API version.
-            **kwargs: Bounded adapter-private options.
-
         Returns:
             ImageGenerationResult: Normalized images, provider usage, and raw data.
 

@@ -10,12 +10,13 @@ import json
 import mimetypes
 from pathlib import Path, PurePosixPath
 import socket
-from typing import Any, Literal
+from typing import Literal
 from urllib.error import HTTPError
 from urllib.parse import unquote, urljoin, urlparse, urlunparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import warnings
 
+from aethergraph.contracts import JsonValue
 from aethergraph.contracts.services.artifacts import Artifact
 from aethergraph.storage.contracts import (
     ArtifactMetricOrder,
@@ -231,7 +232,7 @@ class CanonicalPublicArtifactFacade:
         *,
         kind: str = "directory",
         tags: list[str] | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, JsonValue] | None = None,
         metrics: dict[str, float] | None = None,
         suggested_uri: str | None = None,
         name: str | None = None,
@@ -302,7 +303,7 @@ class CanonicalPublicArtifactFacade:
         kind: str,
         tags: list[str] | None = None,
         mime: str | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, JsonValue] | None = None,
         metrics: dict[str, float] | None = None,
         suggested_uri: str | None = None,
         name: str | None = None,
@@ -371,7 +372,7 @@ class CanonicalPublicArtifactFacade:
         *,
         kind: str = "directory",
         tags: list[str] | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, JsonValue] | None = None,
         metrics: dict[str, float] | None = None,
         suggested_uri: str | None = None,
         name: str | None = None,
@@ -501,7 +502,7 @@ class CanonicalPublicArtifactFacade:
         kind: str,
         tags: list[str] | None = None,
         mime: str | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, JsonValue] | None = None,
         metrics: dict[str, float] | None = None,
         suggested_uri: str | None = None,
         name: str | None = None,
@@ -570,7 +571,7 @@ class CanonicalPublicArtifactFacade:
         kind: str,
         tags: list[str] | None = None,
         mime: str | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, JsonValue] | None = None,
         metrics: dict[str, float] | None = None,
         name: str | None = None,
         pin: bool = False,
@@ -632,23 +633,53 @@ class CanonicalPublicArtifactFacade:
         media_type = response_mime
         if media_type == "application/octet-stream" and mime:
             media_type = mime
-        content_labels = _content_labels(
+        return await self.save_bytes(
+            payload,
+            kind=kind,
+            mime=media_type,
             tags=tags,
             labels={**(labels or {}), "source_url": source},
-            filename=filename,
+            metrics=metrics,
+            name=filename,
+            pin=pin,
         )
+
+    async def save_bytes(
+        self,
+        payload: bytes,
+        *,
+        kind: str,
+        mime: str | None = None,
+        tags: list[str] | None = None,
+        labels: dict[str, JsonValue] | None = None,
+        metrics: dict[str, float] | None = None,
+        name: str | None = None,
+        pin: bool = False,
+    ) -> Artifact:
+        """Persist complete bytes and return the committed public Artifact.
+
+        Complete in-memory payloads use the canonical streaming writer internally,
+        but callers receive the committed DTO directly and never inspect temporal
+        ``last_artifact`` state.
+        """
+
+        if not isinstance(payload, bytes):
+            raise TypeError("artifact payload must be bytes")
+        filename = _filename(name=name, suggested_uri=None)
+        content_labels = _content_labels(tags=tags, labels=labels, filename=filename)
         async with self.writer(
             kind=kind,
             planned_ext=Path(filename or "").suffix or None,
-            mime=media_type,
+            mime=mime or _media_type(filename),
             pin=pin,
         ) as writer:
             writer.add_labels(content_labels)
             writer.add_metrics(metrics or {})
             await writer.write(payload)
-        if self.last_artifact is None:
+        artifact = self.last_artifact
+        if artifact is None:
             raise RuntimeError("canonical Artifact writer completed without a public projection")
-        return self.last_artifact
+        return artifact
 
     async def save_text(
         self,
@@ -658,7 +689,7 @@ class CanonicalPublicArtifactFacade:
         name: str | None = None,
         kind: str = "text",
         tags: list[str] | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, JsonValue] | None = None,
         metrics: dict[str, float] | None = None,
         pin: bool = False,
     ) -> Artifact:
@@ -712,13 +743,13 @@ class CanonicalPublicArtifactFacade:
 
     async def save_json(
         self,
-        payload: Mapping[str, Any],
+        payload: Mapping[str, JsonValue],
         *,
         suggested_uri: str | None = None,
         name: str | None = None,
         kind: str = "json",
         tags: list[str] | None = None,
-        labels: dict[str, Any] | None = None,
+        labels: dict[str, JsonValue] | None = None,
         metrics: dict[str, float] | None = None,
         pin: bool = False,
     ) -> Artifact:
@@ -913,7 +944,7 @@ class CanonicalPublicArtifactFacade:
         *,
         encoding: str = "utf-8",
         errors: str = "strict",
-    ) -> Any:
+    ) -> JsonValue:
         """Load and parse exact owner-authorized Artifact JSON by identity.
 
         Canonical bytes are decoded once and parsed once through strict JSON loading.
@@ -1246,7 +1277,7 @@ class CanonicalPublicArtifactFacade:
         *,
         encoding: str = "utf-8",
         errors: str = "strict",
-    ) -> Any:
+    ) -> JsonValue:
         """Load canonical Artifact JSON from an AG public URI.
 
         The URI selects one public identity before strict byte decoding and JSON parsing.
@@ -1283,7 +1314,7 @@ class CanonicalPublicArtifactFacade:
         *,
         kind: str | None = None,
         tags: Sequence[str] | None = None,
-        labels: Mapping[str, Any] | None = None,
+        labels: Mapping[str, JsonValue] | None = None,
         pinned: bool | None = None,
         metric: str | None = None,
         metric_order: ArtifactMetricOrder | None = None,
@@ -1345,7 +1376,7 @@ class CanonicalPublicArtifactFacade:
         *,
         kind: str | None = None,
         tags: Sequence[str] | None = None,
-        filters: Mapping[str, Any] | None = None,
+        filters: Mapping[str, JsonValue] | None = None,
         pinned: bool | None = None,
         limit: int = 100,
     ) -> list[Artifact]:
@@ -1400,7 +1431,7 @@ class CanonicalPublicArtifactFacade:
         metric: str,
         metric_mode: Literal["max", "min"],
         tags: Sequence[str] | None = None,
-        filters: Mapping[str, Any] | None = None,
+        filters: Mapping[str, JsonValue] | None = None,
         pinned: bool | None = None,
     ) -> Artifact | None:
         """Return the best exact-scope Artifact for one occurrence metric.
@@ -1467,7 +1498,7 @@ class CanonicalPublicArtifactFacade:
         mode: SearchMode,
         top_k: int = 10,
         tags: Sequence[str] | None = None,
-        metadata: Mapping[str, Any] | None = None,
+        metadata: Mapping[str, JsonValue] | None = None,
         require_indexed_cursor: str | None = None,
     ) -> tuple[PublicArtifactSearchHit, ...]:
         """Search and hydrate ranked public Artifacts in one exact mode.
@@ -1560,9 +1591,9 @@ class CanonicalPublicArtifactFacade:
 def _content_labels(
     *,
     tags: Sequence[str] | None,
-    labels: Mapping[str, Any] | None,
+    labels: Mapping[str, JsonValue] | None,
     filename: str | None,
-) -> dict[str, Any]:
+) -> dict[str, JsonValue]:
     result = dict(labels or {})
     normalized_tags = _tags(tags)
     if normalized_tags:
@@ -1633,6 +1664,8 @@ def _artifact_suffix(artifact: Artifact) -> str:
     filename = labels.get("filename")
     if filename is None:
         return ""
+    if not isinstance(filename, str):
+        raise ValueError("Artifact labels.filename must be a string")
     _exact_filename(filename)
     return PurePosixPath(filename).suffix
 

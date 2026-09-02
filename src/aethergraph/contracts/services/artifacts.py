@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
+
+from aethergraph.contracts.json_values import JsonValue
 
 
 @dataclass
@@ -25,8 +27,8 @@ class Artifact:
         mime (str | None): MIME type of the artifact content. Defaults to None.
         created_at (str | None): Timestamp when the artifact was created. Defaults to None.
         tags (list[str] | None): List of tags associated with the artifact. Defaults to None.
-        labels (dict[str, Any] | None): Dictionary of labels for the artifact. Defaults to None.
-        metrics (dict[str, Any] | None): Dictionary of metrics associated with the artifact. Defaults to None.
+        labels (dict[str, JsonValue] | None): JSON labels for the artifact.
+        metrics (dict[str, float] | None): Numeric metrics for the artifact.
         pinned (bool): Whether the artifact is pinned. Defaults to False.
         uri (str | None): URI or path to the artifact. Defaults to None.
         preview_uri (str | None): URI for previewing the artifact. Defaults to None.
@@ -56,8 +58,8 @@ class Artifact:
     created_at: str | None = None
 
     tags: list[str] | None = None
-    labels: dict[str, Any] | None = None
-    metrics: dict[str, Any] | None = None
+    labels: dict[str, JsonValue] | None = None
+    metrics: dict[str, float] | None = None
     pinned: bool = False
     uri: str | None = None
     preview_uri: str | None = None
@@ -79,8 +81,8 @@ class Artifact:
     def mimetype(self, value: str | None) -> None:
         self.mime = value
 
-    def to_dict(self) -> dict[str, Any]:
-        d = {
+    def to_dict(self) -> dict[str, JsonValue]:
+        d: dict[str, JsonValue] = {
             "artifact_id": self.artifact_id,
             "uri": self.uri,
             "kind": self.kind,
@@ -94,9 +96,9 @@ class Artifact:
             "tool_name": self.tool_name,
             "tool_version": self.tool_version,
             "created_at": self.created_at,
-            "tags": self.tags,
+            "tags": cast(JsonValue, self.tags),
             "labels": self.labels,
-            "metrics": self.metrics,
+            "metrics": cast(JsonValue, self.metrics),
             "preview_uri": self.preview_uri,
             "pinned": self.pinned,
             "org_id": self.org_id,
@@ -126,8 +128,8 @@ class AsyncArtifactStore(Protocol):
         mime: str | None = None,
         suggested_uri: str | None = None,
         pin: bool = False,
-        labels: dict | None = None,
-        metrics: dict | None = None,
+        labels: dict[str, JsonValue] | None = None,
+        metrics: dict[str, float] | None = None,
         preview_uri: str | None = None,
         cleanup: bool = True,
     ) -> Artifact: ...
@@ -155,8 +157,8 @@ class AsyncArtifactStore(Protocol):
         tool_name: str,
         tool_version: str,
         pin: bool = False,
-        labels: dict | None = None,
-        metrics: dict | None = None,
+        labels: dict[str, JsonValue] | None = None,
+        metrics: dict[str, float] | None = None,
         preview_uri: str | None = None,
         suggested_uri: str | None = None,
     ) -> Artifact: ...
@@ -175,8 +177,8 @@ class AsyncArtifactStore(Protocol):
         exclude: list[str] | None = None,
         index_children: bool = False,
         pin: bool = False,
-        labels: dict | None = None,
-        metrics: dict | None = None,
+        labels: dict[str, JsonValue] | None = None,
+        metrics: dict[str, float] | None = None,
         suggested_uri: str | None = None,
         archive: bool = False,
         archive_name: str = "bundle.tar.gz",
@@ -188,6 +190,10 @@ class AsyncArtifactStore(Protocol):
     async def load_artifact_dir(self, uri: str) -> str: ...
     async def cleanup_tmp(self, max_age_hours: int = 24) -> None: ...
     async def save_text(self, payload: str, suggested_uri: str | None = None) -> Artifact: ...
-    async def save_json(self, payload: dict, suggested_uri: str | None = None) -> Artifact: ...
+    async def save_json(
+        self,
+        payload: dict[str, JsonValue],
+        suggested_uri: str | None = None,
+    ) -> Artifact: ...
     @property
     def base_uri(self) -> str: ...

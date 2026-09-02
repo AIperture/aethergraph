@@ -55,6 +55,23 @@ class _Artifacts:
         self.writer_mime = mime
         return _Writer(self)
 
+    async def save_bytes(
+        self,
+        payload: bytes,
+        *,
+        mime: str,
+        labels: dict[str, Any],
+        **_: Any,
+    ) -> Artifact:
+        self.writer_mime = mime
+        self.last_artifact = Artifact(
+            artifact_id="artifact:file-1",
+            bytes=len(payload),
+            mime=mime,
+            labels=dict(labels),
+        )
+        return self.last_artifact
+
     async def get_by_id(self, artifact_id: str) -> Artifact | None:
         if self.last_artifact is not None and self.last_artifact.artifact_id == artifact_id:
             return self.last_artifact
@@ -140,6 +157,33 @@ async def test_send_file_persists_and_publishes_one_canonical_mimetype() -> None
     assert len(context.services.channels.events) == 1
     assert context.services.channels.events[0].file is None
     assert context.services.channels.events[0].attachments[0]["mimetype"] == "text/csv"
+
+
+@pytest.mark.asyncio
+async def test_send_image_returns_the_logical_delivery_receipt() -> None:
+    context = _Context()
+
+    receipt = await ChannelSession(context).send_image(
+        file_bytes=b"image",
+        title="result",
+        mimetype="image/png",
+    )
+
+    assert receipt.message_id
+    assert context.services.channels.events[-1].attachments[0]["artifact_id"] == ("artifact:file-1")
+
+
+@pytest.mark.asyncio
+async def test_stream_end_returns_the_stream_delivery_receipt() -> None:
+    context = _Context()
+    session = ChannelSession(context)
+
+    async with session.stream() as sender:
+        await sender.delta("hello")
+        receipt = await sender.end(full_text="hello")
+
+    assert receipt.message_id.endswith(sender._upsert_key.split(":")[-1])
+    assert context.services.channels.events[-1].type == "agent.stream.end"
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ import warnings
 import httpx
 
 from aethergraph.config.config import LLMUsageQuotaSettings
+from aethergraph.contracts import JsonValue
 from aethergraph.contracts.services.llm import ImageGenerationClientProtocol, LLMClientProtocol
 from aethergraph.contracts.services.metering import MeteringService
 from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
@@ -1619,13 +1620,13 @@ class GenericLLMClient(LLMClientProtocol):
 
     def estimate_chat_request(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, JsonValue]],
         *,
         max_output_tokens: int | None,
         structured_output: StructuredOutputRequest | None = None,
         tool_request: ToolCallRequest | None = None,
-        json_schema: dict[str, Any] | None = None,
-        tools: Any = None,
+        json_schema: dict[str, JsonValue] | None = None,
+        tools: list[dict[str, JsonValue]] | None = None,
         model: str | None = None,
     ) -> LLMRequestEstimate:
         """Estimate the current chat request without accumulated run usage.
@@ -2175,7 +2176,7 @@ class GenericLLMClient(LLMClientProtocol):
     # ================================================================
     async def chat(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, JsonValue]],
         *,
         reasoning_effort: str | None = None,
         max_output_tokens: int | None = None,
