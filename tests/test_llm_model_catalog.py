@@ -502,6 +502,19 @@ def test_resolver_unknown_does_not_satisfy_required_capability() -> None:
     assert binding.diagnostics[0].code == "required_capability_unknown"
 
 
+def test_deepseek_implicit_cache_satisfies_required_capability() -> None:
+    profile = chat_profile_from_legacy(LLMProfile(provider="deepseek", model="deepseek-chat"))
+
+    binding = resolve_chat_profile(profile, required=("prompt_cache",))
+
+    assert binding.valid
+    assert binding.capabilities.prompt_cache.state == "supported"
+    assert "deepseek/automatic-prefix-cache/v1" in binding.catalog_keys
+    assert binding.capabilities.prompt_cache.provenance[0].reference == (
+        "deepseek/automatic-prefix-cache/v1"
+    )
+
+
 def test_override_supplies_unknown_model_fact_when_adapter_implements_feature() -> None:
     profile = chat_profile_from_legacy(
         LLMProfile(provider="anthropic", model="claude-sonnet-4-5-20250929")

@@ -338,6 +338,17 @@ def test_required_policy_accepts_deepseek_implicit_cache_without_wire_fields() -
     assert prepared.provider_request_fields == {}
 
 
+def test_required_policy_rejects_unknown_cache_capability() -> None:
+    with pytest.raises(LLMUnsupportedFeatureError, match="prompt_cache"):
+        prepare_prompt_cache(
+            PromptCacheRequest((0,), "agent.v1"),
+            [{"role": "system", "content": "stable"}],
+            provider="custom",
+            model="custom-chat",
+            policy="required",
+        )
+
+
 @pytest.mark.asyncio
 async def test_required_policy_rejects_missing_stable_prefix_request() -> None:
     client = GenericLLMClient(
