@@ -670,6 +670,45 @@ class CanonicalPublicMemoryFacade(CanonicalPromptMemoryMixin):
         record = await self.canonical.get_event(event_id)
         return None if record is None else _public_event(record, self.memory_scope_id)
 
+    async def get_events_by_ids(self, event_ids: list[str]) -> list[Event]:
+        """Read an ordered exact Event batch through canonical Memory.
+
+        The public facade validates one bounded unique request and projects only
+        Events authorized by its immutable canonical scope.
+
+        Examples:
+            Hydrate two Events:
+                ```python
+                events = await memory.get_events_by_ids(["event-1", "event-2"])
+                ```
+
+            Detect a partial miss:
+                ```python
+                events = await memory.get_events_by_ids(["event-1", "missing"])
+                assert [event.event_id for event in events] == ["event-1"]
+                ```
+
+        Args:
+            event_ids: Ordered unique stable Event identities, bounded to 100.
+
+        Returns:
+            list[Event]: Existing scoped public Events in request order.
+
+        Notes:
+            Missing identities are omitted without consulting hot cache or search.
+            Infrastructure failures propagate to the caller.
+        """
+        if not isinstance(event_ids, list):
+            raise TypeError("event_ids must be a list")
+        if len(event_ids) > 100:
+            raise ValueError("event_ids must contain at most 100 identities")
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("event_ids must not contain duplicates")
+        if any(not isinstance(event_id, str) or not event_id for event_id in event_ids):
+            raise ValueError("event_ids must contain non-empty strings")
+        records = await self.canonical.get_events_by_ids(tuple(event_ids))
+        return [_public_event(record, self.memory_scope_id) for record in records]
+
     async def append_state_snapshot(
         self,
         key: str,

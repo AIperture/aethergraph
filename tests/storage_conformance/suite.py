@@ -158,6 +158,12 @@ async def check_event_store_conformance(store: EventStore) -> None:
     assert await store.get(other_scope, "event-1") is None
     owner_scope = StorageScope(tenant_id="tenant-1", project_id="project-1")
     assert await store.get(owner_scope, "event-1") == first
+    assert await store.get_many(owner_scope, ("event-3", "missing", "event-1")) == (
+        batch[1],
+        first,
+    )
+    assert await store.get_many(other_scope, ("event-1",)) == ()
+    assert await store.get_many(owner_scope, ()) == ()
     assert await store.append_many(()) == ()
 
     owner_page = await store.query(EventQuery(scope=owner_scope, page=PageRequest(limit=10)))

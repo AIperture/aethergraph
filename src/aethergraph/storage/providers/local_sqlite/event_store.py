@@ -436,6 +436,58 @@ class LocalEventStore:
         )
         return _record(rows[0]) if rows else None
 
+    async def get_many(
+        self,
+        scope: StorageScope,
+        event_ids: tuple[str, ...],
+    ) -> tuple[EventRecord, ...]:
+        """Read an ordered batch of Event IDs in one scoped query.
+
+        The SQL query applies every populated scope dimension once and the returned
+        records are reordered to match the caller's exact identity order.
+
+        Examples:
+            Read multiple Events:
+                ```python
+                rows = await store.get_many(scope, ("event-1", "event-2"))
+                ```
+
+            Read no Events:
+                ```python
+                assert await store.get_many(scope, ()) == ()
+                ```
+
+        Args:
+            scope: Canonical owner and optional execution constraints.
+            event_ids: Ordered unique stable Event identities.
+
+        Returns:
+            tuple[EventRecord, ...]: Existing scoped records in request order.
+
+        Notes:
+            The storage contract limits the batch to 100 identities and rejects
+            duplicates rather than silently changing request semantics.
+        """
+        if not isinstance(event_ids, tuple):
+            raise TypeError("event_ids must be an immutable tuple")
+        if len(event_ids) > 100:
+            raise ValueError("event_ids must contain at most 100 identities")
+        if len(event_ids) != len(set(event_ids)):
+            raise ValueError("event_ids must not contain duplicates")
+        if any(not isinstance(event_id, str) or not event_id for event_id in event_ids):
+            raise ValueError("event_ids must contain non-empty strings")
+        if not event_ids:
+            return ()
+        where, parameters = _scope_predicate(scope)
+        placeholders = ", ".join("?" for _ in event_ids)
+        rows = await self._database.fetch_all(
+            f"SELECT * FROM local_events WHERE stream = ? "
+            f"AND event_id IN ({placeholders}) AND {where}",
+            (self._stream, *event_ids, *parameters),
+        )
+        by_id = {record.event_id: record for record in (_record(row) for row in rows)}
+        return tuple(by_id[event_id] for event_id in event_ids if event_id in by_id)
+
     async def query(self, query: EventQuery) -> Page[EventRecord]:
         """Read one bounded stable page after applying exact event filters.
 
