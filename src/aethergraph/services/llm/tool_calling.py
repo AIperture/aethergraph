@@ -463,6 +463,22 @@ class ToolCallRequest:
                 raise ValueError(
                     "completed Tool discovery result Tools must be active"
                 )
+        if (
+            self.transport_checkpoint is not None
+            and self.transport_checkpoint.purpose == "pending_discovery_result"
+            and self.discovery_result is None
+        ):
+            raise ValueError(
+                "pending Tool discovery checkpoints require a discovery result"
+            )
+        if (
+            self.discovery_result is not None
+            and self.transport_checkpoint is not None
+            and self.transport_checkpoint.purpose != "pending_discovery_result"
+        ):
+            raise ValueError(
+                "Tool discovery results require a pending discovery checkpoint"
+            )
         fingerprint_version = str(self.fingerprint_version or "").strip()
         if not fingerprint_version:
             raise ValueError("Tool-call request fingerprint_version must not be empty")

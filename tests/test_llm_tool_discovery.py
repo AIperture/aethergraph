@@ -143,6 +143,19 @@ def _failed_discovery_result(
     )
 
 
+def _completed_discovery_result(
+    *,
+    provider_reference_id: str = "search_call_1",
+    tool_names: tuple[str, ...] = ("read_document",),
+) -> ToolDiscoveryResult:
+    return ToolDiscoveryResult(
+        discovery_event_id=f"event_{provider_reference_id}",
+        provider_reference_id=provider_reference_id,
+        status="completed",
+        tool_names=tool_names,
+    )
+
+
 def test_discovery_result_requires_a_matching_continuation_kind() -> None:
     result = _failed_discovery_result()
     tool = ToolDefinition("finish", "Finish.", {"type": "object"})
@@ -156,6 +169,31 @@ def test_discovery_result_requires_a_matching_continuation_kind() -> None:
             ),
             turn_id="turn_1",
             discovery_result=result,
+        )
+
+
+def test_pending_discovery_checkpoint_requires_explicit_result() -> None:
+    checkpoint = ToolTransportCheckpoint(
+        checkpoint_id="checkpoint_search_1",
+        revision=1,
+        provider="openai",
+        model="gpt-5.6",
+        contract_version="responses/v1",
+        turn_id="turn_1",
+        integrity_digest="0" * 64,
+        purpose="pending_discovery_result",
+        opaque_payload={"state": "pending_search"},
+    )
+
+    with pytest.raises(ValueError, match="require a discovery result"):
+        ToolCallRequest(
+            tools=(ToolDefinition("finish", "Finish.", {"type": "object"}),),
+            discovery=ToolDiscoveryRequest(
+                "native_client",
+                search_schema=_CLIENT_SEARCH_SCHEMA,
+            ),
+            turn_id="turn_1",
+            transport_checkpoint=checkpoint,
         )
 
 
@@ -823,6 +861,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
+        discovery_result=_completed_discovery_result(),
     )
     discovery_ledger = [
         {"role": "assistant", "content": "ledger discovery: docs tools requested"},
@@ -1318,6 +1357,7 @@ async def test_openai_consumed_checkpoint_does_not_replay_search_output() -> Non
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=pending,
+        discovery_result=_completed_discovery_result(),
     )
     consumed = _openai_checkpoint(
         request=loaded_request,
@@ -1621,6 +1661,9 @@ async def test_anthropic_client_search_replays_unchanged_history_and_references(
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
+        discovery_result=_completed_discovery_result(
+            provider_reference_id="toolu_search_1"
+        ),
     )
 
     second, _usage = await client.chat(
@@ -1804,6 +1847,9 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=response.transport_checkpoint,
+        discovery_result=_completed_discovery_result(
+            provider_reference_id="azure_search_1"
+        ),
     )
 
     called, _usage = await client.chat(

@@ -68,7 +68,8 @@ interpretation is documented in
 authority. Its public `purpose` is one of:
 
 - `pending_discovery_result`: the next request must return a client-executed search
-  result or references;
+  result containing the exact selected Tool names and the correlated provider
+  reference;
 - `pending_tool_outputs`: the next request must return the exact results for the
   provider call identities stored in the opaque adapter payload; or
 - `consumed`: replay responsibility has ended and a caller must not retain the
@@ -77,6 +78,12 @@ authority. Its public `purpose` is one of:
 Callers may use the safe purpose, provider, model, contract version, turn, and revision
 to manage lifecycle. They must not inspect `opaque_payload`. The adapter validates the
 purpose against its private payload before provider traffic.
+
+The discovery result is mandatory for both successful and failed client-search
+continuations. Provider adapters do not infer selection by subtracting the prior
+active-name set from the current set: that projection may change for independent
+application policy reasons. A completed result names the exact newly selected Tools;
+a failed result carries the typed discovery error and no Tool names.
 
 OpenAI Responses client discovery has a verified failed/no-new-result continuation:
 AG sends the correlated `tool_search_output` with client execution, incomplete
