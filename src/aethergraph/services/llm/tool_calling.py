@@ -479,6 +479,15 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
 
     if request is None:
         return ""
+    discovery_payload: dict[str, Any] | None = None
+    if request.discovery is not None:
+        discovery_payload = {
+            "mode": request.discovery.mode,
+            "max_results": request.discovery.max_results,
+            "search_schema": request.discovery.search_schema,
+        }
+        if request.discovery.search_instructions:
+            discovery_payload["search_instructions"] = request.discovery.search_instructions
     payload = {
         "choice": request.choice,
         "max_calls": request.max_calls,
@@ -499,15 +508,7 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
             }
             for tool in request.tools
         ],
-        "discovery": (
-            None
-            if request.discovery is None
-            else {
-                "mode": request.discovery.mode,
-                "max_results": request.discovery.max_results,
-                "search_schema": request.discovery.search_schema,
-            }
-        ),
+        "discovery": discovery_payload,
     }
     if request.fingerprint_version != LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION:
         payload["contract_version"] = request.fingerprint_version

@@ -168,6 +168,7 @@ class ToolDiscoveryRequest:
     mode: ToolDiscoveryMode
     max_results: int = 5
     search_schema: dict[str, Any] | None = None
+    search_instructions: str = ""
 
     def __post_init__(self) -> None:
         """Validate one bounded discovery request.
@@ -190,6 +191,16 @@ class ToolDiscoveryRequest:
                 assert request.mode == "native_hosted"
                 ```
 
+            Carry caller-owned client-search constraints:
+                ```python
+                request = ToolDiscoveryRequest(
+                    mode="native_client",
+                    search_schema={"type": "object"},
+                    search_instructions="Restrict search to studio.docs.",
+                )
+                assert "studio.docs" in request.search_instructions
+                ```
+
         Args:
             self: Newly initialized discovery request.
 
@@ -198,7 +209,9 @@ class ToolDiscoveryRequest:
 
         Notes:
             Provider-hosted services may impose a lower limit. Adapters must
-            report that exact capability during binding.
+            report that exact capability during binding. `search_instructions`
+            remains caller-owned semantic guidance; adapters transport it without
+            deriving authorization policy.
         """
 
         if self.mode not in {"native_hosted", "native_client", "engine_projected"}:
@@ -217,6 +230,10 @@ class ToolDiscoveryRequest:
             if schema.get("type") != "object":
                 raise ValueError("Tool discovery search_schema must describe an object")
             object.__setattr__(self, "search_schema", schema)
+        instructions = str(self.search_instructions or "").strip()
+        if len(instructions) > 4_000:
+            raise ValueError("Tool discovery search_instructions must not exceed 4000 characters")
+        object.__setattr__(self, "search_instructions", instructions)
         object.__setattr__(self, "max_results", int(self.max_results))
 
 

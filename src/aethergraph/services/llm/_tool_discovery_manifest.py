@@ -50,7 +50,11 @@ def render_tool_search_description(request: ToolCallRequest) -> str:
         "contains more, choose a narrower path or use ranked search. Available primary "
         "capability paths"
     )
-    return f"{prefix}: {manifest}." if manifest else f"{prefix}: none."
+    transport_description = f"{prefix}: {manifest}." if manifest else f"{prefix}: none."
+    search_instructions = str(request.discovery.search_instructions or "").strip()
+    if not search_instructions:
+        return transport_description
+    return f"{search_instructions} {transport_description}"
 
 
 __all__ = ["render_tool_search_description"]

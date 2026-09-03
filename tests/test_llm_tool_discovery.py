@@ -346,7 +346,10 @@ def test_tool_call_contract_carries_deferred_discovery_and_opaque_checkpoint() -
             ),
         ),
         discovery=ToolDiscoveryRequest(
-            "native_client", max_results=7, search_schema=_CLIENT_SEARCH_SCHEMA
+            "native_client",
+            max_results=7,
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+            search_instructions="Root search is disabled; use studio.docs.",
         ),
         turn_id="turn_1",
         transport_checkpoint=_checkpoint(),
@@ -354,9 +357,50 @@ def test_tool_call_contract_carries_deferred_discovery_and_opaque_checkpoint() -
 
     assert request.tools[0].exposure == "deferred"
     assert request.discovery is not None
+    assert request.discovery.search_instructions == (
+        "Root search is disabled; use studio.docs."
+    )
     assert request.turn_id == "turn_1"
     assert request.transport_checkpoint is not None
     assert len(tool_call_request_fingerprint(request)) == 64
+
+
+def test_discovery_instructions_change_tool_request_fingerprint() -> None:
+    tool = ToolDefinition("finish", "Finish.", {"type": "object"})
+    unrestricted = ToolCallRequest(
+        tools=(tool,),
+        discovery=ToolDiscoveryRequest(
+            "native_client",
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+        ),
+        turn_id="turn_1",
+    )
+    restricted = ToolCallRequest(
+        tools=(tool,),
+        discovery=ToolDiscoveryRequest(
+            "native_client",
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+            search_instructions="Root search is disabled; use studio.docs.",
+        ),
+        turn_id="turn_1",
+    )
+
+    assert tool_call_request_fingerprint(unrestricted) != tool_call_request_fingerprint(
+        restricted
+    )
+
+    normalized = ToolDiscoveryRequest(
+        "native_client",
+        search_schema=_CLIENT_SEARCH_SCHEMA,
+        search_instructions="  Use studio.docs.  ",
+    )
+    assert normalized.search_instructions == "Use studio.docs."
+    with pytest.raises(ValueError, match="must not exceed 4000"):
+        ToolDiscoveryRequest(
+            "native_client",
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+            search_instructions="x" * 4_001,
+        )
 
 
 def test_discovery_turn_identity_is_required_but_does_not_rotate_cache_contract() -> None:
@@ -711,7 +755,12 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         tools=(immediate, deferred),
         choice="required",
         discovery=ToolDiscoveryRequest(
-            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
+            "native_client",
+            max_results=5,
+            search_schema=_CLIENT_SEARCH_SCHEMA,
+            search_instructions=(
+                "Root search is disabled. Use the authorized studio.docs path."
+            ),
         ),
         turn_id="turn_1",
     )
@@ -744,6 +793,9 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         in fake_http.last_json["tools"][-1]["description"]
     )
     assert "studio.docs" in fake_http.last_json["tools"][-1]["description"]
+    assert fake_http.last_json["tools"][-1]["description"].startswith(
+        "Root search is disabled. Use the authorized studio.docs path."
+    )
     assert "prompt_cache_options" not in fake_http.last_json
     cache_key = fake_http.last_json["prompt_cache_key"]
     assert all(tool.get("name") != "read_document" for tool in fake_http.last_json["tools"])
@@ -767,9 +819,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     continuation_request = ToolCallRequest(
         tools=(immediate, deferred),
         choice="required",
-        discovery=ToolDiscoveryRequest(
-            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
-        ),
+        discovery=initial_request.discovery,
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=first.transport_checkpoint,
@@ -856,9 +906,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     result_request = ToolCallRequest(
         tools=(immediate, deferred),
         choice="required",
-        discovery=ToolDiscoveryRequest(
-            "native_client", max_results=5, search_schema=_CLIENT_SEARCH_SCHEMA
-        ),
+        discovery=initial_request.discovery,
         turn_id="turn_1",
         active_tool_names=("read_document",),
         transport_checkpoint=second.transport_checkpoint,

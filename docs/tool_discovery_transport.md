@@ -19,6 +19,13 @@ requires the application to echo the search `call_id` in `tool_search_output`.
 Provider adapters own those wire names. The public AG contract continues to use the
 provider-neutral `native_hosted` and `native_client` modes.
 
+For `native_client`, the caller owns both the strict search input schema and bounded
+`search_instructions`. AetherGraph places those instructions before its generic
+transport description and includes non-empty instructions in the request fingerprint.
+This lets an Engine communicate authorization boundaries such as required paths and
+activation semantics without moving policy ownership into a provider adapter. Empty
+instructions retain the prior request-fingerprint input for compatibility.
+
 Official protocol reference:
 [OpenAI Tool search](https://developers.openai.com/api/docs/guides/tools-tool-search).
 
