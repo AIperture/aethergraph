@@ -78,6 +78,33 @@ async def test_send_phase_omitted_phase_key_uses_event_fallback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_progress_activity_preserves_explicit_identity_and_status() -> None:
+    ctx = _FakeContext()
+    chan = ChannelSession(ctx)
+
+    await chan.send_progress_activity(
+        progress_id="context-compaction:checkpoint-1",
+        status="completed",
+        label="Context compacted",
+        detail="30000 to 6000 prompt characters",
+    )
+
+    event = ctx.services.channels.published[0]
+    assert event.type == "agent.progress.end"
+    assert event.upsert_key == "context-compaction:checkpoint-1"
+    assert event.rich == {
+        "kind": "progress",
+        "progress_id": "context-compaction:checkpoint-1",
+        "label": "Context compacted",
+        "detail": "30000 to 6000 prompt characters",
+        "current": None,
+        "total": None,
+        "unit": None,
+        "success": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_chat_and_stream_thinking_phase_reuses_explicit_phase_key() -> None:
     ctx = _FakeContext()
     chan = ChannelSession(ctx)
