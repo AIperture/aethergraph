@@ -913,21 +913,12 @@ class AnthropicMessagesAdapter:
                         code="discovery_result_reference_mismatch",
                         message="Anthropic discovery result does not match the pending search.",
                     )
-                prior_active_names = {
-                    str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
-                }
-                newly_active_names = tuple(
-                    name
-                    for name in tool_request.active_tool_names
-                    if name not in prior_active_names
-                )
-                if discovery_result is not None and discovery_result.status == "completed":
-                    newly_active_names = discovery_result.tool_names
-                if discovery_result is None and not newly_active_names:
+                if discovery_result is None:
                     raise LLMToolCallResponseError(
                         code="discovery_result_missing",
-                        message="Anthropic client Tool search has no newly activated result.",
+                        message="Anthropic client Tool search requires an explicit result.",
                     )
+                newly_active_names = discovery_result.tool_names
                 assert tool_request.discovery is not None
                 if len(newly_active_names) > tool_request.discovery.max_results:
                     raise LLMToolCallResponseError(
@@ -940,7 +931,7 @@ class AnthropicMessagesAdapter:
                         "content": list(checkpoint_payload["assistant_content"]),
                     }
                 )
-                if discovery_result is not None and discovery_result.status == "failed":
+                if discovery_result.status == "failed":
                     assert discovery_result.error is not None
                     result_content: list[dict[str, Any]] | str = json.dumps(
                         {

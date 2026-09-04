@@ -2677,6 +2677,50 @@ class ChannelSession:
                 )
             )
 
+    async def send_progress_activity(
+        self,
+        *,
+        progress_id: str,
+        status: Literal["started", "running", "completed", "failed"],
+        label: str,
+        detail: str | None = None,
+        current: int | None = None,
+        total: int | None = None,
+        unit: str | None = None,
+        channel: str | None = None,
+    ) -> None:
+        """Publish one explicit semantic progress lifecycle update."""
+
+        normalized_id = str(progress_id or "").strip()
+        if not normalized_id:
+            raise ValueError("send_progress_activity requires progress_id")
+        event_type = {
+            "started": "agent.progress.start",
+            "running": "agent.progress.update",
+            "completed": "agent.progress.end",
+            "failed": "agent.progress.end",
+        }[status]
+        rich: dict[str, Any] = {
+            "kind": "progress",
+            "progress_id": normalized_id,
+            "label": str(label or "Progress"),
+            "detail": str(detail or ""),
+            "current": current,
+            "total": total,
+            "unit": unit,
+        }
+        if event_type == "agent.progress.end":
+            rich["success"] = status == "completed"
+        await self._bus.publish(
+            OutEvent(
+                type=event_type,
+                channel=self._resolve_key(channel),
+                upsert_key=normalized_id,
+                rich=rich,
+                meta=self._inject_context_meta(None),
+            )
+        )
+
     @asynccontextmanager
     async def progress(
         self,

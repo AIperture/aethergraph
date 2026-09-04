@@ -463,6 +463,22 @@ class ToolCallRequest:
                 raise ValueError(
                     "completed Tool discovery result Tools must be active"
                 )
+        if (
+            self.transport_checkpoint is not None
+            and self.transport_checkpoint.purpose == "pending_discovery_result"
+            and self.discovery_result is None
+        ):
+            raise ValueError(
+                "pending Tool discovery checkpoints require a discovery result"
+            )
+        if (
+            self.discovery_result is not None
+            and self.transport_checkpoint is not None
+            and self.transport_checkpoint.purpose != "pending_discovery_result"
+        ):
+            raise ValueError(
+                "Tool discovery results require a pending discovery checkpoint"
+            )
         fingerprint_version = str(self.fingerprint_version or "").strip()
         if not fingerprint_version:
             raise ValueError("Tool-call request fingerprint_version must not be empty")
@@ -479,6 +495,15 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
 
     if request is None:
         return ""
+    discovery_payload: dict[str, Any] | None = None
+    if request.discovery is not None:
+        discovery_payload = {
+            "mode": request.discovery.mode,
+            "max_results": request.discovery.max_results,
+            "search_schema": request.discovery.search_schema,
+        }
+        if request.discovery.search_instructions:
+            discovery_payload["search_instructions"] = request.discovery.search_instructions
     payload = {
         "choice": request.choice,
         "max_calls": request.max_calls,
@@ -499,15 +524,7 @@ def tool_call_request_fingerprint(request: ToolCallRequest | None) -> str:
             }
             for tool in request.tools
         ],
-        "discovery": (
-            None
-            if request.discovery is None
-            else {
-                "mode": request.discovery.mode,
-                "max_results": request.discovery.max_results,
-                "search_schema": request.discovery.search_schema,
-            }
-        ),
+        "discovery": discovery_payload,
     }
     if request.fingerprint_version != LEGACY_TOOL_REQUEST_FINGERPRINT_VERSION:
         payload["contract_version"] = request.fingerprint_version

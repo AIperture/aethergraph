@@ -403,12 +403,12 @@ class AzureChatAdapter:
                             "failure continuation shape."
                         ),
                     )
-                prior_active_names = {
-                    str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
-                }
-                newly_active_names = set(tool_request.active_tool_names) - prior_active_names
-                if discovery_result is not None:
-                    newly_active_names = set(discovery_result.tool_names)
+                if discovery_result is None:
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_missing",
+                        message="Azure client Tool search requires an explicit result.",
+                    )
+                newly_active_names = set(discovery_result.tool_names)
                 loaded_tools = [
                     tool
                     for tool in tool_request.tools

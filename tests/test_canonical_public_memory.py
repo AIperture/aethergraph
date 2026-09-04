@@ -201,6 +201,7 @@ async def test_public_memory_projects_events_without_identity_partition_aliases(
         assert second.inputs == [{"query": "hello"}]
         assert second.outputs == [{"count": 3}]
         assert await memory.get_event("event-1") == first
+        assert await memory.get_events_by_ids(["event-2", "missing", "event-1"]) == [second, first]
 
         durable = await memory.query_events(
             use_persistence=True,
@@ -275,6 +276,10 @@ async def test_public_memory_query_and_alias_failures_are_direct(tmp_path: Path)
             await memory.query_events(kinds="chat.turn")  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="tags"):
             await memory.query_events(tags="chat")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="duplicates"):
+            await memory.get_events_by_ids(["duplicate", "duplicate"])
+        with pytest.raises(TypeError, match="list"):
+            await memory.get_events_by_ids(("event-1",))  # type: ignore[arg-type]
         assert await memory.get_event("missing") is None
     finally:
         await bundle.close()
@@ -719,6 +724,7 @@ def test_public_memory_docstrings_and_surface_are_explicit() -> None:
         CanonicalPublicMemoryFacade.append_event,
         CanonicalPublicMemoryFacade.append_chat_turn,
         CanonicalPublicMemoryFacade.get_event,
+        CanonicalPublicMemoryFacade.get_events_by_ids,
         CanonicalPublicMemoryFacade.append_state_snapshot,
         CanonicalPublicMemoryFacade.get_latest_state_record,
         CanonicalPublicMemoryFacade.get_latest_state,

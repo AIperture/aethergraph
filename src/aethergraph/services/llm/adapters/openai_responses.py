@@ -89,6 +89,8 @@ def _openai_function_tool(
 
 def _openai_request_tools(
     request: ToolCallRequest,
+    *,
+    active_tool_names: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     """Encode one OpenAI Tool array with exact discovery framing.
 
@@ -119,7 +121,11 @@ def _openai_request_tools(
     """
 
     discovery_mode = request.discovery.mode if request.discovery is not None else None
-    active_names = set(request.active_tool_names)
+    active_names = set(
+        request.active_tool_names
+        if active_tool_names is None
+        else active_tool_names
+    )
     grouped: dict[str, dict[str, Any]] = {}
     result: list[dict[str, Any]] = []
     for tool in request.tools:
@@ -213,15 +219,9 @@ def _openai_continuation_request_tools(
             if source == "search_output"
         }
         if checkpoint_payload["state"] == "pending_search":
-            prior_active_names = {
-                str(name)
-                for name in list(checkpoint_payload.get("active_tool_names") or [])
-            }
-            if request.discovery_result is not None:
-                omitted_names.update(request.discovery_result.tool_names)
-            else:
-                omitted_names.update(set(request.active_tool_names) - prior_active_names)
-        request = replace(
+            assert request.discovery_result is not None
+            omitted_names.update(request.discovery_result.tool_names)
+        return _openai_request_tools(
             request,
             active_tool_names=tuple(
                 name for name in request.active_tool_names if name not in omitted_names
@@ -406,13 +406,8 @@ def _openai_checkpoint(
             for name in request.active_tool_names
         }
         if previous_payload["state"] == "pending_search":
-            prior_active_names = {
-                str(name)
-                for name in list(previous_payload.get("active_tool_names") or [])
-            }
-            newly_selected_names = set(request.active_tool_names) - prior_active_names
-            if request.discovery_result is not None:
-                newly_selected_names = set(request.discovery_result.tool_names)
+            assert request.discovery_result is not None
+            newly_selected_names = set(request.discovery_result.tool_names)
             for name in newly_selected_names:
                 if name in active_tool_sources:
                     active_tool_sources[name] = "search_output"
@@ -1107,14 +1102,14 @@ class OpenAIResponsesAdapter:
                         code="discovery_result_reference_mismatch",
                         message="OpenAI discovery result does not match the pending search.",
                     )
-                prior_active_names = {
-                    str(name) for name in list(checkpoint_payload.get("active_tool_names") or [])
-                }
-                newly_active_names = set(tool_request.active_tool_names) - prior_active_names
-                if discovery_result is not None:
-                    newly_active_names = set(discovery_result.tool_names)
+                if discovery_result is None:
+                    raise LLMToolCallResponseError(
+                        code="discovery_result_missing",
+                        message="OpenAI client Tool search requires an explicit result.",
+                    )
+                newly_active_names = set(discovery_result.tool_names)
                 body["previous_response_id"] = str(checkpoint_payload.get("response_id") or "")
-                if discovery_result is not None and discovery_result.status == "failed":
+                if discovery_result.status == "failed":
                     body["input"] = [
                         {
                             "type": "tool_search_output",

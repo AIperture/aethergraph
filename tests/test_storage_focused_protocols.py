@@ -83,6 +83,18 @@ class _EventStore:
     async def append_many(self, events: tuple[EventDraft, ...]) -> tuple[EventRecord, ...]:
         return tuple([await self.append(event) for event in events])
 
+    async def get_many(
+        self,
+        scope: StorageScope,
+        event_ids: tuple[str, ...],
+    ) -> tuple[EventRecord, ...]:
+        by_id = {
+            row.event_id: row
+            for row in self.rows
+            if all(getattr(row.scope, key) == value for key, value in scope.as_filter().items())
+        }
+        return tuple(by_id[event_id] for event_id in event_ids if event_id in by_id)
+
     async def append_many_with_search_intents(self, events, intents):
         if len(events) != len(intents):
             raise ValueError("events and intents must have matching lengths")

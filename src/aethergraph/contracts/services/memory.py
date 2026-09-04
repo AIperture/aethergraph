@@ -406,6 +406,10 @@ class MemoryFacadeProtocol(Protocol):
         change: ExternalResourceChangedEvent | dict[str, Any],
     ) -> Event: ...
 
+    async def get_event(self, event_id: str) -> Event | None: ...
+
+    async def get_events_by_ids(self, event_ids: list[str]) -> list[Event]: ...
+
     async def append_chat_turn(
         self,
         role: Literal["user", "assistant", "system", "tool"],

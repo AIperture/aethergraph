@@ -397,6 +397,40 @@ class EventStore(Protocol):
         """
         ...
 
+    async def get_many(
+        self,
+        scope: StorageScope,
+        event_ids: tuple[str, ...],
+    ) -> tuple[EventRecord, ...]:
+        """Read an ordered batch of exact Event identities.
+
+        The store applies one canonical scope to the complete batch and omits
+        identities that do not exist in that scope.
+
+        Examples:
+            Read two Events:
+                ```python
+                events = await store.get_many(scope, ("event-1", "event-2"))
+                ```
+
+            Read an empty batch:
+                ```python
+                assert await store.get_many(scope, ()) == ()
+                ```
+
+        Args:
+            scope: Required canonical owner and optional execution constraints.
+            event_ids: Ordered unique stable Event identities.
+
+        Returns:
+            tuple[EventRecord, ...]: Existing scoped Events in request order.
+
+        Notes:
+            Missing identities are omitted. Callers retain the requested IDs when
+            they need per-item missing results.
+        """
+        ...
+
     async def query(self, query: EventQuery) -> Page[EventRecord]:
         """Read a stable bounded cursor page of canonical events.
 

@@ -80,6 +80,8 @@ async def test_logical_streams_are_isolated_on_one_events_database(tmp_path: Pat
     assert runtime_record.cursor != memory_record.cursor
     assert await runtime.get(scope, draft.event_id) == runtime_record
     assert await memory.get(scope, draft.event_id) == memory_record
+    assert await runtime.get_many(scope, ("missing", draft.event_id)) == (runtime_record,)
+    assert await memory.get_many(scope, (draft.event_id, "missing")) == (memory_record,)
     await database.close()
 
 
@@ -92,6 +94,10 @@ async def test_event_append_is_idempotent_and_batch_conflicts_roll_back(tmp_path
 
     committed = await store.append(first)
     assert await store.append(first) == committed
+    assert await store.get_many(scope, ("missing", first.event_id)) == (committed,)
+    assert await store.get_many(scope, ()) == ()
+    with pytest.raises(ValueError, match="duplicates"):
+        await store.get_many(scope, (first.event_id, first.event_id))
     retries = await asyncio.gather(*(store.append(first) for _ in range(20)))
     assert {record.cursor for record in retries} == {committed.cursor}
     with pytest.raises(StorageIntegrityError, match="conflicting content"):

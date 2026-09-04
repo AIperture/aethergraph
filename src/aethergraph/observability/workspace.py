@@ -280,7 +280,11 @@ class _CanonicalObservabilityFacade:
         """
         return await (await self._inspection()).list_agent_events(**filters)
 
-    async def list_suppressed_scopes(self) -> dict[str, set[str]]:
+    async def list_suppressed_scopes(
+        self,
+        *,
+        session_id: str | None = None,
+    ) -> dict[str, set[str]]:
         """List explicitly hidden or deleted canonical observation scopes.
 
         Intro:
@@ -298,8 +302,15 @@ class _CanonicalObservabilityFacade:
                 hidden = "run-1" in suppressed["run_id"]
                 ```
 
+            Bound the scan to one session:
+                ```python
+                suppressed = await facade.list_suppressed_scopes(
+                    session_id="session-1"
+                )
+                ```
+
         Args:
-            None.
+            session_id: Optional exact canonical session to constrain in storage.
 
         Returns:
             dict[str, set[str]]: Suppressed IDs grouped by stable scope name.
@@ -308,7 +319,7 @@ class _CanonicalObservabilityFacade:
             The operation never reads or deletes authoritative run/session history.
         """
         bundle = await self._bundle()
-        scope = self._query_scope()
+        scope = self._query_scope(**({"session_id": session_id} if session_id else {}))
         result = {"session_id": set(), "run_id": set(), "trace_id": set()}
         if scope is None:
             return result
@@ -339,7 +350,13 @@ class _CanonicalObservabilityFacade:
                 return result
             cursor = page.next_cursor
 
-    async def list_runs(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+    async def list_runs(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """List authoritative canonical runs visible to the workspace identity.
 
         Intro:
@@ -357,9 +374,17 @@ class _CanonicalObservabilityFacade:
                 runs = await facade.list_runs(limit=10_000, offset=0)
                 ```
 
+            Read only one session's runs:
+                ```python
+                runs = await facade.list_runs(
+                    limit=10_000, offset=0, session_id="session-1"
+                )
+                ```
+
         Args:
             limit: Positive maximum number of stable run mappings to return.
             offset: Non-negative number of provider-ordered rows to skip.
+            session_id: Optional exact canonical session to constrain in storage.
 
         Returns:
             list[dict[str, Any]]: Visible stable run mappings in provider order.
@@ -369,7 +394,7 @@ class _CanonicalObservabilityFacade:
         """
         _validate_window(limit, offset)
         bundle = await self._bundle()
-        scope = self._query_scope()
+        scope = self._query_scope(**({"session_id": session_id} if session_id else {}))
         if scope is None:
             return []
         wanted = limit + offset

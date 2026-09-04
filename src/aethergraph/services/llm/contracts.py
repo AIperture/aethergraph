@@ -483,6 +483,22 @@ class ModelRequest:
                 raise ValueError(
                     "completed model discovery result Tools must be active"
                 )
+        if (
+            self.continuation is not None
+            and self.continuation.purpose == "pending_discovery_result"
+            and self.discovery_result is None
+        ):
+            raise ValueError(
+                "pending model discovery continuations require a discovery result"
+            )
+        if (
+            self.discovery_result is not None
+            and self.continuation is not None
+            and self.continuation.purpose != "pending_discovery_result"
+        ):
+            raise ValueError(
+                "model discovery results require a pending discovery continuation"
+            )
         if not isinstance(self.generation, GenerationOptions):
             raise TypeError("model request generation must be GenerationOptions")
         if self.prompt_cache is not None and not isinstance(self.prompt_cache, PromptCacheRequest):

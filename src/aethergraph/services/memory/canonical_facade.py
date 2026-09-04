@@ -512,6 +512,38 @@ class CanonicalMemoryFacade:
         """
         return await self._events.get(self.scope, event_id)
 
+    async def get_events_by_ids(
+        self,
+        event_ids: tuple[str, ...],
+    ) -> tuple[EventRecord, ...]:
+        """Read an ordered exact Event batch from durable storage.
+
+        The lookup uses the facade's immutable scope and never falls back to the hot
+        cache or search projection when an identity is absent.
+
+        Examples:
+            Hydrate two Events:
+                ```python
+                events = await memory.get_events_by_ids(("event-1", "event-2"))
+                ```
+
+            Preserve an empty request:
+                ```python
+                assert await memory.get_events_by_ids(()) == ()
+                ```
+
+        Args:
+            event_ids: Ordered unique stable Event identities.
+
+        Returns:
+            tuple[EventRecord, ...]: Existing scoped Events in request order.
+
+        Notes:
+            Missing identities are omitted so callers can compare the result with
+            their original request and report item-level misses.
+        """
+        return await self._events.get_many(self.scope, event_ids)
+
     async def commit_state(
         self,
         *,
