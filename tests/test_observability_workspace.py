@@ -207,6 +207,16 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
     facade = open_observability_workspace(tmp_path)
     traces = await facade.list_inspect_traces(run_id="run-1")
     runs = await facade.list_runs(limit=10_000, offset=0)
+    session_runs = await facade.list_runs(
+        limit=10_000,
+        offset=0,
+        session_id="session-1",
+    )
+    missing_session_runs = await facade.list_runs(
+        limit=10_000,
+        offset=0,
+        session_id="missing-session",
+    )
     engine_events = await facade.list_engine_events(run_id="run-1")
     suppressed = await facade.list_suppressed_scopes()
     manifest = await facade.hydrate_prompt_manifest("manifest-1")
@@ -217,6 +227,8 @@ async def test_manifested_workspace_preserves_studio_and_engine_reader_boundary(
 
     assert [item.id for item in traces.items] == ["trace-1"]
     assert runs[0]["run_id"] == "run-1"
+    assert [run["run_id"] for run in session_runs] == ["run-1"]
+    assert missing_session_runs == []
     assert runs[0]["meta"]["original_inputs"]["user_request"]["turn_id"] == "t-1"
     assert engine_events == [
         {
