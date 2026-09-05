@@ -43,6 +43,8 @@ class ModelContextCheckpoint:
     payload: dict[str, Any] = field(default_factory=dict, repr=False)
     revision: int = 1
     contract_version: str = MODEL_CONTEXT_CHECKPOINT_VERSION
+    pending_result_ids: tuple[str, ...] = ()
+    replay_results: tuple[dict[str, Any], ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         for name in ("provider", "model", "protocol"):
@@ -61,6 +63,15 @@ class ModelContextCheckpoint:
         if not isinstance(self.payload, dict) or not self.payload:
             raise ValueError("model context checkpoint payload must be a non-empty object")
         object.__setattr__(self, "payload", copy.deepcopy(self.payload))
+        ids = tuple(self.pending_result_ids)
+        if any(not isinstance(value, str) or not value.strip() for value in ids):
+            raise ValueError("model context pending result ids must be non-empty strings")
+        if len(ids) != len(set(ids)):
+            raise ValueError("model context pending result ids must be unique")
+        if not all(isinstance(value, dict) for value in self.replay_results):
+            raise TypeError("model context replay results must be objects")
+        object.__setattr__(self, "pending_result_ids", ids)
+        object.__setattr__(self, "replay_results", tuple(copy.deepcopy(self.replay_results)))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the checkpoint for Engine-private persistence."""
@@ -74,7 +85,76 @@ class ModelContextCheckpoint:
             "source_message_digest": self.source_message_digest,
             "payload": copy.deepcopy(self.payload),
             "revision": self.revision,
+            "pending_result_ids": list(self.pending_result_ids),
+            "replay_results": copy.deepcopy(list(self.replay_results)),
         }
+
+    def validated_replay_results(self, pending_ids: tuple[str, ...]) -> dict[str, dict[str, Any]]:
+        """Validate durable results against the native calls retained in a checkpoint.
+
+        Adapters provide the exact pending identities from their native payload.
+        Engine supplies results restored from canonical execution Events.
+
+        Examples:
+            Validate a checkpoint without pending calls:
+                ```python
+                assert checkpoint.validated_replay_results(()) == {}
+                ```
+            Validate one completed call:
+                ```python
+                results = checkpoint.validated_replay_results(("call_1",))
+                assert results["call_1"]["kind"] == "tool_output"
+                ```
+
+        Args:
+            self: Provider-bound context checkpoint with restored result records.
+            pending_ids: Native identities requiring results during explicit replay.
+
+        Returns:
+            dict[str, dict[str, Any]]: Exact, unique completed results by call identity.
+
+        Notes:
+            Missing or conflicting results fail before provider I/O. They never
+            authorize re-execution of an already completed Tool.
+        """
+        from .tool_calling import LLMToolCallResponseError
+        from .tool_discovery import ToolDiscoveryError, ToolDiscoveryResult
+
+        results: dict[str, dict[str, Any]] = {}
+        for value in self.replay_results:
+            try:
+                if value.get("kind") == "tool_output":
+                    if not isinstance(value.get("call_id"), str) or not isinstance(
+                        value.get("output"), str
+                    ):
+                        raise ValueError("Tool replay requires an exact serialized output")
+                elif value.get("kind") == "discovery_result":
+                    discovery = {key: item for key, item in value.items() if key != "kind"}
+                    if discovery.get("error") is not None:
+                        discovery["error"] = ToolDiscoveryError(**discovery["error"])
+                    ToolDiscoveryResult(**discovery)
+                else:
+                    raise ValueError("Unknown replay result kind")
+            except (TypeError, ValueError) as exc:
+                raise LLMToolCallResponseError(
+                    code="model_context_replay_result_invalid",
+                    message="Provider context replay contains an invalid durable result.",
+                ) from exc
+            identity = str(value.get("call_id") or value.get("provider_reference_id") or "")
+            if identity not in pending_ids or (identity in results and results[identity] != value):
+                raise LLMToolCallResponseError(
+                    code="model_context_replay_result_conflict",
+                    message="Provider context replay has an unexpected or conflicting result.",
+                )
+            results[identity] = copy.deepcopy(value)
+        missing = [identity for identity in pending_ids if identity not in results]
+        if missing:
+            raise LLMToolCallResponseError(
+                code="model_context_replay_result_missing",
+                message="Provider context replay is missing durable results for: "
+                + ", ".join(missing),
+            )
+        return results
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> ModelContextCheckpoint:

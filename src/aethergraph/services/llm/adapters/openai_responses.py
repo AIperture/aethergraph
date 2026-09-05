@@ -1039,15 +1039,76 @@ class OpenAIResponsesAdapter:
         )
 
         body: dict[str, Any] = {"model": model, "input": input_messages}
-        if context_checkpoint is not None:
+        has_pending_continuation = bool(
+            tool_request is not None
+            and tool_request.transport_checkpoint is not None
+            and tool_request.transport_checkpoint.purpose
+            in {"pending_tool_outputs", "pending_discovery_result"}
+        )
+        if context_checkpoint is not None and not has_pending_continuation:
             if context_checkpoint.protocol != "responses.context_management.compact":
                 raise ValueError("OpenAI model context checkpoint protocol mismatch")
             appended = validate_model_context_prefix(messages, context_checkpoint)
             compacted_input = context_checkpoint.payload.get("compacted_input")
             if not isinstance(compacted_input, list) or not compacted_input:
                 raise ValueError("OpenAI model context checkpoint has no compacted input")
+            pending_items = [
+                item
+                for item in compacted_input
+                if item.get("type") == "function_call"
+                or (item.get("type") == "tool_search_call" and item.get("execution") == "client")
+            ]
+            results = context_checkpoint.validated_replay_results(
+                tuple(str(item.get("call_id") or "") for item in pending_items)
+            )
+            replay_outputs = []
+            for item in pending_items:
+                call_id = str(item["call_id"])
+                result = results[call_id]
+                if item["type"] == "function_call":
+                    if result.get("kind") != "tool_output" or not isinstance(
+                        result.get("output"), str
+                    ):
+                        raise LLMToolCallResponseError(
+                            code="model_context_replay_result_invalid",
+                            message="OpenAI context replay requires an exact Tool output.",
+                        )
+                    replay_outputs.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": result["output"],
+                        }
+                    )
+                else:
+                    if result.get("kind") != "discovery_result" or tool_request is None:
+                        raise LLMToolCallResponseError(
+                            code="model_context_replay_result_invalid",
+                            message="OpenAI context replay requires a discovery result.",
+                        )
+                    names = set(result.get("tool_names") or [])
+                    loaded = [tool for tool in tool_request.tools if tool.name in names]
+                    if {tool.name for tool in loaded} != names:
+                        raise LLMToolCallResponseError(
+                            code="model_context_replay_result_invalid",
+                            message="OpenAI context replay discovery declarations are missing.",
+                        )
+                    replay_outputs.append(
+                        {
+                            "type": "tool_search_output",
+                            "execution": "client",
+                            "call_id": call_id,
+                            "status": "completed"
+                            if result.get("status") == "completed"
+                            else "incomplete",
+                            "tools": [
+                                _openai_function_tool(tool, defer_loading=True) for tool in loaded
+                            ],
+                        }
+                    )
             body["input"] = [
                 *[dict(item) for item in compacted_input if isinstance(item, dict)],
+                *replay_outputs,
                 *_normalize_openai_responses_input(appended),
             ]
         if context_management is not None:
@@ -1237,13 +1298,28 @@ class OpenAIResponsesAdapter:
             compaction_items = [item for item in output_items if item.get("type") == "compaction"]
             next_context_checkpoint = context_checkpoint
             if compaction_items:
+                boundary = max(
+                    index
+                    for index, item in enumerate(output_items)
+                    if item.get("type") == "compaction"
+                )
+                replay_input = output_items[boundary:]
                 next_context_checkpoint = ModelContextCheckpoint(
                     provider="openai",
                     model=model,
                     protocol="responses.context_management.compact",
                     source_message_count=len(messages),
                     source_message_digest=model_context_message_digest(messages),
-                    payload={"compacted_input": output_items},
+                    payload={"compacted_input": replay_input},
+                    pending_result_ids=tuple(
+                        str(item["call_id"])
+                        for item in replay_input
+                        if item.get("type") == "function_call"
+                        or (
+                            item.get("type") == "tool_search_call"
+                            and item.get("execution") == "client"
+                        )
+                    ),
                     revision=(context_checkpoint.revision + 1 if context_checkpoint else 1),
                 )
             if data.get("status") == "incomplete":

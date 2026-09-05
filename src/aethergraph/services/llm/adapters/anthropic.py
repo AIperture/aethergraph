@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -168,6 +169,7 @@ def _anthropic_checkpoint(
     assistant_content: list[dict[str, Any]] | None = None,
     search_call_id: str = "",
     pending_calls: list[dict[str, str]] | None = None,
+    server_context_messages: list[dict[str, Any]] | None = None,
 ) -> ToolTransportCheckpoint:
     """Build one integrity-bound Anthropic full-history checkpoint.
 
@@ -207,6 +209,7 @@ def _anthropic_checkpoint(
         assistant_content: Exact prior assistant blocks for pending replay.
         search_call_id: Exact custom search Tool-use identity.
         pending_calls: Exact ordinary Tool-use identities and names awaiting results.
+        server_context_messages: Exact submitted native history in server compaction mode.
 
     Returns:
         ToolTransportCheckpoint: Bounded latest full-history checkpoint.
@@ -227,6 +230,8 @@ def _anthropic_checkpoint(
         "pending_calls": list(pending_calls or []),
         "active_tool_names": list(request.active_tool_names),
     }
+    if server_context_messages is not None:
+        payload["server_context_messages"] = copy.deepcopy(server_context_messages)
     canonical = json.dumps(
         payload,
         ensure_ascii=True,
@@ -418,6 +423,7 @@ def _anthropic_tool_call_response(
     tool_request: ToolCallRequest,
     model: str,
     stable_messages: list[dict[str, Any]],
+    server_context_messages: list[dict[str, Any]] | None = None,
 ) -> ToolCallResponse:
     """Normalize ordered Anthropic discovery and Tool-use blocks.
 
@@ -452,6 +458,7 @@ def _anthropic_tool_call_response(
         tool_request: Exact request used for this decision.
         model: Exact Anthropic model binding.
         stable_messages: Original provider-projected prompt messages.
+        server_context_messages: Exact native request history for server compaction continuation.
 
     Returns:
         ToolCallResponse: Ordered provider-neutral items and private checkpoint.
@@ -660,6 +667,7 @@ def _anthropic_tool_call_response(
             state="pending_search",
             assistant_content=[dict(block) for block in blocks if isinstance(block, dict)],
             search_call_id=client_search_ids[0],
+            server_context_messages=server_context_messages,
         )
     elif pending_calls and str(tool_request.turn_id or "").strip():
         checkpoint = _anthropic_checkpoint(
@@ -669,6 +677,7 @@ def _anthropic_tool_call_response(
             state="pending_tool_outputs",
             assistant_content=[dict(block) for block in blocks if isinstance(block, dict)],
             pending_calls=pending_calls,
+            server_context_messages=server_context_messages,
         )
     elif tool_request.transport_checkpoint is not None:
         prior = _anthropic_checkpoint_payload(
@@ -905,7 +914,58 @@ class AnthropicMessagesAdapter:
             compaction_block = context_checkpoint.payload.get("compaction_block")
             if not isinstance(compaction_block, dict) or not compaction_block.get("content"):
                 raise ValueError("Anthropic model context checkpoint has no usable block")
-            conv = [{"role": "assistant", "content": [dict(compaction_block)]}]
+            retained_blocks = context_checkpoint.payload.get(
+                "assistant_content", [dict(compaction_block)]
+            )
+            pending_ids = tuple(
+                str(block["id"]) for block in retained_blocks if block.get("type") == "tool_use"
+            )
+            has_pending_continuation = bool(
+                tool_request is not None
+                and tool_request.transport_checkpoint is not None
+                and tool_request.transport_checkpoint.purpose
+                in {"pending_tool_outputs", "pending_discovery_result"}
+            )
+            conv = [{"role": "assistant", "content": list(retained_blocks)}]
+            if not has_pending_continuation:
+                results = context_checkpoint.validated_replay_results(pending_ids)
+                result_blocks = []
+                for call_id in pending_ids:
+                    result = results[call_id]
+                    if result.get("kind") == "tool_output":
+                        content = result["output"]
+                    elif result.get("kind") == "discovery_result":
+                        names = set(result.get("tool_names") or [])
+                        if tool_request is None or not names.issubset(
+                            {tool.name for tool in tool_request.tools}
+                        ):
+                            raise LLMToolCallResponseError(
+                                code="model_context_replay_result_invalid",
+                                message="Anthropic context replay discovery declarations are missing.",
+                            )
+                        content = (
+                            [
+                                {"type": "tool_reference", "tool_name": name}
+                                for name in result.get("tool_names", [])
+                            ]
+                            if result.get("status") == "completed"
+                            else json.dumps(result.get("error"))
+                        )
+                    else:
+                        raise LLMToolCallResponseError(
+                            code="model_context_replay_result_invalid",
+                            message="Anthropic context replay result kind is invalid.",
+                        )
+                    result_blocks.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": content,
+                            "is_error": result.get("status") == "failed",
+                        }
+                    )
+                if result_blocks:
+                    conv.append({"role": "user", "content": result_blocks})
             for message in appended:
                 if message.get("role") == "system":
                     continue
@@ -920,6 +980,14 @@ class AnthropicMessagesAdapter:
                 model=model,
                 stable_messages=messages,
             )
+            if context_management is not None:
+                native_history = checkpoint_payload.get("server_context_messages")
+                if not isinstance(native_history, list):
+                    raise LLMToolCallResponseError(
+                        code="model_context_continuation_history_missing",
+                        message="Anthropic server continuation has no native request history.",
+                    )
+                conv = copy.deepcopy(native_history)
             if checkpoint_payload["state"] == "pending_search":
                 discovery_result = tool_request.discovery_result
                 pending_search_call_id = str(checkpoint_payload.get("search_call_id") or "")
@@ -1019,6 +1087,24 @@ class AnthropicMessagesAdapter:
                         ],
                     }
                 )
+
+        if context_management is not None:
+            # The latest compaction block replaces exactly the preceding prefix.
+            for message_index in range(len(conv) - 1, -1, -1):
+                content = conv[message_index].get("content")
+                if not isinstance(content, list):
+                    continue
+                boundaries = [
+                    index
+                    for index, block in enumerate(content)
+                    if block.get("type") == "compaction"
+                ]
+                if boundaries:
+                    conv = [
+                        {**conv[message_index], "content": content[boundaries[-1] :]},
+                        *conv[message_index + 1 :],
+                    ]
+                    break
 
         payload: dict[str, Any] = {
             "model": model,
@@ -1122,13 +1208,25 @@ class AnthropicMessagesAdapter:
                 )
             next_context_checkpoint = context_checkpoint
             if compaction_blocks:
+                boundary = max(
+                    index for index, block in enumerate(blocks) if block.get("type") == "compaction"
+                )
+                retained_blocks = blocks[boundary:]
                 next_context_checkpoint = ModelContextCheckpoint(
                     provider="anthropic",
                     model=model,
                     protocol="compact-2026-01-12",
                     source_message_count=len(messages),
                     source_message_digest=model_context_message_digest(messages),
-                    payload={"compaction_block": compaction_blocks[-1]},
+                    payload={
+                        "compaction_block": compaction_blocks[-1],
+                        "assistant_content": retained_blocks,
+                    },
+                    pending_result_ids=tuple(
+                        str(block["id"])
+                        for block in retained_blocks
+                        if block.get("type") == "tool_use"
+                    ),
                     revision=(context_checkpoint.revision + 1 if context_checkpoint else 1),
                 )
 
@@ -1142,6 +1240,7 @@ class AnthropicMessagesAdapter:
                     tool_request=tool_request,
                     model=model,
                     stable_messages=messages,
+                    server_context_messages=conv if context_management is not None else None,
                 )
                 return ProviderCallResult(
                     (
