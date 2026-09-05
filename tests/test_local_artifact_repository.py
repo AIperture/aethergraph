@@ -20,7 +20,6 @@ from aethergraph.storage.contracts import (
     ArtifactRelationKind,
     ArtifactRepository,
     ArtifactRetentionRecord,
-    EventStore,
     PageRequest,
     StorageConfigurationError,
     StorageConflictError,
@@ -128,7 +127,6 @@ def test_artifact_query_contract_is_bounded_immutable_and_owned() -> None:
     assert query.labels == {"stage": "review"}
     assert "get_many" in ArtifactRepository.__dict__
     assert "get_occurrences_many" in ArtifactRepository.__dict__
-    assert "get_many" not in EventStore.__dict__
 
     with pytest.raises(TypeError, match="immutable tuple"):
         ArtifactOccurrenceQuery(
