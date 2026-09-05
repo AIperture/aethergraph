@@ -71,7 +71,9 @@ def _gemini_stable_contents(messages: list[dict[str, Any]]) -> list[dict[str, An
 def _gemini_messages_digest(messages: list[dict[str, Any]]) -> str:
     """Bind private Gemini replay state to the exact stable prompt."""
 
-    canonical = json.dumps(messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        messages, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -91,12 +93,18 @@ def _gemini_checkpoint(
         "state": "pending_tool_outputs",
         "tool_contract_fingerprint": tool_call_request_fingerprint(request),
         "prompt_message_count": len(stable_messages),
-        "root_message_count": (previous.opaque_payload["root_message_count"] if previous is not None else len(stable_messages)),
+        "root_message_count": (
+            previous.opaque_payload["root_message_count"]
+            if previous is not None
+            else len(stable_messages)
+        ),
         "prompt_digest": _gemini_messages_digest(stable_messages),
         "replay_contents": list(replay_contents),
         "pending_calls": list(pending_calls),
     }
-    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return ToolTransportCheckpoint(
         checkpoint_id=f"google_generate_content_{revision}_{digest[:16]}",
@@ -130,7 +138,9 @@ def _gemini_checkpoint_payload(
             message="Gemini Tool checkpoint binding does not match.",
         )
     payload = dict(checkpoint.opaque_payload or {})
-    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps(
+        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     if digest != checkpoint.integrity_digest:
         raise LLMToolCallResponseError(
@@ -142,14 +152,21 @@ def _gemini_checkpoint_payload(
             code="model_continuation_state_invalid",
             message="Gemini Tool checkpoint state is invalid.",
         )
-    if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(request):
+    if payload.get("tool_contract_fingerprint") != tool_call_request_fingerprint(
+        request
+    ):
         raise LLMToolCallResponseError(
             code="model_exchange_tool_contract_changed",
             message="Gemini Tool checkpoint contract changed.",
         )
     prior_count = payload.get("prompt_message_count")
-    if (not isinstance(prior_count, int) or prior_count < 0 or prior_count > len(stable_messages)
-        or payload.get("prompt_digest") != _gemini_messages_digest(stable_messages[:prior_count])):
+    if (
+        not isinstance(prior_count, int)
+        or prior_count < 0
+        or prior_count > len(stable_messages)
+        or payload.get("prompt_digest")
+        != _gemini_messages_digest(stable_messages[:prior_count])
+    ):
         raise LLMToolCallResponseError(
             code="prompt_continuation_diverged",
             message="Gemini Tool checkpoint prompt changed.",
@@ -160,7 +177,11 @@ def _gemini_checkpoint_payload(
             code="model_continuation_pending_calls_invalid",
             message="Gemini Tool checkpoint has no pending calls.",
         )
-    call_ids = [str(item.get("call_id") or "") for item in pending_calls if isinstance(item, dict)]
+    call_ids = [
+        str(item.get("call_id") or "")
+        for item in pending_calls
+        if isinstance(item, dict)
+    ]
     if len(call_ids) != len(pending_calls) or any(not call_id for call_id in call_ids):
         raise LLMToolCallResponseError(
             code="model_continuation_pending_calls_invalid",
@@ -221,7 +242,9 @@ def _gemini_continuation_contents(
         stable_messages=messages,
     )
     pending_calls = tuple(dict(item) for item in payload["pending_calls"])
-    outputs_by_id = {output.call_id: output.output for output in tool_request.tool_outputs}
+    outputs_by_id = {
+        output.call_id: output.output for output in tool_request.tool_outputs
+    }
     pending_ids = {str(item["call_id"]) for item in pending_calls}
     if set(outputs_by_id) != pending_ids:
         raise LLMToolCallResponseError(
@@ -232,7 +255,9 @@ def _gemini_continuation_contents(
     for item in pending_calls:
         response: dict[str, Any] = {
             "name": str(item["name"]),
-            "response": _gemini_tool_output_response(outputs_by_id[str(item["call_id"])]),
+            "response": _gemini_tool_output_response(
+                outputs_by_id[str(item["call_id"])]
+            ),
         }
         provider_call_id = str(item.get("provider_call_id") or "").strip()
         if provider_call_id:
@@ -241,9 +266,12 @@ def _gemini_continuation_contents(
     replay = (
         *(dict(content) for content in payload["replay_contents"]),
         {"role": "user", "parts": result_parts},
-        *_gemini_stable_contents(messages[payload["prompt_message_count"]:]),
+        *_gemini_stable_contents(messages[payload["prompt_message_count"] :]),
     )
-    return [*_gemini_stable_contents(messages[:payload["root_message_count"]]), *replay], replay
+    return [
+        *_gemini_stable_contents(messages[: payload["root_message_count"]]),
+        *replay,
+    ], replay
 
 
 def _gemini_tool_call_response(
@@ -303,7 +331,9 @@ def _gemini_tool_call_response(
                 message=f"Gemini returned unknown Tool {name or '?'}.",
             )
         metadata: dict[str, Any] = {"part_index": part_index}
-        thought_signature = part.get("thoughtSignature") or part.get("thought_signature")
+        thought_signature = part.get("thoughtSignature") or part.get(
+            "thought_signature"
+        )
         if thought_signature is not None:
             metadata["thought_signature"] = thought_signature
         provider_call_id = str(function_call.get("id") or part.get("id") or "").strip()
@@ -353,6 +383,22 @@ def _gemini_tool_call_response(
         },
         transport_checkpoint=checkpoint,
     )
+
+
+def _gemini_request_tools(tool_request: ToolCallRequest) -> list[dict[str, Any]]:
+    """Encode the declaration payload shared by generation and estimation."""
+    return [
+        {
+            "functionDeclarations": [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": _gemini_function_parameters(tool.input_schema),
+                }
+                for tool in tool_request.tools
+            ]
+        }
+    ]
 
 
 def _gemini_generate_content_payload(
@@ -452,20 +498,11 @@ def _gemini_generate_content_payload(
         "generationConfig": generation_config,
     }
     if tool_request is not None:
-        payload["tools"] = [
-            {
-                "functionDeclarations": [
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": _gemini_function_parameters(tool.input_schema),
-                    }
-                    for tool in tool_request.tools
-                ]
-            }
-        ]
+        payload["tools"] = _gemini_request_tools(tool_request)
         function_calling_config: dict[str, Any] = {
-            "mode": {"auto": "AUTO", "required": "ANY", "none": "NONE"}[tool_request.choice],
+            "mode": {"auto": "AUTO", "required": "ANY", "none": "NONE"}[
+                tool_request.choice
+            ],
         }
         if tool_request.choice == "required":
             function_calling_config["allowedFunctionNames"] = [
@@ -610,7 +647,9 @@ class GeminiGenerateContentAdapter:
         if tool_request is not None and (
             structured_output_fields or output_format in {"json_object", "json_schema"}
         ):
-            raise ValueError("Native Tool calling cannot be combined with structured output")
+            raise ValueError(
+                "Native Tool calling cannot be combined with structured output"
+            )
 
         async def _call():
             """Issue the already-validated unary GenerateContent request.
@@ -642,7 +681,9 @@ class GeminiGenerateContentAdapter:
             """
 
             thinking_cfg = host._gemini_thinking_config(
-                model=model, reasoning_effort=reasoning_effort, thinking_mode=thinking_mode
+                model=model,
+                reasoning_effort=reasoning_effort,
+                thinking_mode=thinking_mode,
             )
             if tool_request is None:
                 provider_contents = _gemini_stable_contents(messages)
@@ -698,7 +739,9 @@ class GeminiGenerateContentAdapter:
                     ),
                     metadata,
                 )
-            txt = "".join(p.get("text", "") for p in (cand.get("content", {}).get("parts") or []))
+            txt = "".join(
+                p.get("text", "") for p in (cand.get("content", {}).get("parts") or [])
+            )
             return ProviderCallResult((txt, usage), metadata)
 
         return await _call()
@@ -806,7 +849,9 @@ class GeminiGenerateContentAdapter:
         ) as response:
             if response.is_error:
                 await response.aread()
-            metadata = checked_response_metadata("google", model, "chat_stream", response)
+            metadata = checked_response_metadata(
+                "google", model, "chat_stream", response
+            )
 
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):

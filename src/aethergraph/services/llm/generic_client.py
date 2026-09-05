@@ -18,9 +18,15 @@ import httpx
 
 from aethergraph.config.config import LLMUsageQuotaSettings
 from aethergraph.contracts import JsonValue
-from aethergraph.contracts.services.llm import ImageGenerationClientProtocol, LLMClientProtocol
+from aethergraph.contracts.services.llm import (
+    ImageGenerationClientProtocol,
+    LLMClientProtocol,
+)
 from aethergraph.contracts.services.metering import MeteringService
-from aethergraph.core.runtime.runtime_metering import current_meter_context, current_metering
+from aethergraph.core.runtime.runtime_metering import (
+    current_meter_context,
+    current_metering,
+)
 from aethergraph.core.schema_validation import first_schema_issue
 from aethergraph.observability.operations import resolve_operation_observer
 from aethergraph.services.llm.adapters import (
@@ -29,8 +35,12 @@ from aethergraph.services.llm.adapters import (
     invoke_chat_adapter,
     invoke_chat_stream_adapter,
 )
-from aethergraph.services.llm.compat.endpoint_selection import resolve_legacy_chat_adapter
-from aethergraph.services.llm.compat.image_generation import image_client_from_legacy_chat
+from aethergraph.services.llm.compat.endpoint_selection import (
+    resolve_legacy_chat_adapter,
+)
+from aethergraph.services.llm.compat.image_generation import (
+    image_client_from_legacy_chat,
+)
 from aethergraph.services.llm.contracts import ModelRequest
 from aethergraph.services.llm.correlation import begin_llm_call_correlation
 from aethergraph.services.llm.credentials import resolve_provider_credential
@@ -58,7 +68,10 @@ from aethergraph.services.llm.provider_transport import (
     ProviderRetrySettings,
     checked_response_metadata,
 )
-from aethergraph.services.llm.registry import provider_default_base_url, resolve_endpoint_adapter
+from aethergraph.services.llm.registry import (
+    provider_default_base_url,
+    resolve_endpoint_adapter,
+)
 from aethergraph.services.llm.request_preparation import (
     prepare_chat_messages,
     prepare_model_request,
@@ -227,9 +240,9 @@ def _tool_call_truncation_receipt(
     if not incomplete_reason:
         return None
     return {
-        "provider_status": str(metadata.get("provider_status") or finish_reason or "incomplete")[
-            :120
-        ],
+        "provider_status": str(
+            metadata.get("provider_status") or finish_reason or "incomplete"
+        )[:120],
         "finish_reason": finish_reason[:120],
         "incomplete_reason": incomplete_reason[:500],
         "provider_response_id": str(metadata.get("response_id") or "")[:500],
@@ -458,7 +471,9 @@ class GenericLLMClient(LLMClientProtocol):
             secret_ref=None,
             secrets=None,
         ).value
-        resolved_base_url = base_url or provider_default_base_url(resolved_provider) or ""
+        resolved_base_url = (
+            base_url or provider_default_base_url(resolved_provider) or ""
+        )
         endpoint_family = resolve_legacy_chat_adapter(
             resolved_provider,
             resolved_endpoint,
@@ -699,8 +714,12 @@ class GenericLLMClient(LLMClientProtocol):
             if prior == checkpoint:
                 return prior_ref
             if prior is not None and checkpoint.revision <= prior.revision:
-                raise ValueError("Tool transport checkpoint revision must advance monotonically")
-        reference = checkpoint.durable_ref or self._inline_checkpoint_reference(checkpoint)
+                raise ValueError(
+                    "Tool transport checkpoint revision must advance monotonically"
+                )
+        reference = checkpoint.durable_ref or self._inline_checkpoint_reference(
+            checkpoint
+        )
         if prior_ref is not None and prior_ref != reference:
             self._tool_transport_checkpoints.pop(prior_ref, None)
         self._tool_transport_checkpoints[reference] = checkpoint
@@ -906,7 +925,9 @@ class GenericLLMClient(LLMClientProtocol):
         """
 
         if not isinstance(capabilities, ToolDiscoveryCapabilities):
-            raise TypeError("tool discovery capabilities must be ToolDiscoveryCapabilities")
+            raise TypeError(
+                "tool discovery capabilities must be ToolDiscoveryCapabilities"
+            )
         self._validate_tool_discovery_binding(
             capabilities=capabilities,
             model=self.model,
@@ -999,7 +1020,9 @@ class GenericLLMClient(LLMClientProtocol):
             if discovery is not None
             else "tool_discovery_binding"
         )
-        endpoint_family = self._resolve_chat_adapter(has_tool_request=True).protocol_family
+        endpoint_family = self._resolve_chat_adapter(
+            has_tool_request=True
+        ).protocol_family
         if not endpoint_family:
             raise LLMToolCallCapabilityError(
                 provider=self.provider,
@@ -1056,9 +1079,13 @@ class GenericLLMClient(LLMClientProtocol):
             )
         return mode_capability
 
-    def _normalize_output_format(self, output_format: ChatOutputFormat) -> ChatOutputFormat:
+    def _normalize_output_format(
+        self, output_format: ChatOutputFormat
+    ) -> ChatOutputFormat:
         if output_format == "json":
-            self._logger.warning("output_format='json' is deprecated; use 'json_object' instead.")
+            self._logger.warning(
+                "output_format='json' is deprecated; use 'json_object' instead."
+            )
             return "json_object"
         return output_format
 
@@ -1217,7 +1244,9 @@ class GenericLLMClient(LLMClientProtocol):
         return {}
 
     def _resolve_reasoning_effort(self, reasoning_effort: str | None) -> str | None:
-        return reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+        return (
+            reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+        )
 
     @staticmethod
     def _prune_none(value: dict[str, Any]) -> dict[str, Any]:
@@ -1250,21 +1279,33 @@ class GenericLLMClient(LLMClientProtocol):
             ),
             "reasoning_effort": reasoning_effort,
             "thinking_mode": extra_params.get("thinking_mode", self.thinking_mode),
-            "thinking_budget": extra_params.get("thinking_budget", self.thinking_budget),
-            "reasoning_summary": extra_params.get("reasoning_summary", self.reasoning_summary),
+            "thinking_budget": extra_params.get(
+                "thinking_budget", self.thinking_budget
+            ),
+            "reasoning_summary": extra_params.get(
+                "reasoning_summary", self.reasoning_summary
+            ),
             "max_output_tokens": max_output_tokens,
             "output_format": output_format,
             "validate_json": (
-                validate_json if output_format in ("json_object", "json_schema") else None
+                validate_json
+                if output_format in ("json_object", "json_schema")
+                else None
             ),
             "strict_schema": strict_schema if output_format == "json_schema" else None,
             "schema_name": (
-                schema_name if output_format == "json_schema" and schema_name != "output" else None
+                schema_name
+                if output_format == "json_schema" and schema_name != "output"
+                else None
             ),
-            "json_schema_present": bool(json_schema) if output_format == "json_schema" else None,
+            "json_schema_present": bool(json_schema)
+            if output_format == "json_schema"
+            else None,
             "deprecated_parameters": list(deprecated_parameters) or None,
             "structured_output_effective_mode": (
-                prepared_structured_output.mode if prepared_structured_output is not None else None
+                prepared_structured_output.mode
+                if prepared_structured_output is not None
+                else None
             ),
             "structured_output_capability_source": (
                 prepared_structured_output.capabilities.source
@@ -1280,7 +1321,8 @@ class GenericLLMClient(LLMClientProtocol):
                     }
                     for item in prepared_structured_output.diagnostics
                 ]
-                if prepared_structured_output is not None and prepared_structured_output.diagnostics
+                if prepared_structured_output is not None
+                and prepared_structured_output.diagnostics
                 else None
             ),
             "structured_output_canonical_schema_fingerprint": (
@@ -1303,7 +1345,9 @@ class GenericLLMClient(LLMClientProtocol):
             "top_p": extra_params.get("top_p"),
             "tool_choice": extra_params.get("tool_choice"),
             "tools_count": (
-                len(extra_params.get("tools") or []) if extra_params.get("tools") else None
+                len(extra_params.get("tools") or [])
+                if extra_params.get("tools")
+                else None
             ),
         }
         return self._prune_none(args)
@@ -1344,9 +1388,13 @@ class GenericLLMClient(LLMClientProtocol):
                                             else None
                                         )
                                     ),
-                                    "name": schema_name if output_format == "json_schema" else None,
+                                    "name": schema_name
+                                    if output_format == "json_schema"
+                                    else None,
                                     "strict": (
-                                        strict_schema if output_format == "json_schema" else None
+                                        strict_schema
+                                        if output_format == "json_schema"
+                                        else None
                                     ),
                                     "schema_present": (
                                         bool(json_schema)
@@ -1370,7 +1418,9 @@ class GenericLLMClient(LLMClientProtocol):
             elif thinking_mode == "on":
                 thinking = {
                     "type": "enabled",
-                    "budget_tokens": extra_params.get("thinking_budget", self.thinking_budget),
+                    "budget_tokens": extra_params.get(
+                        "thinking_budget", self.thinking_budget
+                    ),
                 }
             return self._prune_none(
                 {
@@ -1391,7 +1441,9 @@ class GenericLLMClient(LLMClientProtocol):
                             "thinkingConfig": self._gemini_thinking_config(
                                 model=model,
                                 reasoning_effort=reasoning_effort,
-                                thinking_mode=extra_params.get("thinking_mode", self.thinking_mode),
+                                thinking_mode=extra_params.get(
+                                    "thinking_mode", self.thinking_mode
+                                ),
                             ),
                             "responseMimeType": (
                                 "application/json"
@@ -1399,7 +1451,9 @@ class GenericLLMClient(LLMClientProtocol):
                                 else None
                             ),
                             "responseJsonSchemaPresent": (
-                                bool(json_schema) if output_format == "json_schema" else None
+                                bool(json_schema)
+                                if output_format == "json_schema"
+                                else None
                             ),
                             "maxOutputTokens": max_output_tokens,
                         }
@@ -1414,9 +1468,13 @@ class GenericLLMClient(LLMClientProtocol):
                         if reasoning_effort is not None
                         else None
                     ),
-                    "thinking": self._deepseek_thinking_body(**extra_params).get("thinking"),
+                    "thinking": self._deepseek_thinking_body(**extra_params).get(
+                        "thinking"
+                    ),
                     "response_format": (
-                        {"type": "json_object"} if output_format == "json_object" else None
+                        {"type": "json_object"}
+                        if output_format == "json_object"
+                        else None
                     ),
                     "max_tokens": max_output_tokens,
                 }
@@ -1444,7 +1502,9 @@ class GenericLLMClient(LLMClientProtocol):
             return self._prune_none(
                 {
                     "response_format": (
-                        {"type": "json_object"} if output_format == "json_object" else None
+                        {"type": "json_object"}
+                        if output_format == "json_object"
+                        else None
                     ),
                     "max_tokens": max_output_tokens,
                 }
@@ -1453,9 +1513,13 @@ class GenericLLMClient(LLMClientProtocol):
             return self._prune_none(
                 {
                     "response_format": (
-                        {"type": "json_object"} if output_format == "json_object" else None
+                        {"type": "json_object"}
+                        if output_format == "json_object"
+                        else None
                     ),
-                    "schema_present": bool(json_schema) if output_format == "json_schema" else None,
+                    "schema_present": bool(json_schema)
+                    if output_format == "json_schema"
+                    else None,
                     "max_tokens": max_output_tokens,
                 }
             )
@@ -1470,13 +1534,17 @@ class GenericLLMClient(LLMClientProtocol):
     ) -> list[str]:
         notes: list[str] = []
         if output_format == "json_object" and self.provider == "deepseek":
-            notes.append("DeepSeek JSON output also requires prompt-side JSON instructions.")
+            notes.append(
+                "DeepSeek JSON output also requires prompt-side JSON instructions."
+            )
         if output_format == "json_object" and self.provider == "lmstudio":
             notes.append(
                 "LM Studio json_object uses response_format.type='text' plus prompt-side JSON instructions and local validation."
             )
         if output_format == "json_schema" and self.provider == "lmstudio":
-            notes.append("LM Studio json_schema is requested natively and validated locally.")
+            notes.append(
+                "LM Studio json_schema is requested natively and validated locally."
+            )
         if output_format == "json_schema" and self.provider in {
             "deepseek",
             "openrouter",
@@ -1490,10 +1558,15 @@ class GenericLLMClient(LLMClientProtocol):
             notes.append(
                 "OpenAI does not expose a direct thinking-mode knob; thinking_mode is advisory only."
             )
-        if request_args.get("thinking_budget") and self.provider not in {"anthropic", "google"}:
+        if request_args.get("thinking_budget") and self.provider not in {
+            "anthropic",
+            "google",
+        }:
             notes.append("thinking_budget is ignored by this provider.")
         if not provider_request_args:
-            notes.append("No provider-specific request args were captured for this call.")
+            notes.append(
+                "No provider-specific request args were captured for this call."
+            )
         return notes
 
     @staticmethod
@@ -1556,7 +1629,10 @@ class GenericLLMClient(LLMClientProtocol):
 
             container = current_services()
             settings = getattr(container, "settings", None)
-            if settings is not None and getattr(settings, "llm_usage_quota", None) is not None:
+            if (
+                settings is not None
+                and getattr(settings, "llm_usage_quota", None) is not None
+            ):
                 self._usage_quota_cfg = settings.llm_usage_quota
                 return self._usage_quota_cfg
         except Exception:
@@ -1674,7 +1750,9 @@ class GenericLLMClient(LLMClientProtocol):
         """
 
         estimated_input_tokens = self._estimate_messages_tokens(messages)
-        schema = structured_output.schema if structured_output is not None else json_schema
+        schema = (
+            structured_output.schema if structured_output is not None else json_schema
+        )
         if schema is not None:
             estimated_input_tokens += self._estimate_text_tokens(
                 json.dumps(schema, ensure_ascii=False, sort_keys=True, default=str)
@@ -1741,11 +1819,21 @@ class GenericLLMClient(LLMClientProtocol):
         """
 
         self._require_compatible_model_request(request)
+        from dataclasses import replace
+        from .adapters.chat import project_context_tools
+
+        # A captured full Engine projection includes current ledger results;
+        # the immutable transport root may omit provider-resident history.
+        estimate_request = (
+            replace(request, messages=request.effective_messages)
+            if request.effective_messages is not None
+            else request
+        )
         messages, tool_request = prepare_model_request(
-            request,
+            estimate_request,
             image_policy=self.image_preparation_policy,
         )
-        return self.estimate_chat_request(
+        estimate = self.estimate_chat_request(
             messages,
             max_output_tokens=request.generation.max_output_tokens,
             structured_output=(
@@ -1753,7 +1841,24 @@ class GenericLLMClient(LLMClientProtocol):
                 if isinstance(request.response_format, StructuredOutputRequest)
                 else None
             ),
-            tool_request=tool_request,
+            tools=project_context_tools(
+                self._resolve_chat_adapter(has_tool_request=True).adapter_id,
+                tool_request,
+            )
+            if tool_request is not None
+            else None,
+        )
+
+        return replace(
+            estimate,
+            measurement_scope=(
+                "engine_context_projection"
+                if request.effective_messages is not None
+                else "submitted_context_only"
+                if request.continuation is not None
+                or request.context_checkpoint is not None
+                else "logical_context"
+            ),
         )
 
     def _require_compatible_model_request(self, request: ModelRequest) -> None:
@@ -1838,8 +1943,12 @@ class GenericLLMClient(LLMClientProtocol):
                         phase="would be exceeded before provider dispatch",
                     )
             state["reserved_calls"] = reserved_calls + 1
-            state["reserved_input_tokens"] = reserved_input + estimate.estimated_input_tokens
-            state["reserved_output_tokens"] = reserved_output + estimate.reserved_output_tokens
+            state["reserved_input_tokens"] = (
+                reserved_input + estimate.estimated_input_tokens
+            )
+            state["reserved_output_tokens"] = (
+                reserved_output + estimate.reserved_output_tokens
+            )
         return _LLMQuotaReservation(
             run_id=run_id,
             state=state,
@@ -2148,7 +2257,9 @@ class GenericLLMClient(LLMClientProtocol):
         if request.generation.reasoning_budget is not None:
             generation_params["thinking_budget"] = request.generation.reasoning_budget
         if request.generation.reasoning_summary is not None:
-            generation_params["reasoning_summary"] = request.generation.reasoning_summary
+            generation_params["reasoning_summary"] = (
+                request.generation.reasoning_summary
+            )
         return await self._invoke_generation_runtime(
             messages,
             call_name=request.call_name,
@@ -2372,9 +2483,13 @@ class GenericLLMClient(LLMClientProtocol):
                 "json_schema",
                 "json",
             }:
-                raise ValueError("Native Tool calling cannot be combined with structured output")
+                raise ValueError(
+                    "Native Tool calling cannot be combined with structured output"
+                )
             if kw.get("tools") is not None or kw.get("tool_choice") is not None:
-                raise ValueError("tool_request cannot be combined with legacy tools/tool_choice")
+                raise ValueError(
+                    "tool_request cannot be combined with legacy tools/tool_choice"
+                )
             self._validate_tool_discovery_binding(
                 model=model,
                 request=tool_request,
@@ -2400,14 +2515,18 @@ class GenericLLMClient(LLMClientProtocol):
         canonical_json_schema = json_schema
         canonical_strict_validation = strict_schema
         canonical_validation_owner = (
-            structured_output.validation_owner if structured_output is not None else "aethergraph"
+            structured_output.validation_owner
+            if structured_output is not None
+            else "aethergraph"
         )
         prepared_structured_output: PreparedStructuredOutput | None = None
         prepared_prompt_cache: PreparedPromptCache | None = None
         if output_format == "json_schema" and json_schema is not None:
             effective_policy = self.structured_output_policy
             if "fail_on_unsupported" in deprecated_parameters:
-                effective_policy = "native_required" if fail_on_unsupported else "best_available"
+                effective_policy = (
+                    "native_required" if fail_on_unsupported else "best_available"
+                )
             try:
                 prepared_structured_output = prepare_structured_output(
                     StructuredOutputRequest(name=schema_name, schema=json_schema),
@@ -2554,14 +2673,20 @@ class GenericLLMClient(LLMClientProtocol):
         request_args["effective_endpoint_id"] = effective_endpoint_id
         provider_request_args["effective_endpoint_id"] = effective_endpoint_id
         if prepared_structured_output is not None:
-            request_args["structured_output_validation_owner"] = canonical_validation_owner
+            request_args["structured_output_validation_owner"] = (
+                canonical_validation_owner
+            )
             provider_request_args = _merge_request_fields(
                 provider_request_args,
                 prepared_structured_output.provider_request_fields,
             )
         if prepared_prompt_cache is not None:
-            request_args["prompt_cache"] = copy.deepcopy(prepared_prompt_cache.observation)
-            provider_request_args["prompt_cache"] = copy.deepcopy(prepared_prompt_cache.observation)
+            request_args["prompt_cache"] = copy.deepcopy(
+                prepared_prompt_cache.observation
+            )
+            provider_request_args["prompt_cache"] = copy.deepcopy(
+                prepared_prompt_cache.observation
+            )
         request_estimate = self.estimate_chat_request(
             messages,
             max_output_tokens=max_output_tokens,
@@ -2718,8 +2843,8 @@ class GenericLLMClient(LLMClientProtocol):
                 truncation_receipt = _tool_call_truncation_receipt(provider_value)
                 if truncation_receipt is not None:
                     request_args["tool_call_response_receipt"] = truncation_receipt
-                    observation_record.request_args["tool_call_response_receipt"] = copy.deepcopy(
-                        truncation_receipt
+                    observation_record.request_args["tool_call_response_receipt"] = (
+                        copy.deepcopy(truncation_receipt)
                     )
                     observation_record.response_items = list(
                         tool_call_response_item_summaries(provider_value)
@@ -2765,11 +2890,15 @@ class GenericLLMClient(LLMClientProtocol):
                     },
                     usage=ModelUsage.from_provider_usage(usage),
                 )
-            observation_record.response_items = list(tool_call_response_item_summaries(response))
+            observation_record.response_items = list(
+                tool_call_response_item_summaries(response)
+            )
             if prepared_structured_output is not None:
                 if canonical_validation_owner == "caller":
                     request_args["structured_output_validation_outcome"] = "delegated"
-                    request_args["structured_output_response_state"] = "returned_unvalidated"
+                    request_args["structured_output_response_state"] = (
+                        "returned_unvalidated"
+                    )
                 else:
                     request_args["structured_output_validation_outcome"] = "passed"
                     request_args["structured_output_response_state"] = "completed"
@@ -2834,7 +2963,9 @@ class GenericLLMClient(LLMClientProtocol):
                 with contextlib.suppress(Exception):
                     await span.fail(
                         RuntimeError("LLM call interrupted before completion"),
-                        metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+                        metrics={
+                            "latency_ms": int((time.perf_counter() - start) * 1000)
+                        },
                     )
 
     # ================================================================
@@ -3299,7 +3430,9 @@ class GenericLLMClient(LLMClientProtocol):
                 self.provider,
                 self.model,
                 "streaming",
-                (f"endpoint adapter {stream_adapter.adapter_id!r} has no streaming implementation"),
+                (
+                    f"endpoint adapter {stream_adapter.adapter_id!r} has no streaming implementation"
+                ),
             )
         await self._ensure_client()
         output_format = self._normalize_output_format(output_format)
@@ -3410,7 +3543,9 @@ class GenericLLMClient(LLMClientProtocol):
         start = time.perf_counter()
 
         # Resolve thinking config: omitted -> profile default, explicit value -> per-call override.
-        _thinking_budget = self.thinking_budget if thinking_budget is _UNSET else thinking_budget
+        _thinking_budget = (
+            self.thinking_budget if thinking_budget is _UNSET else thinking_budget
+        )
         _reasoning_summary = (
             self.reasoning_summary if reasoning_summary is _UNSET else reasoning_summary
         )
@@ -3518,7 +3653,9 @@ class GenericLLMClient(LLMClientProtocol):
                 with contextlib.suppress(Exception):
                     await span.fail(
                         RuntimeError("LLM stream interrupted before completion"),
-                        metrics={"latency_ms": int((time.perf_counter() - start) * 1000)},
+                        metrics={
+                            "latency_ms": int((time.perf_counter() - start) * 1000)
+                        },
                     )
 
     async def _chat_dispatch(
@@ -3648,7 +3785,9 @@ class GenericLLMClient(LLMClientProtocol):
             return text
 
         candidate = (
-            _strip_schema_enforced_json_fence(text) if output_format == "json_schema" else text
+            _strip_schema_enforced_json_fence(text)
+            if output_format == "json_schema"
+            else text
         )
         json_text, was_truncated, remainder = _extract_json_text(candidate)
         try:
@@ -3679,11 +3818,15 @@ class GenericLLMClient(LLMClientProtocol):
             else:
                 raise LLMStructuredOutputParseError(
                     code="multiple_json_values",
-                    summary=("Model returned multiple JSON values; exactly one is required."),
+                    summary=(
+                        "Model returned multiple JSON values; exactly one is required."
+                    ),
                     path="$",
                     validator="json",
                     canonical_schema_fingerprint=(
-                        _schema_fingerprint(json_schema) if json_schema is not None else ""
+                        _schema_fingerprint(json_schema)
+                        if json_schema is not None
+                        else ""
                     ),
                     response_state="invalid_json",
                 )
