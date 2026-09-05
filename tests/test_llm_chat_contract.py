@@ -3598,6 +3598,25 @@ async def test_openai_responses_server_compaction_returns_replayable_checkpoint(
 
 
 @pytest.mark.asyncio
+async def test_openai_responses_server_compaction_rejects_custom_instructions() -> None:
+    client = GenericLLMClient(provider="openai", model="gpt-5.2", api_key="test")
+    fake_http = _FakeHttpClient({})
+    client._client = fake_http  # type: ignore[assignment]
+    client._bound_loop = asyncio.get_running_loop()
+
+    with pytest.raises(ValueError, match="does not support custom instructions"):
+        await client.generate(
+            ModelRequest(
+                messages=(message_from_text("user", "Start"),),
+                context_management=ModelContextManagement(
+                    trigger_tokens=80_000,
+                    instructions="Preserve exact identifiers.",
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_anthropic_server_compaction_aggregates_usage_and_preserves_block() -> None:
     payload = {
         "id": "msg_compacted",

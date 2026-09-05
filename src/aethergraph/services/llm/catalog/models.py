@@ -114,6 +114,7 @@ class CatalogServerContextCompaction(CatalogContract):
     state: CatalogCapabilityState
     protocol: str = Field(min_length=1, max_length=256)
     minimum_trigger_tokens: int | None = Field(default=None, ge=1)
+    custom_instructions: CatalogCapabilityState = "unknown"
     maturity: Literal["stable", "beta"]
 
 

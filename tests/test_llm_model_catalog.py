@@ -770,9 +770,29 @@ def test_server_compaction_capability_is_catalog_and_endpoint_scoped() -> None:
     assert supported.valid is True
     assert supported.binding.capabilities.server_context_compaction.state == "supported"
     assert any(
-        key == "openai/gpt-5.2-server-context-compaction/v6"
+        key == "openai/gpt-5.2-server-context-compaction/v7"
         for key in supported.binding.catalog_keys
     )
+    openai_entry = resolve_model_catalog_capability_entry(
+        "openai",
+        "gpt-5.2",
+        "chat",
+        "openai_responses",
+        capability="server_context_compaction",
+    )
+    anthropic_entry = resolve_model_catalog_capability_entry(
+        "anthropic",
+        "claude-sonnet-5",
+        "chat",
+        "anthropic_messages",
+        capability="server_context_compaction",
+    )
+    assert openai_entry is not None
+    assert openai_entry.server_context_compaction is not None
+    assert openai_entry.server_context_compaction.custom_instructions == "unsupported"
+    assert anthropic_entry is not None
+    assert anthropic_entry.server_context_compaction is not None
+    assert anthropic_entry.server_context_compaction.custom_instructions == "supported"
 
     unsupported_profile = supported_profile.model_copy(
         update={
