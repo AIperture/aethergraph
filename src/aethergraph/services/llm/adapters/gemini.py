@@ -91,6 +91,7 @@ def _gemini_checkpoint(
         "state": "pending_tool_outputs",
         "tool_contract_fingerprint": tool_call_request_fingerprint(request),
         "prompt_message_count": len(stable_messages),
+        "root_message_count": (previous.opaque_payload["root_message_count"] if previous is not None else len(stable_messages)),
         "prompt_digest": _gemini_messages_digest(stable_messages),
         "replay_contents": list(replay_contents),
         "pending_calls": list(pending_calls),
@@ -146,9 +147,9 @@ def _gemini_checkpoint_payload(
             code="model_exchange_tool_contract_changed",
             message="Gemini Tool checkpoint contract changed.",
         )
-    if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
-        "prompt_digest"
-    ) != _gemini_messages_digest(stable_messages):
+    prior_count = payload.get("prompt_message_count")
+    if (not isinstance(prior_count, int) or prior_count < 0 or prior_count > len(stable_messages)
+        or payload.get("prompt_digest") != _gemini_messages_digest(stable_messages[:prior_count])):
         raise LLMToolCallResponseError(
             code="prompt_continuation_diverged",
             message="Gemini Tool checkpoint prompt changed.",
@@ -240,8 +241,9 @@ def _gemini_continuation_contents(
     replay = (
         *(dict(content) for content in payload["replay_contents"]),
         {"role": "user", "parts": result_parts},
+        *_gemini_stable_contents(messages[payload["prompt_message_count"]:]),
     )
-    return [*stable_contents, *replay], replay
+    return [*_gemini_stable_contents(messages[:payload["root_message_count"]]), *replay], replay
 
 
 def _gemini_tool_call_response(
