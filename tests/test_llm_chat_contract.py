@@ -3586,7 +3586,7 @@ async def test_openai_responses_server_compaction_returns_replayable_checkpoint(
         ],
         "usage": {"input_tokens": 20, "output_tokens": 2},
     }
-    await client.generate(
+    second = await client.generate(
         ModelRequest(
             messages=(*first_messages, message_from_text("user", "Continue")),
             context_management=ModelContextManagement(trigger_tokens=80_000),
@@ -3595,6 +3595,40 @@ async def test_openai_responses_server_compaction_returns_replayable_checkpoint(
     )
     assert fake_http.last_json["input"][0]["type"] == "compaction"
     assert fake_http.last_json["input"][-1]["content"] == "Continue"
+    assert second.context_checkpoint == first.context_checkpoint
+
+    fake_http.payload = {
+        "id": "resp_compacted_again",
+        "status": "completed",
+        "output": [
+            {"type": "compaction", "id": "cmp_2", "encrypted_content": "opaque-2"},
+            {
+                "type": "message",
+                "id": "msg_3",
+                "content": [{"type": "output_text", "text": "Compacted again."}],
+            },
+        ],
+        "usage": {"input_tokens": 100, "output_tokens": 10},
+    }
+    third = await client.generate(
+        ModelRequest(
+            messages=(
+                *first_messages,
+                message_from_text("user", "Continue"),
+                message_from_text("user", "Continue again"),
+            ),
+            context_management=ModelContextManagement(trigger_tokens=80_000),
+            context_checkpoint=second.context_checkpoint,
+        )
+    )
+
+    assert third.context_checkpoint is not None
+    assert third.context_checkpoint.revision == 2
+    assert third.context_checkpoint.payload["compacted_input"][0] == {
+        "type": "compaction",
+        "id": "cmp_2",
+        "encrypted_content": "opaque-2",
+    }
 
 
 @pytest.mark.asyncio
