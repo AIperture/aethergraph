@@ -166,8 +166,32 @@ class ModelContextCheckpoint:
 def model_context_message_digest(messages: list[dict[str, Any]]) -> str:
     """Return a stable digest for a complete provider-projected message prefix."""
 
+    normalized = []
+    for message in messages:
+        row = {
+            key: value
+            for key, value in message.items()
+            if key not in {"cache_control", "prompt_cache_breakpoint"}
+        }
+        content = row.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        if isinstance(content, list):
+            blocks = []
+            for block in content:
+                if isinstance(block, dict):
+                    block = {
+                        key: value
+                        for key, value in block.items()
+                        if key not in {"cache_control", "prompt_cache_breakpoint"}
+                    }
+                    if block.get("type") in {"input_text", "output_text"}:
+                        block["type"] = "text"
+                blocks.append(block)
+            row["content"] = blocks
+        normalized.append(row)
     encoded = json.dumps(
-        messages,
+        normalized,
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),

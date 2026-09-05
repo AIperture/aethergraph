@@ -156,8 +156,7 @@ def _anthropic_request_tools(request: ToolCallRequest) -> list[dict[str, Any]]:
 def _anthropic_messages_digest(messages: list[dict[str, Any]]) -> str:
     """Bind private Anthropic replay state to the exact stable prompt."""
 
-    canonical = json.dumps(messages, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return model_context_message_digest(messages)
 
 
 def _anthropic_checkpoint(
@@ -342,9 +341,12 @@ def _anthropic_checkpoint_payload(
             code="model_exchange_tool_contract_changed",
             message="Anthropic Tool checkpoint contract changed.",
         )
-    if payload.get("prompt_message_count") != len(stable_messages) or payload.get(
-        "prompt_digest"
-    ) != _anthropic_messages_digest(stable_messages):
+    prior_count = payload.get("prompt_message_count")
+    if (
+        not isinstance(prior_count, int)
+        or prior_count > len(stable_messages)
+        or payload.get("prompt_digest") != _anthropic_messages_digest(stable_messages[:prior_count])
+    ):
         raise LLMToolCallResponseError(
             code="prompt_continuation_diverged",
             message="Anthropic Tool checkpoint prompt changed.",
@@ -980,7 +982,7 @@ class AnthropicMessagesAdapter:
                 model=model,
                 stable_messages=messages,
             )
-            if context_management is not None:
+            if checkpoint_payload is not None:
                 native_history = checkpoint_payload.get("server_context_messages")
                 if not isinstance(native_history, list):
                     raise LLMToolCallResponseError(
@@ -1085,6 +1087,22 @@ class AnthropicMessagesAdapter:
                             }
                             for call_id in pending_call_ids
                         ],
+                    }
+                )
+
+        if checkpoint_payload is not None:
+            # Replay pending results before appending fresh Engine context. Native
+            # assistant/tool blocks from all earlier decisions remain intact.
+            for message in messages[checkpoint_payload["prompt_message_count"] :]:
+                if message.get("role") == "system":
+                    raise LLMToolCallResponseError(
+                        code="prompt_continuation_diverged",
+                        message="System changes require a fresh request root.",
+                    )
+                conv.append(
+                    {
+                        "role": "assistant" if message.get("role") == "assistant" else "user",
+                        "content": _anthropic_content_blocks(message),
                     }
                 )
 
@@ -1240,7 +1258,7 @@ class AnthropicMessagesAdapter:
                     tool_request=tool_request,
                     model=model,
                     stable_messages=messages,
-                    server_context_messages=conv if context_management is not None else None,
+                    server_context_messages=conv,
                 )
                 return ProviderCallResult(
                     (

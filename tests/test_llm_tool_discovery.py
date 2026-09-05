@@ -244,6 +244,10 @@ async def test_openai_failed_client_discovery_uses_incomplete_search_output() ->
         response_id="resp_search_1",
         state="pending_search",
         call_id="search_call_1",
+        prompt_message_count=1,
+        prompt_prefix_digest=_openai_prompt_prefix_digest(
+            [{"role": "user", "content": "find a document Tool"}], 1
+        ),
     )
     continued = ToolCallRequest(
         tools=tools,
@@ -324,6 +328,7 @@ async def test_anthropic_failed_client_discovery_uses_tool_result_error() -> Non
         request=initial,
         model="claude-sonnet-4-5-20250929",
         stable_messages=messages,
+        server_context_messages=messages,
         state="pending_search",
         assistant_content=[search_block],
         search_call_id="toolu_search_1",
@@ -826,10 +831,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     assert fake_http.last_json["tool_choice"] == "required"
     assert fake_http.last_json["parallel_tool_calls"] is False
     assert "lexical_queries" in fake_http.last_json["tools"][-1]["description"]
-    assert (
-        "Select no more than 5 Tools"
-        in fake_http.last_json["tools"][-1]["description"]
-    )
+    assert "Select no more than 5 Tools" in fake_http.last_json["tools"][-1]["description"]
     assert "studio.docs" in fake_http.last_json["tools"][-1]["description"]
     assert fake_http.last_json["tools"][-1]["description"].startswith(
         "Root search is disabled. Use the authorized studio.docs path."
@@ -869,7 +871,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         {"role": "user", "content": "ledger observation: read_document activated"},
     ]
     discovery_messages = [
-        *initial_messages[:2],
+        *initial_messages,
         *discovery_ledger,
         {"role": "user", "content": "volatile frame: cycle 1"},
     ]
@@ -877,7 +879,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     second, _usage = await client.chat(
         discovery_messages,
         tool_request=continuation_request,
-        prompt_cache=PromptCacheRequest((0, 1, 2, 3, 4), "agent.ledger.v1"),
+        prompt_cache=PromptCacheRequest((0, 1, 2, 3, 4, 5), "agent.ledger.v1"),
     )
 
     assert isinstance(second, ToolCallResponse)
@@ -958,7 +960,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
         {"role": "user", "content": "ledger observation: ready to finish"},
     ]
     result_messages = [
-        *discovery_messages[:5],
+        *discovery_messages,
         *result_ledger,
         {"role": "user", "content": "volatile frame: cycle 2"},
     ]
@@ -966,7 +968,7 @@ async def test_openai_native_client_search_round_trips_private_checkpoint() -> N
     third, _usage = await client.chat(
         result_messages,
         tool_request=result_request,
-        prompt_cache=PromptCacheRequest(tuple(range(9)), "agent.ledger.v1"),
+        prompt_cache=PromptCacheRequest(tuple(range(11)), "agent.ledger.v1"),
     )
 
     assert isinstance(third, ToolCallResponse)
@@ -1292,8 +1294,8 @@ def test_openai_tool_search_rejects_unknown_execution_value() -> None:
 def test_openai_continuation_rejects_rewritten_stable_prefix() -> None:
     original = [{"role": "system", "content": "stable header"}]
     checkpoint_payload = {
-        "prompt_stable_message_count": 1,
-        "prompt_stable_prefix_digest": _openai_prompt_prefix_digest(original, 1),
+        "prompt_message_count": 1,
+        "prompt_prefix_digest": _openai_prompt_prefix_digest(original, 1),
     }
 
     with pytest.raises(LLMToolCallResponseError) as raised:
@@ -1803,9 +1805,9 @@ async def test_azure_native_client_uses_responses_route_and_checkpoint_binding()
     assert fake_http.last_json["tools"][-1]["type"] == "tool_search"
     assert fake_http.last_json["tool_choice"] == "required"
     assert fake_http.last_json["parallel_tool_calls"] is False
-    assert sink.records[-1].provider_request_facts["tool_projection"][
-        "request_family"
-    ] == "full_root"
+    assert (
+        sink.records[-1].provider_request_facts["tool_projection"]["request_family"] == "full_root"
+    )
 
     calls_before_failed_resolution = fake_http.calls
     with pytest.raises(LLMToolCallResponseError) as unsupported_failure:
@@ -2148,3 +2150,16 @@ async def test_checkpoint_request_binding_rejects_before_provider_traffic() -> N
 
     assert raised.value.code == "model_continuation_binding_mismatch"
     assert fake_http.calls == 0
+
+
+def test_openai_delivery_cursor_is_independent_of_cache_breakpoint():
+    delivered = [{"role": "system", "content": "header"}, {"role": "user", "content": "old tail"}]
+    update = {"role": "user", "content": "fresh retrieved evidence"}
+    checkpoint = {
+        "prompt_message_count": len(delivered),
+        "prompt_prefix_digest": _openai_prompt_prefix_digest(delivered, len(delivered)),
+    }
+    for cache_count in (None, 1, 2, 3):
+        assert _openai_appended_prompt_input(
+            [*delivered, update], stable_message_count=cache_count, checkpoint_payload=checkpoint
+        ) == [update]
