@@ -17,6 +17,7 @@ RequestFeature = Literal[
     "raw_response",
     "structured_output",
     "tool_result_continuation",
+    "server_context_compaction",
 ]
 RequestModelCapability = Literal[
     "image_input",
@@ -27,6 +28,7 @@ RequestModelCapability = Literal[
     "prompt_cache",
     "native_tool_search_hosted",
     "native_tool_search_client",
+    "server_context_compaction",
 ]
 
 
@@ -204,6 +206,9 @@ def validate_model_request(
         required_model.append("structured_output")
     if request.prompt_cache is not None:
         required_model.append("prompt_cache")
+    if request.context_management is not None or request.context_checkpoint is not None:
+        required_adapter.append("server_context_compaction")
+        required_model.append("server_context_compaction")
 
     if has_tools and has_structured_output:
         diagnostics.append(
@@ -262,6 +267,7 @@ def _feature_for_adapter_capability(capability: str) -> RequestFeature:
         "native_tools": "native_tool_calling",
         "native_tool_search": "native_tool_search",
         "structured_output": "structured_output",
+        "server_context_compaction": "server_context_compaction",
     }[capability]
 
 

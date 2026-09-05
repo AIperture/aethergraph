@@ -11,6 +11,12 @@ from typing import Any
 from aethergraph.services.llm._tool_discovery_manifest import (
     render_tool_search_description,
 )
+from aethergraph.services.llm.context_management import (
+    ModelContextCheckpoint,
+    ModelContextManagement,
+    model_context_message_digest,
+    validate_model_context_prefix,
+)
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
     checked_response_metadata,
@@ -122,9 +128,7 @@ def _openai_request_tools(
 
     discovery_mode = request.discovery.mode if request.discovery is not None else None
     active_names = set(
-        request.active_tool_names
-        if active_tool_names is None
-        else active_tool_names
+        request.active_tool_names if active_tool_names is None else active_tool_names
     )
     grouped: dict[str, dict[str, Any]] = {}
     result: list[dict[str, Any]] = []
@@ -214,9 +218,7 @@ def _openai_continuation_request_tools(
     if request.discovery is not None and request.discovery.mode == "native_client":
         declaration_sources = dict(checkpoint_payload["active_tool_sources"])
         omitted_names = {
-            name
-            for name, source in declaration_sources.items()
-            if source == "search_output"
+            name for name, source in declaration_sources.items() if source == "search_output"
         }
         if checkpoint_payload["state"] == "pending_search":
             assert request.discovery_result is not None
@@ -237,18 +239,14 @@ def _openai_provider_tool_projection(
     """Summarize the exact provider-dispatched Tool projection safely."""
 
     top_level_tools = [
-        dict(tool)
-        for tool in list(body.get("tools") or [])
-        if isinstance(tool, dict)
+        dict(tool) for tool in list(body.get("tools") or []) if isinstance(tool, dict)
     ]
     embedded_tools: list[dict[str, Any]] = []
     for item in list(body.get("input") or []):
         if not isinstance(item, dict) or item.get("type") != "tool_search_output":
             continue
         embedded_tools.extend(
-            dict(tool)
-            for tool in list(item.get("tools") or [])
-            if isinstance(tool, dict)
+            dict(tool) for tool in list(item.get("tools") or []) if isinstance(tool, dict)
         )
     fingerprint_input = {
         "tools": top_level_tools,
@@ -263,9 +261,7 @@ def _openai_provider_tool_projection(
         separators=(",", ":"),
     )
     checkpoint_state = (
-        str(checkpoint_payload.get("state") or "")
-        if checkpoint_payload is not None
-        else ""
+        str(checkpoint_payload.get("state") or "") if checkpoint_payload is not None else ""
     )
     request_family = {
         "pending_search": "pending_discovery_result",
@@ -395,9 +391,7 @@ def _openai_checkpoint(
 
     previous = request.transport_checkpoint
     revision = 1 if previous is None else previous.revision + 1
-    active_tool_sources = {
-        name: "request_tools" for name in request.active_tool_names
-    }
+    active_tool_sources = {name: "request_tools" for name in request.active_tool_names}
     if previous is not None:
         previous_payload = _openai_checkpoint_payload(previous, provider=provider)
         previous_sources = dict(previous_payload["active_tool_sources"])
@@ -562,8 +556,7 @@ def _openai_checkpoint_payload(
         not isinstance(active_sources, dict)
         or set(active_sources) != set(active_names)
         or any(
-            source not in {"request_tools", "search_output"}
-            for source in active_sources.values()
+            source not in {"request_tools", "search_output"} for source in active_sources.values()
         )
     ):
         raise LLMToolCallResponseError(
@@ -961,6 +954,8 @@ class OpenAIResponsesAdapter:
         tool_request: ToolCallRequest | None = None,
         prompt_cache_fields: dict[str, Any] | None = None,
         prompt_cache_stable_message_count: int | None = None,
+        context_management: ModelContextManagement | None = None,
+        context_checkpoint: ModelContextCheckpoint | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         """Invoke one OpenAI Responses request.
@@ -1044,6 +1039,24 @@ class OpenAIResponsesAdapter:
         )
 
         body: dict[str, Any] = {"model": model, "input": input_messages}
+        if context_checkpoint is not None:
+            if context_checkpoint.protocol != "responses.context_management.compact":
+                raise ValueError("OpenAI model context checkpoint protocol mismatch")
+            appended = validate_model_context_prefix(messages, context_checkpoint)
+            compacted_input = context_checkpoint.payload.get("compacted_input")
+            if not isinstance(compacted_input, list) or not compacted_input:
+                raise ValueError("OpenAI model context checkpoint has no compacted input")
+            body["input"] = [
+                *[dict(item) for item in compacted_input if isinstance(item, dict)],
+                *_normalize_openai_responses_input(appended),
+            ]
+        if context_management is not None:
+            body["context_management"] = [
+                {
+                    "type": "compaction",
+                    "compact_threshold": context_management.trigger_tokens,
+                }
+            ]
         structured_output_fields = kw.pop("structured_output_fields", None)
         if tool_request is not None and (
             structured_output_fields
@@ -1090,13 +1103,10 @@ class OpenAIResponsesAdapter:
             )
             if checkpoint_payload["state"] == "pending_search":
                 discovery_result = tool_request.discovery_result
-                pending_search_call_id = str(
-                    checkpoint_payload.get("call_id") or ""
-                )
+                pending_search_call_id = str(checkpoint_payload.get("call_id") or "")
                 if (
                     discovery_result is not None
-                    and discovery_result.provider_reference_id
-                    != pending_search_call_id
+                    and discovery_result.provider_reference_id != pending_search_call_id
                 ):
                     raise LLMToolCallResponseError(
                         code="discovery_result_reference_mismatch",
@@ -1135,9 +1145,7 @@ class OpenAIResponsesAdapter:
                     if len(loaded_tools) > tool_request.discovery.max_results:
                         raise LLMToolCallResponseError(
                             code="discovery_result_limit_exceeded",
-                            message=(
-                                "OpenAI client Tool-search results exceed the request bound."
-                            ),
+                            message=("OpenAI client Tool-search results exceed the request bound."),
                         )
                     body["input"] = [
                         {
@@ -1219,6 +1227,21 @@ class OpenAIResponsesAdapter:
 
             data = r.json()
             usage = data.get("usage", {}) or {}
+            output_items = [
+                dict(item) for item in list(data.get("output") or []) if isinstance(item, dict)
+            ]
+            compaction_items = [item for item in output_items if item.get("type") == "compaction"]
+            next_context_checkpoint = context_checkpoint
+            if compaction_items:
+                next_context_checkpoint = ModelContextCheckpoint(
+                    provider="openai",
+                    model=model,
+                    protocol="responses.context_management.compact",
+                    source_message_count=len(messages),
+                    source_message_digest=model_context_message_digest(messages),
+                    payload={"compacted_input": output_items},
+                    revision=(context_checkpoint.revision + 1 if context_checkpoint else 1),
+                )
             if data.get("status") == "incomplete":
                 detail = data.get("incomplete_details") or {}
                 if tool_request is None and structured_output_fields:
@@ -1234,14 +1257,22 @@ class OpenAIResponsesAdapter:
             # Existing parsing logic for message-only flows
             output = data.get("output")
             if tool_request is not None:
+                response = _openai_tool_call_response(
+                    data,
+                    tool_request=tool_request,
+                    model=model,
+                    prompt_stable_message_count=prompt_cache_stable_message_count,
+                    prompt_stable_prefix_digest=prompt_stable_prefix_digest,
+                )
                 return ProviderCallResult(
                     (
-                        _openai_tool_call_response(
-                            data,
-                            tool_request=tool_request,
-                            model=model,
-                            prompt_stable_message_count=prompt_cache_stable_message_count,
-                            prompt_stable_prefix_digest=prompt_stable_prefix_digest,
+                        replace(
+                            response,
+                            context_checkpoint=next_context_checkpoint,
+                            provider_metadata={
+                                **response.provider_metadata,
+                                "context_compacted": bool(compaction_items),
+                            },
                         ),
                         usage,
                     ),
@@ -1277,6 +1308,29 @@ class OpenAIResponsesAdapter:
             else:
                 txt = ""
 
+            if context_management is not None or context_checkpoint is not None:
+                response = ToolCallResponse(
+                    items=(
+                        AssistantOutput(
+                            output_id=assistant_output_identity(
+                                provider="openai",
+                                response_id=str(data.get("id") or ""),
+                                item_index=0,
+                                text=txt,
+                            ),
+                            text=txt,
+                        ),
+                    )
+                    if txt
+                    else (),
+                    finish_reason=str(data.get("status") or ""),
+                    provider_metadata={
+                        "response_id": str(data.get("id") or ""),
+                        "context_compacted": bool(compaction_items),
+                    },
+                    context_checkpoint=next_context_checkpoint,
+                )
+                return ProviderCallResult((response, usage), metadata)
             return ProviderCallResult((txt, usage), metadata)
 
         return await _call()

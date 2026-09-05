@@ -170,6 +170,7 @@ class ChatCapabilityOverrides(ProfileContract):
     prompt_cache: CapabilityState = "unknown"
     native_tool_search_hosted: CapabilityState = "unknown"
     native_tool_search_client: CapabilityState = "unknown"
+    server_context_compaction: CapabilityState = "unknown"
 
 
 class ChatProfile(ProfileContract):

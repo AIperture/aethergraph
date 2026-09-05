@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 import hashlib
 import json
 from typing import Any
 
 from aethergraph.services.llm._tool_discovery_manifest import (
     render_tool_search_description,
+)
+from aethergraph.services.llm.context_management import (
+    ModelContextCheckpoint,
+    ModelContextManagement,
+    model_context_message_digest,
+    validate_model_context_prefix,
 )
 from aethergraph.services.llm.provider_transport import (
     ProviderCallResult,
@@ -683,9 +690,7 @@ def _anthropic_tool_call_response(
         provider_metadata={
             "response_id": response_id,
             "provider_status": str(data.get("stop_reason") or ""),
-            "incomplete_reason": (
-                "max_tokens" if data.get("stop_reason") == "max_tokens" else ""
-            ),
+            "incomplete_reason": ("max_tokens" if data.get("stop_reason") == "max_tokens" else ""),
             "content_block_count": len(blocks),
         },
         transport_checkpoint=checkpoint,
@@ -803,6 +808,8 @@ class AnthropicMessagesAdapter:
         fail_on_unsupported: bool,
         tools: list[dict[str, Any]] | None = None,
         tool_request: ToolCallRequest | None = None,
+        context_management: ModelContextManagement | None = None,
+        context_checkpoint: ModelContextCheckpoint | None = None,
         **kw: Any,
     ) -> ProviderCallResult[tuple[str | ToolCallResponse, dict[str, int]]]:
         """Invoke one Anthropic Messages request.
@@ -891,6 +898,20 @@ class AnthropicMessagesAdapter:
             content_blocks = _anthropic_content_blocks(m)
             conv.append({"role": anthro_role, "content": content_blocks})
 
+        if context_checkpoint is not None:
+            if context_checkpoint.protocol != "compact-2026-01-12":
+                raise ValueError("Anthropic model context checkpoint protocol mismatch")
+            appended = validate_model_context_prefix(messages, context_checkpoint)
+            compaction_block = context_checkpoint.payload.get("compaction_block")
+            if not isinstance(compaction_block, dict) or not compaction_block.get("content"):
+                raise ValueError("Anthropic model context checkpoint has no usable block")
+            conv = [{"role": "assistant", "content": [dict(compaction_block)]}]
+            for message in appended:
+                if message.get("role") == "system":
+                    continue
+                role = "assistant" if message.get("role") == "assistant" else "user"
+                conv.append({"role": role, "content": _anthropic_content_blocks(message)})
+
         checkpoint_payload: dict[str, Any] | None = None
         if tool_request is not None and tool_request.transport_checkpoint is not None:
             checkpoint_payload = _anthropic_checkpoint_payload(
@@ -901,13 +922,10 @@ class AnthropicMessagesAdapter:
             )
             if checkpoint_payload["state"] == "pending_search":
                 discovery_result = tool_request.discovery_result
-                pending_search_call_id = str(
-                    checkpoint_payload.get("search_call_id") or ""
-                )
+                pending_search_call_id = str(checkpoint_payload.get("search_call_id") or "")
                 if (
                     discovery_result is not None
-                    and discovery_result.provider_reference_id
-                    != pending_search_call_id
+                    and discovery_result.provider_reference_id != pending_search_call_id
                 ):
                     raise LLMToolCallResponseError(
                         code="discovery_result_reference_mismatch",
@@ -1008,6 +1026,19 @@ class AnthropicMessagesAdapter:
             "messages": conv,
             **sampling_fields,
         }
+        if context_management is not None:
+            if context_management.trigger_tokens < 50_000:
+                raise ValueError("Anthropic compaction trigger must be at least 50000 tokens")
+            edit: dict[str, Any] = {
+                "type": "compact_20260112",
+                "trigger": {
+                    "type": "input_tokens",
+                    "value": context_management.trigger_tokens,
+                },
+            }
+            if context_management.instructions is not None:
+                edit["instructions"] = context_management.instructions
+            payload["context_management"] = {"edits": [edit]}
         request_cache_control = _anthropic_cache_control(kw.get("cache_control"))
         if request_cache_control:
             payload["cache_control"] = request_cache_control
@@ -1052,40 +1083,105 @@ class AnthropicMessagesAdapter:
         _validate_anthropic_cache_breakpoints(payload)
 
         async def _call():
+            request_headers = {
+                "x-api-key": host.api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            }
+            if context_management is not None or context_checkpoint is not None:
+                request_headers["anthropic-beta"] = "compact-2026-01-12"
             r = await host._client.post(
                 f"{host.base_url}/v1/messages",
-                headers={
-                    "x-api-key": host.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
+                headers=request_headers,
                 json=payload,
             )
             metadata = checked_response_metadata("anthropic", model, "chat", r)
 
             data = r.json()
-            usage = data.get("usage", {}) or {}
+            usage = dict(data.get("usage", {}) or {})
+            iterations = usage.get("iterations")
+            if isinstance(iterations, list):
+                usage["input_tokens"] = sum(
+                    int(item.get("input_tokens") or 0)
+                    for item in iterations
+                    if isinstance(item, dict)
+                )
+                usage["output_tokens"] = sum(
+                    int(item.get("output_tokens") or 0)
+                    for item in iterations
+                    if isinstance(item, dict)
+                )
+            blocks = [
+                dict(block) for block in list(data.get("content") or []) if isinstance(block, dict)
+            ]
+            compaction_blocks = [block for block in blocks if block.get("type") == "compaction"]
+            if any(block.get("content") is None for block in compaction_blocks):
+                raise LLMToolCallResponseError(
+                    code="server_context_compaction_failed",
+                    message="Anthropic returned an unusable null compaction summary.",
+                )
+            next_context_checkpoint = context_checkpoint
+            if compaction_blocks:
+                next_context_checkpoint = ModelContextCheckpoint(
+                    provider="anthropic",
+                    model=model,
+                    protocol="compact-2026-01-12",
+                    source_message_count=len(messages),
+                    source_message_digest=model_context_message_digest(messages),
+                    payload={"compaction_block": compaction_blocks[-1]},
+                    revision=(context_checkpoint.revision + 1 if context_checkpoint else 1),
+                )
 
             if output_format == "raw":
                 txt = json.dumps(data, ensure_ascii=False)
                 return ProviderCallResult((txt, usage), metadata)
 
             if tool_request is not None:
+                response = _anthropic_tool_call_response(
+                    data,
+                    tool_request=tool_request,
+                    model=model,
+                    stable_messages=messages,
+                )
                 return ProviderCallResult(
                     (
-                        _anthropic_tool_call_response(
-                            data,
-                            tool_request=tool_request,
-                            model=model,
-                            stable_messages=messages,
+                        replace(
+                            response,
+                            context_checkpoint=next_context_checkpoint,
+                            provider_metadata={
+                                **response.provider_metadata,
+                                "context_compacted": bool(compaction_blocks),
+                            },
                         ),
                         usage,
                     ),
                     metadata,
                 )
 
-            blocks = data.get("content") or []
             txt = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+            if context_management is not None or context_checkpoint is not None:
+                response = ToolCallResponse(
+                    items=(
+                        AssistantOutput(
+                            output_id=assistant_output_identity(
+                                provider="anthropic",
+                                response_id=str(data.get("id") or ""),
+                                item_index=0,
+                                text=txt,
+                            ),
+                            text=txt,
+                        ),
+                    )
+                    if txt
+                    else (),
+                    finish_reason=str(data.get("stop_reason") or ""),
+                    provider_metadata={
+                        "response_id": str(data.get("id") or ""),
+                        "context_compacted": bool(compaction_blocks),
+                    },
+                    context_checkpoint=next_context_checkpoint,
+                )
+                return ProviderCallResult((response, usage), metadata)
             return ProviderCallResult((txt, usage), metadata)
 
         return await _call()

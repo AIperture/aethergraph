@@ -227,9 +227,9 @@ def _tool_call_truncation_receipt(
     if not incomplete_reason:
         return None
     return {
-        "provider_status": str(
-            metadata.get("provider_status") or finish_reason or "incomplete"
-        )[:120],
+        "provider_status": str(metadata.get("provider_status") or finish_reason or "incomplete")[
+            :120
+        ],
         "finish_reason": finish_reason[:120],
         "incomplete_reason": incomplete_reason[:500],
         "provider_response_id": str(metadata.get("response_id") or "")[:500],
@@ -2166,6 +2166,8 @@ class GenericLLMClient(LLMClientProtocol):
             ),
             tool_request=tool_request,
             prompt_cache=request.prompt_cache,
+            context_management=request.context_management,
+            context_checkpoint=request.context_checkpoint,
             trace_payload=request.caller_context or None,
             effective_messages=effective_messages,
             **generation_params,
@@ -2275,6 +2277,8 @@ class GenericLLMClient(LLMClientProtocol):
         structured_output: StructuredOutputRequest | None = None,
         tool_request: ToolCallRequest | None = None,
         prompt_cache: PromptCacheRequest | None = None,
+        context_management: Any = None,
+        context_checkpoint: Any = None,
         json_schema: dict[str, Any] | None | object = _UNSET,
         schema_name: str | object = _UNSET,
         strict_schema: bool | object = _UNSET,
@@ -2345,6 +2349,14 @@ class GenericLLMClient(LLMClientProtocol):
             fail_on_unsupported=fail_on_unsupported,
         )
         model = kw.pop("model", self.model)
+        if context_checkpoint is not None:
+            actual = (context_checkpoint.provider, context_checkpoint.model)
+            expected = (self.provider, model)
+            if actual != expected:
+                raise LLMToolCallResponseError(
+                    code="model_context_checkpoint_binding_mismatch",
+                    message="Model context checkpoint binding does not match this LLM client.",
+                )
         if self.prompt_cache_policy == "required" and prompt_cache is None:
             raise LLMUnsupportedFeatureError(
                 self.provider,
@@ -2662,6 +2674,8 @@ class GenericLLMClient(LLMClientProtocol):
                         else None
                     ),
                     tool_request=tool_request,
+                    context_management=context_management,
+                    context_checkpoint=context_checkpoint,
                     **kw,
                 ),
                 provider=self.provider,
@@ -2704,9 +2718,9 @@ class GenericLLMClient(LLMClientProtocol):
                 truncation_receipt = _tool_call_truncation_receipt(provider_value)
                 if truncation_receipt is not None:
                     request_args["tool_call_response_receipt"] = truncation_receipt
-                    observation_record.request_args[
-                        "tool_call_response_receipt"
-                    ] = copy.deepcopy(truncation_receipt)
+                    observation_record.request_args["tool_call_response_receipt"] = copy.deepcopy(
+                        truncation_receipt
+                    )
                     observation_record.response_items = list(
                         tool_call_response_item_summaries(provider_value)
                     )

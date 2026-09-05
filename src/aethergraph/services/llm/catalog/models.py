@@ -19,6 +19,7 @@ CatalogCapability = Literal[
     "prompt_cache",
     "embeddings",
     "image_generation",
+    "server_context_compaction",
 ]
 
 
@@ -107,6 +108,15 @@ class CatalogPromptCache(CatalogContract):
     max_new_writes_per_request: int | None = Field(default=None, ge=1, le=64)
 
 
+class CatalogServerContextCompaction(CatalogContract):
+    """Evidence-backed provider compaction support for one model binding."""
+
+    state: CatalogCapabilityState
+    protocol: str = Field(min_length=1, max_length=256)
+    minimum_trigger_tokens: int | None = Field(default=None, ge=1)
+    maturity: Literal["stable", "beta"]
+
+
 class CatalogEmbeddingCapabilities(CatalogContract):
     """Evidence-backed embedding capabilities for one model binding."""
 
@@ -135,6 +145,7 @@ class ModelCatalogEntry(CatalogContract):
     native_tool_search: tuple[CatalogNativeToolSearchMode, ...] = ()
     structured_output: CatalogStructuredOutput | None = None
     prompt_cache: CatalogPromptCache | None = None
+    server_context_compaction: CatalogServerContextCompaction | None = None
     embeddings: CatalogEmbeddingCapabilities | None = None
     image_generation: CatalogImageGenerationCapabilities | None = None
     sources: tuple[HttpUrl, ...]
@@ -232,6 +243,7 @@ class ModelCatalogEntry(CatalogContract):
                 self.chat_tools is not None,
                 self.structured_output is not None,
                 self.prompt_cache is not None,
+                self.server_context_compaction is not None,
                 self.embeddings is not None,
                 self.image_generation is not None,
             )
@@ -264,6 +276,10 @@ class ModelCatalogEntry(CatalogContract):
             )
         if self.prompt_cache is not None:
             positive_capability = positive_capability or self.prompt_cache.mode != "unavailable"
+        if self.server_context_compaction is not None:
+            positive_capability = (
+                positive_capability or self.server_context_compaction.state == "supported"
+            )
         if self.embeddings is not None:
             positive_capability = positive_capability or "supported" in {
                 self.embeddings.text_embeddings,
@@ -405,6 +421,7 @@ __all__ = [
     "CatalogImageGenerationCapabilities",
     "CatalogNativeToolSearchMode",
     "CatalogPromptCache",
+    "CatalogServerContextCompaction",
     "CatalogStructuredOutput",
     "ModelCatalog",
     "ModelCatalogEntry",

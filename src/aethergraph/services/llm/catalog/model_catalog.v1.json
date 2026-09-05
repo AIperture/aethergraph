@@ -1,7 +1,47 @@
 {
   "schema_version": "aethergraph.model-catalog/v1",
-  "catalog_revision": 5,
+  "catalog_revision": 6,
   "entries": [
+    {
+      "catalog_key": "openai/gpt-5.2-server-context-compaction/v6",
+      "provider_id": "openai",
+      "operation": "chat",
+      "endpoint_ids": ["openai_responses"],
+      "model_pattern": "gpt-5\\.2(?:-\\d{4}-\\d{2}-\\d{2})?",
+      "server_context_compaction": {
+        "state": "supported",
+        "protocol": "responses.context_management.compact",
+        "maturity": "stable"
+      },
+      "sources": [
+        "https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.2",
+        "https://developers.openai.com/api/reference/cli/resources/responses/methods/create"
+      ],
+      "verified_at": "2026-09-04",
+      "catalog_revision": 6,
+      "evidence_status": "verified",
+      "priority": 200
+    },
+    {
+      "catalog_key": "anthropic/current-server-context-compaction/v6",
+      "provider_id": "anthropic",
+      "operation": "chat",
+      "endpoint_ids": ["anthropic_messages"],
+      "model_pattern": "claude-(?:(?:fable|mythos)-5(?:-1|-preview)?|opus-(?:4-6|4-7|4-8|5)|sonnet-(?:4-6|5))(?:-\\d{8})?",
+      "server_context_compaction": {
+        "state": "supported",
+        "protocol": "compact-2026-01-12",
+        "minimum_trigger_tokens": 50000,
+        "maturity": "beta"
+      },
+      "sources": [
+        "https://platform.claude.com/docs/en/build-with-claude/compaction"
+      ],
+      "verified_at": "2026-09-04",
+      "catalog_revision": 6,
+      "evidence_status": "verified",
+      "priority": 200
+    },
     {
       "catalog_key": "openai/current-mainline-chat-tools/v5",
       "provider_id": "openai",

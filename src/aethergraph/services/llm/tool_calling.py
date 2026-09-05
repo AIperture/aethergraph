@@ -10,6 +10,7 @@ import json
 import re
 from typing import Any, Literal, TypeAlias
 
+from .context_management import ModelContextCheckpoint
 from .tool_discovery import (
     ModelContinuation,
     ToolDiscoveryEvent,
@@ -451,34 +452,23 @@ class ToolCallRequest:
             if self.transport_checkpoint is None:
                 raise ValueError("Tool discovery results require a transport checkpoint")
             if tool_outputs:
-                raise ValueError(
-                    "Tool discovery results cannot accompany ordinary Tool outputs"
-                )
-            if (
-                self.discovery_result.status == "completed"
-                and not set(self.discovery_result.tool_names).issubset(
-                    set(active_tool_names)
-                )
-            ):
-                raise ValueError(
-                    "completed Tool discovery result Tools must be active"
-                )
+                raise ValueError("Tool discovery results cannot accompany ordinary Tool outputs")
+            if self.discovery_result.status == "completed" and not set(
+                self.discovery_result.tool_names
+            ).issubset(set(active_tool_names)):
+                raise ValueError("completed Tool discovery result Tools must be active")
         if (
             self.transport_checkpoint is not None
             and self.transport_checkpoint.purpose == "pending_discovery_result"
             and self.discovery_result is None
         ):
-            raise ValueError(
-                "pending Tool discovery checkpoints require a discovery result"
-            )
+            raise ValueError("pending Tool discovery checkpoints require a discovery result")
         if (
             self.discovery_result is not None
             and self.transport_checkpoint is not None
             and self.transport_checkpoint.purpose != "pending_discovery_result"
         ):
-            raise ValueError(
-                "Tool discovery results require a pending discovery checkpoint"
-            )
+            raise ValueError("Tool discovery results require a pending discovery checkpoint")
         fingerprint_version = str(self.fingerprint_version or "").strip()
         if not fingerprint_version:
             raise ValueError("Tool-call request fingerprint_version must not be empty")
@@ -650,9 +640,7 @@ def tool_call_request_item_summaries(
                 "ordinal": len(request.tool_outputs),
                 "kind": "discovery_result",
                 "discovery_event_id": request.discovery_result.discovery_event_id,
-                "provider_reference_id": (
-                    request.discovery_result.provider_reference_id
-                ),
+                "provider_reference_id": (request.discovery_result.provider_reference_id),
                 "status": request.discovery_result.status,
                 "error_code": (
                     request.discovery_result.error.code
@@ -854,6 +842,7 @@ class ToolCallResponse:
     finish_reason: str = ""
     provider_metadata: dict[str, Any] = field(default_factory=dict)
     transport_checkpoint: ToolTransportCheckpoint | None = None
+    context_checkpoint: ModelContextCheckpoint | None = None
     usage: ModelUsage = field(default_factory=ModelUsage.unavailable)
 
     def __post_init__(self) -> None:
@@ -908,6 +897,10 @@ class ToolCallResponse:
             raise TypeError(
                 "Tool-call response transport_checkpoint must be ToolTransportCheckpoint"
             )
+        if self.context_checkpoint is not None and not isinstance(
+            self.context_checkpoint, ModelContextCheckpoint
+        ):
+            raise TypeError("Tool-call response context_checkpoint must be ModelContextCheckpoint")
         if not isinstance(self.usage, ModelUsage):
             raise TypeError("Tool-call response usage must be ModelUsage")
         object.__setattr__(self, "items", items)
